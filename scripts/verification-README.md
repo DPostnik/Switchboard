@@ -41,7 +41,11 @@ command and its persistent helpers do not inherit the lease. If the guard itself
 is forcibly killed, this protection no longer applies. Native scripts
 still acquire the existing global build lock; the CLI never acquires that lock itself.
 It checks host load and active heavy jobs before every check. A busy host leaves admission planned without consuming an attempt; it does not launch
-a background retry. Capacity loss after completed checks blocks the batch rather than
+a background retry. Load comes from the kernel (`os.getloadavg`), so the check also works under
+Switchboard's external boundary. Heavy jobs are counted with `ps`; where `ps` cannot run (under the
+boundary it is refused) the count is skipped and the deferral or diagnostic text says so; the shared
+build lock still serializes builds. The load check is a courtesy, not a security control: builds and
+tests always run inside the chat's boundary. Capacity loss after completed checks blocks the batch rather than
 replaying its build. A later explicit run can admit still-planned work.
 
 Supported checks are `build`, `native-tests`, `web-build`, `web-tests`, and `verification-tests`. Native tests
@@ -79,7 +83,9 @@ python3 scripts/verify-project.py reconcile BATCH_ID
 global build lock without nesting a build, stages the bundle, and preserves the replaced
 bundle in `build/.replaced` for the old running process. It writes durable install and
 restart intent before acting. It requests a restart exactly once, then returns
-`waiting_for_restart`. An existing attempt blocks repetition, including after uncertain
+`waiting_for_restart`. Under the external boundary (`SWITCHBOARD_EXTERNAL_SANDBOX=1`) it does not run
+`scripts/request-app-restart.sh`: it finishes the install, records the attempt and prints that the agent
+must call the app-owned `request_app_restart` tool exactly once, then end the turn and wait. An existing attempt blocks repetition, including after uncertain
 transport delivery. Installation does not mark live behavior verified.
 
 After restart, `confirm-live` requires JSON evidence with `snapshot_digest`,

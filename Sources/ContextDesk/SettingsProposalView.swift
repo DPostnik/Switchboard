@@ -26,13 +26,7 @@ struct SettingsProposalView: View {
                                        "Nothing changes until you press Apply. The agent cannot apply this itself."))
                             .font(.ui(.caption)).foregroundStyle(DeskPalette.muted).fixedSize(horizontal: false, vertical: true)
                     }
-                    ForEach(review.projects, id: \.projectID) { diff in projectCard(diff) }
-                    if !review.skipped.isEmpty {
-                        VStack(alignment: .leading, spacing: .ui(3)) {
-                            Text(L10n.text("Пропущено", "Skipped")).font(.ui(.callout).weight(.semibold))
-                            ForEach(review.skipped, id: \.self) { Text($0).font(.ui(.caption)).foregroundStyle(DeskPalette.attention) }
-                        }
-                    }
+                    SettingsProposalChanges(review: review)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, .ui(22)).padding(.vertical, .ui(20))
@@ -50,6 +44,22 @@ struct SettingsProposalView: View {
             .background(DeskPalette.canvas)
         }
         .frame(width: 620, height: 520)
+    }
+}
+
+/// The list of changes of one proposal, shared by the global sheet and the request card in a chat. Paths, commands and
+/// project names are shown as data.
+struct SettingsProposalChanges: View {
+    let review: SettingsProposalReview
+
+    var body: some View {
+        ForEach(review.projects, id: \.projectID) { diff in projectCard(diff) }
+        if !review.skipped.isEmpty {
+            VStack(alignment: .leading, spacing: .ui(3)) {
+                Text(L10n.text("Пропущено", "Skipped")).font(.ui(.callout).weight(.semibold))
+                ForEach(review.skipped, id: \.self) { Text($0).font(.ui(.caption)).foregroundStyle(DeskPalette.attention) }
+            }
+        }
     }
 
     private func projectCard(_ diff: SettingsProposalReview.ProjectDiff) -> some View {
@@ -87,5 +97,38 @@ struct SettingsProposalView: View {
             Text(text).font(.ui(.callout)).foregroundStyle(warning ? DeskPalette.attention : DeskPalette.ink)
                 .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+/// An access request in the chat that made it: the same list of changes as the sheet, the agent's reason as data, and
+/// the user's decision. Apply saves the settings and the chat continues with the new access at its next turn; Reject tells
+/// the chat the request was refused. Either way the chat receives one fixed app message.
+struct SettingsProposalCard: View {
+    @ObservedObject var model: DeskModel
+    let review: SettingsProposalReview
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: .ui(10)) {
+            Label { Text(L10n.text("Агент просит доступ", "The agent asks for access")).foregroundStyle(DeskPalette.ink) } icon: {
+                Image(systemName: "exclamationmark.diamond.fill").foregroundStyle(DeskPalette.attention)
+            }.font(.ui(.headline))
+            if let reason = review.reason {
+                Text(reason).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: .ui(8)) { SettingsProposalChanges(review: review) }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(maxHeight: 220).fixedSize(horizontal: false, vertical: true)
+            Text(L10n.text("Изменятся настройки проекта для всех его чатов. Ничего не изменится, пока ты не нажмёшь «Применить»; после этого чат продолжит задачу с новыми правами.",
+                           "This changes the project settings for all its chats. Nothing changes until you press Apply; then the chat continues the task with the new access."))
+                .font(.ui(.caption)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer(minLength: 0)
+                Button(L10n.text("Отклонить", "Reject")) { model.rejectSettingsProposal(review.id) }.buttonStyle(DeskButtonStyle())
+                Button(L10n.text("Применить", "Apply")) { model.applySettingsProposal(review.id) }
+                    .buttonStyle(DeskButtonStyle(kind: .primary)).disabled(review.projects.isEmpty)
+            }
+        }
+        .controlSize(.large).padding(16).background(DeskPalette.attentionWash, in: RoundedRectangle(cornerRadius: 14))
     }
 }

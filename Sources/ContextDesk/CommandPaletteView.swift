@@ -220,7 +220,8 @@ private struct CommandPalette: View {
 
     private func chatEntry(_ chat: Chat, project: Project?) -> PaletteEntry {
         let status: PaletteEntry.Status? =
-            model.pending.contains { $0.threadID == chat.id } || model.restartWaitingChatIDs.contains(chat.id) ? .needsYou
+            model.pending.contains { $0.threadID == chat.id } || model.restartWaitingChatIDs.contains(chat.id)
+                || model.settingsProposalsByChat[chat.id] != nil ? .needsYou
             : model.isBusy(threadID: chat.id) ? .running
             : chat.hasUnreadResponse ? .unread : nil
         return PaletteEntry(id: "chat:\(chat.id)", icon: chat.isPinned ? "pin" : "bubble.left", title: chat.title,

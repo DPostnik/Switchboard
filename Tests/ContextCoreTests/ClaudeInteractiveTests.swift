@@ -2419,6 +2419,43 @@ private func boundaryDeveloper(_ root: URL, sharedRoots: [AgentPermissionProfile
     await adapter.disconnect()
 }
 
+@Test func claudeAppliedSettingsProposalReplacesTheProcessAtTheNextTurn() async throws {
+    let fixture = try boundaryFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let adapter = ClaudeIntegration(boundary: fixture.runtime), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: fixture.binary, home: fixture.home, resources: fixture.resources)).value()
+    var state = SavedState()
+    var project = Project(path: fixture.root.path); project.accessPresets = []
+    state.projects = [project]
+    func rights() -> AgentPermissionProfile { AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: state.projects[0]) }
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: fixture.root, role: rights())).value()
+    func send(_ count: Int) async throws {
+        _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: fixture.root, session: session, role: rights())).value()
+        try await waitFor { await events.completionCount() == count }
+    }
+    try await send(1)
+    let first = try #require(fixture.launches().first?["pid"].int)
+    // The user applies a proposal (a folder for this project), as the request card does: the next turn runs in a new process.
+    let notes = fixture.root.appendingPathComponent("notes")
+    try FileManager.default.createDirectory(at: notes, withIntermediateDirectories: true)
+    var change = SettingsProposal.Change(project: fixture.root.path); change.addFolders = [.init(path: notes.path, writable: false)]
+    let applied = state.apply(SettingsProposalReview(id: "p.json", proposal: .init(chat: session.nativeID, changes: [change]), state: state))
+    #expect(applied)
+    try await send(2)
+    #expect(fixture.launches().count == 2)
+    let second = try #require(fixture.launches().last?["pid"].int)
+    #expect(second != first && kill(pid_t(first), 0) != 0)
+    #expect(fixture.helperArguments().last.map { args in args.indices.dropLast().contains { args[$0] == "--read" && args[$0 + 1].hasSuffix("/notes") } } == true)
+    // Negative: the same proposal read again changes nothing, so the warm process takes the next turn.
+    let appliedAgain = state.apply(SettingsProposalReview(id: "p.json", proposal: .init(changes: [change]), state: state))
+    #expect(!appliedAgain)
+    try await send(3)
+    #expect(fixture.launches().count == 2)
+    await adapter.disconnect()
+}
+
 @Test func claudeBoundaryTokenParsingAndRelayRewrite() throws {
     let now = Date()
     func document(_ expires: Date, token: String = "sk-ant-oat01-x") -> Data {

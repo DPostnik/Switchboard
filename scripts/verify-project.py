@@ -65,17 +65,34 @@ def command_for(check, scope_reason=None):
     return ['npm', 'test', '--', *filters], 'Web'
 
 
+HEAVY_JOB = re.compile(r'(?:python[0-9.]* (?:-I )?\S*(?:swift-task\.py|scripts/perf/)|(?:^|/)xcodebuild(?: |$))', re.I)
+JOBS_NOT_COUNTED = ('heavy jobs not counted: ps cannot run here (for example under the external boundary); '
+                    'the shared build lock still runs builds and tests one at a time')
+
+
+def heavy_job_count():
+    """Running heavy jobs, or None when `ps` cannot run (it is setuid; nono refuses it)."""
+    try:
+        processes = subprocess.check_output(['ps', '-axo', 'pid,command'], text=True, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return sum(bool(HEAVY_JOB.search(line)) for line in processes.splitlines())
+
+
 def preflight():
+    """A courtesy load check before heavy checks, not a security control. Load comes from the kernel without a
+    subprocess, so it also works under the external boundary; builds and tests still run inside it."""
     if platform.system() != 'Darwin':
         raise ValueError('heavy verification requires the configured macOS host')
-    load = subprocess.check_output(['sysctl', '-n', 'vm.loadavg', 'hw.ncpu'], text=True).splitlines()
-    one = float(load[0].strip('{} ').split()[0])
-    cores = int(load[1])
-    processes = subprocess.check_output(['ps', '-axo', 'pid,command'], text=True)
-    count = sum(bool(re.search(r'(?:python[0-9.]* (?:-I )?\S*(?:swift-task\.py|scripts/perf/)|(?:^|/)xcodebuild(?: |$))', line, re.I)) for line in processes.splitlines())
-    if one > cores or count >= 2:
+    one = os.getloadavg()[0]
+    cores = os.cpu_count() or 1
+    count = heavy_job_count()
+    if one > cores or (count is not None and count >= 2):
         from verification_queue import VerificationDeferred
-        raise VerificationDeferred(f'host busy: load {one}, cores {cores}, heavy jobs {count}; no check launched')
+        jobs = f'heavy jobs {count}' if count is not None else JOBS_NOT_COUNTED
+        raise VerificationDeferred(f'host busy: load {one:.2f}, cores {cores}, {jobs}; no check launched')
+    if count is None:
+        print(f'preflight: load {one:.2f}, cores {cores}; {JOBS_NOT_COUNTED}', file=sys.stderr, flush=True)
 
 
 def fingerprint(checkout):
@@ -332,11 +349,26 @@ def install_batch(queue, repo, state_dir, batch_id):
             record['installed_at'] = time.time()
             record['destination'] = str(destination)
             marker.write_text(json.dumps(record, indent=2))
-        # Persist intent before delivery. An uncertain delivery is never repeated.
-        restart = directory / 'restart-attempt.json'
-        durable_attempt(restart, {'state': 'requested', 'requested_at': time.time()})
-        subprocess.run(['zsh', 'scripts/request-app-restart.sh'], cwd=repo, check=True)
-        return {'state': 'waiting_for_restart', 'batch_id': batch_id, 'artifact': str(destination), 'next': 'confirm-live'}
+        result = request_restart(repo, directory / 'restart-attempt.json')
+        return {'state': 'waiting_for_restart', 'batch_id': batch_id, 'artifact': str(destination), 'next': 'confirm-live', **result}
+
+
+RESTART_TOOL_STEP = ('Installed. The restart was not requested from here: under the external boundary the restart script '
+                     'cannot reach the running app. Call the app-owned request_app_restart tool exactly once (no retry, '
+                     'also after an error), then end the turn and wait for the continuation message.')
+
+
+def request_restart(repo, restart, environ=None):
+    """Persist intent before delivery; an uncertain delivery is never repeated. Under the external boundary the agent
+    asks the app through its own tool instead (channel 3), so nothing is started from here."""
+    environ = os.environ if environ is None else environ
+    if environ.get('SWITCHBOARD_EXTERNAL_SANDBOX') == '1':
+        durable_attempt(restart, {'state': 'tool_required', 'recorded_at': time.time()})
+        print(RESTART_TOOL_STEP, file=sys.stderr, flush=True)
+        return {'restart': 'call request_app_restart once', 'restart_note': RESTART_TOOL_STEP}
+    durable_attempt(restart, {'state': 'requested', 'requested_at': time.time()})
+    subprocess.run(['zsh', 'scripts/request-app-restart.sh'], cwd=repo, check=True)
+    return {'restart': 'requested'}
 
 
 def publish_batch(queue, repo, state_dir, batch_id, messages_path, expected_base, branch):

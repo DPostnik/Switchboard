@@ -78,7 +78,8 @@ struct SidebarRowsList<Content: View>: View, Equatable {
 
 extension DeskModel {
     func sidebarSnapshot(_ listing: SidebarListing) -> SidebarSnapshot {
-        let pendingChats = Set(pending.map(\.threadID)), restartWaiting = Set(restartWaitingChatIDs)
+        // A chat with an access request card waits like one with an approval (amber dot).
+        let pendingChats = Set(pending.map(\.threadID)).union(settingsProposalsByChat.keys), restartWaiting = Set(restartWaitingChatIDs)
         func row(_ chat: Chat, favorite: Bool) -> SidebarChatRow {
             let project = favorite ? project(chat.projectID) : nil
             return SidebarChatRow(chat: chat, busy: isBusy(threadID: chat.id), pending: pendingChats.contains(chat.id),

@@ -277,6 +277,50 @@ private func commandFixture() throws -> (URL, URL) {
     await client.stop()
 }
 
+/// `app_log` and `request_app_restart` reach a Codex thread only with the diagnostics role gate and the running app bundle
+/// inside the thread's project; a resumed thread also names itself as the restart requester.
+@Test func diagnosticsMCPOffersHostToolsOnlyForTheProjectOfTheRunningApp() async throws {
+    let (root, executable) = try commandFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let resources = root.appendingPathComponent("resources")
+    let runtime = resources.appendingPathComponent("ChatDirectoryRuntime")
+    try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
+    try Data().write(to: runtime.appendingPathComponent("server.py"))
+    let project = root.appendingPathComponent("project"), other = root.appendingPathComponent("other")
+    let bundle = project.appendingPathComponent("build/Switchboard.app")
+    try FileManager.default.createDirectory(at: bundle.appendingPathComponent("Contents/MacOS"), withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+    let wire = CodexConnection()
+    let client = CodexClient(transport: wire)
+    await client.setHostBundle(bundle, executable: bundle.appendingPathComponent("Contents/MacOS/Switchboard"))
+    try await client.start(executable: executable, home: root, diagnosticsResources: resources)
+    let allowed = AgentPermissionProfile.workspace()
+    let session = try await client.createSession(projectPath: project.path, permissions: allowed, model: "", route: .direct)
+    var calls = try await wire.request("test/calls").array
+    let started = try #require(calls.first { $0["method"].string == "thread/start" })["params"]["config"]["mcp_servers.switchboard_diagnostics"]["args"].array
+    let expected = bundle.standardizedFileURL.appendingPathComponent("Contents/MacOS/Switchboard").path
+    #expect(started.contains(.string("--host-app")) && started.contains(.string(expected)) && started.contains(.string("local.daniil.switchboard")))
+    #expect(!started.contains(.string("--codex-thread")))
+    try await client.resume(session, projectPath: project.path, permissions: allowed, route: .direct)
+    calls = try await wire.request("test/calls").array
+    let resumed = try #require(calls.last { $0["method"].string == "thread/resume" })["params"]["config"]["mcp_servers.switchboard_diagnostics"]["args"].array
+    #expect(resumed.contains(.string("--codex-thread")) && resumed.contains(.string(session.nativeID)))
+    // Another project: project_diagnostics stays, the host tools go.
+    try await client.resume(session, projectPath: other.path, permissions: allowed, route: .direct)
+    calls = try await wire.request("test/calls").array
+    let elsewhere = try #require(calls.last { $0["method"].string == "thread/resume" })["params"]["config"]["mcp_servers.switchboard_diagnostics"]
+    #expect(elsewhere["enabled"].bool == true && elsewhere["args"].array.contains(.string(other.path)))
+    #expect(!elsewhere["args"].array.contains(.string("--host-app")) && !elsewhere["args"].array.contains(.string("--codex-thread")))
+    // Without a shell (the project_diagnostics gate) nothing is offered, also in the app's own project.
+    var denied = allowed
+    denied.shell = .off
+    try await client.resume(session, projectPath: project.path, permissions: denied, route: .direct)
+    calls = try await wire.request("test/calls").array
+    let off = try #require(calls.last { $0["method"].string == "thread/resume" })["params"]["config"]["mcp_servers.switchboard_diagnostics"]
+    #expect(off["enabled"].bool == false && off["args"].array.isEmpty)
+    await client.stop()
+}
+
 @Test func userChromePermissionRevocationOverridesSavedThreadBeforeSend() async throws {
     let (root, executable) = try commandFixture()
     defer { try? FileManager.default.removeItem(at: root) }

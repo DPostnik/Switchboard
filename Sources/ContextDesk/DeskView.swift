@@ -112,8 +112,9 @@ struct DeskView: View {
             }
         }
         .sheet(item: $permissionsProject) { project in ProjectSettingsView(model: model, project: project) }
-        // A proposal opens by itself, oldest first; it closes only through Apply or Reject, which remove its file.
-        .sheet(item: Binding(get: { permissionsProject == nil ? model.settingsProposals.first : nil }, set: { _ in })) { review in
+        // A proposal without a valid chat opens by itself, oldest first; it closes only through Apply or Reject, which remove
+        // its file. A proposal that names one of this app's chats is a card in that chat instead (`SettingsProposalCard`).
+        .sheet(item: Binding(get: { permissionsProject == nil ? model.globalSettingsProposals.first : nil }, set: { _ in })) { review in
             SettingsProposalView(model: model, review: review)
         }
         .alert(L10n.text("Название чата", "Chat title"), isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
@@ -1158,6 +1159,11 @@ struct ChatView: View {
                     .frame(maxWidth: columnWidth).padding(.horizontal, .ui(24))
                     .transition(DeskMotion.slide(from: .bottom, reduceMotion))
             }
+            if let review = model.currentSettingsProposal {
+                SettingsProposalCard(model: model, review: review).id(review.id)
+                    .frame(maxWidth: columnWidth).padding(.horizontal, .ui(24))
+                    .transition(DeskMotion.slide(from: .bottom, reduceMotion))
+            }
             if let chat = model.selectedChat, chat.isScheduledRecord, !model.selectedChatIsArchived {
                 Label(DeskModel.scheduledRecordFollowUpNotice, systemImage: "clock.arrow.circlepath")
                     .font(.ui(.callout)).foregroundStyle(.secondary)
@@ -1263,6 +1269,7 @@ struct ChatView: View {
             }
         }
         .animation(DeskMotion.standard(reduceMotion), value: model.currentAction?.id)
+        .animation(DeskMotion.standard(reduceMotion), value: model.currentSettingsProposal?.id)
         .overlay(alignment: .topTrailing) {
             ChatFilesOverlay(files: chatFiles, model: model, open: openPreview,
                              addToMessage: { model.addDroppedFiles([$0]) })

@@ -2,7 +2,7 @@ import Foundation
 import Testing
 import AgentContract
 import ContextCore
-@_spi(NativeProtocol) import CodexAdapter
+@_spi(NativeProtocol) @testable import CodexAdapter
 
 private func fixtureProject() throws -> URL {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -215,6 +215,13 @@ private func sha256(_ data: Data) -> String {
     #expect(policy["writableRoots"].array.contains(.string(shared.path)) && !policy["writableRoots"].array.contains(.string(notes.path)))
 }
 
+private extension CodexIntegration {
+    static func boundaryInput(project: String, profile: AgentPermissionProfile, root: URL, inbox: URL) -> ExternalSandboxPlanner.Input {
+        boundaryInput(project: project, permissions: profile, home: root.appendingPathComponent("codex-home"), executable: root.appendingPathComponent("codex"),
+                      resources: root.appendingPathComponent("resources"), workflowDirectories: [], inbox: inbox)
+    }
+}
+
 private func claudeInput(_ root: URL, project: Project, workerID: String) -> ExternalSandboxPlanner.Input {
     var input = ExternalSandboxPlanner.Input(project: project.path, profile: AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: project),
                                              providerHome: root.appendingPathComponent("codex-home"), providerExecutable: root.appendingPathComponent("codex"),
@@ -271,6 +278,55 @@ private func claudeInput(_ root: URL, project: Project, workerID: String) -> Ext
                                                       providerExecutable: input.providerExecutable, resources: input.resources, workerID: "x1", home: input.home),
                                                 helper: .success(helper)).get()
     #expect(!codex.commands.contains { $0.name == "pgrep" } && !codex.grants.contains { $0.path == codex.settingsFile.path })
+}
+
+/// The Switchboard project's own trusted commands once `/usr/bin/log show` and `zsh scripts/request-app-restart.sh` are
+/// replaced by the app-owned `app_log` and `request_app_restart`: the Claude inventory accepts the rest. Only
+/// `log show` makes the project ineligible; the restart script still plans but cannot reach the app from inside.
+@Test func switchboardProjectPassesTheInventoryWithoutLogShowAndTheRestartScript() throws {
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    let remaining = ["ps", "sysctl -n", "gh", "git push", "git pull", "git fetch", "git clone", "git ls-remote", "git worktree",
+                     "swift build", "swift test", "swift run", "swift package", "xcodebuild", "codesign",
+                     "zsh scripts/build-app.sh", "zsh scripts/test.sh"]
+    var project = Project(path: root.appendingPathComponent("project").path)
+    project.accessPresets = ["github", "swift", "apple-signing"]
+    project.sandboxCommands = remaining
+    let trusted = try #require(AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: project).commandSandbox?.unsandboxed)
+    #expect(Set(remaining).isSubset(of: Set(trusted)))
+    let plan = try ExternalSandboxPlanner.plan(claudeInput(root, project: project, workerID: "sb1"), helper: .success(helper)).get()
+    #expect(plan.commands.contains { $0.name == "codesign" } && plan.commands.contains { $0.name == "pgrep" })
+    // Also without any mediated command (gh or git not installed): none of them is an unrunnable head or names a path.
+    #expect(ExternalSandboxPlanner.unrunnableTrustedCommand(trusted, mediated: [], grants: plan.grants, home: root.appendingPathComponent("home")) == nil)
+    for removed in ["/usr/bin/log show", "zsh scripts/request-app-restart.sh"] {
+        project.sandboxCommands = remaining + [removed]
+        let result = ExternalSandboxPlanner.plan(claudeInput(root, project: project, workerID: "sb2"), helper: .success(helper))
+        if removed.hasPrefix("/usr/bin/log") { #expect(result == .failure(.trustedCommandOutside(removed))) }
+        else { #expect((try? result.get()) != nil, "a project script runs inside the boundary; only the restart it requests needs the app") }
+    }
+}
+
+@Test func codexBoundaryGrantsAndExportsTheSettingsProposalInbox() throws {
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    let project = Project(path: root.appendingPathComponent("project").path)
+    let inbox = root.appendingPathComponent("inbox", isDirectory: true)
+    var input = CodexIntegration.boundaryInput(project: project.path, profile: AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: project),
+                                               root: root, inbox: inbox)
+    input.workerID = "cx1"; input.home = root.appendingPathComponent("home")
+    let plan = try ExternalSandboxPlanner.plan(input, helper: .success(helper)).get()
+    #expect(plan.grants.contains(.init(.allow, inbox.resolvingSymlinksInPath().path)))
+    // The inbox is the only addition: Codex still has no settings file and no mediated pgrep.
+    #expect(!plan.commands.contains { $0.name == "pgrep" } && !plan.grants.contains { $0.path == plan.settingsFile.path })
+    let environment = CodexConnection.boundaryEnvironment(ExternalSandboxLaunch(plan: plan, helper: helper))
+    #expect(environment[SettingsProposalInbox.environmentKey] == SettingsProposalInbox.directory.path)
+    #expect(environment["TMPDIR"] == plan.temporary.path && environment["SWITCHBOARD_EXTERNAL_SANDBOX"] == "1")
+    // Negative: without the inbox input no grant appears for it.
+    var bare = input; bare.extraWrites = []; bare.workerID = "cx2"
+    let barePlan = try ExternalSandboxPlanner.plan(bare, helper: .success(helper)).get()
+    #expect(!barePlan.grants.contains { $0.path.hasSuffix("/inbox") })
 }
 
 @Test func commandInventoryRefusesTrustedCommandsTheBoundaryCannotRun() throws {

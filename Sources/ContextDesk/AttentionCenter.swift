@@ -92,7 +92,7 @@ import ContextCore
 
     /// One badge for everything waiting on the user: pending approvals plus unresolved important messages.
     func refreshDockBadge() {
-        let count = pending.count + openAttentionCount + pullRequests.openAlerts.count
+        let count = pending.count + settingsProposals.count + openAttentionCount + pullRequests.openAlerts.count
         NSApplication.shared.dockTile.badgeLabel = count == 0 ? nil : String(count)
     }
 

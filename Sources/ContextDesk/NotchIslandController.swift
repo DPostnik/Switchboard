@@ -173,7 +173,8 @@ import ContextCore
 
     static func snapshot(model: DeskModel) -> Snapshot {
         let projects = Dictionary(model.state.projects.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
-        let waitingChats = Set(model.pending.map(\.threadID))
+        // A chat with an access request card waits too; the request is decided in the chat, not from the island or Fringe.
+        let waitingChats = Set(model.pending.map(\.threadID)).union(model.settingsProposalsByChat.keys)
         var chats: [NotchChat] = [], working: Set<String> = []
         for chat in model.state.chats where !chat.isArchived && !chat.isScheduledRecord {
             let busy = model.isBusy(threadID: chat.id)

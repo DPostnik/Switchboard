@@ -583,30 +583,18 @@ public actor ClaudeIntegration: AgentIntegration {
             Песочница команд в этом чате:
             - Каждая команда Bash идёт внутри песочницы, если в вызове не указан `dangerouslyDisableSandbox: true`. Вне песочницы без вопроса пользователю идут только доверенные команды проекта; любую другую команду с этим флагом подтверждает пользователь.
             - Доверенные команды проекта (\(list)) выходят из песочницы только с `dangerouslyDisableSandbox: true`; запускай их так с первой попытки, отдельно или только с чтением их вывода.
+            - Если подключены инструменты `app_log` и `request_app_restart` (проект работающего приложения Switchboard), журнал приложения читай через `app_log`, а перезапуск запрашивай один раз через `request_app_restart`, а не командами `log show` и `scripts/request-app-restart.sh`.
             """,
             """
             Command sandbox in this chat:
             - Every Bash command runs inside the sandbox unless the call sets `dangerouslyDisableSandbox: true`. Outside the sandbox only the project's trusted commands run without asking the user; any other command with that flag waits for the user.
             - Project trusted commands (\(list)) leave the CLI sandbox only with `dangerouslyDisableSandbox: true`; run them that way on the first attempt, on their own or followed only by reads of their output.
+            - When the `app_log` and `request_app_restart` tools are attached (the project of the running Switchboard app), read the app's log with `app_log` and request a restart once with `request_app_restart` instead of the `log show` and `scripts/request-app-restart.sh` commands.
             """, language: language)
     }
     /// How a sandboxed chat proposes project settings; only the user applies them in the app.
     static func settingsProposalInstructions(language: AppLanguage = L10n.language) -> String {
-        let presets = AccessPresetCatalog.all.map(\.id).joined(separator: ", ")
-        let format = #"{"chat": "<$SWITCHBOARD_CHAT_ID>", "reason": "...", "changes": [{"project": "<project path or name>", "addPresets": ["vercel"], "removePresets": [], "addFolders": [{"path": "~/path", "writable": false}], "removeFolders": [], "addCommands": ["zsh scripts/build.sh"], "removeCommands": [], "sandbox": true}]}"#
-        return L10n.text(
-            """
-            Настройки проектов в Switchboard (песочница команд, наборы доступа, папки вне проекта, команды вне песочницы) меняет только пользователь. Если задаче нужен доступ, которого нет, или пользователь просит изменить эти настройки, предложи изменение:
-            - Запиши один JSON-файл в папку "$\(SettingsProposalInbox.environmentKey)" (она доступна на запись в песочнице), например "$\(SettingsProposalInbox.environmentKey)/<короткое-имя>.json". Формат: \(format). Пропускай ненужные поля; в одном файле может быть несколько проектов.
-            - Наборы: \(presets).
-            - Приложение покажет пользователю список изменений; применит их только он. Скажи пользователю, что предложение ждёт его решения. Предлагай только то, что нужно задаче; команды вне песочницы получают доступ ко всему Mac.
-            """,
-            """
-            Project settings in Switchboard (the command sandbox, access sets, folders outside the project, commands outside the sandbox) are changed only by the user. When the task needs access that is missing, or the user asks to change these settings, propose the change:
-            - Write one JSON file into the folder "$\(SettingsProposalInbox.environmentKey)" (writable inside the sandbox), for example "$\(SettingsProposalInbox.environmentKey)/<short-name>.json". Format: \(format). Omit fields you do not need; one file may cover several projects.
-            - Sets: \(presets).
-            - The app shows the user the list of changes; only the user applies them. Tell the user the proposal waits for their decision. Propose only what the task needs; commands outside the sandbox get access to the whole Mac.
-            """, language: language)
+        SettingsProposalInbox.instructions(chatVariable: ProcessLabels.chatKey, language: language)
     }
     /// When to reach for the user's own Chrome rather than the app's isolated browser.
     static func userChromeInstructions(language: AppLanguage = L10n.language) -> String {
@@ -1156,10 +1144,10 @@ public actor ClaudeIntegration: AgentIntegration {
                     await allow(policy.boundary ? "boundary" : onlyTemporary ? "sandboxed" : "roleAllows"); return
                 }
                 askReason = "roleAsksWrites"
-                guard attended else { await deny(outside, reason: "unattended"); return }
-            } else if !attended, profile.filesystem != .unrestricted { await deny(outside, reason: "unattended"); return }
+                guard attended else { await deny(Self.unattendedRefusal(), reason: "unattended"); return }
+            } else if !attended, profile.filesystem != .unrestricted { await deny(Self.unattendedRefusal(), reason: "unattended"); return }
         case "Bash":
-            guard profile.shell == .on || profile.filesystem == .unrestricted else { await deny(outside, reason: "shellOff"); return }
+            guard profile.shell == .on || profile.filesystem == .unrestricted else { await deny(Self.shellOffRefusal(), reason: "shellOff"); return }
             // Under the boundary the OS holds the whole process tree; the hook already applied the deny, network and ask lists.
             // `dangerouslyDisableSandbox` changes nothing there, so it is not a question either.
             if policy.boundary { await allow("boundary"); return }
@@ -1173,14 +1161,13 @@ public actor ClaudeIntegration: AgentIntegration {
                 if policy.trusts(command, cwd: session) { await allow("trusted"); return }
                 askReason = "disableSandboxRequested:" + (policy.trustRejection(command, cwd: session) ?? "untrusted")
                 guard attended else {
-                    await deny(L10n.text("Команда вне песочницы; запуск без присмотра её не выполняет.", "A command outside the sandbox; an unattended run does not run it."),
-                               reason: askReason); return
+                    await deny(Self.unattendedRefusal(outsideSandbox: true), reason: askReason); return
                 }
                 unsandboxed = true
                 break
             }
             askReason = "noSandbox"
-            guard attended else { await deny(outside, reason: "unattended"); return }
+            guard attended else { await deny(Self.unattendedRefusal(), reason: "unattended"); return }
         case "WebFetch", "WebSearch":
             if profile.network || (name == "WebSearch" && profile.webSearch) { await allow("roleAllows"); return }
             await deny(outside, reason: "network"); return
@@ -1203,9 +1190,9 @@ public actor ClaudeIntegration: AgentIntegration {
                 case .askWrites, .all:
                     if !write { await allow("roleAllows"); return }
                     askReason = "connectorWrite"
-                    guard !policy.scheduled else { await deny(outside, reason: "unattended"); return }
+                    guard !policy.scheduled else { await deny(Self.unattendedRefusal(), reason: "unattended"); return }
                 }
-            } else if !attended { await deny(outside, reason: "unattended"); return }
+            } else if !attended { await deny(Self.unattendedRefusal(), reason: "unattended"); return }
         }
         guard let turn else {
             await deny(L10n.text("Ход завершён: действие вне роли некому подтвердить", "The turn has ended: nobody can approve an action outside the role"),

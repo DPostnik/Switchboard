@@ -172,7 +172,7 @@ struct ClaudeLaunchPolicy: Equatable {
     func inspection(command: String, cwd: String? = nil) -> (decision: CommandDecision, reason: String?) {
         let text = command.trimmingCharacters(in: .whitespacesAndNewlines) + " "
         if let hit = profile.commandInspection.deny.first(where: { Self.matches(text, $0) }) {
-            return (.deny(L10n.text("Команда запрещена ролью: \(hit.trimmingCharacters(in: .whitespaces))", "The role forbids this command: \(hit.trimmingCharacters(in: .whitespaces))")), "denyList")
+            return (.deny(ClaudeIntegration.roleDenyRefusal(hit.trimmingCharacters(in: .whitespaces))), "denyList")
         }
         if !profile.network, let hit = Self.networkCommands.first(where: { Self.matches(text, $0) }) {
             return (.deny(L10n.text("Роль без сети: \(hit.trimmingCharacters(in: .whitespaces))", "The role has no network: \(hit.trimmingCharacters(in: .whitespaces))")), "network")
@@ -180,7 +180,7 @@ struct ClaudeLaunchPolicy: Equatable {
         for head in Self.heads(text) {
             guard let pattern = profile.commandInspection.ask.first(where: { (head + " ").hasPrefix($0) }) else { continue }
             if pattern.hasPrefix("rm "), let cwd, safeRemoval(head, cwd: cwd) { continue }
-            return (profile.approvals == .ask && !scheduled ? .ask : .deny(L10n.text("Действие вне роли; запуск без присмотра не ждёт.", "Outside the role; an unattended run does not wait.")), "askList")
+            return (profile.approvals == .ask && !scheduled ? .ask : .deny(ClaudeIntegration.unattendedRefusal()), "askList")
         }
         return (.allow, nil)
     }

@@ -62,6 +62,11 @@ struct CodexReplyTooLarge: LocalizedError, Sendable {
         scopedEvents = scoped.stream; scopedSink = scoped.continuation
     }
 
+    /// What a provider under the boundary adds to its environment: the plan's own variables and where a chat leaves a
+    /// settings proposal (`SettingsProposalInbox.instructions`, writable in the plan by `CodexIntegration.boundaryInput`).
+    static func boundaryEnvironment(_ boundary: ExternalSandboxLaunch) -> [String: String] {
+        boundary.plan.environment.merging([SettingsProposalInbox.environmentKey: SettingsProposalInbox.directory.path]) { _, new in new }
+    }
     public func start(executable: URL, home: URL, extraArguments: [String] = [], boundary: ExternalSandboxLaunch? = nil) async throws {
         guard process == nil else { return }
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true,
@@ -85,7 +90,7 @@ struct CodexReplyTooLarge: LocalizedError, Sendable {
         }
         var environment = ProcessInfo.processInfo.environment
         environment["CODEX_HOME"] = home.path
-        if let boundary { environment.merge(boundary.plan.environment) { _, new in new } }
+        if let boundary { environment.merge(Self.boundaryEnvironment(boundary)) { _, new in new } }
         // Account login belongs to this app, even when started from a configured shell.
         for key in ["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE"] {
             environment.removeValue(forKey: key)

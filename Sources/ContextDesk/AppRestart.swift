@@ -10,9 +10,12 @@ enum RestartFailure: LocalizedError {
 }
 
 /// The chat whose agent requested a restart gets one fixed continuation message once the app is back.
-/// Only session IDs travel: the app maps them to its own chats and never accepts text from the request.
+/// Only IDs travel: agent session IDs from a CLI request, or the Switchboard chat ID the app gave the chat directory
+/// server (`request_app_restart`). The app maps them to its own chats and never accepts text from the request.
 struct RestartContinuation: Codable, Equatable {
     static let claudeSessionKey = "claudeSession", codexThreadKey = "codexThread"
+    /// A Switchboard chat ID; sent by the app-owned `request_app_restart` tool (ChatDirectoryRuntime/server.py).
+    static let chatKey = "chat"
     static let maximumAge: TimeInterval = 600
     static var file: URL { Locations.root.appendingPathComponent("restart-continuation.json") }
     static var message: String {
@@ -35,6 +38,7 @@ struct RestartContinuation: Codable, Equatable {
     private static var requesterOrder: [AgentProfile] { AgentIntegrationFactory.profiles.reversed() }
     /// The requester must be an existing, unarchived chat of the matching agent.
     static func chatID(requestedBy info: [AnyHashable: Any]?, in chats: [Chat]) -> String? {
+        if let id = info?[chatKey] as? String, valid(id), let chat = chats.first(where: { $0.id == id && !$0.isArchived }) { return chat.id }
         for profile in requesterOrder {
             guard let key = profile.restartRequester?.key, let id = info?[key] as? String, valid(id) else { continue }
             let session = AgentSessionReference(connection: profile.connection, nativeID: id)

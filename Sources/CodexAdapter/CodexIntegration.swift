@@ -323,13 +323,23 @@ public actor CodexIntegration: AgentIntegration {
         // Keep the owner after the parent completes: background children and their stop/history
         // operations still belong to this process. Scope changes and disconnect release it.
     }
+    /// The planner input for a Codex worker. The settings proposal inbox is writable, as for Claude, so "one refusal, one
+    /// request" works inside the boundary (invariant 14).
+    static func boundaryInput(project: String, permissions: AgentPermissionProfile, home: URL, executable: URL, resources: URL?,
+                              workflowDirectories: [URL], inbox: URL = SettingsProposalInbox.directory) -> ExternalSandboxPlanner.Input {
+        var input = ExternalSandboxPlanner.Input(project: project, profile: permissions, providerHome: home, providerExecutable: executable,
+                                                 resources: resources, workflowDirectories: workflowDirectories)
+        try? FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
+        input.extraWrites = [inbox.path]
+        return input
+    }
     /// The external boundary for a worker, or nil (native sandbox and prompts) with the reason logged once.
     private func boundary(project: String, permissions: AgentPermissionProfile, route: AgentRoute) async throws -> ExternalSandboxLaunch? {
         let base = try worker(for: route)
         guard let launch = await base.launchInfo else { return nil }
         let helper = ExternalSandboxHelper.bundled()
-        let input = ExternalSandboxPlanner.Input(project: project, profile: permissions, providerHome: launch.home, providerExecutable: launch.executable,
-                                                 resources: resources, workflowDirectories: await base.registeredWorkflowDirectories)
+        let input = Self.boundaryInput(project: project, permissions: permissions, home: launch.home, executable: launch.executable,
+                                       resources: resources, workflowDirectories: await base.registeredWorkflowDirectories)
         switch ExternalSandboxPlanner.plan(input, helper: helper) {
         case .success(let plan):
             guard case .success(let verified) = helper else { return nil }
