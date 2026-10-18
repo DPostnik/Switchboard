@@ -30,3 +30,8 @@ Switchboard was called Context Desk until 2026-10-17. Its data moved from `~/Lib
   3. The app restarts only when every chat is idle (no turns, queued sends, approvals or jobs), so other chats are never interrupted; several chats may wait for the same restart and each one is continued.
   4. After the restart the chat receives "Switchboard restarted at your request. Continue the task…". Then verify: the running `Switchboard` process started after the bundle's build time (`ps -o lstart`, `stat` of `build/Switchboard.app/Contents/MacOS/Switchboard`); the changed behavior works in the real app (unified log `/usr/bin/log show --predicate 'subsystem == "local.daniil.switchboard"'`, app state, or asking the user to confirm a UI-only check); then commit/push per the standing authorization and report the result.
   5. If no continuation arrives (the chat runs outside Switchboard, or the app had to be force-quit), say so and ask the user to quit with Cmd+Q and reopen.
+
+## Response style
+
+- Write chat replies about 80% of the way to ASD-STE100 (Simplified Technical English): short sentences, active voice, one idea per sentence, one meaning per word, imperative for instructions.
+- Keep each chat reply under 2000 characters. If more is needed, put the detail in a file and summarize it in chat.
