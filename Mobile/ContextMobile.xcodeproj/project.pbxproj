@@ -31,6 +31,8 @@ AAAAE0000000000000000005 = {isa = PBXFileReference; lastKnownFileType = sourceco
 AAAAE0000000000000000006 = {isa = PBXBuildFile; fileRef = AAAAE0000000000000000005; };
 AAAAE0000000000000000007 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileMarkdown.swift; sourceTree = SOURCE_ROOT; };
 AAAAE0000000000000000008 = {isa = PBXBuildFile; fileRef = AAAAE0000000000000000007; };
+AAAAE0000000000000000009 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileFileView.swift; sourceTree = SOURCE_ROOT; };
+AAAAE000000000000000000A = {isa = PBXBuildFile; fileRef = AAAAE0000000000000000009; };
 /* Begin PBXBuildFile section */
 		ABCDE0000000000000000001 = {isa = PBXBuildFile; fileRef = ABCDE0000000000000000002; };
 		59CFC907D5F4E60C0B46C6AC /* ../Sources/ContextCore/MobileRemote.swift in Sources */ = {isa = PBXBuildFile; fileRef = C23157AC2005C3BBBDA7D2C8 /* ../Sources/ContextCore/MobileRemote.swift */; };
@@ -127,6 +129,7 @@ AAAAE0000000000000000002,
 AAAAE0000000000000000004,
 AAAAE0000000000000000006,
 AAAAE0000000000000000008,
+AAAAE000000000000000000A,
 				59CFC907D5F4E60C0B46C6AC /* ../Sources/ContextCore/MobileRemote.swift in Sources */,
 				D0FDF956FB34FEB9F0D65EA5 /* ../Sources/ContextCore/Localization.swift in Sources */,
 			);

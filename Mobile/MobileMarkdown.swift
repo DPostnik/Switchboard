@@ -301,6 +301,13 @@ enum MarkdownInline {
         return String(url.absoluteString.dropFirst(copyScheme.count + 1)).removingPercentEncoding
     }
 
+    /// A Markdown link to a file (`[plan](docs/plan.md)`, `file:///…`), not to a website.
+    static func filePath(_ url: URL) -> String? {
+        if url.scheme == "file" { return url.path.isEmpty ? nil : url.path }
+        guard url.scheme == nil, url.host == nil else { return nil }
+        let value = url.relativeString.removingPercentEncoding ?? url.relativeString
+        return looksLikePath(value) ? value : nil
+    }
     /// A path-like code span: `Sources/App.swift`, `~/notes.md`, `/tmp/log:12`. URLs are not paths.
     static func looksLikePath(_ value: String) -> Bool {
         guard value.count < 300, !value.contains("://"), !value.contains("\n") else { return false }

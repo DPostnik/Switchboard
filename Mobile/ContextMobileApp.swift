@@ -29,6 +29,9 @@ import ImageIO
     private var active = false
     private var lifecycle = UUID()
     private let phoneID = UUID().uuidString.lowercased()
+    #if targetEnvironment(simulator)
+    var previewFiles: [String: RemoteFile] = [:]
+    #endif
     func restoreConnection() async {
         guard !signedIn else { return }
         #if targetEnvironment(simulator)
@@ -213,6 +216,33 @@ import ImageIO
         if !commands.contains(where: { $0.id == receipt.id }) { commands.insert(receipt, at: 0) }
         status = ""
         if self.api === api, active { dirtyCommands.insert(command.id); requestUpdates() }
+    }
+    /// File reads are idempotent and never reach an agent, so they skip the delivery receipt;
+    /// after a failure the user may simply ask again (a new command).
+    func requestFile(device: RemoteDevice, chat: RemoteChat, path: String) async throws -> String {
+        #if targetEnvironment(simulator)
+        if ProcessInfo.processInfo.arguments.contains("-mobile-preview") {
+            var done = RemoteCommand.file(owner: device.owner, device: device.id, project: chat.project, chat: chat.id, path: path)
+            try done.validate()
+            done.status = "submitted"; commands.insert(done, at: 0)
+            previewFiles[done.id] = Self.previewFile(path)
+            return done.id
+        }
+        #endif
+        guard let api else { throw RemoteFailure.signedOut }
+        let command = RemoteCommand.file(owner: try await api.owner(), device: device.id, project: chat.project, chat: chat.id, path: path)
+        try command.validate()
+        try await api.submit(command)
+        if !commands.contains(where: { $0.id == command.id }) { commands.insert(command, at: 0) }
+        if self.api === api, active { dirtyCommands.insert(command.id); requestUpdates() }
+        return command.id
+    }
+    func takeFile(_ command: String) async throws -> RemoteFile? {
+        #if targetEnvironment(simulator)
+        if let file = previewFiles[command] { return file }
+        #endif
+        guard let api else { throw RemoteFailure.signedOut }
+        return try await api.takeFile(command: command)
     }
     func approvalCommand(device: String, chat: String, approval: String) -> RemoteCommand? {
         commands.first { $0.device == device && $0.chat == chat && $0.approval.flatMap(UUID.init(uuidString:)) == UUID(uuidString: approval) }
@@ -635,7 +665,7 @@ struct MobileSettings: View {
                     Text(L10n.text("Применится после перезапуска приложения.", "Applies after restarting the app.")).font(.footnote).foregroundStyle(.secondary)
                 }
                 Section(L10n.text("История", "History")) {
-                    Text(L10n.text("Здесь — последние 20 сообщений недавних чатов. Длинные сообщения сокращены до 2000 символов. Полная история остаётся на Mac.", "The latest 20 messages in recent chats are shown here. Long messages are limited to 2,000 characters. Full history stays on your Mac."))
+                    Text(L10n.text("Здесь — последние 20 сообщений недавних чатов. Длинные сообщения сокращены до 2000 символов. Полная история остаётся на Mac. Файл проекта из ответа открывается нажатием на его путь.", "The latest 20 messages in recent chats are shown here. Long messages are limited to 2,000 characters. Full history stays on your Mac. Tap a project file path in an answer to open the file."))
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 if model.signedIn {
@@ -662,6 +692,7 @@ struct MobileChatView: View {
     @State private var photoSelection: [PhotosPickerItem] = []
     @State private var loadingPhotos = false
     @State private var photoError: String?
+    @State private var openedFile: OpenedFile?
     private var draftKey: String { deviceID + ":" + chatID }
     private var photos: [RemotePhoto] { model.photoDrafts[draftKey] ?? [] }
     private var canSend: Bool { !loadingPhotos && (!draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !photos.isEmpty) }
@@ -672,7 +703,7 @@ struct MobileChatView: View {
     var body: some View {
         if let device = model.devices.first(where: { $0.id == deviceID }), let chat = device.snapshot.chats.first(where: { $0.id == chatID }) {
             let project = device.snapshot.projects.first { $0.id == chat.project }
-            let lastCommand = model.commands.first { $0.chat == chatID && $0.device == deviceID }
+            let lastCommand = model.commands.first { $0.chat == chatID && $0.device == deviceID && $0.kind != "file" }
             VStack(spacing: 0) {
                 if !(model.connectionState == .connected && model.onlineMacs.contains(device.id.lowercased())) {
                     ConnectionStatus(model: model, device: device).padding(.horizontal).padding(.vertical, 9).background(.bar)
@@ -691,7 +722,7 @@ struct MobileChatView: View {
                                 .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.top, 8)
                             let lastUser = chat.messages.last { $0.role == "user" }?.id
                             ForEach(chat.messages) { message in
-                                MessageBubble(message: message)
+                                MessageBubble(message: message, openFile: project?.canReadFiles == true ? { openedFile = OpenedFile(path: $0) } : nil)
                                 if message.id == lastUser, let status = sendStatus(lastCommand, chat: chat) {
                                     Text(status).font(.caption).foregroundStyle(.secondary)
                                         .frame(maxWidth: .infinity, alignment: .trailing).padding(.top, -14)
@@ -915,6 +946,16 @@ struct MobileChatView: View {
                     MobileChatSettingsView(model: model, deviceID: deviceID, chatID: chatID, expected: settings, options: settings.options)
                 }
             }
+            .sheet(item: $openedFile) { file in
+                MobileFileView(model: model, device: device, chat: chat, path: file.path)
+            }
+            #if targetEnvironment(simulator)
+            .onAppear {
+                // Visual checks: `-preview-file docs/plan.md` opens the viewer with synthetic content.
+                let arguments = ProcessInfo.processInfo.arguments
+                if let index = arguments.firstIndex(of: "-preview-file"), index + 1 < arguments.count { openedFile = OpenedFile(path: arguments[index + 1]) }
+            }
+            #endif
         } else if let command = model.commands.first(where: { $0.device == deviceID && $0.chat == chatID && $0.createsChat }) ?? model.unresolved.flatMap({ $0.device == deviceID && $0.chat == chatID && $0.createsChat ? $0 : nil }) {
             VStack(spacing: 16) {
                 if ["pending", "claimed", "submitted"].contains(command.status) { ProgressView() }
@@ -1003,8 +1044,15 @@ struct ComposerChip: View {
     }
 }
 
+struct OpenedFile: Identifiable {
+    let id = UUID()
+    let path: String
+}
+
 struct MessageBubble: View {
     let message: RemoteMessage
+    /// Set when the Mac can send project files; otherwise path chips copy the path.
+    var openFile: ((String) -> Void)?
     @State private var copiedPath = false
     var body: some View {
         if message.role == "user" {
@@ -1033,8 +1081,9 @@ struct MessageBubble: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .contextMenu { menu }
             .environment(\.openURL, OpenURLAction { url in
-                // Path chips copy instead of opening: the file lives on the Mac.
-                guard let path = MarkdownInline.copiedValue(url) else { return .systemAction }
+                // The file lives on the Mac: open it through the Mac when it can send files, otherwise copy the path.
+                guard let path = MarkdownInline.copiedValue(url) ?? MarkdownInline.filePath(url) else { return .systemAction }
+                if let openFile { openFile(path); return .handled }
                 UIPasteboard.general.string = path
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 copiedPath = true
@@ -1081,6 +1130,7 @@ extension MobileModel {
                                  RemoteModelOption(id: "fixture-b", name: "Model B", agent: RemoteModelOption.codexAgent),
                                  RemoteModelOption(id: "fixture-claude", name: "Claude Model", agent: RemoteModelOption.claudeAgent)]
         project.settings = RemoteChatSettings(options: RemoteChatOptions(model: "fixture-a"), projectAccess: .standard, canEdit: true)
+        project.canReadFiles = true
         var chat = RemoteChat(id: "preview-chat", project: project.id, title: L10n.text("Мобильное приложение", "Mobile app"), running: false,
             messages: [RemoteMessage(id: "m1", role: "user", text: L10n.text("Сделаем удобный интерфейс для iPhone. Поле ввода должно быть всегда под рукой.", "Let's make the iPhone interface comfortable. Keep the message field within reach.")),
                        RemoteMessage(id: "m2", role: "assistant", text: L10n.text("Готово. Теперь переписка занимает весь экран, а поле ввода закреплено внизу.\n\n**Что изменилось**\n• Поиск по чатам\n• Превью последних сообщений\n• Кнопка скрытия клавиатуры\n\nПосле отправки клавиатура закрывается автоматически.", "Done. The conversation now fills the screen, with the composer pinned at the bottom.\n\n**What's new**\n• Chat search\n• Latest message previews\n• A button to hide the keyboard\n\nThe keyboard closes automatically after sending."))], approvals: [])
@@ -1132,6 +1182,26 @@ extension MobileModel {
         connectionState = ProcessInfo.processInfo.arguments.contains("-preview-offline") ? .offline : .connected
         onlineMacs = Set(devices.map(\.id))
         signedIn = true
+    }
+}
+
+extension MobileModel {
+    /// Synthetic file content: Markdown for `.md`, a rendered page for `.pdf`, text otherwise.
+    static func previewFile(_ path: String) -> RemoteFile {
+        let name = (path as NSString).lastPathComponent
+        switch (path as NSString).pathExtension.lowercased() {
+        case "md":
+            return RemoteFile(kind: .markdown, path: path, text: L10n.text("# План\n\nФайл с Mac, показан на телефоне.\n\n- Первый шаг\n- Второй шаг", "# Plan\n\nA file from the Mac, shown on the phone.\n\n- First step\n- Second step"), size: 120)
+        case "pdf":
+            let page = UIGraphicsImageRenderer(size: CGSize(width: 600, height: 800)).jpegData(withCompressionQuality: 0.8) { context in
+                UIColor.white.setFill(); context.fill(CGRect(x: 0, y: 0, width: 600, height: 800))
+                (name as NSString).draw(at: CGPoint(x: 40, y: 40), withAttributes: [.font: UIFont.systemFont(ofSize: 32)])
+            }
+            return RemoteFile(kind: .pages, path: path, pages: [page, page], pageCount: 5, size: 90_000, truncated: true)
+        default:
+            return RemoteFile(kind: .text, path: path, text: (1...60).map { "let line\($0) = \($0) // preview" }.joined(separator: "\n"),
+                              size: 600_000, truncated: true)
+        }
     }
 }
 

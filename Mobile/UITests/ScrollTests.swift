@@ -228,6 +228,28 @@ final class ScrollTests: XCTestCase {
 }
 
 final class AnswerControlTests: XCTestCase {
+    @MainActor func testFilePathOpensReadOnlyViewerInBothLanguages() throws {
+        for (language, truncated, done) in [("ru", "Показано начало файла", "Готово"), ("en", "Showing the start of the file", "Done")] {
+            let app = XCUIApplication()
+            app.launchArguments = ["-mobile-preview", "-preview-rich", "-preview-chat", "-interfaceLanguage", language]
+            app.launch()
+            app.scrollViews["conversation-scroll"].swipeDown(velocity: .fast)
+            app.scrollViews["conversation-scroll"].swipeDown(velocity: .fast)
+            let path = app.links["Sources/ContextCore/MobileRemote.swift"].firstMatch
+            XCTAssertTrue(path.waitForExistence(timeout: 5))
+            path.tap()
+            let content = app.staticTexts["file-content"].firstMatch
+            XCTAssertTrue(content.waitForExistence(timeout: 5))
+            XCTAssertTrue(content.label.contains("let line1 = 1"), content.label)
+            XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", truncated)).firstMatch.exists)
+            let shot = XCTAttachment(screenshot: app.screenshot())
+            shot.name = "File viewer " + language; shot.lifetime = .keepAlways; add(shot)
+            app.buttons[done].firstMatch.tap()
+            XCTAssertTrue(app.scrollViews["conversation-scroll"].waitForExistence(timeout: 5))
+            app.terminate()
+        }
+    }
+
     @MainActor func testRichAnswerControlsInBothLanguages() throws {
         for (language, copied, commands, cut, access) in [
             ("ru", "Скопировано", "Копировать команды", "Сокращено · полный текст на Mac", "С подтверждениями"),

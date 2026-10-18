@@ -71,6 +71,8 @@ public struct RemoteProject: Codable, Identifiable, Sendable, Equatable {
     /// Models a new chat can start with, from every ready agent; the chosen model selects the agent. Absent on older hosts: use `models`.
     public var newChatModels: [RemoteModelOption]?
     public var settings: RemoteChatSettings?
+    /// Absent on older hosts and when the cloud schema has no file table: path chips only copy.
+    public var canReadFiles: Bool?
     public init(id: String, name: String, canCreateChat: Bool? = nil) {
         self.id = id; self.name = name; self.canCreateChat = canCreateChat
     }
@@ -121,15 +123,59 @@ public struct RemoteMessage: Codable, Identifiable, Sendable, Equatable {
     public init(id: String, role: String, text: String) { self.id = id; self.role = role; self.text = text }
     /// Clips the full message text to the phone limit and records whether anything was cut.
     public init(id: String, role: String, fullText: String) {
-        self.init(id: id, role: role, text: String(fullText.prefix(Self.textLimit)))
+        self.init(id: id, role: role, text: Self.clip(fullText))
         if fullText.count > Self.textLimit { truncated = true }
     }
     /// Appends streamed text within the limit.
     public mutating func append(_ more: String) {
         guard truncated != true else { return }
         let combined = text + more
-        text = String(combined.prefix(Self.textLimit))
+        text = Self.clip(combined)
         if combined.count > Self.textLimit { truncated = true }
+    }
+    /// Cuts at the last whole Markdown block that fits, never inside a code fence or table.
+    /// Falls back to a sentence or word boundary (closing an open fence), then to a hard cut.
+    public static func clip(_ text: String, limit: Int = textLimit) -> String {
+        guard text.count > limit else { return text }
+        let head = String(text.prefix(limit))
+        let lines = head.split(separator: "\n", omittingEmptySubsequences: false)
+        func fence(_ line: Substring) -> Bool {
+            let value = line.drop { $0 == " " }
+            return value.hasPrefix("```") || value.hasPrefix("~~~")
+        }
+        func table(_ line: Substring) -> Bool { line.drop { $0 == " " }.hasPrefix("|") }
+        func blockStart(_ line: Substring) -> Bool {
+            let value = line.drop { $0 == " " }
+            if value.isEmpty || value.hasPrefix("#") || value.hasPrefix(">") || fence(line) || table(line) { return true }
+            if ["- ", "* ", "+ "].contains(where: value.hasPrefix) { return true }
+            return value.range(of: #"^\d{1,3}[.)] "#, options: .regularExpression) != nil
+        }
+        // Character offsets where a line ends and the next one starts a new block outside a fence.
+        var inFence = false, offset = 0, block: Int?
+        var fences: [(end: Int, open: Bool)] = []
+        for (index, line) in lines.enumerated() {
+            if fence(line) { inFence.toggle() }
+            offset += line.count
+            fences.append((offset, inFence))
+            if index + 1 < lines.count {
+                let next = lines[index + 1]
+                if !inFence, blockStart(next), !(table(line) && table(next)), offset >= limit * 2 / 5 { block = offset }
+            }
+            offset += 1
+        }
+        if let block {
+            return String(head.prefix(block)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let minimum = head.index(head.startIndex, offsetBy: limit * 2 / 5)
+        let sentences = try! NSRegularExpression(pattern: #"[.!?…](?=\s)"#)
+        let sentence = sentences.matches(in: head, range: NSRange(minimum..., in: head)).last
+            .flatMap { Range($0.range, in: head)?.upperBound }
+        let word = head[minimum...].lastIndex(where: \.isWhitespace)
+        guard let cut = sentence ?? word else { return head }
+        var result = String(head[..<cut]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let position = head.distance(from: head.startIndex, to: cut)
+        if fences.last(where: { $0.end < position })?.open == true { result += "\n```" }
+        return result
     }
 }
 public struct RemoteApproval: Codable, Identifiable, Sendable, Equatable {
@@ -157,6 +203,49 @@ public struct RemoteDevice: Codable, Identifiable, Sendable {
         seen = ISO8601DateFormatter().string(from: Date()); self.snapshot = snapshot
         projects = snapshot.projects.map(\.id)
     }
+}
+/// One project file as the Mac read it for the phone. Lives in a short-lived owner-only row.
+public struct RemoteFile: Codable, Sendable, Equatable {
+    public enum Kind: String, Codable, Sendable { case markdown, text, pages, failure }
+    /// Why the Mac did not return content. Codes stay stable; the phone owns the wording.
+    public enum Failure: String, Codable, Sendable, CaseIterable {
+        case notFound, outsideProject, protected, directory, unsupported, unreadable, tooLarge
+        public func message(language: AppLanguage = L10n.language) -> String {
+            switch self {
+            case .notFound: L10n.text("Файл не найден на Mac.", "File not found on the Mac.", language: language)
+            case .outsideProject: L10n.text("Файл лежит вне папки проекта. С телефона открываются только файлы проекта.", "The file is outside the project folder. Only project files can be opened from the phone.", language: language)
+            case .protected: L10n.text("Этот файл может содержать секреты, поэтому с телефона он не открывается.", "This file may contain secrets, so it cannot be opened from the phone.", language: language)
+            case .directory: L10n.text("Это папка, а не файл.", "This is a folder, not a file.", language: language)
+            case .unsupported: L10n.text("Такой тип файла на телефоне не показывается. Поддерживаются текст, Markdown, PDF и изображения.", "This file type cannot be shown on the phone. Text, Markdown, PDF and images are supported.", language: language)
+            case .unreadable: L10n.text("Mac не смог прочитать файл.", "The Mac could not read the file.", language: language)
+            case .tooLarge: L10n.text("Файл слишком большой для показа на телефоне.", "The file is too large to show on the phone.", language: language)
+            }
+        }
+    }
+    public static let pathLimit = 4096
+    /// Text is cut to this many UTF-8 bytes; documents are rendered to at most `pageLimit` JPEG pages.
+    public static let textBytes = 256 * 1024
+    public static let pageLimit = 12
+    public static let pageBytes = 450 * 1024
+    /// Encoded JSON budget, below the database row check.
+    public static let payloadBytes = 3_800_000
+    public var kind: Kind
+    /// Path relative to the project folder; the file name for display.
+    public var path: String
+    public var text: String?
+    public var pages: [Data]?
+    /// Total pages in the document, when more were available than sent.
+    public var pageCount: Int?
+    /// Size of the file on the Mac, in bytes.
+    public var size: Int64?
+    public var truncated: Bool?
+    public var failure: Failure?
+    public init(kind: Kind, path: String, text: String? = nil, pages: [Data]? = nil, pageCount: Int? = nil, size: Int64? = nil, truncated: Bool? = nil, failure: Failure? = nil) {
+        self.kind = kind; self.path = path; self.text = text; self.pages = pages
+        self.pageCount = pageCount; self.size = size; self.truncated = truncated; self.failure = failure
+    }
+    public static func failed(_ failure: Failure, path: String) -> Self { Self(kind: .failure, path: path, failure: failure) }
+    public var name: String { (path as NSString).lastPathComponent }
 }
 /// Bounded JPEG payload; filenames and destination paths are generated by the receiving Mac.
 public struct RemotePhoto: Codable, Sendable, Equatable, Identifiable {
@@ -205,6 +294,10 @@ public struct RemoteCommand: Codable, Identifiable, Sendable {
         command.settings = RemoteSettingsChange(options: options, expected: expected.options, expectedProjectAccess: expected.projectAccess)
         return command
     }
+    /// Read-only request for one file of the chat's project; `text` carries the path as written in the answer.
+    public static func file(owner: String, device: String, project: String, chat: String, path: String) -> Self {
+        Self(owner: owner, device: device, project: project, chat: chat, kind: "file", text: path)
+    }
     public init(owner: String, device: String, project: String, chat: String, kind: String, text: String = "", approval: String? = nil, turn: String? = nil, photos: [RemotePhoto] = []) {
         id = UUID().uuidString.lowercased(); self.owner = owner; self.device = device
         self.project = project; self.chat = chat; self.kind = kind; self.text = text
@@ -214,10 +307,15 @@ public struct RemoteCommand: Codable, Identifiable, Sendable {
     public func validate() throws {
         guard UUID(uuidString: id) != nil, UUID(uuidString: project) != nil,
               !chat.isEmpty, text.utf8.count <= 32_000,
-              ["send", "stop", "allow", "deny", "create", "configure"].contains(kind),
+              ["send", "stop", "allow", "deny", "create", "configure", "file"].contains(kind),
               !["send", "create"].contains(kind) || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !(photos ?? []).isEmpty,
               !["allow", "deny"].contains(kind) || approval.flatMap(UUID.init(uuidString:)) != nil
         else { throw RemoteFailure.invalidCommand }
+        if kind == "file" {
+            let path = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !path.isEmpty, text.utf8.count <= RemoteFile.pathLimit, !text.contains("\n"), !text.contains("\0"),
+                  approval == nil, turn == nil, (photos ?? []).isEmpty, settings == nil else { throw RemoteFailure.invalidCommand }
+        }
         let photos = photos ?? []
         guard photos.count <= RemotePhoto.maximumCount,
               photos.isEmpty || ["send", "create"].contains(kind), Set(photos.map(\.id)).count == photos.count else { throw RemoteFailure.invalidPhoto }
@@ -459,6 +557,30 @@ public actor RemoteAPI {
     }
     public func publish(_ device: RemoteDevice) async throws {
         _ = try await request("rest/v1/remote_devices?on_conflict=id", method: "POST", body: JSONEncoder().encode(device), prefer: "resolution=merge-duplicates")
+    }
+    /// Returns false when the cloud schema predates file viewing.
+    public func supportsFiles() async throws -> Bool {
+        do {
+            return try JSONDecoder().decode(Int.self, from: await request("rest/v1/rpc/remote_files_version", method: "POST", body: Data("{}".utf8))) == 1
+        } catch RemoteFailure.request(404) { return false }
+    }
+    /// Mac side: one answer per claimed file command.
+    public func publishFile(_ file: RemoteFile, command: String) async throws {
+        struct Row: Encodable { let id: String; let payload: RemoteFile }
+        guard UUID(uuidString: command) != nil else { throw RemoteFailure.invalidCommand }
+        let body = try JSONEncoder().encode(Row(id: command.lowercased(), payload: file))
+        guard body.count <= RemoteFile.payloadBytes + 1024 else { throw RemoteFailure.invalidCommand }
+        _ = try await request("rest/v1/remote_files", method: "POST", body: body)
+    }
+    /// Phone side: reads the answer and removes it from the cloud; nil until the Mac has answered.
+    public func takeFile(command: String) async throws -> RemoteFile? {
+        struct Row: Decodable { let payload: RemoteFile }
+        guard UUID(uuidString: command) != nil else { throw RemoteFailure.invalidCommand }
+        let id = command.lowercased()
+        guard let row = try JSONDecoder().decode([Row].self, from: await request("rest/v1/remote_files?select=payload&id=eq.\(id)&limit=1")).first else { return nil }
+        // Best effort: scheduled cleanup removes rows the phone could not delete.
+        _ = try? await request("rest/v1/remote_files?id=eq.\(id)", method: "DELETE")
+        return row.payload
     }
     public func checkPhotoSchema() async throws {
         do { _ = try await request("rest/v1/remote_commands?select=photos&limit=0") }

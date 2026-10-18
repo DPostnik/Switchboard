@@ -47,6 +47,7 @@ with tempfile.TemporaryDirectory(prefix='context-remote-db-', dir='/tmp') as dir
         sql((root/'supabase/migrations/202609280003_photos.sql').read_text())
         sql((root/'supabase/migrations/202609280004_photo_retention.sql').read_text())
         sql((root/'supabase/migrations/202609280006_chat_settings.sql').read_text())
+        sql((root/'supabase/migrations/202610180001_remote_files.sql').read_text())
         assert sql("select public.valid_remote_photos(null), public.valid_remote_photos('[]'), public.valid_remote_photos('{}'), public.valid_remote_photos('[{\"id\":\"bad\",\"data\":\"/9j/AA==\"}]');") == 't|t|f|f'
 
         owner = "set role authenticated; set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';"
@@ -182,6 +183,50 @@ with tempfile.TemporaryDirectory(prefix='context-remote-db-', dir='/tmp') as dir
         sql(owner + patch)
         assert delta(last_revision)['device']['revision'] > last_revision
         assert len(delta(last_revision)['chats']) == 2
-        print('PASS: chat settings validation, immutable choices and uncertain-work blocking; photo expiry, grace period, immutable history, retention permissions/idempotence; all data migrations, delete/recreate revision continuity, atomic event rollback, private channel RLS, compact signals, delta revisions/deletions, owner/project isolation, duplicate claims and no uncertain replay')
+        # File viewing: one owner-only answer per claimed file command, never edited, swept after 10 minutes.
+        sql(owner + 'delete from public.remote_devices;')
+        sql(owner + f"insert into public.remote_devices(id,name,projects,snapshot) values ('{device}','Mac',array['project'],'{{}}');")
+        request, sent = str(uuid.uuid4()), str(uuid.uuid4())
+        ask = f"insert into public.remote_commands(id,device,project,chat,kind,text) values ('{request}','{device}','project','chat','file','docs/plan.md');"
+        rejects(owner + ask.replace("'docs/plan.md'", "'   '"))
+        rejects(owner + ask.replace("'docs/plan.md'", "E'a\\nb'"))
+        rejects(owner + ask.replace("(id,device,project,chat,kind,text)", "(id,device,project,chat,kind,text,turn)").replace("'docs/plan.md')", "'docs/plan.md','turn')"))
+        rejects(other + ask)
+        sql(owner + ask)
+        answer = f"insert into public.remote_files(id,payload) values ('{request}','{{\"kind\":\"text\",\"path\":\"docs/plan.md\",\"text\":\"hi\"}}');"
+        rejects(owner + answer)
+        assert sql(owner + f"select kind from public.claim_remote_command('{device}');").endswith('file')
+        rejects(other + answer)
+        rejects(owner + answer.replace("'{\"kind", "'[{\"kind").replace("}}');", "}}]');"))
+        sql(owner + answer)
+        rejects(owner + answer)
+        rejects(owner + f"update public.remote_files set payload='{{}}' where id='{request}';")
+        assert sql(other + 'select count(*) from public.remote_files;').endswith('0')
+        assert json.loads(sql(owner + f"select payload from public.remote_files where id='{request}';").splitlines()[-1])['text'] == 'hi'
+        sql(owner + f"insert into public.remote_commands(id,device,project,chat,kind,text) values ('{sent}','{device}','project','other','send','hello');")
+        assert sql(owner + f"select kind from public.claim_remote_command('{device}');").endswith('send')
+        rejects(owner + f"insert into public.remote_files(id,payload) values ('{sent}','{{}}');")
+        sql(other + 'delete from public.remote_files;')
+        assert sql('select count(*) from public.remote_files;') == '1'
+        rejects(owner + 'select public.cleanup_remote_files();')
+        rejects('set role anon; select public.cleanup_remote_files();')
+        assert sql('select public.cleanup_remote_files();') == '0'
+        sql(f"update public.remote_files set created = now() - interval '11 minutes' where id='{request}';")
+        assert sql('select public.cleanup_remote_files();') == '1'
+        later = str(uuid.uuid4())
+        sql(owner + ask.replace(request, later))
+        assert sql(owner + f"select kind from public.claim_remote_command('{device}');").endswith('file')
+        sql(owner + answer.replace(request, later))
+        sql(owner + f"delete from public.remote_files where id='{later}';")
+        assert sql('select count(*) from public.remote_files;') == '0'
+        assert sql(owner + 'select public.remote_files_version();').endswith('1')
+        rejects('set role anon; select public.remote_files_version();')
+        last = str(uuid.uuid4())
+        sql(owner + ask.replace(request, last))
+        assert sql(owner + f"select kind from public.claim_remote_command('{device}');").endswith('file')
+        sql(owner + answer.replace(request, last))
+        sql(owner + 'delete from public.remote_devices;')
+        assert sql('select count(*) from public.remote_files;') == '0'
+        print('PASS: file answers (owner-only, claimed file commands, immutable, swept after 10 minutes); chat settings validation, immutable choices and uncertain-work blocking; photo expiry, grace period, immutable history, retention permissions/idempotence; all data migrations, delete/recreate revision continuity, atomic event rollback, private channel RLS, compact signals, delta revisions/deletions, owner/project isolation, duplicate claims and no uncertain replay')
     finally:
         if started: run('pg_ctl','-D',folder/'data','-m','fast','-w','stop')

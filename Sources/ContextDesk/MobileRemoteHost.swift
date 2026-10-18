@@ -30,6 +30,8 @@ import IOKit.ps
     private var workspaceObservers: [NSObjectProtocol] = []
     private var powerSource: CFRunLoopSource?
     private var sleeping = false
+    /// The cloud schema has the short-lived file table; checked on every subscription.
+    private var filesReady = false
     private var api: RemoteAPI?
     private var apiURL = ""
     private var apiKey = ""
@@ -103,6 +105,7 @@ import IOKit.ps
                 try await client.checkRealtimeSchema()
                 guard let self, self.enabled, !self.sleeping else { throw CancellationError() }
                 self.lastPublished = nil // A new subscription always reconciles current local state.
+                self.filesReady = (try? await client.supportsFiles()) ?? false
                 try await self.publishCurrent()
             }
             realtime = channel
@@ -143,6 +146,7 @@ import IOKit.ps
                 snapshot.chats[index].messages = Array(messages.suffix(20))
             }
         }
+        for index in snapshot.projects.indices { snapshot.projects[index].canReadFiles = filesReady ? true : nil }
         for index in snapshot.chats.indices where snapshot.chats[index].running {
             if let action = liveActivity[snapshot.chats[index].id] { snapshot.chats[index].activity = action }
         }
@@ -205,7 +209,8 @@ import IOKit.ps
                         guard projects.contains(command.project), command.device.lowercased() == device.lowercased(),
                               command.owner == (try await api.owner()) else { throw RemoteFailure.invalidCommand }
                         try await journal.begin(command)
-                        result = try await model.executeRemote(command)
+                        if command.kind == "file" { result = try await answerFile(command, model: model, api: api) }
+                        else { result = try await model.executeRemote(command) }
                     } catch RemoteFailure.invalidCommand { result = "rejected" }
                     catch { result = "uncertain" }
                     try await api.finish(id: command.id, status: result)
@@ -213,6 +218,16 @@ import IOKit.ps
                 }
             }
         }, failure: { [weak self] error in self?.realtime?.recover(from: error) })
+    }
+    /// Reads only from the chat's own project folder and answers once; the agent is not involved.
+    private func answerFile(_ command: RemoteCommand, model: DeskModel, api: RemoteAPI) async throws -> String {
+        guard filesReady,
+              let project = model.state.projects.first(where: { $0.id.uuidString == command.project }),
+              model.state.chats.contains(where: { $0.id == command.chat && $0.projectID == project.id }) else { throw RemoteFailure.invalidCommand }
+        let path = command.text, root = project.path
+        let file = await Task.detached(priority: .userInitiated) { RemoteFileReader.read(path, root: root) }.value
+        try await api.publishFile(file, command: command.id)
+        return "submitted"
     }
     /// User-initiated off: unlike quitting, it also stops access from returning on the next launch.
     func turnOff() async {

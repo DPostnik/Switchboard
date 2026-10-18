@@ -339,3 +339,22 @@ selected above. Do not remove the Cron extension or touch other jobs. If activat
 fails, report cloud cleanup as inactive until verified; local cleanup is independent.
 For local errors, inspect the app's localized error and folder permissions. No
 measured storage savings are claimed until real expiry runs occur.
+
+## Project files and answer clipping (2026-10-18)
+
+Tap a project file path in an answer (a path chip or a file link) to open the file.
+The phone queues a read-only `file` command; the Mac reads the file itself, without
+the agent, and answers once into the owner-only `remote_files` table. The phone reads
+and deletes the answer; scheduled cleanup removes leftovers after 10 minutes.
+Only regular files inside the chat's project folder are returned (symbolic links are
+resolved first); secrets such as `.env*`, keys and `.git/` stay on the Mac.
+Markdown is rendered, other text is shown as is (first 256 KiB), and PDF pages and
+images arrive as JPEG (up to 12 pages). Older Macs or schemas without the table keep
+copying the path. Apply `202610180001_remote_files.sql` and
+`202610180002_remote_files_cleanup_cron.sql`, then restart the Mac app.
+
+Phone history still keeps 2,000 characters per message, but the cut now ends at the
+last whole Markdown block and never inside a code block or table. Agents in every
+chat are asked to put the conclusion first and keep answers near 1,800 characters.
+The simulator-only `-preview-file <path>` argument opens the viewer with synthetic
+content for visual checks.

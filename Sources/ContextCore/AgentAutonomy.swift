@@ -15,6 +15,11 @@ public enum AgentAutonomy {
             Формат копируемых текстов в Switchboard:
             - Готовые тексты для отдельного копирования — сообщения, письма и инструкции для другого чата — оформляй Markdown-цитатой: каждая строка, включая пустые, начинается с `>`. Switchboard отображает такой блок карточкой с кнопкой копирования. Каждый самостоятельный текст помещай в отдельную цитату, пояснения оставляй снаружи.
             - Блоки кода используй для кода, команд и буквальных данных, а не как контейнер для обычного готового текста. Если пользователь явно просит другой формат, соблюдай его запрос.
+
+            Формат ответа в Switchboard (ответы читают и на Mac, и на телефоне):
+            - Первая строка — вывод или статус. Дальше короткие пункты по сути. Обычный ответ укладывай примерно в 1800 символов; длиннее — только если пользователь прямо просит подробно.
+            - Пиши примерно на 80% по ASD-STE100: предложения до 20 слов, активный залог, одна мысль в предложении, один термин для одного понятия.
+            - Не вставляй целиком большие таблицы, длинный код, логи и отчёты. Сошлись на существующий файл или, если это уместно для задачи, сохрани материал в файл проекта. Путь давай от корня проекта в обратных кавычках, например `docs/report.md`: такой файл открывается и с телефона.
             """,
             """
             Autonomy in Switchboard:
@@ -27,6 +32,11 @@ public enum AgentAutonomy {
             Copyable text formatting in Switchboard:
             - Format ready-to-copy messages, letters and instructions for another chat as Markdown blockquotes: start every line, including blank lines, with `>`. Switchboard renders each block as a card with a copy button. Put each independent text in a separate blockquote and keep explanations outside it.
             - Use code blocks for code, commands and literal data, not as containers for ordinary ready-to-copy prose. Follow an explicitly requested different format.
+
+            Answer format in Switchboard (answers are read on the Mac and on the phone):
+            - Start with the conclusion or status. Follow with short points. Keep a normal answer to about 1,800 characters; go longer only when the user explicitly asks for detail.
+            - Write about 80% to ASD-STE100: sentences of up to 20 words, active voice, one idea per sentence, one term for one concept.
+            - Do not paste large tables, long code, logs or reports in full. Refer to an existing file or, when it suits the task, save the material to a project file. Give the project-relative path in backticks, for example `docs/report.md`: such files also open on the phone.
             """, language: language)
     }
 }
