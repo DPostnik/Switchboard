@@ -9,7 +9,12 @@ private final class RemoteAuthFixture: @unchecked Sendable {
     var failRefresh = false
     var failStorage = false
     var writes: [Data?] = []
+    var submitStatus = 201
+    var submits = 0
     func respond(_ request: URLRequest) -> (Int, Data) {
+        if request.httpMethod == "POST" && request.url!.path.hasSuffix("/remote_commands") {
+            return lock.withLock { submits += 1; return (submitStatus, Data()) }
+        }
         if request.url!.path.contains("/token") {
             let refresh = request.url!.query!.contains("refresh_token")
             if refresh { lock.withLock { refreshes += 1 }; Thread.sleep(forTimeInterval: 0.1) }
@@ -158,4 +163,49 @@ private func fixtureAPI(_ fixture: RemoteAuthFixture, host: String) throws -> Re
     do { _ = try await api.realtimeCredentials(); Issue.record("Refresh escaped failed invalidation") }
     catch RemoteFailure.keychain(let code) { #expect(code == -25293) }
     #expect(fixture.lock.withLock { fixture.refreshes } == 0)
+}
+
+@Test func remoteSubmitReportsOnlyProvenNonStorage() async throws {
+    let command = RemoteCommand(owner: UUID().uuidString, device: UUID().uuidString, project: UUID().uuidString,
+                                chat: UUID().uuidString, kind: "send", text: "Fixture")
+    for (code, notStored) in [(400, true), (401, true), (403, true), (408, false), (500, false), (504, false)] {
+        let fixture = RemoteAuthFixture(); fixture.submitStatus = code
+        let host = UUID().uuidString.lowercased() + ".invalid"
+        let api = try fixtureAPI(fixture, host: host)
+        defer { AuthURLProtocol.registry.set(host, nil) }
+        try await api.signIn(email: "fixture", password: "fixture")
+        do { try await api.submit(command); Issue.record("Expected a failure for \(code)") }
+        catch let failure as RemoteNotStored {
+            #expect(notStored, "Status \(code) must stay unknown")
+            guard case RemoteFailure.request(code) = failure.cause else { Issue.record("Wrong cause for \(code)"); continue }
+        } catch {
+            #expect(!notStored, "Status \(code) proves nothing was stored")
+        }
+    }
+}
+
+@Test func remoteSubmitConflictMeansTheCommandIsStored() async throws {
+    let fixture = RemoteAuthFixture(); fixture.submitStatus = 409
+    let host = UUID().uuidString.lowercased() + ".invalid"
+    let api = try fixtureAPI(fixture, host: host)
+    defer { AuthURLProtocol.registry.set(host, nil) }
+    try await api.signIn(email: "fixture", password: "fixture")
+    try await api.submit(RemoteCommand(owner: UUID().uuidString, device: UUID().uuidString, project: UUID().uuidString,
+                                       chat: UUID().uuidString, kind: "send", text: "Fixture"))
+}
+
+@Test func remoteSubmitWithoutSessionNeverSends() async throws {
+    let fixture = RemoteAuthFixture(); fixture.failRefresh = true
+    let host = UUID().uuidString.lowercased() + ".invalid"
+    let api = try fixtureAPI(fixture, host: host)
+    defer { AuthURLProtocol.registry.set(host, nil) }
+    try await api.signIn(email: "fixture", password: "fixture")
+    do {
+        try await api.submit(RemoteCommand(owner: UUID().uuidString, device: UUID().uuidString, project: UUID().uuidString,
+                                           chat: UUID().uuidString, kind: "send", text: "Fixture"))
+        Issue.record("Expected not stored")
+    } catch let failure as RemoteNotStored {
+        guard case RemoteFailure.signedOut = failure.cause else { Issue.record("Wrong cause"); return }
+    }
+    #expect(fixture.lock.withLock { fixture.submits } == 0)
 }

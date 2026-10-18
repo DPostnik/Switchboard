@@ -377,6 +377,11 @@ public enum RemoteFailure: Error, LocalizedError {
         L10n.text("Не удалось получить доступ к сессии в Связке ключей (код \(code)). Проверь, что Связка ключей разблокирована и доступ для Switchboard разрешён.", "Could not access the session in Keychain (code \(code)). Check that Keychain is unlocked and Switchboard is allowed access.", language: language)
     }
 }
+/// A command submit failed in a way that proves the queue does not hold it.
+public struct RemoteNotStored: Error, LocalizedError {
+    public let cause: Error
+    public var errorDescription: String? { cause.localizedDescription }
+}
 public enum RemoteVault {
     public static func read(_ account: String) -> Data? {
         try? readChecked(account)
@@ -592,9 +597,19 @@ public actor RemoteAPI {
             guard version == 1 else { throw RemoteFailure.settingsSetup }
         } catch RemoteFailure.request(404) { throw RemoteFailure.settingsSetup }
     }
+    /// Throws `RemoteNotStored` only when the failure proves the queue does not hold the command;
+    /// any other failure leaves the outcome unknown.
     public func submit(_ command: RemoteCommand) async throws {
         try command.validate()
-        _ = try await request("rest/v1/remote_commands", method: "POST", body: JSONEncoder().encode(command))
+        // Authenticate before sending: a failure here means nothing reached the server.
+        do { _ = try await validSession() } catch { throw RemoteNotStored(cause: error) }
+        do { _ = try await request("rest/v1/remote_commands", method: "POST", body: JSONEncoder().encode(command)) }
+        // The ID is the primary key: a conflict means an earlier attempt with this command was stored.
+        catch RemoteFailure.request(409) { return }
+        // The server answered and rolled back the insert. Timeouts and 5xx stay unknown.
+        catch RemoteFailure.request(let code) where (400..<500).contains(code) && code != 408 {
+            throw RemoteNotStored(cause: RemoteFailure.request(code))
+        }
     }
     public func claim(device: String) async throws -> [RemoteCommand] {
         try JSONDecoder().decode([RemoteCommand].self, from: await request("rest/v1/rpc/claim_remote_command", method: "POST", body: JSONEncoder().encode(["device_id": device])))

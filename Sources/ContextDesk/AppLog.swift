@@ -8,4 +8,5 @@ enum AppLog {
     static let chatTitle = Logger(subsystem: subsystem, category: "chat-title")
     static let lifecycle = Logger(subsystem: subsystem, category: "lifecycle")
     static let delivery = Logger(subsystem: subsystem, category: "delivery")
+    static let remote = Logger(subsystem: subsystem, category: "remote")
 }

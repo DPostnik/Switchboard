@@ -112,10 +112,14 @@ import IOKit.ps
             channel.onState = { [weak self] value in
                 guard let self else { return }
                 connectionState = value; status = value.text
+                AppLog.remote.notice("Remote connection: \(String(describing: value), privacy: .public)")
                 if value == .connecting { publication.cancel() }
                 if value == .connected { requestPublication(); requestCommands() }
             }
-            channel.onError = { [weak self] error in self?.status = error.localizedDescription }
+            channel.onError = { [weak self] error in
+                AppLog.remote.error("Remote channel error: \(error.localizedDescription, privacy: .public)")
+                self?.status = error.localizedDescription
+            }
             channel.onChange = { [weak self] event in
                 guard let self, event.device.lowercased() == device.lowercased(), event.entity == "command" else { return }
                 // Finishing/rejecting an earlier command can unblock a queued send.
@@ -212,12 +216,19 @@ import IOKit.ps
                         if command.kind == "file" { result = try await answerFile(command, model: model, api: api) }
                         else { result = try await model.executeRemote(command) }
                     } catch RemoteFailure.invalidCommand { result = "rejected" }
-                    catch { result = "uncertain" }
+                    catch {
+                        AppLog.remote.error("Remote command \(command.id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+                        result = "uncertain"
+                    }
+                    AppLog.remote.notice("Remote command \(command.id, privacy: .public) (\(command.kind, privacy: .public)): \(result, privacy: .public)")
                     try await api.finish(id: command.id, status: result)
                     requestPublication()
                 }
             }
-        }, failure: { [weak self] error in self?.realtime?.recover(from: error) })
+        }, failure: { [weak self] error in
+            AppLog.remote.error("Remote command intake failed: \(error.localizedDescription, privacy: .public)")
+            self?.realtime?.recover(from: error)
+        })
     }
     /// Reads only from the chat's own project folder and answers once; the agent is not involved.
     private func answerFile(_ command: RemoteCommand, model: DeskModel, api: RemoteAPI) async throws -> String {

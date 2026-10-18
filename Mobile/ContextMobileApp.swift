@@ -17,6 +17,10 @@ import ImageIO
     @Published var signedIn = false
     @Published var sending = false
     @Published var unresolved: RemoteCommand?
+    /// The cloud lookup did not find the unresolved command after its send had ended.
+    @Published var undelivered = false
+    /// The full unresolved command, photos included; the stored receipt omits photos.
+    private var unsentBody: RemoteCommand?
     var api: RemoteAPI?
     var receiptStorage: RemoteSessionStorage = .keychain
     @Published var connectionState: RemoteConnectionState = .stopped
@@ -159,8 +163,34 @@ import ImageIO
     }
     private func resolveDelivery() throws {
         if let unresolved, commands.contains(where: { $0.id == unresolved.id }) {
-            try receiptStorage.write(nil, "pending-command"); self.unresolved = nil
+            try clearReceipt()
         }
+    }
+    private func clearReceipt() throws {
+        try receiptStorage.write(nil, "pending-command"); unresolved = nil; unsentBody = nil; undelivered = false
+    }
+    /// Looks the unresolved command up by ID. No send is in flight, so absence means the queue never stored it.
+    func checkDelivery() async {
+        guard let api, let pending = unresolved, !sending else { return }
+        sending = true; defer { sending = false }
+        do {
+            if let found = try await api.command(id: pending.id) {
+                if !commands.contains(where: { $0.id == found.id }) { commands.insert(found, at: 0) }
+                try resolveDelivery()
+            } else { undelivered = true }
+            status = ""
+        } catch { status = error.localizedDescription }
+    }
+    /// Sends the same command again. Its ID is the primary key, so the Mac can never receive it twice.
+    var canResend: Bool { undelivered && unsentBody != nil && unsentBody?.id == unresolved?.id }
+    func resendUndelivered() async {
+        guard let api, canResend, let command = unsentBody, !sending else { return }
+        sending = true; defer { sending = false }
+        do { try await submit(command, using: api) } catch { status = error.localizedDescription }
+    }
+    func discardUndelivered() {
+        guard undelivered, !sending else { return }
+        do { try clearReceipt(); status = "" } catch { status = error.localizedDescription }
     }
     func refresh() async {
         guard active else { return }
@@ -210,9 +240,13 @@ import ImageIO
         // Save the stable ID before networking. Never resubmit after a transport failure.
         var receipt = command; receipt.photos = nil
         try receiptStorage.write(JSONEncoder().encode(receipt), "pending-command")
-        unresolved = command
-        try await api.submit(command)
-        try receiptStorage.write(nil, "pending-command"); unresolved = nil
+        unresolved = command; unsentBody = command; undelivered = false
+        do { try await api.submit(command) }
+        catch let failure as RemoteNotStored {
+            // The server proved it stored nothing, so the receipt must not block later sends.
+            try clearReceipt(); throw failure.cause
+        }
+        try clearReceipt()
         if !commands.contains(where: { $0.id == receipt.id }) { commands.insert(receipt, at: 0) }
         status = ""
         if self.api === api, active { dirtyCommands.insert(command.id); requestUpdates() }
@@ -639,7 +673,19 @@ struct MobileNotice: View {
                 if !model.status.isEmpty { Label(model.status, systemImage: "exclamationmark.circle") }
                 else if model.connectionState != .connected { Label(model.connectionState.text, systemImage: "network") }
                 if model.unresolved != nil {
-                    Text(L10n.text("Доставка не подтверждена. Проверь историю на Mac перед новой отправкой.", "Delivery is unconfirmed. Check the history on your Mac before sending again."))
+                    if model.undelivered {
+                        Text(L10n.text("Команды нет в облаке: Mac её не получит.", "The command is not in the cloud: the Mac will not receive it."))
+                        HStack {
+                            if model.canResend {
+                                Button(L10n.text("Отправить снова", "Send again")) { Task { await model.resendUndelivered() } }
+                            }
+                            Button(L10n.text("Сбросить", "Discard"), role: .destructive) { model.discardUndelivered() }
+                        }.buttonStyle(.bordered).disabled(model.sending)
+                    } else {
+                        Text(L10n.text("Доставка не подтверждена. Проверь историю на Mac перед новой отправкой.", "Delivery is unconfirmed. Check the history on your Mac before sending again."))
+                        Button(L10n.text("Проверить доставку", "Check delivery")) { Task { await model.checkDelivery() } }
+                            .buttonStyle(.bordered).disabled(model.sending)
+                    }
                 }
             }.font(.footnote).frame(maxWidth: .infinity, alignment: .leading)
                 .padding().background(.regularMaterial)
