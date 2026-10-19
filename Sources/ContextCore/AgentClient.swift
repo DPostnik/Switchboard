@@ -73,12 +73,14 @@ public actor AgentClient {
             model: .init(context: context, model: model, effort: effort), route: route.agentRoute, browserProfile: browserProfile)
     }
     public func createSession(projectPath: String, permissions: AgentPermissionProfile, model: String, route: RequestRoute,
-                              context: AgentContext? = nil, browserProfile: AgentBrowserProfile? = nil) async throws -> AgentSessionReference {
-        let request = try await request(prompt: "", session: nil, projectPath: projectPath, permissions: permissions, model: model, route: route, context: context, browserProfile: browserProfile)
+                              context: AgentContext? = nil, browserProfile: AgentBrowserProfile? = nil,
+                              kind: AgentExecutionRequest.Kind = .interactive) async throws -> AgentSessionReference {
+        let request = try await request(prompt: "", session: nil, projectPath: projectPath, permissions: permissions, model: model, route: route, kind: kind, context: context, browserProfile: browserProfile)
         let session = try await integration.prepare(request).value(); sessionRoutes[session] = route; sessionContexts[session] = request.model.context; return session
     }
-    public func resume(_ session: AgentSessionReference, projectPath: String, permissions: AgentPermissionProfile, route: RequestRoute) async throws {
-        let request = try await request(prompt: "", session: session, projectPath: projectPath, permissions: permissions, model: "", route: route)
+    public func resume(_ session: AgentSessionReference, projectPath: String, permissions: AgentPermissionProfile, route: RequestRoute,
+                       kind: AgentExecutionRequest.Kind = .interactive) async throws {
+        let request = try await request(prompt: "", session: session, projectPath: projectPath, permissions: permissions, model: "", route: route, kind: kind)
         _ = try await integration.prepare(request).value(); sessionRoutes[session] = route; sessionContexts[session] = request.model.context
     }
     public func send(_ text: String, to session: AgentSessionReference, projectPath: String, permissions: AgentPermissionProfile,

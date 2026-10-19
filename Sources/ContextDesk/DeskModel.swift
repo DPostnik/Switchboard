@@ -1183,7 +1183,8 @@ private struct ChatRunState {
                 let browserProfile = scheduledRun == nil && state.browserEnabled == true
                     ? newChatBrowserProfiles[project.id].map { AgentBrowserProfile(id: $0) } : nil
                 let session = try await client.createSession(projectPath: project.path, permissions: access,
-                                                                 model: selectedModel, route: route, browserProfile: browserProfile)
+                                                                 model: selectedModel, route: route, browserProfile: browserProfile,
+                                                                 kind: scheduledRun == nil ? .interactive : .scheduled)
                 if let browserProfile, newChatBrowserProfiles[project.id] == browserProfile.id {
                     newChatBrowserProfiles.removeValue(forKey: project.id)
                 }
@@ -1213,7 +1214,8 @@ private struct ChatRunState {
             }
             guard let id else { throw ClientFailure(L10n.text("Не выбран разговор", "No conversation selected")) }
             if !loadedThreads.contains(id) {
-                try await client.resume(sessionForChat(id), projectPath: project.path, permissions: access, route: route)
+                try await client.resume(sessionForChat(id), projectPath: project.path, permissions: access, route: route,
+                                        kind: scheduledRun == nil ? .interactive : .scheduled)
                 loadedThreads.insert(id)
             }
             if let scheduledRun {

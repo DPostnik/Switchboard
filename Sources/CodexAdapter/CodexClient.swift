@@ -64,14 +64,15 @@ public actor CodexClient {
     }
 
     public func createSession(projectPath: String, permissions: AgentPermissionProfile, model: String, route: RequestRoute,
-                              browserProfile: AgentBrowserProfile? = nil) async throws -> AgentSessionReference {
+                              browserProfile: AgentBrowserProfile? = nil, scheduled: Bool = false) async throws -> AgentSessionReference {
         var params = permissions.codexThreadParameters
         let profiles = BrowserProfileStore(root: browserRoot)
         guard browserProfile == nil || browserResources != nil else { throw BrowserProfileError.scope }
         let grant = browserResources == nil ? nil : try profiles.prepareNew(project: projectPath, connection: .originalCodex, selection: browserProfile) { environment in
             try BrowserProfileControl.verifyClosed(environment: environment, runtime: browserResources!.appendingPathComponent("BrowserRuntime"))
         }
-        params["config"] = permissions.codexThreadConfiguration(browser: try BrowserConfiguration.threadConfiguration(resources: browserResources, root: browserRoot, environment: grant?.environment, grant: grant))
+        params["config"] = permissions.codexThreadConfiguration(browser: try BrowserConfiguration.threadConfiguration(resources: browserResources, root: browserRoot, environment: grant?.environment, grant: grant,
+                                                                                                                     policy: BrowserLaunchPolicy(permissions, scheduled: scheduled)))
         params["cwd"] = .string(projectPath)
         params["modelProvider"] = .string(route.providerID)
         params["developerInstructions"] = .string(AgentAutonomy.instructions())
@@ -85,12 +86,14 @@ public actor CodexClient {
         knownSessions.insert(session)
         return session
     }
-    public func resume(_ session: AgentSessionReference, projectPath: String, permissions: AgentPermissionProfile, route: RequestRoute) async throws {
+    public func resume(_ session: AgentSessionReference, projectPath: String, permissions: AgentPermissionProfile, route: RequestRoute,
+                       scheduled: Bool = false) async throws {
         var params = permissions.codexThreadParameters
         let id = try nativeID(session)
         let profiles = BrowserProfileStore(root: browserRoot)
         let grant = browserResources == nil ? nil : try profiles.prepare(session: session, project: projectPath)
-        params["config"] = permissions.codexThreadConfiguration(browser: try BrowserConfiguration.threadConfiguration(resources: browserResources, root: browserRoot, environment: grant?.environment, grant: grant))
+        params["config"] = permissions.codexThreadConfiguration(browser: try BrowserConfiguration.threadConfiguration(resources: browserResources, root: browserRoot, environment: grant?.environment, grant: grant,
+                                                                                                                     policy: BrowserLaunchPolicy(permissions, scheduled: scheduled)))
         params["threadId"] = .string(id)
         params["cwd"] = .string(projectPath)
         params["modelProvider"] = .string(route.providerID)

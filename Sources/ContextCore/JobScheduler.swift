@@ -206,6 +206,19 @@ public actor JobStore {
         do { try commit(value) } catch { throw ScheduleControlUncertain() }
         return value
     }
+    /// Add a task authored through the control channel. A lost acknowledgement is uncertain, never a retry.
+    public func insertCreated(_ job: ManagedJob, now: Date = Date()) throws -> JobLedger {
+        try job.validate()
+        var value = try load()
+        guard job.source == nil, !job.sourceDisabled, job.routine == nil, job.roleID == nil,
+              !value.jobs.contains(where: { $0.id == job.id }) else { throw ScheduleControl.invalid }
+        var job = job
+        job.nextRun = job.enabled ? try job.schedule.next(after: now) : nil
+        if job.enabled && job.nextRun == nil { job.enabled = false }
+        value.jobs.append(job)
+        do { try commit(value) } catch { throw ScheduleControlUncertain() }
+        return value
+    }
     public func remove(_ id: UUID) throws -> JobLedger {
         var value = try load()
         guard !value.runs.contains(where: { $0.jobID == id && $0.status.active }) else { throw Self.busy }

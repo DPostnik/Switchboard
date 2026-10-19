@@ -83,6 +83,31 @@ class ScheduleClientTests(unittest.TestCase):
                 client.main()
             self.assertEqual(send.call_count, 1)
 
+    def test_create_sends_single_request_and_stays_paused_by_default(self):
+        project = 'B39B21BF-187C-4C45-8F94-F98F70F8643F'
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt = Path(tmp) / 'prompt.txt'
+            prompt.write_text('Собери сводку. `literal` $(never-run)\n')
+            args = ['client', 'create', '--name', 'Digest', '--project-id', project.lower(), '--prompt-file', str(prompt),
+                    '--rule', 'FREQ=DAILY;BYHOUR=8;BYMINUTE=0', '--time-zone', 'Europe/Warsaw', '--model', 'test-model', '--effort', 'medium']
+            with patch('sys.argv', args), patch.object(client, 'send', return_value={'jobs': []}) as send, contextlib.redirect_stdout(io.StringIO()):
+                client.main()
+            self.assertEqual(send.call_count, 1)
+            request = send.call_args.args[0]
+            self.assertEqual(request, {'operation': 'create', 'createRequest': {
+                'name': 'Digest', 'prompt': prompt.read_text(), 'engine': 'codex', 'projectID': project,
+                'schedule': {'rule': 'FREQ=DAILY;BYHOUR=8;BYMINUTE=0', 'timeZone': 'Europe/Warsaw'}, 'model': 'test-model', 'effort': 'medium'}})
+            with patch('sys.argv', args + ['--enable', '--engine', 'claude']), patch.object(client, 'send', return_value={'jobs': []}) as send, contextlib.redirect_stdout(io.StringIO()):
+                client.main()
+            created = send.call_args.args[0]['createRequest']
+            self.assertTrue(created['enabled'])
+            self.assertEqual(created['engine'], 'claude')
+            prompt.write_text('  \n')
+            with patch('sys.argv', args), patch.object(client, 'send') as send, contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    client.main()
+            send.assert_not_called()
+
     def test_timeout_keeps_one_receipt_and_status_never_resends(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(client, 'ROOT', Path(tmp)), contextlib.redirect_stderr(io.StringIO()):
             with patch.object(client.time, 'monotonic', side_effect=[0, 41]):

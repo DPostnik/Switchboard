@@ -60,6 +60,16 @@ def main():
     importing.add_argument('--effort', required=True)
     importing.add_argument('--prompt-file', type=Path)
     importing.add_argument('--recurring', required=True, action='store_true', help=message('Подтвердить постоянную рутину, не разовую задачу или пилот', 'Confirm an ongoing routine, not a one-time task or pilot'))
+    create = sub.add_parser('create', help=message('Создать новое повторяющееся задание по поручению пользователя', 'Create a new recurring task at the user’s request'))
+    create.add_argument('--name', required=True)
+    create.add_argument('--project-id', required=True)
+    create.add_argument('--prompt-file', required=True, type=Path)
+    create.add_argument('--rule', required=True, help=message('Повторяющееся правило RRULE, например FREQ=DAILY;BYHOUR=8;BYMINUTE=0', 'Recurring RRULE, e.g. FREQ=DAILY;BYHOUR=8;BYMINUTE=0'))
+    create.add_argument('--time-zone', required=True, help=message('Часовой пояс IANA', 'IANA time zone'))
+    create.add_argument('--model', required=True)
+    create.add_argument('--effort', required=True, choices=['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
+    create.add_argument('--engine', default='codex', choices=['codex', 'claude'])
+    create.add_argument('--enable', action='store_true', help=message('Включить сразу; иначе задание создаётся на паузе', 'Enable at once; otherwise the task is created paused'))
     status = sub.add_parser('status', help=message('Проверить запрос без повтора', 'Check a request without replay'))
     status.add_argument('request_id')
     update = sub.add_parser('update', help=message('Изменить существующее задание по поручению пользователя', 'Edit an existing task at the user’s request'))
@@ -89,7 +99,16 @@ def main():
     if args.command == 'update' and not (args.prompt_file or args.rule or args.time_zone or args.enable or args.pause or args.confirm_source_disabled or args.model
                                      or args.accept_external_policy or args.revoke_external_policy):
         parser.error(message('Не указано изменение', 'No change specified'))
-    prompt = args.prompt_file.read_text() if args.command in ('update', 'import') and args.prompt_file else None
+    prompt = args.prompt_file.read_text() if args.command in ('update', 'import', 'create') and args.prompt_file else None
+    if args.command == 'create':
+        if not prompt.strip():
+            parser.error(message('Файл с заданием пуст', 'The prompt file is empty'))
+        created = dict(name=args.name, prompt=prompt, engine=args.engine, projectID=str(uuid.UUID(args.project_id)).upper(),
+                       schedule={'rule': args.rule, 'timeZone': args.time_zone}, model=args.model, effort=args.effort)
+        if args.enable:
+            created['enabled'] = True
+        reply = send({'operation': 'create', 'createRequest': created})
+        print(json.dumps(reply, ensure_ascii=False, indent=2)); return
     reply = send({'operation': 'catalog' if args.command in ('catalog', 'import') else 'list'})
     if args.command == 'import':
         source = next((s for s in reply['catalog']['sources'] if s['definition']['id'] == args.source_id), None)

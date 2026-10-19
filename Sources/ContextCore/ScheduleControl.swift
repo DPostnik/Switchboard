@@ -9,6 +9,8 @@ public struct ScheduleControlRequest: Codable, Sendable {
     public var expires: Date
     public var operation: String
     public var importRequest: ScheduleImport?
+    /// A new app-owned recurring task; the owner fixes route, role, source and consent.
+    public var createRequest: ScheduleCreate?
     public var expected: ManagedJob?
     public var model: String?
     public var effort: String?
@@ -49,6 +51,30 @@ public enum ScheduleControl {
     public static var changed: ClientFailure {
         ClientFailure(L10n.text("Задание изменилось. Прочитай его заново перед изменением.", "The task changed. Read it again before editing."))
     }
+    public static let efforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+
+    /// Build a new task from an agent request. The agent chooses only name, instructions, engine,
+    /// recurring schedule, model/effort, project and enablement; everything else stays at the owner's defaults.
+    public static func created(_ input: ScheduleCreate, project: ScheduleProject, now: Date = Date()) throws -> ManagedJob {
+        let name = input.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 120,
+              !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              !input.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              input.projectID == project.id, TimeZone(identifier: input.schedule.timeZone) != nil,
+              !input.model.isEmpty, input.model.count <= 128,
+              input.model == input.model.trimmingCharacters(in: .whitespacesAndNewlines),
+              !input.model.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              efforts.contains(input.effort) else { throw invalid }
+        guard input.schedule.once == nil, !input.schedule.rule.isEmpty,
+              try input.schedule.next(after: now) != nil else { throw JobSchedule.invalid }
+        var job = ManagedJob()
+        job.name = name; job.prompt = input.prompt; job.engine = input.engine
+        job.projectID = project.id; job.model = input.model; job.effort = input.effort
+        job.schedule = JobSchedule(rule: input.schedule.rule, timeZone: input.schedule.timeZone)
+        job.enabled = input.enabled ?? false
+        try job.validate()
+        return job
+    }
     public static func updated(_ request: ScheduleControlRequest, originalPaused: Bool) throws -> ManagedJob {
         guard ["update", "browser-import"].contains(request.operation), var job = request.expected else { throw invalid }
         guard (request.model == nil) == (request.effort == nil) else { throw invalid }
@@ -56,7 +82,7 @@ public enum ScheduleControl {
             guard !model.isEmpty, model.count <= 128,
                   model == model.trimmingCharacters(in: .whitespacesAndNewlines),
                   !model.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
-                  ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].contains(effort) else { throw invalid }
+                  efforts.contains(effort) else { throw invalid }
             job.model = model; job.effort = effort
         }
         if request.operation == "browser-import" {
@@ -123,15 +149,22 @@ public enum ScheduleControl {
             do {
                 let data = try Data(contentsOf: claim)
                 guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      Set(object.keys).isSubset(of: ["version", "id", "expires", "operation", "browserSessionImport", "clearBrowserSessionImport", "expected", "prompt", "schedule", "enabled", "confirmSourceDisabled", "acceptExternalPolicy", "importRequest", "model", "effort"]) else { throw invalid }
+                      Set(object.keys).isSubset(of: ["version", "id", "expires", "operation", "browserSessionImport", "clearBrowserSessionImport", "expected", "prompt", "schedule", "enabled", "confirmSourceDisabled", "acceptExternalPolicy", "importRequest", "createRequest", "model", "effort"]) else { throw invalid }
                 let request = try JSONDecoder().decode(ScheduleControlRequest.self, from: data)
                 guard request.version == 1, request.id == id, request.expires > now,
                       request.expires.timeIntervalSince(now) <= 600,
-                      ["list", "update", "catalog", "import", "browser-import"].contains(request.operation) else { throw invalid }
+                      ["list", "update", "catalog", "import", "create", "browser-import"].contains(request.operation) else { throw invalid }
+                if request.operation == "create" {
+                    guard Set(object.keys) == Set(["version", "id", "expires", "operation", "createRequest"]),
+                          let created = object["createRequest"] as? [String: Any],
+                          Set(created.keys).isSubset(of: ["name", "prompt", "engine", "projectID", "schedule", "model", "effort", "enabled"]),
+                          let schedule = created["schedule"] as? [String: Any], Set(schedule.keys) == Set(["rule", "timeZone"]),
+                          request.createRequest != nil else { throw invalid }
+                } else if request.createRequest != nil { throw invalid }
                 if request.operation == "browser-import", !Set(object.keys).isSubset(of: ["version", "id", "expires", "operation", "expected", "browserSessionImport", "clearBrowserSessionImport"]) { throw invalid }
                 if request.operation != "browser-import", request.browserSessionImport != nil || request.clearBrowserSessionImport != nil { throw invalid }
                 if let policy = object["browserSessionImport"] as? [String: Any], Set(policy.keys) != Set(["profile", "site"]) { throw invalid }
-                if object["schedule"] != nil {
+                if object["schedule"] != nil, request.operation != "create" {
                     guard request.operation == "update", let schedule = object["schedule"] as? [String: Any],
                           Set(schedule.keys) == Set(["rule", "timeZone"]) else { throw invalid }
                 }

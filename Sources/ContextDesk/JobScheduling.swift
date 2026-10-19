@@ -165,6 +165,18 @@ import ContextCore
                     }
                     return self.jobLedger.jobs
                 }
+                if request.operation == "create" {
+                    guard let input = request.createRequest,
+                          let project = self.state.projects.first(where: { $0.id == input.projectID }),
+                          FileManager.default.fileExists(atPath: project.path) else { throw ScheduleControl.invalid }
+                    let job = try ScheduleControl.created(input, project: ScheduleProject(id: project.id, path: project.path))
+                    do { self.jobLedger = try await self.jobStore.insertCreated(job) }
+                    catch {
+                        if error is ScheduleControlUncertain { self.schedulerReady = false }
+                        throw error
+                    }
+                    return self.jobLedger.jobs
+                }
                 let source = request.expected?.source
                 let paused = source.map { source in
                     guard source.hasPrefix("codex:"),

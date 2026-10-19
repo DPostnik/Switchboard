@@ -184,7 +184,9 @@ public actor ClaudeJobRunner: AgentScheduledExecutor {
         guard !stopped else { throw CancellationError() }
         let arguments = try Self.arguments(model: model, effort: effort) + (lease.map {
             try Self.browserArguments(BrowserEnvironmentStore.serverArguments(resources: $0.browser.resources, root: $0.browser.root,
-                                                                              environment: $0.grant.environment, grant: $0.grant))
+                                                                              environment: $0.grant.environment, grant: $0.grant,
+                                                                              // Legacy print runs keep their old rights; imports only for the job's own site.
+                                                                              policy: .init(allowEval: true, allowUpload: true, importScope: .listed)))
         } ?? [])
         // Same startup/tool limits as the Codex MCP entry (30 s / 90 s).
         let mcpEnvironment = lease == nil ? [:] : ["MCP_TIMEOUT": "30000", "MCP_TOOL_TIMEOUT": "90000"]

@@ -69,7 +69,7 @@ public struct AgentPermissionProfile: Codable, Hashable, Sendable {
     /// Writes inside the project run without a prompt (plan 4.2: the editor asks only for outside writes).
     public static func workspace(extraRoots: [Root] = []) -> Self {
         .init(filesystem: .project(extraRoots: extraRoots), network: false, webSearch: false, shell: .sandboxed, projectWrites: .silent,
-              browser: .app, connectors: .off, approvals: .ask)
+              browser: .app, connectors: .off, cookieImport: .any, approvals: .ask)
     }
     /// No restrictions and no prompts (Codex `danger-full-access`, Claude `bypassPermissions`).
     public static let unrestricted = Self(filesystem: .unrestricted, network: true, webSearch: true, shell: .on, projectWrites: .silent,

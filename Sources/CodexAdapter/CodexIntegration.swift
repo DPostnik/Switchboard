@@ -173,11 +173,13 @@ public actor CodexIntegration: AgentIntegration {
             return await perform(request.model.context, session: request.session) {
                 let access = try self.access(request.permissions), route = try self.route(request.route)
                 if let session = request.session {
-                    try await self.client.resume(session, projectPath: request.projectPath, permissions: access, route: route)
+                    try await self.client.resume(session, projectPath: request.projectPath, permissions: access, route: route,
+                                                 scheduled: request.kind == .scheduled)
                     self.sessionRoutes[session] = (request.route, request.model.context)
                     return session
                 }
-                let session = try await self.client.createSession(projectPath: request.projectPath, permissions: access, model: request.model.model, route: route, browserProfile: request.browserProfile)
+                let session = try await self.client.createSession(projectPath: request.projectPath, permissions: access, model: request.model.model, route: route,
+                                                                  browserProfile: request.browserProfile, scheduled: request.kind == .scheduled)
                 self.sessionRoutes[session] = (request.route, request.model.context)
                 return session
             }

@@ -12,6 +12,23 @@ public struct ScheduleImport: Codable, Sendable {
     public var prompt: String?
 }
 
+/// Agent-authored new task. Fields the owner always decides (route, role, source, consent) are absent by design.
+public struct ScheduleCreate: Codable, Sendable {
+    public var name: String
+    public var prompt: String
+    public var engine: JobEngine
+    public var projectID: UUID
+    public var schedule: JobSchedule
+    public var model: String
+    public var effort: String
+    public var enabled: Bool?
+    public init(name: String, prompt: String, engine: JobEngine, projectID: UUID, schedule: JobSchedule,
+                model: String, effort: String, enabled: Bool? = nil) {
+        self.name = name; self.prompt = prompt; self.engine = engine; self.projectID = projectID
+        self.schedule = schedule; self.model = model; self.effort = effort; self.enabled = enabled
+    }
+}
+
 public struct ScheduleSource: Codable, Sendable {
     public var definition: ScheduledJob
     public var digest: String

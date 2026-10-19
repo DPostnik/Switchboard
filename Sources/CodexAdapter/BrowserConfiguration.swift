@@ -40,7 +40,8 @@ public enum BrowserConfiguration {
         ].flatMap { ["-c", $0] }
     }
 
-    static func threadConfiguration(resources: URL?, root: URL, environment: UUID?, grant: BrowserProfileGrant? = nil) throws -> JSONValue {
+    static func threadConfiguration(resources: URL?, root: URL, environment: UUID?, grant: BrowserProfileGrant? = nil,
+                                    policy: BrowserLaunchPolicy = .init(allowEval: false, allowUpload: false, importScope: .none)) throws -> JSONValue {
         guard let resources, let environment else {
             // A disabled table still needs a valid transport. Override saved
             // thread configuration explicitly without launching any process.
@@ -53,7 +54,7 @@ public enum BrowserConfiguration {
         return .object(["mcp_servers.switchboard_browser": .object([
             "command": .string("/usr/bin/python3"),
             "args": .array(BrowserEnvironmentStore.serverArguments(resources: resources, root: root, environment: environment,
-                                                                   grant: grant).map(JSONValue.string)),
+                                                                   grant: grant, policy: policy).map(JSONValue.string)),
             "enabled": .bool(true), "required": .bool(true),
             "startup_timeout_sec": .number(30), "tool_timeout_sec": .number(90)
         ])])

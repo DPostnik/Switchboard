@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import AgentContract
 
 /// Persistent browser ownership; stores no authentication material.
 public enum BrowserEnvironmentStore {
@@ -7,14 +8,16 @@ public enum BrowserEnvironmentStore {
     public static let parallelLimitKey = "parallelBrowserLimit"
 
     /// Shared stdio MCP argv (after `/usr/bin/python3`) so every engine launches the browser identically.
+    /// The role's browser rights travel only as launch arguments; the runtime fails closed without them.
     public static func serverArguments(resources: URL, root: URL, environment: UUID, grant: BrowserProfileGrant?,
-                                       language: AppLanguage = L10n.language) -> [String] {
+                                       policy: BrowserLaunchPolicy, language: AppLanguage = L10n.language) -> [String] {
         let limit = UserDefaults.standard.integer(forKey: parallelLimitKey)
         return [resources.appendingPathComponent("BrowserRuntime/server.py").path,
                 "--root", root.path, "--environment", environment.uuidString.lowercased(),
                 "--max-browsers", String((1...8).contains(limit) ? limit : 2),
                 "--language", language.rawValue]
             + (grant.map { ["--profile-lease", $0.generation.uuidString.lowercased()] } ?? [])
+            + policy.arguments
     }
     /// Host-owned identity, independent of MCP process IDs and model arguments.
     public static func bindingPath(session: String, root: URL) -> URL {
@@ -61,4 +64,30 @@ public enum BrowserEnvironmentStore {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
     }
 
+}
+
+/// Browser rights of one chat's role (roles plan, Phase 4; audit H3, M8).
+public struct BrowserLaunchPolicy: Equatable, Sendable {
+    public enum ImportScope: String, Sendable { case none, listed, any }
+    public var allowEval: Bool
+    public var allowUpload: Bool
+    public var importScope: ImportScope
+    public init(allowEval: Bool, allowUpload: Bool, importScope: ImportScope) {
+        self.allowEval = allowEval; self.allowUpload = allowUpload; self.importScope = importScope
+    }
+    /// Script evaluation and uploads need a role that may run commands; reader and editor do not get them.
+    /// An unattended run imports cookies only for sites listed for it: the app-wide "any site" never applies.
+    public init(_ requested: AgentPermissionProfile, scheduled: Bool) {
+        let profile = requested.effective
+        let operating = profile.shell == .on || profile.filesystem == .unrestricted
+        allowEval = operating; allowUpload = operating
+        switch profile.cookieImport {
+        case .none: importScope = .none
+        case .sites: importScope = .listed
+        case .any: importScope = scheduled ? .listed : .any
+        }
+    }
+    var arguments: [String] {
+        (allowEval ? ["--allow-eval"] : []) + (allowUpload ? ["--allow-upload"] : []) + ["--import-scope", importScope.rawValue]
+    }
 }

@@ -210,6 +210,75 @@ private func importFixture(_ root: URL, rule: String = "FREQ=DAILY;BYHOUR=9;BYMI
     await model.stopScheduler()
 }
 
+@Test func scheduleControlCreatesOnlyBoundedRecurringTasks() throws {
+    let project = ScheduleProject(id: UUID(), path: "/tmp")
+    var input = ScheduleCreate(name: " Digest ", prompt: "Read, never send.", engine: .claude, projectID: project.id,
+        schedule: JobSchedule(rule: "FREQ=DAILY;BYHOUR=8;BYMINUTE=0", timeZone: "Europe/Warsaw"), model: "claude-opus-5-5", effort: "medium")
+    let job = try ScheduleControl.created(input, project: project)
+    #expect(job.name == "Digest" && job.prompt == input.prompt && job.engine == .claude && job.projectID == project.id)
+    #expect(!job.enabled && job.nextRun == nil && job.source == nil && !job.sourceDisabled)
+    #expect(job.route == .direct && job.roleID == nil && job.routine == nil && job.acceptsExternalPolicy == nil && job.browserSessionImport == nil)
+    #expect(job.schedule == JobSchedule(rule: "FREQ=DAILY;BYHOUR=8;BYMINUTE=0", timeZone: "Europe/Warsaw"))
+    input.enabled = true
+    #expect(try ScheduleControl.created(input, project: project).enabled)
+    for broken in [{ $0.name = " " }, { $0.prompt = "\n" }, { $0.model = "" }, { $0.effort = "turbo" },
+                   { $0.projectID = UUID() }, { $0.schedule = JobSchedule(rule: "FREQ=DAILY;BYHOUR=8;BYMINUTE=0", timeZone: "Mars/Base") },
+                   { $0.schedule = JobSchedule(rule: "FREQ=DAILY;BYHOUR=8;BYMINUTE=0;COUNT=2", timeZone: "UTC") },
+                   { $0.schedule = JobSchedule(rule: "", timeZone: "UTC", once: Date().addingTimeInterval(3600)) },
+                   { $0.schedule = JobSchedule(rule: "", timeZone: "UTC") }] as [(inout ScheduleCreate) -> Void] {
+        var invalid = input; broken(&invalid)
+        #expect(throws: (any Error).self) { try ScheduleControl.created(invalid, project: project) }
+    }
+}
+
+@Test @MainActor func scheduleControlCreatesThroughOwningSchedulerAndRejectsExtraFields() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let inbox = root.appendingPathComponent("control"), originals = root.appendingPathComponent("originals")
+    try FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
+    let store = JobStore(file: root.appendingPathComponent("jobs.json"))
+    let model = DeskModel(store: AppStore(file: root.appendingPathComponent("state.sqlite")), jobStore: store)
+    let project = Project(path: root.path); model.state.projects = [project]; model.schedulerReady = true
+    func post(_ object: [String: Any]) throws -> UUID {
+        var object = object
+        let id = UUID(); object["version"] = 1; object["id"] = id.uuidString
+        object["expires"] = Date().addingTimeInterval(60).timeIntervalSinceReferenceDate
+        let file = inbox.appendingPathComponent(id.uuidString + ".request.json")
+        try JSONSerialization.data(withJSONObject: object).write(to: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        return id
+    }
+    func reply(_ id: UUID) throws -> ScheduleControlReply {
+        try JSONDecoder().decode(ScheduleControlReply.self, from: Data(contentsOf: inbox.appendingPathComponent(id.uuidString + ".response.json")))
+    }
+    let created: [String: Any] = ["name": "Digest", "prompt": "Read, never send.", "engine": "codex", "projectID": project.id.uuidString,
+                                  "schedule": ["rule": "FREQ=HOURLY;INTERVAL=2", "timeZone": "Europe/Warsaw"], "model": "test-model", "effort": "medium", "enabled": true]
+    let ok = try post(["operation": "create", "createRequest": created])
+    await model.processScheduleControl(directory: inbox, originals: originals)
+    let job = try #require(model.jobLedger.jobs.first)
+    #expect(try reply(ok).status == "completed" && model.jobLedger.jobs.count == 1 && model.jobLedger.runs.isEmpty)
+    #expect(job.enabled && job.nextRun != nil && job.projectID == project.id && job.source == nil && job.roleID == nil)
+    #expect(try await store.load().jobs == model.jobLedger.jobs)
+    // Fields the owner decides are rejected before any write; so is a one-time schedule and a foreign project.
+    var leaked = created; leaked["roleID"] = "operator"
+    var once = created; once["schedule"] = ["rule": "", "timeZone": "UTC", "once": Date().addingTimeInterval(3600).timeIntervalSinceReferenceDate]
+    var foreign = created; foreign["projectID"] = UUID().uuidString
+    var withSchedule: [String: Any] = ["operation": "create", "createRequest": created]
+    withSchedule["schedule"] = ["rule": "FREQ=DAILY;BYHOUR=8;BYMINUTE=0", "timeZone": "UTC"]
+    var withExpected: [String: Any] = ["operation": "create", "createRequest": created]
+    withExpected["expected"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(job))
+    var listWithCreate: [String: Any] = ["operation": "list"]; listWithCreate["createRequest"] = created
+    for object in [["operation": "create", "createRequest": leaked], ["operation": "create", "createRequest": once],
+                   ["operation": "create", "createRequest": foreign], withSchedule, withExpected, listWithCreate] {
+        let id = try post(object)
+        await model.processScheduleControl(directory: inbox, originals: originals)
+        #expect(try reply(id).status == "rejected")
+    }
+    #expect(model.jobLedger.jobs.count == 1)
+    await model.stopScheduler()
+}
+
 @Test func scheduleControlChangesModelPairWithoutChangingScope() throws {
     var job = ManagedJob(); job.name = "Coordinator"; job.prompt = "existing"; job.projectID = UUID()
     job.model = "gpt-6-sol"; job.effort = "high"

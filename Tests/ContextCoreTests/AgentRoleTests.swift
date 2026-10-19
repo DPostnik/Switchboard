@@ -243,3 +243,24 @@ private func settings(_ args: [String]) throws -> JSONValue {
     #expect(try await ledger.count() == 249)
     #expect(await ledger.lastError == nil)
 }
+
+// MARK: - Browser rights
+
+@Test func browserRightsFollowTheRoleAndUnattendedRunsNeverImportAnySite() {
+    func policy(_ id: String, scheduled: Bool = false) -> BrowserLaunchPolicy { BrowserLaunchPolicy(preset(id).profile, scheduled: scheduled) }
+    #expect(policy(AgentRoleID.reader) == .init(allowEval: false, allowUpload: false, importScope: .any))
+    #expect(policy(AgentRoleID.editor) == .init(allowEval: false, allowUpload: false, importScope: .any))
+    #expect(policy(AgentRoleID.developer) == .init(allowEval: true, allowUpload: true, importScope: .any))
+    #expect(policy(AgentRoleID.fullOperator) == .init(allowEval: true, allowUpload: true, importScope: .any))
+    // Routines keep eval (the ledger shows they rely on it) but import only their own sites.
+    #expect(policy(AgentRoleID.routineOperator, scheduled: true) == .init(allowEval: true, allowUpload: true, importScope: .listed))
+    #expect(policy(AgentRoleID.fullOperator, scheduled: true).importScope == .listed)
+    var none = preset(AgentRoleID.developer).profile; none.cookieImport = .none
+    #expect(BrowserLaunchPolicy(none, scheduled: false).importScope == .none)
+    let args = BrowserEnvironmentStore.serverArguments(resources: URL(fileURLWithPath: "/r"), root: URL(fileURLWithPath: "/b"), environment: UUID(),
+                                                       grant: nil, policy: policy(AgentRoleID.editor))
+    #expect(!args.contains("--allow-eval") && !args.contains("--allow-upload") && Array(args.suffix(2)) == ["--import-scope", "any"])
+    let developer = BrowserEnvironmentStore.serverArguments(resources: URL(fileURLWithPath: "/r"), root: URL(fileURLWithPath: "/b"), environment: UUID(),
+                                                            grant: nil, policy: policy(AgentRoleID.developer))
+    #expect(developer.contains("--allow-eval") && developer.contains("--allow-upload"))
+}

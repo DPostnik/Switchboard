@@ -97,8 +97,9 @@ class MultiClientTests(unittest.TestCase):
             time.sleep(0.02)
 
     def client(self, language='en', workspace=None, limit=2, lease=None):
+        # Full role rights: these tests cover multi-client routing; the role gate has its own tests.
         command = [sys.executable, '-B', str(RUNTIME / 'server.py'), '--root', str(self.root), '--language', language,
-                   '--max-browsers', str(limit)]
+                   '--max-browsers', str(limit), '--allow-eval', '--allow-upload', '--import-scope', 'any']
         if lease is not None:
             command += ['--profile-lease', lease]
         client = StdioRPC(command, cwd=str(workspace) if workspace else None).start()

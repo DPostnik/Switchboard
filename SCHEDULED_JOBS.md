@@ -78,3 +78,15 @@ available, verify both source pause and absence of an active/uncertain source ru
 then enable and inspect the destination response. No automatic pause retry or
 source resume/rollback follows an uncertain result. Current Switchboard import
 support is implemented independently of that external capability limitation.
+
+## Creating tasks from chats — 2026-10-19
+
+The control client now supports `create --name NAME --project-id UUID --prompt-file FILE
+--rule RRULE --time-zone ZONE --model MODEL --effort EFFORT [--engine codex|claude]
+[--enable]`. An agent chooses only those fields. The running owner fixes the direct
+route, leaves the role unset so the project's job default applies, and records no
+source, routine, browser session import or external Claude consent. A Claude task
+created this way stays blocked before dispatch until the user grants consent with
+`update --accept-external-policy`. Tasks start paused unless `--enable` is passed.
+One-time schedules, deletion and immediate runs remain editor actions. Unknown
+fields in the request fail closed; a lost acknowledgement is reported as uncertain.

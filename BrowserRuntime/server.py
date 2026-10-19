@@ -1498,6 +1498,48 @@ def catalog():
              'annotations': {'readOnlyHint': readonly, 'destructiveHint': not readonly, 'openWorldHint': True}} for name, ru, en, props, required, readonly in definitions]
 
 
+class RolePolicy:
+    """What the chat's role lets this MCP front end forward. Set only by host launch arguments, never by tool
+    arguments. Without arguments the front end fails closed: no eval, no upload, no cookie import."""
+    IMPORT_SCOPES = ('none', 'listed', 'any')
+
+    def __init__(self, allow_eval=False, allow_upload=False, import_scope='none', roots=()):
+        self.allow_eval, self.allow_upload, self.import_scope = allow_eval, allow_upload, import_scope
+        self.roots = [Path(r) for r in roots]
+
+    def hidden(self):
+        return set() if self.allow_eval else {'browser_eval'}
+
+    def listed_site_covers(self, host):
+        """True when a non-wildcard site policy in the environment or browser root covers the host."""
+        for root in self.roots:
+            policy_file = root / 'chrome-session-import.json'
+            try:
+                if not policy_file.is_file() or policy_file.is_symlink() or policy_file.stat().st_size > 4096:
+                    continue
+                site = json.loads(policy_file.read_text()).get('site')
+            except (OSError, ValueError, AttributeError):
+                continue
+            if isinstance(site, str) and site != '*' and (host == site or host.endswith('.' + site)):
+                return True
+        return False
+
+    def check(self, name, a):
+        denied = tr('Роль этого чата не разрешает это действие браузера.', "This chat's role does not allow this browser action.")
+        if name == 'browser_eval':
+            require(self.allow_eval, denied)
+        if not self.allow_upload:
+            require(not (name == 'browser_input' and isinstance(a, dict) and a.get('action') == 'upload'), denied)
+            require(not (name == 'browser_action' and isinstance(a, dict) and a.get('name') == 'upload_file'), denied)
+        if name == 'browser_import_session':
+            require(self.import_scope != 'none', tr('Роль этого чата не разрешает импорт cookies.', "This chat's role does not allow cookie import."))
+            if self.import_scope == 'listed':
+                host = (urlparse(a.get('expectedURL', '') if isinstance(a, dict) else '').hostname or '').lower()
+                require(self.listed_site_covers(host), tr(
+                    'Запуск без присмотра импортирует cookies только для сайтов своего задания; разрешение «любой сайт» к нему не относится.',
+                    'An unattended run imports cookies only for its own sites; the "any site" setting does not apply to it.'))
+
+
 def dispatch(browser, name, a):
     definition = next((t for t in catalog() if t['name'] == name), None)
     require(definition is not None and isinstance(a, dict), 'unknown_tool')
@@ -1559,6 +1601,10 @@ def main():
     parser.add_argument('--environment', type=uuid.UUID)
     parser.add_argument('--profile-lease', type=uuid.UUID)
     parser.add_argument('--max-browsers', type=int, choices=range(1, 9), default=2)
+    # Role policy from the host; absent flags fail closed.
+    parser.add_argument('--allow-eval', action='store_true')
+    parser.add_argument('--allow-upload', action='store_true')
+    parser.add_argument('--import-scope', choices=RolePolicy.IMPORT_SCOPES, default='none')
     args = parser.parse_args()
     LANGUAGE = args.language
     os.umask(0o077)
@@ -1573,6 +1619,8 @@ def main():
             require(not root.is_symlink(), tr('Каталог среды браузера не должен быть символической ссылкой.',
                                              'The browser environment directory must not be a symbolic link.'))
             root.mkdir(mode=0o700, exist_ok=True)
+    policy = RolePolicy(args.allow_eval, args.allow_upload, args.import_scope,
+                        roots=[root] + ([installation_root] if args.environment else []))
     browser = RemoteBrowser(root, Path.cwd(), LANGUAGE,
                             installation_root=installation_root if args.environment else None,
                             max_browsers=args.max_browsers,
@@ -1646,9 +1694,10 @@ def main():
                 elif method == 'ping':
                     response['result'] = {}
                 elif method == 'tools/list' and initialized:
-                    response['result'] = {'tools': catalog()}
+                    response['result'] = {'tools': [t for t in catalog() if t['name'] not in policy.hidden()]}
                 elif method == 'tools/call' and initialized:
                     params = message.get('params', {})
+                    policy.check(params.get('name'), params.get('arguments', {}))
                     result = browser.call(params.get('name'), params.get('arguments', {}))
                     browser.persist()
                     response['result'] = {'content': content(result)}

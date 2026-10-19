@@ -280,7 +280,8 @@ public actor ClaudeIntegration: AgentIntegration {
                 let profiles = BrowserProfileStore(root: browserRoot)
                 let grant = try browserResources.map { _ in try profiles.prepare(session: reference(id), project: record.cwd) }
                 let server = browserResources.flatMap { resources in grant.map {
-                    BrowserEnvironmentStore.serverArguments(resources: resources, root: browserRoot, environment: $0.environment, grant: $0)
+                    BrowserEnvironmentStore.serverArguments(resources: resources, root: browserRoot, environment: $0.environment, grant: $0,
+                                                            policy: BrowserLaunchPolicy(profile, scheduled: scheduled))
                 } }
                 let arguments = try Self.arguments(id: id, resumed: record.sent, permissions: profile,
                                                    model: request.model.model, effort: request.model.effort, scheduled: scheduled,
