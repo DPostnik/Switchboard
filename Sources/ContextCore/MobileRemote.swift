@@ -40,7 +40,9 @@ public struct RemoteChatOptions: Codable, Sendable, Equatable {
     public var model: String
     /// nil inherits the project's interactive default without changing it.
     public var access: RemoteAccessMode?
-    public init(model: String, access: RemoteAccessMode? = nil) { self.model = model; self.access = access }
+    /// Role id (v2 phones); wins over `access`. Never above the project's default: the Mac rejects anything higher.
+    public var role: String?
+    public init(model: String, access: RemoteAccessMode? = nil, role: String? = nil) { self.model = model; self.access = access; self.role = role }
     public func validate() throws {
         guard !model.isEmpty, model.utf8.count <= 200 else { throw RemoteFailure.invalidCommand }
     }
@@ -49,9 +51,17 @@ public struct RemoteChatSettings: Codable, Sendable, Equatable {
     public var options: RemoteChatOptions
     public var projectAccess: RemoteAccessMode
     public var canEdit: Bool
-    public init(options: RemoteChatOptions, projectAccess: RemoteAccessMode, canEdit: Bool) {
-        self.options = options; self.projectAccess = projectAccess; self.canEdit = canEdit
+    /// Additive for v2 phones: the project's default role and the roles the phone may pick (never above it).
+    public var projectRole: String?
+    public var roles: [RemoteRoleOption]?
+    public init(options: RemoteChatOptions, projectAccess: RemoteAccessMode, canEdit: Bool, projectRole: String? = nil, roles: [RemoteRoleOption]? = nil) {
+        self.options = options; self.projectAccess = projectAccess; self.canEdit = canEdit; self.projectRole = projectRole; self.roles = roles
     }
+}
+public struct RemoteRoleOption: Codable, Sendable, Equatable, Identifiable {
+    public var id: String
+    public var name: String
+    public init(id: String, name: String) { self.id = id; self.name = name }
 }
 public struct RemoteSettingsChange: Codable, Sendable, Equatable {
     public var options: RemoteChatOptions

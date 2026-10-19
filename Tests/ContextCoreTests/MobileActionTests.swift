@@ -73,6 +73,15 @@ import Testing
         #expect(command.kind == "create")
         let decoded = try JSONDecoder().decode(RemoteCommand.self, from: JSONEncoder().encode(command))
         #expect(decoded.settings?.options == options)
+        if access == .fullAccess {
+            // The phone never raises a chat above the project's default role (audit M3).
+            await #expect(throws: RemoteFailure.self) { try await model.executeRemote(decoded) }
+            #expect(try await store.load().chats.isEmpty)
+            let snapshot = await model.remoteSnapshot(projects: [project.id.uuidString])
+            #expect(snapshot.projects.first?.settings?.projectRole == AgentRoleID.editor)
+            #expect(snapshot.projects.first?.settings?.roles?.map(\.id) == [AgentRoleID.reader, AgentRoleID.editor])
+            return
+        }
         #expect(try await model.executeRemote(decoded) == "submitted")
         let saved = try #require(await store.load().chats.first)
         #expect(saved.model == options.model && saved.effort == "low")
@@ -93,13 +102,17 @@ import Testing
         let initial = await model.remoteSnapshot(projects: [project.id.uuidString])
         #expect(initial.projects.first?.models?.map(\.id) == ["fixture-model", "fixture-alternate"])
         let expected = try #require(initial.chats.first?.settings)
-        let options = RemoteChatOptions(model: "fixture-alternate", access: .fullAccess)
+        let raised = RemoteCommand.configure(owner: UUID().uuidString, device: UUID().uuidString, project: project.id.uuidString,
+                                             chat: "existing", options: RemoteChatOptions(model: "fixture-alternate", access: .fullAccess), expected: expected)
+        await #expect(throws: RemoteFailure.self) { try await model.executeRemote(raised) } // never above the project default
+        let options = RemoteChatOptions(model: "fixture-alternate", role: AgentRoleID.reader)
         var command = RemoteCommand.configure(owner: UUID().uuidString, device: UUID().uuidString, project: project.id.uuidString,
                                               chat: "existing", options: options, expected: expected)
         #expect(try await model.executeRemote(command) == "submitted")
         let saved = try #require(await store.load().chats.first)
-        #expect(saved.model == options.model && saved.accessMode == .fullAccess && saved.effort == "low")
+        #expect(saved.model == options.model && saved.roleID == AgentRoleID.reader && saved.accessMode == .standard && saved.effort == "low")
         #expect(saved.inheritsProjectAccess == false)
+        #expect(await model.remoteSnapshot(projects: [project.id.uuidString]).chats.first?.settings?.options.role == AgentRoleID.reader)
         #expect(model.chatID == nil && model.draft == "Desktop draft" && model.state.model == "fixture-model")
         #expect(model.state.projects.first?.defaultChatAccessMode == .standard)
         #expect(try await wire.request("test/received").array.allSatisfy { !["thread/start", "turn/start"].contains($0["method"].string ?? "") })

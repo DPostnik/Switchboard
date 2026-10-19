@@ -42,6 +42,8 @@ public actor ClaudeIntegration: AgentIntegration {
         let id: String
         let cwd: String
         var access: AccessMode
+        /// The role's profile; legacy records carry only `access` and resolve to the editor or operator preset.
+        var profile: AgentPermissionProfile?
         var sent = false
         var active: String?
         var turns: [AgentHistoryTurn] = []
@@ -196,13 +198,14 @@ public actor ClaudeIntegration: AgentIntegration {
         do {
             let id = request.session?.nativeID ?? UUID().uuidString
             guard UUID(uuidString: id) != nil else { return .rejected(.invalidInput) }
-            let access: AccessMode = { if case .unrestricted = request.permissions { return .fullAccess }; return .standard }()
+            guard let profile = request.permissions.profile else { return .rejected(.unsupportedPermissions) }
+            let access: AccessMode = profile.effective.isUnrestricted ? .fullAccess : .standard
             if request.session != nil {
                 let old = try load(id)
                 guard old.cwd == request.projectPath, !submitting.contains(id), wires[id] == nil || old.active == nil else { return .rejected(.unsupportedPermissions) }
                 // A fresh explicit user submission may continue native history; old work is never resent.
                 if old.active != nil { finish(id, outcome: .uncertain) }
-                sessions[id]?.access = access; try save(id)
+                sessions[id]?.access = access; sessions[id]?.profile = profile; try save(id)
                 if browserResources != nil {
                     let profiles = BrowserProfileStore(root: browserRoot)
                     let grant = try profiles.prepare(session: reference(id), project: old.cwd)
@@ -217,7 +220,8 @@ public actor ClaudeIntegration: AgentIntegration {
                         try BrowserProfileControl.verifyClosed(environment: environment, runtime: resources.appendingPathComponent("BrowserRuntime"))
                     }
                 }
-                sessions[id] = Session(id: id, cwd: request.projectPath, access: access); try save(id)
+                var record = Session(id: id, cwd: request.projectPath, access: access); record.profile = profile
+                sessions[id] = record; try save(id)
                 if let grant { try BrowserProfileStore(root: browserRoot).acknowledge(grant, session: reference(id)) }
             }
             return .success(reference(id))
@@ -233,25 +237,27 @@ public actor ClaudeIntegration: AgentIntegration {
         do {
             let record = try load(id)
             guard record.active == nil, record.cwd == request.projectPath else { return .rejected(.invalidInput) }
-            let expectedAccess: AccessMode = { if case .unrestricted = request.permissions { return .fullAccess }; return .standard }()
-            sessions[id]?.access = expectedAccess
+            guard let profile = request.permissions.profile else { return .rejected(.unsupportedPermissions) }
+            let expectedAccess: AccessMode = profile.effective.isUnrestricted ? .fullAccess : .standard
+            sessions[id]?.access = expectedAccess; sessions[id]?.profile = profile
             let scheduled = request.kind == .scheduled
-            let launch = try Self.arguments(id: id, resumed: true, access: expectedAccess, model: request.model.model, effort: request.model.effort,
+            let policy = ClaudeLaunchPolicy(profile, scheduled: scheduled, userChromeEnabled: userChrome)
+            let launch = try Self.arguments(id: id, resumed: true, permissions: profile, model: request.model.model, effort: request.model.effort,
                                             scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
-                                            projectAgents: ProjectAgents.argument(projectPath: record.cwd), profile: home, userChrome: userChrome)
+                                            projectAgents: ProjectAgents.argument(projectPath: record.cwd), home: home, userChrome: userChrome)
             // A scheduled turn's CLI still running background tasks (sub-agents) takes the user's message instead of
             // restarting, which would end them: the attended approval rules are applied to the live process first.
             // `--chrome` cannot be added live, so that CLI stays without the user's Chrome until it is replaced.
             var adopted = false
             if let current = wires[id], !scheduled, !(backgroundTasks[id] ?? []).isEmpty {
                 func variant(scheduled: Bool, userChrome: Bool) throws -> [String] {
-                    try Self.arguments(id: id, resumed: true, access: expectedAccess, model: request.model.model, effort: request.model.effort,
+                    try Self.arguments(id: id, resumed: true, permissions: profile, model: request.model.model, effort: request.model.effort,
                                        scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
-                                       projectAgents: ProjectAgents.argument(projectPath: record.cwd), profile: home, userChrome: userChrome)
+                                       projectAgents: ProjectAgents.argument(projectPath: record.cwd), home: home, userChrome: userChrome)
                 }
                 let live = try variant(scheduled: false, userChrome: false)
                 if scheduledWires.contains(id), wireArguments[id] == (try variant(scheduled: true, userChrome: userChrome)) {
-                    if let settings = Self.approvalSettings(access: expectedAccess, scheduled: false) {
+                    if let settings = ClaudeLaunchPolicy(profile, scheduled: false, userChromeEnabled: false).settings {
                         _ = try await current.control(.object(["subtype": .string("apply_flag_settings"), "settings": settings]))
                     }
                     guard wires[id] === current else { return .rejected(.staleContext) }
@@ -276,22 +282,22 @@ public actor ClaudeIntegration: AgentIntegration {
                 let server = browserResources.flatMap { resources in grant.map {
                     BrowserEnvironmentStore.serverArguments(resources: resources, root: browserRoot, environment: $0.environment, grant: $0)
                 } }
-                let arguments = try Self.arguments(id: id, resumed: record.sent, access: expectedAccess,
+                let arguments = try Self.arguments(id: id, resumed: record.sent, permissions: profile,
                                                    model: request.model.model, effort: request.model.effort, scheduled: scheduled,
                                                    projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                                    projectAgents: ProjectAgents.argument(projectPath: record.cwd), browserServer: server,
-                                                   profile: home, userChrome: userChrome)
+                                                   home: home, userChrome: userChrome)
                 var environment = ClaudeProfile.environment(home: home).merging(Self.sessionEnvironment) { _, new in new }
                 // Same startup/tool limits as the Codex MCP entry (30 s / 90 s).
-                if server != nil || expectedAccess == .fullAccess { environment.merge(Self.browserEnvironment) { _, new in new } }
-                if expectedAccess == .fullAccess { environment.merge(Self.connectorEnvironment) { _, new in new } }
+                if server != nil || policy.connectors { environment.merge(Self.browserEnvironment) { _, new in new } }
+                if policy.connectors { environment.merge(Self.connectorEnvironment) { _, new in new } }
                 try await wire.start(executable: executable, arguments: arguments, environment: environment, cwd: URL(fileURLWithPath: record.cwd))
                 wires[id] = wire; wireArguments[id] = launch; backgroundTasks[id] = []; stopWaiting(id)
                 if scheduled { scheduledWires.insert(id) } else { scheduledWires.remove(id) }
                 if let grant { wireGrants[id] = grant; try profiles.acknowledge(grant, session: reference(id)) }
                 seenRequests[id] = []
                 readers[id] = Task { [weak self] in for await value in wire.frames { await self?.receive(value, session: id, wire: wire) } }
-                _ = try await wire.control(.object(["subtype": .string("initialize"), "hooks": .null]))
+                _ = try await wire.control(.object(["subtype": .string("initialize"), "hooks": self.auditPolicy(id, scheduled: scheduled)?.hooks ?? policy.hooks]))
             }
             guard request.model.context == context, signedIn, wires[id] === wire else { await wire.close(); return .rejected(.staleContext) }
             let turn = request.id.uuidString
@@ -335,21 +341,28 @@ public actor ClaudeIntegration: AgentIntegration {
     }()
     /// Flag settings of attended full-access chats; nil when the launch carries none.
     static func approvalSettings(access: AccessMode, scheduled: Bool) -> JSONValue? {
-        guard access == .fullAccess, !scheduled else { return nil }
-        return .object(["permissions": .object(["ask": .array(connectorApprovalRules.map(JSONValue.string))])])
+        ClaudeLaunchPolicy(AgentRoleCatalog.preset(access.legacyRoleID).profile, scheduled: scheduled, userChromeEnabled: false).settings
     }
-    /// A scheduled turn runs unattended, so full-access connector actions are not held for approval (as print runs were not).
+    /// Legacy entry: the old access modes stand for the editor and operator roles.
     static func arguments(id: String, resumed: Bool, access: AccessMode, model: String, effort: String?, scheduled: Bool = false,
                           projectInstructions: String? = nil, projectAgents: String? = nil, browserServer: [String]? = nil,
                           profile: URL? = nil, userChrome: Bool = false) throws -> [String] {
-        // Only full-access chats (network allowed) load the account's claude.ai connectors such as Gmail.
-        let connectors = access == .fullAccess
-        // The user's real Chrome only for attended full-access turns; `--restricted` would skip it anyway.
-        let chrome = userChrome && connectors && !scheduled
+        try arguments(id: id, resumed: resumed, permissions: AgentRoleCatalog.preset(access.legacyRoleID).profile, model: model, effort: effort,
+                      scheduled: scheduled, projectInstructions: projectInstructions, projectAgents: projectAgents, browserServer: browserServer,
+                      home: profile, userChrome: userChrome)
+    }
+    /// Flags for one launch. A scheduled turn runs unattended, so connector actions are never held for approval.
+    static func arguments(id: String, resumed: Bool, permissions requested: AgentPermissionProfile, model: String, effort: String?, scheduled: Bool = false,
+                          projectInstructions: String? = nil, projectAgents: String? = nil, browserServer: [String]? = nil,
+                          home: URL? = nil, userChrome: Bool = false) throws -> [String] {
+        let policy = ClaudeLaunchPolicy(requested, scheduled: scheduled, userChromeEnabled: userChrome)
+        // Only roles with connectors load the account's claude.ai connectors such as Gmail.
+        let connectors = policy.connectors
+        let chrome = policy.userChrome
         var args = ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
                     "--permission-prompt-tool", "stdio", "--setting-sources", ""]
         if !connectors { args.append("--strict-mcp-config") }
-        if let browserServer {
+        if let browserServer, policy.profile.browser != .off {
             // Only the app's browser server; its tools run without a prompt, like scheduled runs.
             args += ["--disable-slash-commands"] + (try ClaudeJobRunner.browserArguments(browserServer))
         } else if connectors {
@@ -357,8 +370,8 @@ public actor ClaudeIntegration: AgentIntegration {
             args += ["--disable-slash-commands", "--mcp-config", "{\"mcpServers\":{}}"]
         } else { args += ["--safe-mode", "--mcp-config", "{\"mcpServers\":{}}"] }
         // `--setting-sources ""` also skips the profile's settings.json; only its commit/PR attribution is carried over.
-        var settings = approvalSettings(access: access, scheduled: scheduled)?.object ?? [:]
-        if let profile, let attribution = ClaudeProfile.attribution(home: profile) { settings["attribution"] = attribution }
+        var settings = policy.settings?.object ?? [:]
+        if let home, let attribution = ClaudeProfile.attribution(home: home) { settings["attribution"] = attribution }
         if !settings.isEmpty {
             let encoder = JSONEncoder(); encoder.outputFormatting = [.withoutEscapingSlashes, .sortedKeys]
             args += ["--settings", String(decoding: try encoder.encode(JSONValue.object(settings)), as: UTF8.self)]
@@ -366,19 +379,25 @@ public actor ClaudeIntegration: AgentIntegration {
         // `--setting-sources ""` skips `claudeInChromeDefaultEnabled`, so the flag is explicit.
         if chrome { args.append("--chrome") }
         args += [resumed ? "--resume" : "--session-id", id]
-        if access == .standard {
-            args += ["--restricted", "--tools", "Read,Glob,Grep,Write,Edit,AskUserQuestion", "--permission-mode", "default"]
-        } else { args += ["--permission-mode", "bypassPermissions"] }
+        if policy.restricted { args.append("--restricted") }
+        if let tools = policy.tools { args += ["--tools", tools.joined(separator: ",")] }
+        args += ["--permission-mode", policy.permissionMode]
+        for directory in policy.additionalDirectories { args += ["--add-dir", directory] }
         if !model.isEmpty { args += ["--model", model] }
         // Only a documented level is forwarded; an unset value leaves the CLI default in place.
         if let level = ClaudeEffort.accepted(effort) { args += ["--effort", level.rawValue] }
-        // `--setting-sources ""` also skips the project's `.claude/agents`; only full access has the Agent tool to use them.
-        if access == .fullAccess, let projectAgents { args += ["--agents", projectAgents] }
+        // `--setting-sources ""` also skips the project's `.claude/agents`; only roles with subagents pass them, capped to the role.
+        if policy.subagentTools != [], let projectAgents,
+           let definitions = try? JSONDecoder().decode(JSONValue.self, from: Data(projectAgents.utf8)) {
+            let capped = policy.subagentTools.map { ProjectAgents.capped(definitions, to: $0) } ?? definitions
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.withoutEscapingSlashes, .sortedKeys]
+            args += ["--agents", String(decoding: try encoder.encode(capped), as: UTF8.self)]
+        }
         // `--setting-sources ""` also skips the user's and the project's CLAUDE.md, so both come in here; project rules last.
-        // Only full access has the Agent tool; the guidance would be noise in restricted chats.
-        let delegation = access == .fullAccess ? delegationInstructions() : nil
+        // Only roles with subagents get the delegation guidance; it would be noise elsewhere.
+        let delegation = policy.delegation ? delegationInstructions() : nil
         args += ["--append-system-prompt", ([AgentAutonomy.instructions(), delegation, chrome ? userChromeInstructions() : nil,
-                                             profile.flatMap { ClaudeProfile.instructions(home: $0) },
+                                             home.flatMap { ClaudeProfile.instructions(home: $0) },
                                              projectInstructions].compactMap { $0 }).joined(separator: "\n\n")]
         return args
     }
@@ -469,7 +488,9 @@ public actor ClaudeIntegration: AgentIntegration {
         switch value["type"].string {
         case "transport_closed":
             wires.removeValue(forKey: id); warm[id] = nil; finish(id, outcome: .uncertain); abandonWait(id); stopSubagents(id)
-        case "control_request": await permission(value, session: id, wire: wire)
+        case "control_request":
+            if value["request"]["subtype"].string == "hook_callback" { await hook(value, session: id, wire: wire) }
+            else { await permission(value, session: id, wire: wire) }
         case "stream_event":
             guard let turn = sessions[id]?.active else { return }
             let event = value["event"], main = value["parent_tool_use_id"].string == nil
@@ -505,6 +526,8 @@ public actor ClaudeIntegration: AgentIntegration {
             if !text.isEmpty, let key = message["id"].string { emit(.init(id: key, kind: "assistant", text: text), session: id) }
             for part in parts where part["type"].string == "tool_use" {
                 if let key = part["id"].string { emit(.init(id: key, kind: "activity", text: (part["name"].string ?? "") + "\n" + part["input"].display), session: id) }
+                record(.init(tool: part["name"].string ?? "", capability: Self.capability(tool: part["name"].string ?? "", input: part["input"], cwd: sessions[id]?.cwd),
+                             target: Self.target(tool: part["name"].string ?? "", input: part["input"]), decision: .used, turn: turn), session: id)
             }
         case "user":
             guard value["parent_tool_use_id"].string == nil else { return }
@@ -553,26 +576,133 @@ public actor ClaudeIntegration: AgentIntegration {
         default: break // Notifications are data; only recognized control requests can obtain an answer.
         }
     }
+    private func policy(_ id: String) -> ClaudeLaunchPolicy {
+        let record = sessions[id]
+        let profile = record?.profile ?? AgentRoleCatalog.preset((record?.access ?? .standard).legacyRoleID).profile
+        return ClaudeLaunchPolicy(profile, scheduled: scheduledWires.contains(id), userChromeEnabled: userChrome)
+    }
+    /// In audit mode the engine runs unrestricted; this is the policy the role would have enforced, for "would deny" records.
+    private func auditPolicy(_ id: String, scheduled: Bool? = nil) -> ClaudeLaunchPolicy? {
+        guard var profile = sessions[id]?.profile, profile.audit else { return nil }
+        profile.audit = false
+        return ClaudeLaunchPolicy(profile, scheduled: scheduled ?? scheduledWires.contains(id), userChromeEnabled: userChrome)
+    }
+    private func record(_ record: AgentCapabilityRecord, session id: String) {
+        sink.yield(.init(session: reference(id), payload: .capability(record)))
+    }
+    static func capability(tool: String, input: JSONValue, cwd: String?) -> AgentCapabilityRecord.Capability {
+        switch tool {
+        case "Read", "Glob", "Grep", "NotebookRead", "LS": return .read
+        case "Write", "Edit", "MultiEdit", "NotebookEdit":
+            guard let path = input["file_path"].string ?? input["path"].string, let cwd else { return .writeInProject }
+            return isWithinProject(path, cwd: cwd) ? .writeInProject : .writeOutside
+        case "Bash", "PowerShell": return .shell
+        case "WebFetch", "WebSearch": return .network
+        case "Agent", "Task": return .subagent
+        case "AskUserQuestion": return .question
+        default:
+            if tool.hasPrefix("mcp__switchboard_browser__") || tool.hasPrefix("mcp__claude-in-chrome__") { return .browser }
+            if tool.hasPrefix(connectorToolPrefix) {
+                return connectorApprovalRules.contains { rule in ClaudeToolRule.matches(tool, rule) } ? .connectorWrite : .connector
+            }
+            return .other
+        }
+    }
+    static func target(tool: String, input: JSONValue) -> String? {
+        if let path = input["file_path"].string ?? input["path"].string { return path }
+        if let command = input["command"].string { return String(command.prefix(120)) }
+        if let url = input["url"].string { return URL(string: url)?.host ?? url }
+        if let url = input["expectedURL"].string { return URL(string: url)?.host }
+        if let query = input["query"].string { return String(query.prefix(80)) }
+        return nil
+    }
+    /// A `PreToolUse` callback for a shell command: the role's deny-list and network list answer before the command runs.
+    private func hook(_ value: JSONValue, session id: String, wire: ClaudeWire) async {
+        guard let requestID = value["request_id"].string else { await wire.close(); return }
+        guard seenRequests[id, default: []].insert(requestID).inserted else { await wire.close(); return }
+        let request = value["request"]
+        guard request["callback_id"].string == ClaudeLaunchPolicy.hookCallback, request["input"]["hook_event_name"].string == "PreToolUse" else {
+            try? await respond(wire, requestID: requestID, response: .object([:])); return
+        }
+        let command = request["input"]["tool_input"]["command"].string ?? ""
+        let turn = sessions[id]?.active
+        func output(_ decision: String, _ reason: String?) -> JSONValue {
+            var fields: [String: JSONValue] = ["hookEventName": .string("PreToolUse"), "permissionDecision": .string(decision)]
+            if let reason { fields["permissionDecisionReason"] = .string(reason) }
+            return .object(["hookSpecificOutput": .object(fields)])
+        }
+        if let audit = auditPolicy(id) {
+            if case .deny = audit.inspect(command: command) {
+                record(.init(tool: "Bash", capability: .shell, target: command, decision: .wouldDeny, turn: turn), session: id)
+            }
+            try? await respond(wire, requestID: requestID, response: .object([:])); return
+        }
+        switch policy(id).inspect(command: command) {
+        case .allow: try? await respond(wire, requestID: requestID, response: .object([:]))
+        case .ask:
+            record(.init(tool: "Bash", capability: .shell, target: command, decision: .hookAsked, turn: turn), session: id)
+            try? await respond(wire, requestID: requestID, response: output("ask", L10n.text("Роль требует подтверждения", "The role asks for approval")))
+        case .deny(let reason):
+            record(.init(tool: "Bash", capability: .shell, target: command, decision: .hookDenied, turn: turn), session: id)
+            try? await respond(wire, requestID: requestID, response: output("deny", reason))
+        }
+    }
     private func permission(_ value: JSONValue, session id: String, wire: ClaudeWire) async {
         guard let requestID = value["request_id"].string else { await wire.close(); return }
         guard seenRequests[id, default: []].insert(requestID).inserted else { await wire.close(); return }
         let request = value["request"], input = request["input"], name = request["tool_name"].string ?? ""
         guard request["subtype"].string == "can_use_tool" else { await wire.close(); return }
-        let connector = sessions[id]?.access == .fullAccess && name.hasPrefix(Self.connectorToolPrefix)
-        guard let turn = sessions[id]?.active,
-              connector || ["Read", "Glob", "Grep", "Write", "Edit", "Bash", "AskUserQuestion"].contains(name) else {
-            try? await respond(wire, requestID: requestID, response: .object(["behavior": .string("deny"), "message": .string(L10n.text("Неподдерживаемый запрос", "Unsupported request"))]))
-            return
+        let policy = policy(id), profile = policy.profile, cwd = sessions[id]?.cwd ?? "/"
+        let turn = sessions[id]?.active
+        let capability = Self.capability(tool: name, input: input, cwd: cwd), target = Self.target(tool: name, input: input)
+        func deny(_ message: String, _ decision: AgentCapabilityRecord.Decision = .denied) async {
+            record(.init(tool: name, capability: capability, target: target, decision: decision, turn: turn), session: id)
+            try? await respond(wire, requestID: requestID, response: .object(["behavior": .string("deny"), "message": .string(message)]))
         }
-        if sessions[id]?.access == .standard {
-            let outside: Bool
-            if let path = input["file_path"].string ?? input["path"].string, let cwd = sessions[id]?.cwd {
-                outside = !Self.isWithinProject(path, cwd: cwd)
-            } else { outside = false }
-            if name == "Bash" || outside {
-                try? await respond(wire, requestID: requestID, response: .object(["behavior": .string("deny"), "message": .string(L10n.text("Действие выходит за разрешённые границы проекта", "Outside the supported project restrictions"))]))
-                return
-            }
+        func allow() async {
+            record(.init(tool: name, capability: capability, target: target, decision: .allowed, turn: turn), session: id)
+            try? await respond(wire, requestID: requestID, response: .object(["behavior": .string("allow"), "updatedInput": input]))
+        }
+        guard let turn, policy.permits(tool: name) else {
+            await deny(L10n.text("Неподдерживаемый запрос", "Unsupported request"), .unsupportedTool); return
+        }
+        // An unattended run never waits: anything the engine asks about is outside the role and is refused.
+        let attended = profile.approvals == .ask && !policy.scheduled
+        let outside = L10n.text("Действие выходит за разрешённые границы роли", "Outside the role's permitted scope")
+        switch name {
+        case "Read", "Glob", "Grep", "Write", "Edit":
+            let writing = ["Write", "Edit"].contains(name)
+            if profile.filesystem != .unrestricted, let path = input["file_path"].string ?? input["path"].string {
+                let roots = writing ? policy.writableRoots : policy.readableRoots
+                let inProject = Self.isWithinProject(path, cwd: cwd)
+                var inside = inProject || roots.contains { Self.isWithinProject(path, cwd: $0) }
+                if writing, profile.filesystem == .readOnly {
+                    inside = profile.scratch.map { Self.isWithinProject(path, cwd: cwd + "/" + $0) } ?? false
+                }
+                guard inside else { if attended && !policy.restricted { break } else { await deny(outside); return } }
+                // Silent inside the role when the role says so; the editor role still asks like the old standard mode.
+                if profile.projectWrites == .silent || !writing { await allow(); return }
+                guard attended else { await deny(outside); return }
+            } else if !attended, profile.filesystem != .unrestricted { await deny(outside); return }
+        case "Bash":
+            guard profile.shell == .on || profile.filesystem == .unrestricted else { await deny(outside); return }
+            guard attended else { await deny(outside); return }
+        case "WebFetch", "WebSearch":
+            if profile.network || (name == "WebSearch" && profile.webSearch) { await allow(); return }
+            await deny(outside); return
+        case "AskUserQuestion": break
+        default:
+            if name.hasPrefix("mcp__switchboard_browser__") || name.hasPrefix("mcp__claude-in-chrome__") { await allow(); return }
+            if name.hasPrefix(Self.connectorToolPrefix) {
+                let write = capability == .connectorWrite
+                switch profile.connectors {
+                case .off: await deny(outside); return
+                case .read: if write { await deny(outside); return }; await allow(); return
+                case .askWrites, .all:
+                    if !write { await allow(); return }
+                    guard !policy.scheduled else { await deny(outside); return }
+                }
+            } else if !attended { await deny(outside); return }
         }
         var questions: Set<String>?
         let kind: AgentInteraction.Kind
@@ -582,11 +712,13 @@ public actor ClaudeIntegration: AgentIntegration {
                 return .init(id: text, text: text, options: question["options"].array.compactMap { $0["label"].string }, secret: false, required: true)
             }
             guard !fields.isEmpty, fields.count <= 16, fields.count == input["questions"].array.count, Set(fields.map(\.id)).count == fields.count else {
-                try? await respond(wire, requestID: requestID, response: .object(["behavior": .string("deny"), "message": .string(L10n.text("Неподдерживаемая схема вопроса", "Unsupported question schema"))]))
-                return
+                await deny(L10n.text("Неподдерживаемая схема вопроса", "Unsupported question schema")); return
             }
             questions = Set(fields.map(\.id)); kind = .questions(fields)
-        } else { kind = .approval(canAllow: true) }
+        } else {
+            kind = .approval(canAllow: true)
+            record(.init(tool: name, capability: capability, target: target, decision: .asked, turn: turn), session: id)
+        }
         let token = UUID()
         interactions[token] = .init(session: id, requestID: requestID, input: input, questions: questions, epoch: context.accountRevision)
         sink.yield(.init(session: reference(id), payload: .interaction(.init(id: token, session: reference(id), turn: turn,

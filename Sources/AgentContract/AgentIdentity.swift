@@ -68,32 +68,6 @@ public enum AgentCapability: String, Codable, CaseIterable, Sendable {
     case browserProfiles
 }
 
-/// These are restrictions, not provider-specific sandbox names.
-public enum AgentPermissionIntent: Codable, Hashable, Sendable {
-    case workspaceWrite(root: String, network: Bool, approval: ApprovalPolicy)
-    case unrestricted(approval: ApprovalPolicy)
-    /// Explicitly accepts the external CLI's policy, with new prompts denied.
-    /// Never derive this case from a project's standard/full-access setting.
-    case externalPolicyDenyPrompts
-
-    public enum ApprovalPolicy: String, Codable, Sendable { case ask, never }
-}
-
-public enum AgentPermissionSupport: String, Codable, Sendable {
-    case codexProjectPolicy, externalPolicyOnly, claudeRestrictedFiles
-
-    public func accepts(_ intent: AgentPermissionIntent) -> Bool {
-        switch (self, intent) {
-        case (.codexProjectPolicy, .workspaceWrite(_, false, .ask)),
-             (.codexProjectPolicy, .unrestricted(.never)),
-             (.claudeRestrictedFiles, .workspaceWrite(_, false, .ask)),
-             (.claudeRestrictedFiles, .unrestricted(.never)),
-             (.externalPolicyOnly, .externalPolicyDenyPrompts): true
-        default: false
-        }
-    }
-}
-
 public struct AgentDescriptor: Sendable {
     public static let contractVersion = 1
     public let version: Int
@@ -122,7 +96,7 @@ public struct AgentDescriptor: Sendable {
         }
         guard routes.contains(request.route) else { return .routeUnavailable }
         guard permissions.accepts(request.permissions) else { return .unsupportedPermissions }
-        if case .workspaceWrite(let root, _, _) = request.permissions,
+        if case .profile(let profile, let root) = request.permissions, profile.filesystem != .unrestricted,
            root != request.projectPath { return .unsupportedPermissions }
         // An empty interactive model explicitly selects the engine default. Isolated generation requires a named model.
         guard request.projectPath.hasPrefix("/") else { return .invalidInput }

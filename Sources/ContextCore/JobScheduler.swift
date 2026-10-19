@@ -77,6 +77,8 @@ public struct ManagedJob: Identifiable, Codable, Equatable, Sendable {
     public var sourceDisabled = false
     /// Missing on legacy jobs: never infer consent from a project access mode.
     public var acceptsExternalPolicy: Bool?
+    /// Role for this job's runs; nil uses the project's job default. Never above it (`ScheduleControl` cannot set it).
+    public var roleID: String?
     /// Explicit per-task permission, propagated to each fresh browser environment.
     public var browserSessionImport: ChromeSessionImportPolicy?
     /// A frozen revision: editing the library never silently changes scheduled work.

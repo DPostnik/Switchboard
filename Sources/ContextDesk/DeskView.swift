@@ -10,6 +10,7 @@ struct DeskView: View {
     @State private var renaming: Chat?
     @State private var renamingProject: Project?
     @State private var newProjectName = ""
+    @State private var permissionsProject: Project?
     @State private var deleting: Chat?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dropTargetProjectID: UUID?
@@ -82,6 +83,7 @@ struct DeskView: View {
         .popover(isPresented: $showingNotifications) {
             notificationsPanel
         }
+        .sheet(item: $permissionsProject) { project in ProjectPermissionsView(model: model, project: project) }
         .alert(L10n.text("Название чата", "Chat title"), isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField(L10n.text("Название", "Title"), text: $newTitle)
             Button(L10n.text("Сохранить", "Save")) { if let chat = renaming { Task { await model.renameChat(chat.id, title: newTitle) } }; renaming = nil }
@@ -349,6 +351,9 @@ struct DeskView: View {
                     }.disabled(!model.state.chats.contains { $0.projectID == project.id && !$0.isArchived })
                     Button { startRenaming(project) } label: {
                         Label(L10n.text("Переименовать…", "Rename…"), systemImage: "pencil")
+                    }
+                    Button { permissionsProject = project } label: {
+                        Label(L10n.text("Разрешения…", "Permissions…"), systemImage: "lock.shield")
                     }
                     Divider()
                     Button(L10n.text("Переместить выше", "Move up")) {
@@ -799,17 +804,20 @@ struct ChatView: View {
                                     onContentHeight: { composerHeight = $0 }) { Task { await model.send() } }
                         .frame(height: min(max(composerHeight, 40), 220)).padding(.horizontal, 16).padding(.top, 14).accessibilityLabel(L10n.text("Сообщение", "Message"))
                 }
+                if !model.roleApproximations.isEmpty {
+                    Text(model.roleApproximationNotice).font(.ui(.caption)).foregroundStyle(.secondary)
+                        .padding(.horizontal, 16).padding(.top, 6).fixedSize(horizontal: false, vertical: true)
+                        .accessibilityLabel(model.roleApproximationNotice)
+                }
                 HStack(spacing: 2) {
-                    ChipMenu(title: model.accessSelection?.title ?? model.projectAccessTitle,
+                    ChipMenu(title: model.roleSelection.flatMap { model.roleCatalog.role($0)?.title } ?? model.projectRoleTitle,
                              systemImage: model.accessMode == .fullAccess ? "lock.open" : "lock") {
-                        Picker(L10n.text("Разрешения", "Permissions"), selection: Binding(get: { model.accessSelection }, set: { model.selectAccessMode($0) })) {
-                            if model.selectedChat != nil { Text(model.projectAccessTitle).tag(Optional<AccessMode>.none) }
-                            ForEach(AccessMode.allCases, id: \.self) { mode in Text(mode.title).tag(Optional(mode)) }
+                        Picker(L10n.text("Роль", "Role"), selection: Binding(get: { model.roleSelection }, set: { model.selectRole($0) })) {
+                            if model.selectedChat != nil { Text(model.projectRoleTitle).tag(Optional<String>.none) }
+                            ForEach(model.roleCatalog.interactive) { role in Text(role.title).tag(Optional(role.id)) }
                         }.pickerStyle(.inline).labelsHidden()
                     }.disabled(model.busy || model.sending)
-                        .help(model.currentAgent == .appClaude
-                            ? L10n.text("Claude: стандартный режим — только файлы проекта, без команд и сети. Полный доступ разрешает команды и сеть. В новом чате задаёт режим по умолчанию для проекта; в существующем — переопределение этого чата. Применяется со следующего сообщения.", "Claude: standard mode allows project files only, without commands or network. Full access allows commands and network. In a new chat, sets the project default; in an existing chat, overrides its permissions. Applies from the next message.")
-                            : L10n.text("В новом чате задаёт режим по умолчанию для проекта; в существующем — переопределение этого чата. Полный доступ: команды, файлы и сеть без подтверждений агента. Применяется со следующего сообщения.", "In a new chat, sets the project default; in an existing chat, overrides its permissions. Full access allows commands, files, and network access without agent approvals. Applies from the next message."))
+                        .help(model.currentRole.summary + " " + L10n.text("В новом чате задаёт роль по умолчанию для проекта; в существующем — роль этого чата. Применяется со следующего сообщения.", "In a new chat, sets the project's default role; in an existing chat, this chat's role. Applies from the next message."))
                     Spacer()
                     if model.chatID == nil {
                         ChipMenu(title: model.currentAgent == .appClaude ? "Claude" : "Codex", systemImage: "sparkle") {
@@ -1126,6 +1134,9 @@ struct SettingsView: View {
             mobileSettings
                 .tabItem { Label(L10n.text("Мобильный доступ", "Mobile access"), systemImage: "iphone") }
                 .tag("mobile")
+            PermissionsLedgerView(model: model)
+                .tabItem { Label(L10n.text("Разрешения", "Permissions"), systemImage: "lock.shield") }
+                .tag("permissions")
             dataSettings
                 .tabItem { Label(L10n.text("Данные", "Data"), systemImage: "externaldrive") }
                 .tag("data")

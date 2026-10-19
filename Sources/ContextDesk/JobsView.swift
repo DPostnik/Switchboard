@@ -124,8 +124,14 @@ struct JobsView: View {
                 LabeledContent(L10n.text("Часовой пояс", "Time zone"), value: job.schedule.timeZone)
                 if let next = job.nextRun, job.enabled { LabeledContent(L10n.text("Следующий запуск", "Next run")) { Text(jobDate(next, zone: job.schedule.timeZone)).textSelection(.enabled) } }
                 Text(job.schedule.once != nil ? L10n.text("Однократно", "Once") : job.schedule.rule.isEmpty ? L10n.text("Только вручную", "Manual only") : ScheduledJobs.readableSchedule(job.schedule.rule)).font(.ui(.callout)).textSelection(.enabled)
+                if let project = model.state.projects.first(where: { $0.id == job.projectID }) {
+                    let role = job.role(project: project, catalog: model.roleCatalog)
+                    LabeledContent(L10n.text("Роль запусков", "Run role")) {
+                        Text(role.title + (role.profile.audit ? " · " + L10n.text("аудит", "audit") : "")).textSelection(.enabled)
+                    }
+                }
                 if job.engine == .codex {
-                    Text(L10n.text("Каждый запуск создаёт новый чат с текущими разрешениями проекта.", "Each run creates a new chat using the project's current permissions.")).font(.ui(.caption)).foregroundStyle(.secondary)
+                    Text(L10n.text("Каждый запуск создаёт новый чат с ролью задания (не выше роли проекта для заданий).", "Each run creates a new chat with the job's role (never above the project's job role).")).font(.ui(.caption)).foregroundStyle(.secondary)
                 } else {
                     Text(L10n.text("Claude Code использует существующий вход и правила разрешений CLI. Новые запросы разрешений отклоняются; результат сохраняется здесь. Требуется версия \(AgentIntegrationFactory.claudeVersion).", "Claude Code uses existing CLI sign-in and permission rules. New permission requests are denied; results are saved here. Version \(AgentIntegrationFactory.claudeVersion) is required.")).font(.ui(.caption)).foregroundStyle(.secondary)
                 }
@@ -196,6 +202,14 @@ struct JobEditor: View {
                 Picker(L10n.text("Проект", "Project"), selection: $job.projectID) {
                     Text(L10n.text("Выбери проект", "Choose a project")).tag(nil as UUID?)
                     ForEach(model.state.projects) { Text($0.name).tag(Optional($0.id)) }
+                }
+                Picker(L10n.text("Роль", "Role"), selection: $job.roleID) {
+                    Text(L10n.text("Как у проекта", "Project default")).tag(nil as String?)
+                    ForEach(model.roleCatalog.scheduled) { role in Text(role.title).tag(Optional(role.id)) }
+                }
+                if let project = model.state.projects.first(where: { $0.id == job.projectID }) {
+                    let role = job.role(project: project, catalog: model.roleCatalog)
+                    Text(L10n.text("Запуски пойдут с ролью «\(role.title)»: \(role.summary) Роль не поднимается выше роли проекта для заданий.", "Runs use the \(role.title) role: \(role.summary) Never above the project's job role.")).font(.ui(.caption)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 HStack {
                     TextField(L10n.text("Модель", "Model"), text: $job.model, prompt: Text(L10n.text("По умолчанию", "Default")))

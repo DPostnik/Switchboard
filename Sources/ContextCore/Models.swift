@@ -8,6 +8,13 @@ public struct Project: Identifiable, Codable, Hashable, Sendable {
     public var accessMode: AccessMode?
     /// Default for interactive chats, independent of scheduled execution permissions.
     public var defaultChatAccessMode: AccessMode?
+    /// Role defaults (`AgentRoleID`); nil falls back to the legacy access modes above.
+    public var chatRoleID: String?
+    public var jobRoleID: String?
+    /// Folders outside the project a `developer` or `routine-operator` role may use; declared here, never by the agent.
+    public var extraRoots: [AgentPermissionProfile.Root]?
+    /// Sites a `routine-operator` job may import Chrome cookies for.
+    public var cookieSites: [String]?
     /// Sidebar visibility only; chats, permissions and scheduled work are retained.
     public var hidden: Bool?
     public var isHidden: Bool { hidden == true }
@@ -49,8 +56,11 @@ public struct Chat: Identifiable, Codable, Hashable, Sendable {
     public var accessMode: AccessMode?
     /// Only an explicit true inherits; legacy records retain their stored permissions.
     public var inheritsProjectAccess: Bool?
-    public func resolvedAccessMode(in project: Project) -> AccessMode {
-        inheritsProjectAccess == true ? (project.defaultChatAccessMode ?? .standard) : (accessMode ?? .standard)
+    /// Explicit role (`AgentRoleID`); nil with `inheritsProjectAccess` follows the project, otherwise the legacy `accessMode`.
+    public var roleID: String?
+    /// Derived from the resolved role; kept for the phone protocol and older call sites.
+    public func resolvedAccessMode(in project: Project, catalog: AgentRoleCatalog = AgentRoleCatalog()) -> AccessMode {
+        resolvedRole(in: project, catalog: catalog).legacyAccessMode
     }
     public var updated: Date
     public init(id: String, projectID: UUID, title: String, model: String) {
@@ -88,6 +98,10 @@ public struct SavedState: Codable, Sendable {
     public var userChromeEnabled: Bool?
     public var defaultRoute: RequestRoute?
     public var queuedMessages: [QueuedMessage]?
+    /// Custom roles; presets always exist.
+    public var roles: AgentRoleCatalog?
+    /// Set once the legacy access modes were mapped to roles.
+    public var roleMigration: RoleMigrationRecord?
     public var projects: [Project] = []
     public var chats: [Chat] = []
     public var model: String = ""

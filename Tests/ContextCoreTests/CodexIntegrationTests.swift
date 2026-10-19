@@ -90,7 +90,9 @@ func contractRuntimeRejectsUnverifiedVersionsBeforeSessionDispatch(version: Stri
             model: .init(context: descriptor.context, model: "fixture"), route: route)
     }
     if case .rejected(.routeUnavailable) = await adapter.submit(request(route: .optimizer(id: "missing"))) {} else { Issue.record("Unavailable route accepted") }
-    if case .rejected(.unsupportedPermissions) = await adapter.submit(request(network: true)) {} else { Issue.record("Restrictions weakened") }
+    let prompting = AgentExecutionRequest(conversation: ConversationID(), session: .init(connection: .originalCodex, nativeID: "session"), kind: .scheduled,
+        prompt: "fixture", projectPath: root.path, permissions: .unrestricted(approval: .ask), model: .init(context: descriptor.context, model: "fixture"), route: .direct)
+    if case .rejected(.unsupportedPermissions) = await adapter.submit(prompting) {} else { Issue.record("Restrictions weakened") }
     #expect(try await wire.request("test/calls").array.compactMap(\.string) == ["initialize"])
     let work = request()
     _ = try await adapter.prepare(work).value()

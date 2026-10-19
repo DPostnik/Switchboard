@@ -200,7 +200,10 @@ private struct ChatRunState {
     @Published var claudeDescriptor: AgentDescriptor?
     private var claudeEventTask: Task<Void, Never>?
     let store: AppStore
+    /// Every capability use and permission decision (roles plan, Phase 0); writes never block a decision.
+    let capabilityLedger: CapabilityLedger
     init(connection: any AgentIntegration = AgentIntegrationFactory.codex(), claudeIntegration: any AgentIntegration = AgentIntegrationFactory.claude(), store: AppStore = AppStore(file: Locations.root.appendingPathComponent("metadata.sqlite")),
+         capabilityLedger: CapabilityLedger = CapabilityLedger(file: Locations.root.appendingPathComponent("capability-ledger.sqlite")),
          pluginDirectory: URL = PluginCatalog.defaultDirectory,
          summaryResources: URL? = Bundle.main.resourceURL?.appendingPathComponent("Skills"),
          summaryExecutable: URL? = nil, summaryHome: URL = Locations.codexHome, claudeHome: URL = Locations.claudeHome,
@@ -213,6 +216,7 @@ private struct ChatRunState {
         self.claudeSummaryRunner = AgentGenerationRunner(integration: claudeIntegration)
         self.claudeHome = claudeHome
         self.store = store
+        self.capabilityLedger = capabilityLedger
         self.pluginDirectory = pluginDirectory
         self.summaryResources = summaryResources; self.summaryExecutable = summaryExecutable; self.summaryHome = summaryHome
         refreshPlugins()
@@ -246,6 +250,8 @@ private struct ChatRunState {
         }
         defer { isBootstrapping = false; step("rest") }
         do { state = try await store.load(); usage = try await store.loadUsage(); projectID = state.visibleProjects.first?.id } catch { self.error = error.localizedDescription; return }
+        if state.migrateRoles() { persist() }
+        Task { [capabilityLedger] in try? await capabilityLedger.sweep() }
         photoCleanupTask = Task { [weak self] in
             while !Task.isCancelled {
                 self?.cleanTemporaryPhotos()
@@ -744,9 +750,9 @@ private struct ChatRunState {
             return nil
         }
     }
-    /// `model`, `effort`, `access` and `title` override the new chat's defaults (a run record's follow-up keeps its settings).
+    /// `model`, `effort`, `role` and `title` override the new chat's defaults (a run record's follow-up keeps its settings).
     func createHandoffChat(_ handoff: ContextHandoff, project: Project, route: RequestRoute, agent: AgentConnectionID = .originalCodex,
-                           model: String? = nil, effort: String? = nil, access: AccessMode? = nil, title: String? = nil) async -> Bool {
+                           model: String? = nil, effort: String? = nil, role: String? = nil, title: String? = nil) async -> Bool {
         guard !creatingHandoff else { return false }
         creatingHandoff = true; defer { creatingHandoff = false }
         do {
@@ -762,12 +768,13 @@ private struct ChatRunState {
             let prompt = try handoff.prompt()
             let selectedModel = model ?? (agent == .appClaude ? state.claudeModel ?? "" : state.model)
             try await store.saveHandoff(handoff)
-            let resolvedAccess = access ?? state.projects.first { $0.id == project.id }?.defaultChatAccessMode ?? .standard
-            let session = try await client.createSession(projectPath: project.path, access: resolvedAccess,
+            let current = state.projects.first { $0.id == project.id } ?? project
+            let resolvedRole = roleCatalog.role(role) ?? current.chatRole(roleCatalog)
+            let session = try await client.createSession(projectPath: project.path, permissions: resolvedRole.profile(for: current),
                                                              model: selectedModel, route: route, context: descriptor.context)
             var chat = Chat(session: session, projectID: project.id, title: title ?? String(handoff.goal.prefix(100)), model: selectedModel)
             chat.route = route; chat.handoffOrigin = handoff.origin; chat.effort = effort
-            chat.accessMode = access; chat.inheritsProjectAccess = access == nil
+            chat.roleID = roleCatalog.role(role)?.id; chat.accessMode = roleCatalog.role(role)?.legacyAccessMode; chat.inheritsProjectAccess = role == nil
             guard !state.chats.contains(where: { $0.nativeSession == session }) else { throw ConversationIdentity.invalidStorage }
             state.chats.append(chat)
             do { try await store.save(state) }
@@ -934,25 +941,75 @@ private struct ChatRunState {
         do { try await store.saveDeletingChat(state, threadID: id) }
         catch { self.error = L10n.text("Чат удалён у агента, но не удалось сохранить изменения в приложении: ", "The chat was deleted in the agent, but the change could not be saved in the app: ") + error.localizedDescription }
     }
-    var accessMode: AccessMode {
-        guard let project = state.projects.first(where: { $0.id == projectID }) else { return .standard }
-        return selectedChat?.resolvedAccessMode(in: project) ?? project.defaultChatAccessMode ?? .standard
+    var roleCatalog: AgentRoleCatalog { state.roleCatalog }
+    /// The role the selected chat runs with, or the project's chat default for a new chat.
+    var currentRole: AgentRole {
+        guard let project = state.projects.first(where: { $0.id == projectID }) else { return AgentRoleCatalog.preset(AgentRoleID.editor) }
+        return selectedChat?.resolvedRole(in: project, catalog: roleCatalog) ?? project.chatRole(roleCatalog)
     }
-    var accessSelection: AccessMode? {
-        selectedChat?.inheritsProjectAccess == true ? nil : accessMode
+    var accessMode: AccessMode { currentRole.legacyAccessMode }
+    /// nil while the selected chat follows the project default.
+    var roleSelection: String? { selectedChat?.inheritsProjectRole == true ? nil : currentRole.id }
+    var accessSelection: AccessMode? { roleSelection.map { _ in accessMode } }
+    var projectRoleTitle: String {
+        let role = state.projects.first { $0.id == projectID }?.chatRole(roleCatalog) ?? AgentRoleCatalog.preset(AgentRoleID.editor)
+        return L10n.text("По умолчанию проекта", "Project default") + ": " + role.title
     }
-    var projectAccessTitle: String {
-        let mode = state.projects.first { $0.id == projectID }?.defaultChatAccessMode ?? .standard
-        return L10n.text("По умолчанию проекта", "Project default") + ": " + mode.title
+    var projectAccessTitle: String { projectRoleTitle }
+    /// Dimensions the current agent can only approximate for the current role; shown, never silently downgraded.
+    var roleApproximations: [AgentPermissionDimension] {
+        guard let project = state.projects.first(where: { $0.id == projectID }) else { return [] }
+        let descriptor = currentAgent == .appClaude ? claudeDescriptor : agentDescriptor
+        return descriptor?.permissions.approximations(currentRole.profile(for: project)) ?? []
     }
-    func selectAccessMode(_ mode: AccessMode?) {
+    var roleApproximationNotice: String {
+        let names = roleApproximations.map(Self.dimensionTitle).joined(separator: ", ")
+        let agent = currentAgent == .appClaude ? "Claude" : "Codex"
+        return L10n.text("\(agent) не может точно применить для роли «\(currentRole.title)»: \(names). Ограничение приближено, не снято.",
+                         "\(agent) cannot enforce for the \(currentRole.title) role: \(names). The restriction is approximated, not dropped.")
+    }
+    static func dimensionTitle(_ dimension: AgentPermissionDimension) -> String {
+        switch dimension {
+        case .filesystem: L10n.text("файлы", "files")
+        case .network: L10n.text("сеть без команд", "network off with shell on")
+        case .webSearch: L10n.text("веб-поиск", "web search")
+        case .shell: L10n.text("команды", "shell")
+        case .projectWrites: L10n.text("запись в проекте", "project writes")
+        case .browser: L10n.text("браузер", "browser")
+        case .connectors: L10n.text("коннекторы", "connectors")
+        case .cookieImport: L10n.text("импорт cookie", "cookie import")
+        case .approvals: L10n.text("подтверждения", "approvals")
+        case .commandInspection: L10n.text("проверка команд", "command inspection")
+        case .subagents: L10n.text("подагенты", "subagents")
+        case .scratch: L10n.text("папка research", "research folder")
+        }
+    }
+    /// A chat's role (nil follows the project); for a new chat, the project's chat default. The legacy mode stays in step for the phone.
+    func selectRole(_ id: String?) {
         guard !busy, !sending, !isChangingChat(currentRunKey) else { return }
         if let index = state.chats.firstIndex(where: { $0.id == chatID }) {
-            state.chats[index].accessMode = mode
-            state.chats[index].inheritsProjectAccess = mode == nil
-        } else if let mode, let index = state.projects.firstIndex(where: { $0.id == projectID }) {
-            state.projects[index].defaultChatAccessMode = mode
+            guard id == nil || roleCatalog.role(id) != nil else { return }
+            state.chats[index].roleID = id
+            state.chats[index].inheritsProjectAccess = id == nil
+            state.chats[index].accessMode = roleCatalog.role(id)?.legacyAccessMode
+        } else if let id, let role = roleCatalog.role(id), let index = state.projects.firstIndex(where: { $0.id == projectID }) {
+            state.projects[index].chatRoleID = id
+            state.projects[index].defaultChatAccessMode = role.legacyAccessMode
         } else { return }
+        persist()
+    }
+    func selectAccessMode(_ mode: AccessMode?) { selectRole(mode?.legacyRoleID) }
+    /// Project defaults for chats and jobs plus the declared extra roots; the agent never changes these.
+    func updateProjectRoles(_ id: UUID, chatRole: String?, jobRole: String?, extraRoots: [AgentPermissionProfile.Root]?, cookieSites: [String]?) {
+        guard let index = state.projects.firstIndex(where: { $0.id == id }) else { return }
+        if let chatRole, let role = roleCatalog.role(chatRole) {
+            state.projects[index].chatRoleID = chatRole; state.projects[index].defaultChatAccessMode = role.legacyAccessMode
+        }
+        if let jobRole, let role = roleCatalog.role(jobRole), role.id != AgentRoleID.fullOperator {
+            state.projects[index].jobRoleID = jobRole; state.projects[index].accessMode = role.legacyAccessMode
+        }
+        if let extraRoots { state.projects[index].extraRoots = extraRoots.filter { $0.path.hasPrefix("/") } }
+        if let cookieSites { state.projects[index].cookieSites = cookieSites.map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty } }
         persist()
     }
     var queuedMessages: [QueuedMessage] { state.queuedMessages ?? [] }
@@ -1089,7 +1146,7 @@ private struct ChatRunState {
     }
     private func deliver(text: String, project: Project, threadID: String?, localID: String,
                          selectedModel: String, selectedEffort: String, scheduledRun: UUID? = nil, scheduledRoute: RequestRoute? = nil, scheduledBrowserImport: ChromeSessionImportPolicy? = nil,
-                         scheduledAgent: AgentConnectionID = .originalCodex) async {
+                         scheduledAgent: AgentConnectionID = .originalCodex, scheduledRole: AgentRole? = nil) async {
         let selection = selectionGeneration
         let visible = scheduledRun == nil && threadID == chatID && project.id == projectID
         if visible { items.append(TranscriptItem(id: localID, kind: "user", text: text, phase: L10n.text("Отправляется…", "Sending…"))) }
@@ -1104,10 +1161,11 @@ private struct ChatRunState {
             scheduleQueue(threadID: runKey)
         }
         // Capture the target's policy before suspension; selection can change while sending.
-        let access: AccessMode
-        if scheduledRun != nil { access = project.accessMode ?? .standard }
-        else if let threadID { access = state.chats.first { $0.id == threadID }?.resolvedAccessMode(in: project) ?? .standard }
-        else { access = project.defaultChatAccessMode ?? .standard }
+        let role: AgentRole
+        if scheduledRun != nil { role = scheduledRole ?? project.jobRole(roleCatalog) }
+        else if let threadID { role = state.chats.first { $0.id == threadID }?.resolvedRole(in: project, catalog: roleCatalog) ?? project.chatRole(roleCatalog) }
+        else { role = project.chatRole(roleCatalog) }
+        let access = role.profile(for: project)
         let newConnection = scheduledRun == nil ? currentAgent : scheduledAgent
         let route = scheduledRoute ?? (threadID == nil ? (newConnection == .appClaude ? .direct : defaultRoute) : (state.chats.first { $0.id == threadID }?.route ?? .direct))
         do {
@@ -1124,7 +1182,7 @@ private struct ChatRunState {
             if id == nil {
                 let browserProfile = scheduledRun == nil && state.browserEnabled == true
                     ? newChatBrowserProfiles[project.id].map { AgentBrowserProfile(id: $0) } : nil
-                let session = try await client.createSession(projectPath: project.path, access: access,
+                let session = try await client.createSession(projectPath: project.path, permissions: access,
                                                                  model: selectedModel, route: route, browserProfile: browserProfile)
                 if let browserProfile, newChatBrowserProfiles[project.id] == browserProfile.id {
                     newChatBrowserProfiles.removeValue(forKey: project.id)
@@ -1133,7 +1191,8 @@ private struct ChatRunState {
                 guard ConversationIdentity.appID(for: nativeCreated, in: state, connection: session.connection) == nil else { throw ConversationIdentity.invalidStorage }
                 var chat = Chat(session: session, projectID: project.id, title: ChatTitle.placeholder(), model: selectedModel)
                 chat.effort = selectedEffort
-                chat.accessMode = scheduledRun == nil ? nil : access
+                chat.accessMode = scheduledRun == nil ? nil : role.legacyAccessMode
+                chat.roleID = scheduledRun == nil ? nil : role.id
                 chat.inheritsProjectAccess = scheduledRun == nil
                 let created = chat.id
                 id = created
@@ -1154,7 +1213,7 @@ private struct ChatRunState {
             }
             guard let id else { throw ClientFailure(L10n.text("Не выбран разговор", "No conversation selected")) }
             if !loadedThreads.contains(id) {
-                try await client.resume(sessionForChat(id), projectPath: project.path, access: access, route: route)
+                try await client.resume(sessionForChat(id), projectPath: project.path, permissions: access, route: route)
                 loadedThreads.insert(id)
             }
             if let scheduledRun {
@@ -1179,7 +1238,7 @@ private struct ChatRunState {
                 }
             }
             let submittedTurn = try await client.send(outgoing, to: sessionForChat(id), projectPath: project.path,
-                                                          access: access, model: selectedModel, effort: selectedEffort,
+                                                          permissions: access, model: selectedModel, effort: selectedEffort,
                                                           kind: scheduledRun == nil ? .interactive : .scheduled, conversation: ConversationID(id))
             if threadID == nil && scheduledRun == nil {
                 generateChatTitle(id, firstMessage: text, model: selectedModel, route: route)
@@ -1239,7 +1298,7 @@ private struct ChatRunState {
             let prompt = try job.browserExecutionPrompt() + "\n\n" + AttentionMarkers.instructions()
             await deliver(text: prompt, project: project, threadID: nil, localID: "local-user:" + run.id.uuidString,
                           selectedModel: job.model, selectedEffort: job.effort, scheduledRun: run.id, scheduledRoute: job.route,
-                          scheduledBrowserImport: job.browserSessionImport, scheduledAgent: agent)
+                          scheduledBrowserImport: job.browserSessionImport, scheduledAgent: agent, scheduledRole: job.role(project: project, catalog: roleCatalog))
         } catch {
             await finishJob(run.id, status: .blocked, output: error.localizedDescription)
         }
@@ -1476,17 +1535,39 @@ private struct ChatRunState {
             var project = RemoteProject(id: $0.id.uuidString, name: $0.name, canCreateChat: canCreateRemoteChat)
             project.models = codexOptions
             project.newChatModels = newChatModels
+            let projectRole = $0.chatRole(roleCatalog)
             project.settings = RemoteChatSettings(options: RemoteChatOptions(model: defaultModel),
-                projectAccess: RemoteAccessMode(rawValue: ($0.defaultChatAccessMode ?? .standard).rawValue)!, canEdit: !newChatModels.isEmpty)
+                projectAccess: RemoteAccessMode(rawValue: projectRole.legacyAccessMode.rawValue)!, canEdit: !newChatModels.isEmpty,
+                projectRole: projectRole.id, roles: remoteRoles(project: $0))
             return project
         }, chats: chats)
     }
+    /// Roles the phone may select for a project: never above the project's chat default (audit M3).
+    private func remoteRoles(project: Project) -> [RemoteRoleOption] {
+        let cap = project.chatRole(roleCatalog).rank
+        return roleCatalog.interactive.filter { $0.rank <= cap }.map { RemoteRoleOption(id: $0.id, name: $0.title) }
+    }
+    /// The role a phone command asks for, or nil to inherit. `role` wins over the legacy `access`; both are capped.
+    private func remoteRole(_ options: RemoteChatOptions?, project: Project) throws -> AgentRole? {
+        let cap = project.chatRole(roleCatalog)
+        if let id = options?.role {
+            guard let role = roleCatalog.role(id), role.rank <= cap.rank else { throw RemoteFailure.invalidCommand }
+            return role
+        }
+        guard let access = options?.access else { return nil }
+        let role = AgentRoleCatalog.preset(AccessMode(rawValue: access.rawValue)!.legacyRoleID)
+        guard role.rank <= cap.rank else { throw RemoteFailure.invalidCommand }
+        return role
+    }
     private func remoteSettings(_ chat: Chat, project: Project) -> RemoteChatSettings {
-        RemoteChatSettings(options: RemoteChatOptions(model: chat.model,
-            access: chat.inheritsProjectAccess == true ? nil : RemoteAccessMode(rawValue: (chat.accessMode ?? .standard).rawValue)),
-            projectAccess: RemoteAccessMode(rawValue: (project.defaultChatAccessMode ?? .standard).rawValue)!,
+        let projectRole = project.chatRole(roleCatalog), role = chat.resolvedRole(in: project, catalog: roleCatalog)
+        return RemoteChatSettings(options: RemoteChatOptions(model: chat.model,
+            access: chat.inheritsProjectRole ? nil : RemoteAccessMode(rawValue: role.legacyAccessMode.rawValue), role: chat.inheritsProjectRole ? nil : role.id),
+            projectAccess: RemoteAccessMode(rawValue: projectRole.legacyAccessMode.rawValue)!,
             canEdit: connected && authenticated && !models.isEmpty && !isChangingChat(chat.id) && !isBusy(threadID: chat.id)
-                && !pending.contains(where: { $0.threadID == chat.id }) && !queuedMessages.contains(where: { $0.threadID == chat.id }))
+                && !pending.contains(where: { $0.threadID == chat.id }) && !queuedMessages.contains(where: { $0.threadID == chat.id })
+                && role.rank <= projectRole.rank,
+            projectRole: projectRole.id, roles: remoteRoles(project: project))
     }
     private func remoteModel(_ options: RemoteChatOptions) throws -> AgentModelInfo {
         guard let model = models.first(where: { $0.id == options.model }) else { throw RemoteFailure.invalidCommand }
@@ -1514,14 +1595,15 @@ private struct ChatRunState {
             let chosen = try options.map { try remoteModel($0) }
             model = chosen?.id ?? state.model; effort = chosen?.defaultEffort ?? draftEffort; route = defaultRoute
         }
-        let access = options?.access.flatMap { AccessMode(rawValue: $0.rawValue) } ?? project.defaultChatAccessMode ?? .standard
+        let explicitRole = try remoteRole(options, project: project)
+        let role = explicitRole ?? project.chatRole(roleCatalog)
         // Persist the stable app ID before sending. Native identity never comes from the phone.
-        let session = try await (claude ? claudeConnection : connection).createSession(projectPath: project.path, access: access, model: model, route: route)
+        let session = try await (claude ? claudeConnection : connection).createSession(projectPath: project.path, permissions: role.profile(for: project), model: model, route: route)
         guard !state.chats.contains(where: { $0.id == command.chat }),
               ConversationIdentity.appID(for: session.nativeID, in: state, connection: session.connection) == nil else { throw RemoteFailure.invalidCommand }
         var chat = Chat(session: session, projectID: project.id, title: ChatTitle.placeholder(), model: model)
         chat.id = command.chat; chat.effort = effort; chat.route = route
-        chat.accessMode = options?.access.flatMap { AccessMode(rawValue: $0.rawValue) }; chat.inheritsProjectAccess = chat.accessMode == nil
+        chat.roleID = explicitRole?.id; chat.accessMode = explicitRole?.legacyAccessMode; chat.inheritsProjectAccess = explicitRole == nil
         state.chats.append(chat)
         try await store.save(state)
         loadedThreads.insert(chat.id)
@@ -1544,18 +1626,21 @@ private struct ChatRunState {
             let current = remoteSettings(chat, project: project)
             guard current.canEdit, change.expected == current.options, change.expectedProjectAccess == current.projectAccess else { throw RemoteFailure.invalidCommand }
             let selectedModel = try remoteModel(change.options)
+            let role = try remoteRole(change.options, project: project)
             configuringRemoteChats.insert(chat.id)
             defer { configuringRemoteChats.remove(chat.id); objectWillChange.send() }
             guard let index = state.chats.firstIndex(where: { $0.id == chat.id }) else { throw RemoteFailure.invalidCommand }
             state.chats[index].model = selectedModel.id
             if chat.model != selectedModel.id { state.chats[index].effort = selectedModel.defaultEffort }
-            state.chats[index].accessMode = change.options.access.flatMap { AccessMode(rawValue: $0.rawValue) }
-            state.chats[index].inheritsProjectAccess = change.options.access == nil
+            state.chats[index].roleID = role?.id
+            state.chats[index].accessMode = role?.legacyAccessMode
+            state.chats[index].inheritsProjectAccess = role == nil
             do { try await store.save(state) }
             catch {
                 if let index = state.chats.firstIndex(where: { $0.id == chat.id }) {
                     state.chats[index].model = chat.model; state.chats[index].effort = chat.effort
                     state.chats[index].accessMode = chat.accessMode; state.chats[index].inheritsProjectAccess = chat.inheritsProjectAccess
+                    state.chats[index].roleID = chat.roleID
                 }
                 throw error
             }
@@ -1701,6 +1786,14 @@ private struct ChatRunState {
             if !pending.contains(where: { $0.id == action.id }) { pending.append(action); notify(action) }
         case .interactionsReset:
             clearAgentInteractions(.originalCodex)
+        case .capability(let record):
+            guard let thread, let chat = state.chats.first(where: { $0.id == thread }),
+                  let project = state.projects.first(where: { $0.id == chat.projectID }) else { return }
+            let role = chat.resolvedRole(in: project, catalog: roleCatalog)
+            let run = jobLedger.runs.first { $0.threadID == thread && $0.status.active }?.id
+            let decision = CapabilityDecision(chatID: thread, runID: run, projectID: project.id, roleID: role.id,
+                                              agent: event.session?.connection == .appClaude ? "claude" : "codex", record: record, audit: role.profile.audit)
+            Task { [capabilityLedger] in await capabilityLedger.record(decision) }
         case .accountChanged(let issue):
             for (id, task) in titleTasks where state.chats.first(where: { $0.id == id })?.nativeSession?.connection != .appClaude { task.cancel() }
             models = []; clearLimits(); resetAgentState(.originalCodex)
@@ -1852,14 +1945,14 @@ private struct ChatRunState {
     func followUpScheduledRecord(_ record: Chat, text: String, project: Project) async {
         let goal = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !goal.isEmpty, let agent = record.nativeSession?.connection else { return }
-        let model = currentModel, effort = claudeEffort, access = record.resolvedAccessMode(in: project)
+        let model = currentModel, effort = claudeEffort, role = record.resolvedRole(in: project, catalog: roleCatalog).id
         do {
             let handoff = try await scheduledRecordHandoff(record, goal: goal)
             _ = try handoff.prompt()
             guard chatID == record.id else { return }
             let title = L10n.text("\(record.title) — продолжение", "\(record.title) — follow-up")
             guard await createHandoffChat(handoff, project: project, route: record.route ?? .direct, agent: agent,
-                                          model: model, effort: agent == .appClaude ? effort : nil, access: access, title: title) else { return }
+                                          model: model, effort: agent == .appClaude ? effort : nil, role: role, title: title) else { return }
             chatDrafts[record.id] = nil
             await send()
         } catch { self.error = error.localizedDescription }
@@ -1884,7 +1977,8 @@ private struct ChatRunState {
         guard !state.chats.contains(where: { $0.nativeSession == session }) else { throw ConversationIdentity.invalidStorage }
         var chat = Chat(session: session, projectID: project.id, title: run.name, model: job.model)
         chat.effort = job.effort; chat.route = .direct; chat.scheduledRecord = run.id
-        chat.accessMode = project.accessMode ?? .standard; chat.inheritsProjectAccess = false
+        let role = job.role(project: project, catalog: roleCatalog)
+        chat.accessMode = role.legacyAccessMode; chat.roleID = role.id; chat.inheritsProjectAccess = false
         state.chats.append(chat)
         do { try await store.save(state) }
         catch { state.chats.removeAll { $0.id == chat.id }; throw error }

@@ -36,6 +36,9 @@ private actor ClaudeEvents {
         for event in values { if case .interaction(let request) = event.payload { return request } }
         return nil
     }
+    func capabilities() -> [AgentCapabilityRecord] {
+        values.compactMap { if case .capability(let record) = $0.payload { return record }; return nil }
+    }
 }
 private func interactiveFixture(_ root: URL) throws -> URL {
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -74,9 +77,12 @@ private func interactiveFixture(_ root: URL) throws -> URL {
         print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':json.dumps(value),'structured_output':value,'usage':usage,'permission_denials':[]})); sys.exit(0)
     browser='--mcp-config' in sys.argv and 'switchboard_browser' in sys.argv[sys.argv.index('--mcp-config')+1]
     full=sys.argv[sys.argv.index('--permission-mode')+1]=='bypassPermissions'
-    assert ('--safe-mode' in sys.argv) == (not browser and not full) and '--setting-sources' in sys.argv
-    # Scheduled full-access turns run without connector approval rules.
-    assert ('--strict-mcp-config' in sys.argv) != full and ('--settings' not in sys.argv or full)
+    editor='--restricted' in sys.argv and sys.argv[sys.argv.index('--tools')+1]=='Read,Glob,Grep,Write,Edit,AskUserQuestion'
+    connectors='--strict-mcp-config' not in sys.argv
+    assert ('--safe-mode' in sys.argv) == (not browser and not connectors) and '--setting-sources' in sys.argv
+    # The editor and operator roles keep the old standard/full flags; scheduled operator turns run without connector approval rules.
+    assert (not (full or editor)) or connectors == full
+    assert not editor or '--settings' not in sys.argv
     assert '--append-system-prompt' in sys.argv
     assert len(sys.argv[sys.argv.index('--append-system-prompt')+1]) > 100
     assert sys.argv[sys.argv.index('--setting-sources')+1] == ''
@@ -110,6 +116,10 @@ private func interactiveFixture(_ root: URL) throws -> URL {
             if prompt=='broken': print('invalid-json',flush=True); continue
             if prompt=='unknown': out({'type':'control_request','request_id':'unknown','request':{'subtype':'unexpected_action'}}); continue
             if prompt=='wait': continue
+            if prompt.startswith('hook:'):
+                out({'type':'control_request','request_id':'hook-'+prompt[5:],'request':{'subtype':'hook_callback','callback_id':'switchboard-bash','tool_use_id':'t-hook',
+                     'input':{'hook_event_name':'PreToolUse','tool_name':'Bash','tool_input':{'command':prompt[5:]},'session_id':sid,'cwd':os.getcwd()}}})
+                continue
             if prompt.startswith('background'):
                 tasks('b1')
                 out({'type':'system','subtype':'task_started','session_id':sid,'task_id':'b1','tool_use_id':'call1','description':'Check sources','subagent_type':'general-purpose','is_backgrounded':True,'task_type':'local_agent','prompt':'Look'})
@@ -155,10 +165,51 @@ private func waitFor(_ condition: @escaping () async -> Bool) async throws {
     throw ClientFailure("Fixture timed out")
 }
 private func interactiveRequest(context: AgentContext, root: URL, session: AgentSessionReference? = nil, prompt: String = "hello", id: UUID = UUID(),
-                                fullAccess: Bool = false, kind: AgentExecutionRequest.Kind = .interactive, model: String = "") -> AgentExecutionRequest {
+                                fullAccess: Bool = false, kind: AgentExecutionRequest.Kind = .interactive, model: String = "",
+                                role: AgentPermissionProfile? = nil) -> AgentExecutionRequest {
     .init(id: id, conversation: ConversationID(), session: session, kind: kind, prompt: prompt, projectPath: root.path,
-          permissions: fullAccess ? .unrestricted(approval: .never) : .workspaceWrite(root: root.path, network: false, approval: .ask),
+          permissions: role.map { .profile($0, root: root.path) } ?? (fullAccess ? .unrestricted(approval: .never) : .workspaceWrite(root: root.path, network: false, approval: .ask)),
           model: .init(context: context, model: model), route: .direct)
+}
+
+@Test func claudeDeveloperRoleRegistersTheCommandHookAndAnswersByRole() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let developer = AgentRoleCatalog.preset(AgentRoleID.developer).profile
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root, role: developer)).value()
+    var expected: [(String, String?)] = [("sudo ls", "deny"), ("rm -rf build", "ask"), ("swift build", nil)]
+    for (command, decision) in expected {
+        let before = await events.completionCount()
+        _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "hook:" + command, role: developer)).value()
+        try await waitFor { await events.completionCount() == before + 1 }
+        let reply = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: home.appendingPathComponent("answer")))["response"]
+        #expect(reply["request_id"].string == "hook-" + command)
+        #expect(reply["response"]["hookSpecificOutput"]["permissionDecision"].string == decision)
+        if decision == nil { #expect(reply["response"] == .object([:])) }
+    }
+    expected.removeAll()
+    let launch = try String(contentsOf: home.appendingPathComponent("submitted"), encoding: .utf8)
+    #expect(launch.contains("acceptEdits") && launch.contains("Grep,Write,Edit,Bash,WebFetch") && !launch.contains("--restricted"))
+    let controls = try String(contentsOf: home.appendingPathComponent("controls"), encoding: .utf8).split(separator: "\n")
+        .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+    let initialize = try #require(controls.first { $0["request"]["subtype"].string == "initialize" })
+    #expect(initialize["request"]["hooks"]["PreToolUse"].array.first?["matcher"].string == "Bash")
+    #expect(initialize["request"]["hooks"]["PreToolUse"].array.first?["hookCallbackIds"].array == [.string("switchboard-bash")])
+    let recorded = await events.capabilities().filter { $0.capability == .shell }
+    #expect(recorded.map(\.decision) == [.hookDenied, .hookAsked] && recorded.first?.target == "sudo ls")
+    // The editor role registers no hook at all.
+    let editor = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: editor)).value()
+    try await waitFor { await events.completionCount() == 4 }
+    let later = try String(contentsOf: home.appendingPathComponent("controls"), encoding: .utf8).split(separator: "\n")
+        .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }.filter { $0["request"]["subtype"].string == "initialize" }
+    #expect(later.count == 2 && later.last?["request"]["hooks"] == .null)
+    await adapter.disconnect()
 }
 
 @Test func claudeInteractiveKeepsProcessWarmAcrossTurnsUntilSettingsChange() async throws {
@@ -540,7 +591,8 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
                           jobStore: JobStore(file: root.appendingPathComponent("jobs.json")))
     let pump = Task { for await event in model.claudeConnection.events { await model.receiveClaude(event) } }
     defer { pump.cancel() }
-    let project = Project(path: root.path)
+    var project = Project(path: root.path)
+    project.defaultChatAccessMode = .fullAccess // The phone may pick full access only up to the project's default role.
     model.state.projects = [project]; model.state.defaultConnection = .appClaude; model.state.claudeModel = "claude-sonnet-5-5"
     let ids = [project.id.uuidString]
     #expect(await model.remoteSnapshot(projects: Set(ids)).projects.first?.canCreateChat == false)

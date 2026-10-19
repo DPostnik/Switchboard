@@ -63,15 +63,15 @@ public actor CodexClient {
         _ = try await transport.request("skills/extraRoots/set", params: .object(["extraRoots": .array(directories.map { .string($0.path) })]))
     }
 
-    public func createSession(projectPath: String, access: AccessMode, model: String, route: RequestRoute,
+    public func createSession(projectPath: String, permissions: AgentPermissionProfile, model: String, route: RequestRoute,
                               browserProfile: AgentBrowserProfile? = nil) async throws -> AgentSessionReference {
-        var params = access.threadParameters
+        var params = permissions.codexThreadParameters
         let profiles = BrowserProfileStore(root: browserRoot)
         guard browserProfile == nil || browserResources != nil else { throw BrowserProfileError.scope }
         let grant = browserResources == nil ? nil : try profiles.prepareNew(project: projectPath, connection: .originalCodex, selection: browserProfile) { environment in
             try BrowserProfileControl.verifyClosed(environment: environment, runtime: browserResources!.appendingPathComponent("BrowserRuntime"))
         }
-        params["config"] = try BrowserConfiguration.threadConfiguration(resources: browserResources, root: browserRoot, environment: grant?.environment, grant: grant)
+        params["config"] = permissions.codexThreadConfiguration(browser: try BrowserConfiguration.threadConfiguration(resources: browserResources, root: browserRoot, environment: grant?.environment, grant: grant))
         params["cwd"] = .string(projectPath)
         params["modelProvider"] = .string(route.providerID)
         params["developerInstructions"] = .string(AgentAutonomy.instructions())
@@ -85,12 +85,12 @@ public actor CodexClient {
         knownSessions.insert(session)
         return session
     }
-    public func resume(_ session: AgentSessionReference, projectPath: String, access: AccessMode, route: RequestRoute) async throws {
-        var params = access.threadParameters
+    public func resume(_ session: AgentSessionReference, projectPath: String, permissions: AgentPermissionProfile, route: RequestRoute) async throws {
+        var params = permissions.codexThreadParameters
         let id = try nativeID(session)
         let profiles = BrowserProfileStore(root: browserRoot)
         let grant = browserResources == nil ? nil : try profiles.prepare(session: session, project: projectPath)
-        params["config"] = try BrowserConfiguration.threadConfiguration(resources: browserResources, root: browserRoot, environment: grant?.environment, grant: grant)
+        params["config"] = permissions.codexThreadConfiguration(browser: try BrowserConfiguration.threadConfiguration(resources: browserResources, root: browserRoot, environment: grant?.environment, grant: grant))
         params["threadId"] = .string(id)
         params["cwd"] = .string(projectPath)
         params["modelProvider"] = .string(route.providerID)
@@ -100,15 +100,27 @@ public actor CodexClient {
     }
     /// Acknowledges submission only. Never retries after any transport failure.
     public func send(_ text: String, to session: AgentSessionReference, projectPath: String,
-                     access: AccessMode, model: String, effort: String) async throws -> String? {
+                     permissions: AgentPermissionProfile, model: String, effort: String) async throws -> String? {
         var params: [String: JSONValue] = [
             "threadId": .string(try nativeID(session)),
             "input": .array([.object(["type": .string("text"), "text": .string(text), "text_elements": .array([])])])
         ]
-        params.merge(access.turnParameters(projectPath: projectPath)) { _, new in new }
+        params.merge(permissions.codexTurnParameters(projectPath: projectPath)) { _, new in new }
         if !model.isEmpty { params["model"] = .string(model) }
         if !effort.isEmpty { params["effort"] = .string(effort) }
         return try await transport.request("turn/start", params: .object(params), timeout: 60)["turn"]["id"].string
+    }
+    // Legacy entry points: the old access modes stand for the editor and operator roles.
+    public func createSession(projectPath: String, access: AccessMode, model: String, route: RequestRoute,
+                              browserProfile: AgentBrowserProfile? = nil) async throws -> AgentSessionReference {
+        try await createSession(projectPath: projectPath, permissions: AgentRoleCatalog.preset(access.legacyRoleID).profile, model: model, route: route, browserProfile: browserProfile)
+    }
+    public func resume(_ session: AgentSessionReference, projectPath: String, access: AccessMode, route: RequestRoute) async throws {
+        try await resume(session, projectPath: projectPath, permissions: AgentRoleCatalog.preset(access.legacyRoleID).profile, route: route)
+    }
+    public func send(_ text: String, to session: AgentSessionReference, projectPath: String,
+                     access: AccessMode, model: String, effort: String) async throws -> String? {
+        try await send(text, to: session, projectPath: projectPath, permissions: AgentRoleCatalog.preset(access.legacyRoleID).profile, model: model, effort: effort)
     }
     public func interrupt(_ session: AgentSessionReference, turn: String) async throws {
         _ = try await transport.request("turn/interrupt", params: .object([

@@ -150,12 +150,11 @@ public actor CodexIntegration: AgentIntegration {
             try await self.client.registerWorkflows(at: tools.workflowDirectories)
         }
     }
-    private func access(_ permission: AgentPermissionIntent) throws -> AccessMode {
-        switch permission {
-        case .workspaceWrite(_, false, .ask): return .standard
-        case .unrestricted(.never): return .fullAccess
-        default: throw IntegrationRejection(.unsupportedPermissions)
+    private func access(_ permission: AgentPermissionIntent) throws -> AgentPermissionProfile {
+        guard case .profile(let profile, _) = permission, AgentPermissionSupport.codexProjectPolicy.accepts(permission) else {
+            throw IntegrationRejection(.unsupportedPermissions)
         }
+        return profile
     }
     private func route(_ value: AgentRoute) throws -> RequestRoute {
         switch value {
@@ -174,11 +173,11 @@ public actor CodexIntegration: AgentIntegration {
             return await perform(request.model.context, session: request.session) {
                 let access = try self.access(request.permissions), route = try self.route(request.route)
                 if let session = request.session {
-                    try await self.client.resume(session, projectPath: request.projectPath, access: access, route: route)
+                    try await self.client.resume(session, projectPath: request.projectPath, permissions: access, route: route)
                     self.sessionRoutes[session] = (request.route, request.model.context)
                     return session
                 }
-                let session = try await self.client.createSession(projectPath: request.projectPath, access: access, model: request.model.model, route: route, browserProfile: request.browserProfile)
+                let session = try await self.client.createSession(projectPath: request.projectPath, permissions: access, model: request.model.model, route: route, browserProfile: request.browserProfile)
                 self.sessionRoutes[session] = (request.route, request.model.context)
                 return session
             }
@@ -197,7 +196,7 @@ public actor CodexIntegration: AgentIntegration {
                     session = existing
                 } else { session = try await self.prepare(request).value() }
                 let turn = try await self.client.send(request.prompt, to: session, projectPath: request.projectPath,
-                    access: self.access(request.permissions), model: request.model.model, effort: request.model.effort ?? "")
+                    permissions: self.access(request.permissions), model: request.model.model, effort: request.model.effort ?? "")
                 guard let turn, !turn.isEmpty else { throw ClientFailure(L10n.text("Не получен ID запуска", "No turn ID received")) }
                 self.turnContexts[session, default: [:]][turn] = request.model.context
                 let handle = AgentExecutionHandle(context: request.model.context, requestID: request.id, session: session, turnID: turn)

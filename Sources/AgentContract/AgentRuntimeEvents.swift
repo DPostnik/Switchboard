@@ -23,6 +23,28 @@ public struct AgentEvent: Sendable {
         case background(tasks: Int)
         /// Full current list of the session's sub-agents (running ones and those finished since the last user message).
         case subagents([AgentSubagent])
+        /// One capability use or permission decision for the ledger (plan Phase 0); never a prompt to the user.
+        case capability(AgentCapabilityRecord)
+    }
+}
+
+/// What an agent tried and what the role decided. `target` is a path, domain or command head, capped by the adapter.
+public struct AgentCapabilityRecord: Codable, Hashable, Sendable {
+    public enum Capability: String, Codable, Sendable {
+        case read, writeInProject, writeOutside, shell, network, browser, connector, connectorWrite, subagent, question, other
+    }
+    public enum Decision: String, Codable, Sendable {
+        /// The tool ran under the engine's own rules; the app only observed it.
+        case used
+        case allowed, asked, denied, wouldDeny, unsupportedTool, hookDenied, hookAsked
+    }
+    public var tool: String
+    public var capability: Capability
+    public var target: String?
+    public var decision: Decision
+    public var turn: String?
+    public init(tool: String, capability: Capability, target: String? = nil, decision: Decision, turn: String? = nil) {
+        self.tool = tool; self.capability = capability; self.target = target.map { String($0.prefix(200)) }; self.decision = decision; self.turn = turn
     }
 }
 

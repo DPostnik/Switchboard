@@ -144,6 +144,27 @@ struct CodexPendingInteraction: Sendable {
 
 /// Pure notification decoding; request IDs and answer encoding stay in the client.
 enum CodexEventDecoder {
+    /// A started item as a ledger record: the sandbox decided, the app only observed it.
+    static func capability(_ item: JSONValue, turn: String?) -> AgentCapabilityRecord? {
+        switch item["type"].string {
+        case "commandExecution": return .init(tool: "commandExecution", capability: .shell, target: item["command"].string, decision: .used, turn: turn)
+        case "fileChange": return .init(tool: "fileChange", capability: .writeInProject, target: item["changes"].array.first?["path"].string, decision: .used, turn: turn)
+        case "mcpToolCall":
+            let server = item["server"].string ?? ""
+            return .init(tool: server + "." + (item["tool"].string ?? ""), capability: server == "switchboard_browser" ? .browser : .other, decision: .used, turn: turn)
+        case "webSearch": return .init(tool: "webSearch", capability: .network, target: item["query"].string, decision: .used, turn: turn)
+        default: return nil
+        }
+    }
+    /// An approval request as a ledger record.
+    static func capability(request method: String, params p: JSONValue) -> AgentCapabilityRecord? {
+        switch method {
+        case "item/commandExecution/requestApproval": return .init(tool: "commandExecution", capability: .shell, target: p["command"].string, decision: .asked, turn: p["turnId"].string)
+        case "item/fileChange/requestApproval": return .init(tool: "fileChange", capability: .writeOutside, target: p["grantRoot"].string ?? p["changes"].array.first?["path"].string, decision: .asked, turn: p["turnId"].string)
+        case "item/permissions/requestApproval": return .init(tool: "permissions", capability: .other, target: p["reason"].string, decision: .asked, turn: p["turnId"].string)
+        default: return nil
+        }
+    }
     static func notification(_ raw: JSONValue) -> CodexEvent? {
         let p = raw["params"], method = raw["method"].string ?? ""
         let session = p["threadId"].string.map { AgentSessionReference(connection: .originalCodex, nativeID: $0) }

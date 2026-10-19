@@ -35,7 +35,8 @@ private func request(_ context: AgentContext, session: AgentSessionReference? = 
     #expect(descriptor(changed).validate(request(original)) == .staleContext)
     #expect(descriptor(original, version: 2).validate(request(original)) == .incompatibleContract)
     #expect(descriptor(original).validate(request(original, route: .optimizer(id: "missing"))) == .routeUnavailable)
-    #expect(descriptor(original).validate(request(original, permissions: .workspaceWrite(root: "/fixture", network: true, approval: .ask))) == .unsupportedPermissions)
+    #expect(descriptor(original).validate(request(original, permissions: .unrestricted(approval: .ask))) == .unsupportedPermissions)
+    #expect(descriptor(original).validate(request(original, permissions: .workspaceWrite(root: "/elsewhere", network: false, approval: .ask))) == .unsupportedPermissions)
     #expect(descriptor(original).validate(request(original)) == nil)
 }
 

@@ -35,6 +35,9 @@ extension CodexClient {
                 return
             }
             interactions[pending.interaction.id] = (pending, wire.generation, token)
+            if let record = CodexEventDecoder.capability(request: method, params: p) {
+                eventSink.yield(.init(session: pending.interaction.session, payload: .capability(record)))
+            }
             eventSink.yield(.init(session: pending.interaction.session, payload: .interaction(pending.interaction)))
             return
         }
@@ -47,6 +50,10 @@ extension CodexClient {
         }
         if ["client/disconnected", "account/login/completed", "account/updated"].contains(method) { resetInteractions() }
         if let event = CodexEventDecoder.notification(raw) { eventSink.yield(event) }
+        if method == "item/started", let native = p["threadId"].string, !native.isEmpty,
+           let record = CodexEventDecoder.capability(p["item"], turn: p["turnId"].string) {
+            eventSink.yield(.init(session: .init(connection: .originalCodex, nativeID: native), payload: .capability(record)))
+        }
     }
     private func resolve(where matches: (CodexPendingInteraction) -> Bool) {
         for (id, value) in interactions where matches(value.pending) {
