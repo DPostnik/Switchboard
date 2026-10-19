@@ -129,6 +129,12 @@ public struct JobRun: Identifiable, Codable, Sendable {
     public var output = ""
     public var routine: RoutineInvocation?
 }
+extension JobRun {
+    /// Longest a scheduled run may stay active before the watchdog stops it. The longest observed run took
+    /// 113 minutes (2026-10-19), so this only catches hung runs.
+    public static let deadline: TimeInterval = 3 * 3600
+    public func isOverdue(now: Date) -> Bool { status.active && now.timeIntervalSince(started) > Self.deadline }
+}
 public struct JobLedger: Codable, Sendable {
     public var version = 1
     public var jobs: [ManagedJob] = []

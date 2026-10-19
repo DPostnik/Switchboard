@@ -19,9 +19,39 @@ import ContextCore
         catch { schedulerReady = false; self.error = error.localizedDescription; return }
         schedulerTask = Task { [weak self] in
             while !Task.isCancelled {
+                await self?.watchScheduler()
                 await self?.tickJobs()
                 do { try await Task.sleep(for: .seconds(15)) } catch { return }
             }
+        }
+    }
+    /// Watchdog for unattended work (roles plan, Phase 3b). It never replays anything: an overdue run is stopped and
+    /// recorded as uncertain, and a scheduler that stopped after a storage error retries taking the schedules.
+    func watchScheduler(now: Date = Date()) async {
+        guard !schedulerStopping else { return }
+        if !schedulerReady {
+            guard now >= schedulerRecoveryAfter else { return }
+            schedulerRecoveryAfter = now.addingTimeInterval(300)
+            do {
+                jobLedger = try await jobStore.load(); schedulerReady = true
+                AppLog.lifecycle.notice("Scheduler recovered after an error")
+            } catch {
+                AppLog.lifecycle.error("Scheduler recovery failed: \(error.localizedDescription, privacy: .public)")
+            }
+            return
+        }
+        await stopOverdueRuns(now: now)
+    }
+    func stopOverdueRuns(now: Date = Date()) async {
+        for run in jobLedger.runs where run.isOverdue(now: now) {
+            AppLog.lifecycle.error("Scheduled run \(run.id.uuidString, privacy: .public) passed its deadline; stopping it")
+            // Record first, so the later cancellation outcome cannot replace the reason; finishing drops the executor.
+            let executor = jobExecutors[run.id], task = jobTasks[run.id]
+            await finishJob(run.id, status: .uncertain, output: L10n.text(
+                "Запуск шёл дольше 3 часов, и сторож остановил его. Повтора не было; проверь результат в чате запуска.",
+                "The run took longer than 3 hours and the watchdog stopped it. Nothing was retried; check the result in the run's chat."))
+            task?.cancel()
+            await executor?.stop()
         }
     }
     func tickJobs(now: Date = Date(), controlDirectory: URL = Locations.root.appendingPathComponent("schedule-control")) async {

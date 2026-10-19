@@ -73,6 +73,8 @@ private struct ChatRunState {
     /// Lives next to the job ledger, so tests with a temporary job store never touch the user's file.
     let attentionStore: AttentionStore
     var schedulerTask: Task<Void, Never>?
+    /// Earliest time the watchdog retries a scheduler that stopped after an error.
+    var schedulerRecoveryAfter = Date.distantPast
     var jobTasks: [UUID: Task<Void, Never>] = [:]
     var jobExecutorFactories = AgentIntegrationFactory.scheduled
     var jobExecutors: [UUID: any AgentScheduledExecutor] = [:]

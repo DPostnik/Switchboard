@@ -390,3 +390,69 @@ func schedulerRecoveryPreservesNextOccurrenceWithoutReplaying(activeStatus: JobR
     _ = try await replacement.load()
     await replacement.release()
 }
+
+private actor HangingExecutorFixture: AgentScheduledExecutor {
+    var stops = 0, executions = 0
+    func descriptor() -> AgentResult<AgentDescriptor> {
+        .success(.init(context: .init(connection: .init(agent: .claudeCode, id: UUID()), accountRevision: UUID()),
+            identityMode: .externalCLI, capabilities: [.scheduledExecution], permissions: .externalPolicyOnly, routes: [.externalConfiguration]))
+    }
+    func execute(_ request: AgentExecutionRequest, willStart: @escaping @Sendable () async throws -> Void) async -> AgentResult<AgentScheduledResult> {
+        executions += 1
+        try? await willStart()
+        while stops == 0 && !Task.isCancelled { try? await Task.sleep(for: .milliseconds(10)) }
+        return .success(.finished(.cancelled, output: "stopped"))
+    }
+    func stop() { stops += 1 }
+}
+
+@Test @MainActor func watchdogStopsOverdueRunsOnceAndNeverReplays() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let model = DeskModel(store: AppStore(file: root.appendingPathComponent("state.sqlite")),
+                          jobStore: JobStore(file: root.appendingPathComponent("jobs.json")))
+    let fixture = HangingExecutorFixture()
+    model.jobExecutorFactories[.claude] = { _, _, _, _ in fixture }
+    let project = Project(path: root.path); model.state.projects = [project]; model.schedulerReady = true
+    var job = ManagedJob(); job.name = "Hangs"; job.prompt = "work"; job.projectID = project.id; job.engine = .claude
+    #expect(await model.saveJob(job))
+    await model.launchJob(job.id)
+    for _ in 0..<200 where model.jobLedger.runs.first?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
+    let run = try #require(model.jobLedger.runs.first)
+    // Within the deadline nothing happens.
+    await model.watchScheduler(now: run.started.addingTimeInterval(JobRun.deadline - 60))
+    let stopsBefore = await fixture.stops
+    #expect(model.jobLedger.runs.first?.status == .running && stopsBefore == 0)
+    // Past it, the run is recorded as uncertain with the watchdog's reason, the executor is stopped once.
+    await model.watchScheduler(now: run.started.addingTimeInterval(JobRun.deadline + 60))
+    for task in Array(model.jobTasks.values) { await task.value }
+    let finished = try #require(model.jobLedger.runs.first)
+    #expect(finished.status == .uncertain && finished.output.contains("3"))
+    let (stops, executions) = (await fixture.stops, await fixture.executions)
+    #expect(stops == 1 && executions == 1)
+    #expect(model.attention.open.contains { $0.runID == run.id })
+    // A later tick neither stops nor replays it.
+    await model.watchScheduler(now: run.started.addingTimeInterval(JobRun.deadline + 600))
+    let (laterStops, laterExecutions) = (await fixture.stops, await fixture.executions)
+    #expect(laterStops == 1 && laterExecutions == 1 && model.jobLedger.runs.count == 1)
+}
+
+@Test @MainActor func watchdogRetriesASchedulerThatStoppedAfterAnError() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("jobs.json")
+    let other = JobStore(file: file)
+    _ = try await other.load() // Another owner holds the schedules.
+    let model = DeskModel(store: AppStore(file: root.appendingPathComponent("state.sqlite")), jobStore: JobStore(file: file))
+    let now = Date()
+    await model.watchScheduler(now: now)
+    #expect(!model.schedulerReady)
+    await other.release()
+    // Retried no sooner than five minutes after the failed attempt.
+    await model.watchScheduler(now: now.addingTimeInterval(60))
+    #expect(!model.schedulerReady)
+    await model.watchScheduler(now: now.addingTimeInterval(301))
+    #expect(model.schedulerReady)
+}
