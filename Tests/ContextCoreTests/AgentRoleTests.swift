@@ -146,7 +146,7 @@ private func settings(_ args: [String]) throws -> JSONValue {
     let editor = try claudeArguments(preset(AgentRoleID.editor), agents: #"{"w":{"description":"d","prompt":"p"}}"#)
     #expect(editor.contains("--strict-mcp-config") && editor.contains("--safe-mode") && editor.contains("--restricted"))
     #expect(value(after: "--tools", in: editor) == "Read,Glob,Grep,Write,Edit,AskUserQuestion")
-    #expect(value(after: "--permission-mode", in: editor) == "default")
+    #expect(value(after: "--permission-mode", in: editor) == "acceptEdits") // project writes no longer ask
     #expect(!editor.contains("--settings") && !editor.contains("--agents") && !editor.contains("--chrome") && !editor.contains("--add-dir"))
     #expect(editor == (try ClaudeIntegration.arguments(id: value(after: "--session-id", in: editor)!, resumed: false, access: .standard, model: "", effort: nil, projectAgents: #"{"w":{"description":"d","prompt":"p"}}"#, userChrome: true)))
     let operatorArgs = try claudeArguments(preset(AgentRoleID.fullOperator), agents: #"{"w":{"description":"d","prompt":"p"}}"#)

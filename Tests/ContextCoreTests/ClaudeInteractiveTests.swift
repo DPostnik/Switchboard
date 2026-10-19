@@ -172,6 +172,26 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
           model: .init(context: context, model: model), route: .direct)
 }
 
+@Test func claudeEditorWritesInsideTheProjectWithoutAsking() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "approval")).value()
+    try await waitFor { await events.completion() != nil }
+    #expect(await events.interaction() == nil)
+    let reply = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: home.appendingPathComponent("answer")))["response"]["response"]
+    #expect(reply["behavior"].string == "allow")
+    #expect(await events.capabilities().map(\.decision) == [.allowed])
+    let launch = try String(contentsOf: home.appendingPathComponent("submitted"), encoding: .utf8)
+    #expect(launch.contains("acceptEdits") && launch.contains("--restricted"))
+    await adapter.disconnect()
+}
+
 @Test func claudeDeveloperRoleRegistersTheCommandHookAndAnswersByRole() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -423,8 +443,10 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     let reader = Task { for await event in adapter.events { await events.append(event) } }
     defer { reader.cancel() }
     let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
-    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
-    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: prompt)).value()
+    // A role that still asks for project writes, so the fixture's in-project Write reaches the user.
+    var asking = AgentPermissionProfile.workspace(); asking.projectWrites = .ask
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root, role: asking)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: prompt, role: asking)).value()
     if prompt != "outside" {
         try await waitFor {
             let action = await events.interaction(), completion = await events.completion()

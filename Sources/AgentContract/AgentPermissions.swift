@@ -66,8 +66,9 @@ public struct AgentPermissionProfile: Codable, Hashable, Sendable {
 
     /// Codex `workspace-write` with no network and on-request approvals; Claude project-file tools only.
     /// The app browser stays attached as it was for the old standard mode.
+    /// Writes inside the project run without a prompt (plan 4.2: the editor asks only for outside writes).
     public static func workspace(extraRoots: [Root] = []) -> Self {
-        .init(filesystem: .project(extraRoots: extraRoots), network: false, webSearch: false, shell: .sandboxed,
+        .init(filesystem: .project(extraRoots: extraRoots), network: false, webSearch: false, shell: .sandboxed, projectWrites: .silent,
               browser: .app, connectors: .off, approvals: .ask)
     }
     /// No restrictions and no prompts (Codex `danger-full-access`, Claude `bypassPermissions`).
