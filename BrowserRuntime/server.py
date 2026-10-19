@@ -1718,6 +1718,16 @@ def main():
     finally:
         halt()
         browser.disconnect()
+        # The reader thread may still be blocked in stdin readline (stop by SIGTERM,
+        # not EOF) and holds the buffer lock. Interpreter finalization would then abort
+        # with "could not acquire lock ... at interpreter shutdown". All state is
+        # already persisted per call, so leave without finalization.
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except Exception:
+                pass
+        os._exit(0)
 
 
 if __name__ == '__main__':
