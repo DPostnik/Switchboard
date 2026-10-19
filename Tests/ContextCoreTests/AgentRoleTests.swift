@@ -223,6 +223,27 @@ private func settings(_ args: [String]) throws -> JSONValue {
 
 // MARK: - Ledger
 
+@Test func commandHookReadsQuotesHeredocsAndSubstitutionsLikeTheShell() {
+    let developer = ClaudeLaunchPolicy(preset(AgentRoleID.developer).profile, scheduled: false, userChromeEnabled: false)
+    func allowed(_ command: String) -> Bool { developer.inspect(command: command, cwd: "/p/proj") == .allow }
+    // Data, not commands: quoted heredocs, single quotes, plain words in double quotes, commit messages.
+    #expect(allowed("python3 -I - <<'EOF'\nprint('the role forbids `security` and sudo here')\nEOF\necho done"))
+    #expect(allowed("cat > notes.md <<\"END\"\nRun `sudo ls` later.\nEND"))
+    #expect(allowed("echo 'sudo ls; $(sudo ls) `security x`'"))
+    #expect(allowed("git commit -m \"Explain why sudo and osascript are denied\""))
+    #expect(allowed("grep -n \"sudo \" Sources/x.swift | head"))
+    #expect(allowed("cat <<-EOF\n\tplain text with sudo\n\tEOF"))
+    // Commands, even when nested or wrapped.
+    for risky in ["echo \"$(sudo ls)\"", "echo \"`security find-generic-password`\"", "x=$(sudo ls)", "echo `sudo ls`",
+                  "bash -c \"sudo ls\"", "sh -c 'osascript -e beep'", "nohup sudo ls &", "env A=1 sudo ls", "time sudo ls",
+                  "cat <<EOF\n$(sudo ls)\nEOF", "(cd /tmp && sudo ls)", "ls | xargs sudo rm", "echo ok\nsudo ls"] {
+        #expect(!allowed(risky), "\(risky)")
+    }
+    // An unclosed quote never hides what came before it.
+    #expect(!allowed("sudo ls; echo \"unterminated"))
+    #expect(ShellSegments.commands("a | b && c; d\ne").count == 5)
+}
+
 @Test func capabilityLedgerStoresRowsAggregatesAndSweeps() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }

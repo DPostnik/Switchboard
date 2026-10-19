@@ -138,13 +138,21 @@ struct ClaudeLaunchPolicy: Equatable {
             }
         }
     }
-    /// Command segment heads after shell separators, with leading environment assignments removed.
+    /// The commands a shell line runs (see `ShellSegments`), with leading environment assignments and
+    /// command wrappers (`nohup`, `env`, `exec`…) removed so the real command is what gets matched.
     static func heads(_ text: String) -> [String] {
-        let separators = CharacterSet(charactersIn: "|;&(`\n")
-        return text.components(separatedBy: separators).map { segment in
+        ShellSegments.commands(text).map { segment in
             var head = segment.trimmingCharacters(in: .whitespaces)
-            if head.hasPrefix("$") { head.removeFirst() }
-            while let space = head.firstIndex(of: " "), head[..<space].contains("="), !head[..<space].contains("/") { head = String(head[head.index(after: space)...]).trimmingCharacters(in: .whitespaces) }
+            var changed = true
+            while changed {
+                changed = false
+                if let space = head.firstIndex(of: " "), head[..<space].contains("="), !head[..<space].contains("/") {
+                    head = String(head[head.index(after: space)...]).trimmingCharacters(in: .whitespaces); changed = true
+                }
+                for wrapper in ShellSegments.wrappers where head.hasPrefix(wrapper + " ") {
+                    head = String(head.dropFirst(wrapper.count + 1)).trimmingCharacters(in: .whitespaces); changed = true
+                }
+            }
             return head
         }
     }
