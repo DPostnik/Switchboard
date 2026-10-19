@@ -9,12 +9,16 @@ public enum ChromeCookieError: Error, LocalizedError, Sendable {
     case browserBusy, destinationRunning, uncertain, connection, missingEnvironment, empty, browserLimit
     /// A consent file without a valid app signature (written outside the app, copied or edited).
     case unsignedPolicy
+    /// This site was imported into this chat browser within the last hour, or too many sites were.
+    case recentlyImported, importLimit
 
     public var errorDescription: String? { message(language: L10n.language) }
     public func message(language: AppLanguage) -> String {
         switch self {
         case .sourceRunning: return L10n.text("Chrome не дал прочитать файл cookies. Заверши обычный Google Chrome через Cmd+Q и повтори импорт.", "Chrome did not allow reading its cookie file. Quit regular Google Chrome with Cmd+Q, then import again.", language: language)
         case .unavailable: return L10n.text("Не удалось прочитать cookies выбранного профиля Chrome.", "Could not read cookies from the selected Chrome profile.", language: language)
+        case .recentlyImported: return L10n.text("Сессию этого сайта уже импортировали в браузер чата за последний час. Повторного импорта не будет: проверь вход на странице.", "This site's session was already imported into the chat browser within the last hour. It will not be imported again: check sign-in on the page.", language: language)
+        case .importLimit: return L10n.text("За последний час в браузер чата импортировали сессии слишком многих сайтов. Новый импорт будет доступен позже.", "Too many sites were imported into the chat browser within the last hour. A new import will be available later.", language: language)
         case .unsignedPolicy: return L10n.text("Разрешение на импорт не подтверждено приложением. Включи его заново в Браузер → Импортировать только cookies.", "The import permission was not confirmed by the app. Enable it again in Browser → Import cookies only.", language: language)
         case .invalidProfile: return L10n.text("Профиль Chrome недоступен или его путь изменился. Обнови список профилей.", "The Chrome profile is unavailable or its path changed. Refresh the profile list.", language: language)
         case .unsupportedSchema: return L10n.text("Этот формат cookies Chrome пока не поддерживается. Импорт не выполнен.", "This Chrome cookie format is not supported yet. Nothing was imported.", language: language)

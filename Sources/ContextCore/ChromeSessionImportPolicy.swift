@@ -196,6 +196,8 @@ extension ChromeCookieImporter {
               (1024...65535).contains(port), endpoint.path.hasPrefix("/devtools/browser/"),
               endpoint.user == nil, endpoint.password == nil, endpoint.query == nil, endpoint.fragment == nil
         else { throw ChromeCookieError.invalidProfile }
+        // Counted before any cookie is read, so an uncertain outcome also uses up the attempt (audit M7).
+        try ChromeImportLedger.admit(environment: environment, site: scope.site ?? scope.pageHost ?? site)
         let read = try ChromeCookieSource.read(profile: scope.profile, site: scope.site, pageHost: scope.pageHost, sourceIsRunning: sourceIsRunning)
         guard !read.cookies.isEmpty else { throw ChromeCookieError.empty }
         let connection = try CookieCDP(endpoint: endpoint)
@@ -204,5 +206,41 @@ extension ChromeCookieImporter {
         return try await writeAndVerify(read, fence: environment.appendingPathComponent("executor-in-flight.json"), executorFence: true) { method, parameters in
             try await connection.call(method, parameters: parameters)
         }
+    }
+}
+
+/// Per-environment record of cookie imports, kept on disk so closing and reopening a tab does not reset the
+/// limit (audit M7). The native helper is the only reader and writer. A site is imported at most once per window,
+/// and at most `siteLimit` different sites per window, which bounds an "any site" policy.
+public struct ChromeImportLedger: Codable, Equatable, Sendable {
+    public struct Entry: Codable, Equatable, Sendable {
+        public var site: String
+        public var date: Date
+    }
+    public static let window: TimeInterval = 3600
+    public static let siteLimit = 5
+    public var entries: [Entry] = []
+
+    static func file(_ environment: URL) -> URL { environment.appendingPathComponent("chrome-session-import-ledger.json") }
+
+    /// Records the attempt or refuses it. An unreadable ledger refuses instead of starting over.
+    public static func admit(environment: URL, site: String, now: Date = Date()) throws {
+        let path = file(environment)
+        var ledger = ChromeImportLedger()
+        if FileManager.default.fileExists(atPath: path.path) {
+            guard path.resolvingSymlinksInPath().path == path.path,
+                  (try? path.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max) ?? Int.max <= 65_536,
+                  let stored = try? JSONDecoder().decode(ChromeImportLedger.self, from: Data(contentsOf: path)) else {
+                throw ChromeCookieError.importLimit
+            }
+            ledger = stored
+        }
+        let host = site.lowercased()
+        ledger.entries = ledger.entries.filter { now.timeIntervalSince($0.date) < window && $0.date <= now.addingTimeInterval(60) }
+        guard !ledger.entries.contains(where: { $0.site == host }) else { throw ChromeCookieError.recentlyImported }
+        guard Set(ledger.entries.map(\.site)).count < siteLimit else { throw ChromeCookieError.importLimit }
+        ledger.entries.append(Entry(site: host, date: now))
+        try JSONEncoder().encode(ledger).write(to: path, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
     }
 }

@@ -454,3 +454,27 @@ private actor CookieWriteProbe {
     #expect(try ChromeSessionImportPolicy.loadShared(browserRoot: root)?.coversAnySite == true)
     #expect(try ChromeSessionImportPolicy.load(environment: environment)?.site == "linkedin.com")
 }
+
+@Test func importLedgerSurvivesNewTabsAndBoundsSitesPerHour() throws {
+    let environment = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: environment, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: environment) }
+    let start = Date(timeIntervalSince1970: 1_000_000)
+    try ChromeImportLedger.admit(environment: environment, site: "LinkedIn.com", now: start)
+    // The ledger is on disk, so a new tab token (a new call) for the same site is still refused.
+    #expect(throws: ChromeCookieError.recentlyImported) { try ChromeImportLedger.admit(environment: environment, site: "linkedin.com", now: start.addingTimeInterval(60)) }
+    for (index, site) in ["a.example.com", "b.example.com", "c.example.com", "d.example.com"].enumerated() {
+        try ChromeImportLedger.admit(environment: environment, site: site, now: start.addingTimeInterval(Double(index + 2) * 60))
+    }
+    #expect(throws: ChromeCookieError.importLimit) { try ChromeImportLedger.admit(environment: environment, site: "e.example.com", now: start.addingTimeInterval(600)) }
+    // After the window the same site may be imported again.
+    try ChromeImportLedger.admit(environment: environment, site: "linkedin.com", now: start.addingTimeInterval(3_700))
+    let file = environment.appendingPathComponent("chrome-session-import-ledger.json")
+    #expect((try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+    // A damaged ledger refuses rather than starting over.
+    try Data("not json".utf8).write(to: file)
+    #expect(throws: ChromeCookieError.importLimit) { try ChromeImportLedger.admit(environment: environment, site: "f.example.com", now: start.addingTimeInterval(4_000)) }
+    for error in [ChromeCookieError.recentlyImported, .importLimit] {
+        #expect(!error.message(language: .russian).isEmpty && error.message(language: .russian) != error.message(language: .english))
+    }
+}
