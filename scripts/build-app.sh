@@ -55,12 +55,34 @@ fi
 codesign --verify --deep --strict "$app"
 python3 - "$app" <<'PY'
 from pathlib import Path
+import ctypes
+import os
+import shutil
+import subprocess
 import sys
+import time
 
 staged = Path(sys.argv[1])
 destination = Path('build/Switchboard.app')
-backup = staged.parent / 'previous.app'
+# A running app keeps its replaced bundle until it exits: system services (the
+# open panel among them) validate the host's code signature from disk and fail
+# once the executable is deleted, which hangs NSOpenPanel.runModal.
+replaced = Path('build/.replaced')
+backup = replaced / f'Switchboard-{time.time_ns()}.app'
+
+def running_executables():
+    # Not pgrep: it skips its own ancestors, and agents run this script under Switchboard.
+    libproc = ctypes.CDLL('/usr/lib/libproc.dylib')
+    pids = subprocess.run(['/bin/ps', '-axo', 'pid='], capture_output=True, text=True, check=True).stdout.split()
+    paths = set()
+    for pid in pids:
+        buffer = ctypes.create_string_buffer(4096)
+        if libproc.proc_pidpath(int(pid), buffer, len(buffer)) > 0:
+            paths.add(os.path.realpath(buffer.value.decode()))
+    return paths
+
 if destination.exists():
+    replaced.mkdir(parents=True, exist_ok=True)
     destination.rename(backup)
 try:
     staged.rename(destination)
@@ -68,6 +90,12 @@ except BaseException:
     if backup.exists():
         backup.rename(destination)
     raise
+if replaced.exists():
+    in_use = running_executables()
+    for bundle in replaced.iterdir():
+        prefix = os.path.realpath(bundle) + os.sep
+        if not any(path.startswith(prefix) for path in in_use):
+            shutil.rmtree(bundle, ignore_errors=True)
 print(f'Updated: {destination.resolve()}')
 print('Quit the running app with Cmd+Q and reopen it to load this build.')
 PY
