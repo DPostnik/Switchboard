@@ -632,12 +632,12 @@ public actor ClaudeIntegration: AgentIntegration {
             return .object(["hookSpecificOutput": .object(fields)])
         }
         if let audit = auditPolicy(id) {
-            if case .deny = audit.inspect(command: command) {
+            if case .deny = audit.inspect(command: command, cwd: sessions[id]?.cwd) {
                 record(.init(tool: "Bash", capability: .shell, target: command, decision: .wouldDeny, turn: turn), session: id)
             }
             try? await respond(wire, requestID: requestID, response: .object([:])); return
         }
-        switch policy(id).inspect(command: command) {
+        switch policy(id).inspect(command: command, cwd: sessions[id]?.cwd) {
         case .allow: try? await respond(wire, requestID: requestID, response: .object([:]))
         case .ask:
             record(.init(tool: "Bash", capability: .shell, target: command, decision: .hookAsked, turn: turn), session: id)

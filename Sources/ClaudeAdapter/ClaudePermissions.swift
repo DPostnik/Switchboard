@@ -104,7 +104,8 @@ struct ClaudeLaunchPolicy: Equatable {
 
     enum CommandDecision: Equatable { case allow, ask, deny(String) }
     /// Inspection of one shell command against the role: deny-list first, then the network list, then the ask-list.
-    func inspect(command: String) -> CommandDecision {
+    /// A recursive delete whose every target stays inside the project, a writable root or a temporary folder is not asked.
+    func inspect(command: String, cwd: String? = nil) -> CommandDecision {
         let text = command.trimmingCharacters(in: .whitespacesAndNewlines) + " "
         if let hit = profile.commandInspection.deny.first(where: { Self.matches(text, $0) }) {
             return .deny(L10n.text("Команда запрещена ролью: \(hit.trimmingCharacters(in: .whitespaces))", "The role forbids this command: \(hit.trimmingCharacters(in: .whitespaces))"))
@@ -112,23 +113,45 @@ struct ClaudeLaunchPolicy: Equatable {
         if !profile.network, let hit = Self.networkCommands.first(where: { Self.matches(text, $0) }) {
             return .deny(L10n.text("Роль без сети: \(hit.trimmingCharacters(in: .whitespaces))", "The role has no network: \(hit.trimmingCharacters(in: .whitespaces))"))
         }
-        if profile.commandInspection.ask.contains(where: { Self.matches(text, $0) }) {
+        for head in Self.heads(text) {
+            guard let pattern = profile.commandInspection.ask.first(where: { (head + " ").hasPrefix($0) }) else { continue }
+            if pattern.hasPrefix("rm "), let cwd, safeRemoval(head, cwd: cwd) { continue }
             return profile.approvals == .ask && !scheduled ? .ask : .deny(L10n.text("Действие вне роли; запуск без присмотра не ждёт.", "Outside the role; an unattended run does not wait."))
         }
         return .allow
     }
+    /// `rm` targets that are plain paths inside the project, a writable extra root or a temporary folder.
+    /// Variables, `~`, globs at the root and `..` are never considered safe.
+    func safeRemoval(_ head: String, cwd: String) -> Bool {
+        let targets = head.split(separator: " ").dropFirst().map(String.init).filter { !$0.hasPrefix("-") }
+        guard !targets.isEmpty else { return false }
+        let temporary = ["/tmp", "/private/tmp", "/var/folders", "/private/var/folders"] + [ProcessInfo.processInfo.environment["TMPDIR"]].compactMap { $0 }
+        let roots = [cwd] + writableRoots + temporary
+        return targets.allSatisfy { raw in
+            let path = raw.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            guard !path.isEmpty, !path.contains("$"), !path.hasPrefix("~"), !path.split(separator: "/").contains(".."),
+                  path != "/", path != ".", path != "*", !path.hasPrefix("/*") else { return false }
+            let absolute = path.hasPrefix("/") ? path : cwd + "/" + path
+            return roots.contains { root in
+                let base = root.hasSuffix("/") ? String(root.dropLast()) : root
+                return absolute.hasPrefix(base + "/") && absolute.count > base.count + 1
+            }
+        }
+    }
+    /// Command segment heads after shell separators, with leading environment assignments removed.
+    static func heads(_ text: String) -> [String] {
+        let separators = CharacterSet(charactersIn: "|;&(`\n")
+        return text.components(separatedBy: separators).map { segment in
+            var head = segment.trimmingCharacters(in: .whitespaces)
+            if head.hasPrefix("$") { head.removeFirst() }
+            while let space = head.firstIndex(of: " "), head[..<space].contains("="), !head[..<space].contains("/") { head = String(head[head.index(after: space)...]).trimmingCharacters(in: .whitespaces) }
+            return head
+        }
+    }
     /// A pattern matches the head of a command segment (after `|`, `;`, `&&`, `(`, backticks, `$(` or a newline),
     /// so `sudo ` is found in `cd x && sudo rm` but not inside `pseudo ` or as an argument such as `echo curl`.
     static func matches(_ text: String, _ pattern: String) -> Bool {
-        let separators = CharacterSet(charactersIn: "|;&(`\n")
-        for segment in text.components(separatedBy: separators) {
-            var head = segment.trimmingCharacters(in: .whitespaces)
-            if head.hasPrefix("$") { head.removeFirst() }
-            // Skip leading environment assignments: `FOO=1 sudo x`.
-            while let space = head.firstIndex(of: " "), head[..<space].contains("="), !head[..<space].contains("/") { head = String(head[head.index(after: space)...]).trimmingCharacters(in: .whitespaces) }
-            if (head + " ").hasPrefix(pattern) { return true }
-        }
-        return false
+        heads(text).contains { ($0 + " ").hasPrefix(pattern) }
     }
 
     /// Tools the app answers `can_use_tool` for; anything else is unsupported and denied.

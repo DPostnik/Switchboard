@@ -193,7 +193,14 @@ private func settings(_ args: [String]) throws -> JSONValue {
     let developer = ClaudeLaunchPolicy(preset(AgentRoleID.developer).profile, scheduled: false, userChromeEnabled: false)
     #expect(developer.inspectsCommands && developer.hooks["PreToolUse"].array.first?["matcher"].string == "Bash")
     #expect(developer.inspect(command: "swift build") == .allow)
-    #expect(developer.inspect(command: "rm -rf .build") == .ask)
+    #expect(developer.inspect(command: "rm -rf .build") == .ask) // no cwd known: ask
+    #expect(developer.inspect(command: "rm -rf .build Tests/tmp", cwd: "/p/proj") == .allow)
+    #expect(developer.inspect(command: "rm -rf /tmp/roles-x /private/var/folders/ab/T/y", cwd: "/p/proj") == .allow)
+    #expect(developer.inspect(command: "rm -rf /p/proj/build && swift build", cwd: "/p/proj") == .allow)
+    for risky in ["rm -rf ../other", "rm -rf ~/Library", "rm -rf $HOME/x", "rm -rf /p/other", "rm -rf /", "rm -rf .", "rm -fr /p/projx", "rm -r /Users/x"] {
+        #expect(developer.inspect(command: risky, cwd: "/p/proj") == .ask, "\(risky)")
+    }
+    #expect(developer.inspect(command: "git push origin main", cwd: "/p/proj") == .allow)
     #expect(developer.inspect(command: "cd /tmp && sudo rm -rf /") == .deny(L10n.text("Команда запрещена ролью: sudo", "The role forbids this command: sudo")))
     #expect(developer.inspect(command: "pseudo tool") == .allow && developer.inspect(command: "FOO=1 sudo ls") != .allow && developer.inspect(command: "echo hi; sudo ls") != .allow)
     #expect(developer.inspect(command: "git push --force origin main") != .allow)

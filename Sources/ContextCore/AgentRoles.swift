@@ -65,7 +65,7 @@ public struct AgentRoleCatalog: Codable, Hashable, Sendable {
                   profile: .init(filesystem: .project(extraRoots: []), network: true, webSearch: true, shell: .on, projectWrites: .silent, browser: .app,
                                  connectors: .off, cookieImport: .none, approvals: .ask,
                                  commandInspection: .init(deny: ["sudo ", "launchctl ", "defaults write", "security ", "diskutil ", "git push --force", "git push -f", "osascript"],
-                                                          ask: ["rm -rf", "git reset --hard", "git clean", "git push"]),
+                                                          ask: ["rm -rf", "rm -fr", "rm -r ", "git reset --hard", "git clean"]),
                                  subagentRole: AgentRoleID.developer)),
         AgentRole(id: AgentRoleID.routineOperator, titleRU: "Оператор рутин", titleEN: "Routine operator",
                   summaryRU: "Для заданий по расписанию: браузер приложения, коннекторы только на чтение, команды без системных. Действия вне роли откладываются, запуск не ждёт.",

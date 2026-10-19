@@ -182,7 +182,7 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
     let developer = AgentRoleCatalog.preset(AgentRoleID.developer).profile
     let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root, role: developer)).value()
-    var expected: [(String, String?)] = [("sudo ls", "deny"), ("rm -rf build", "ask"), ("swift build", nil)]
+    var expected: [(String, String?)] = [("sudo ls", "deny"), ("rm -rf ../build", "ask"), ("rm -rf build", nil), ("swift build", nil)]
     for (command, decision) in expected {
         let before = await events.completionCount()
         _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "hook:" + command, role: developer)).value()
@@ -205,7 +205,7 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     // The editor role registers no hook at all.
     let editor = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
     _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: editor)).value()
-    try await waitFor { await events.completionCount() == 4 }
+    try await waitFor { await events.completionCount() == 5 }
     let later = try String(contentsOf: home.appendingPathComponent("controls"), encoding: .utf8).split(separator: "\n")
         .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }.filter { $0["request"]["subtype"].string == "initialize" }
     #expect(later.count == 2 && later.last?["request"]["hooks"] == .null)
