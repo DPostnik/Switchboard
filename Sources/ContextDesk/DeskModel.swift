@@ -251,6 +251,11 @@ private struct ChatRunState {
         defer { isBootstrapping = false; step("rest") }
         do { state = try await store.load(); usage = try await store.loadUsage(); projectID = state.visibleProjects.first?.id } catch { self.error = error.localizedDescription; return }
         if state.migrateRoles() { persist() }
+        // Sign the cookie-import consent files once, when the signing key is first created (audit H2).
+        do {
+            let signed = try ChromeSessionImportPolicy.adoptExistingPolicies()
+            if !signed.isEmpty { AppLog.browser.notice("Signed \(signed.count, privacy: .public) existing cookie-import permission files") }
+        } catch { AppLog.browser.error("Could not sign cookie-import permission files: \(error.localizedDescription, privacy: .public)") }
         Task { [capabilityLedger] in try? await capabilityLedger.sweep() }
         photoCleanupTask = Task { [weak self] in
             while !Task.isCancelled {

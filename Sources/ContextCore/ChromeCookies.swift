@@ -7,12 +7,15 @@ import CSQLite
 public enum ChromeCookieError: Error, LocalizedError, Sendable {
     case sourceRunning, unavailable, invalidProfile, unsupportedSchema, keychain, sourceChanged, tooLarge
     case browserBusy, destinationRunning, uncertain, connection, missingEnvironment, empty, browserLimit
+    /// A consent file without a valid app signature (written outside the app, copied or edited).
+    case unsignedPolicy
 
     public var errorDescription: String? { message(language: L10n.language) }
     public func message(language: AppLanguage) -> String {
         switch self {
         case .sourceRunning: return L10n.text("Chrome не дал прочитать файл cookies. Заверши обычный Google Chrome через Cmd+Q и повтори импорт.", "Chrome did not allow reading its cookie file. Quit regular Google Chrome with Cmd+Q, then import again.", language: language)
         case .unavailable: return L10n.text("Не удалось прочитать cookies выбранного профиля Chrome.", "Could not read cookies from the selected Chrome profile.", language: language)
+        case .unsignedPolicy: return L10n.text("Разрешение на импорт не подтверждено приложением. Включи его заново в Браузер → Импортировать только cookies.", "The import permission was not confirmed by the app. Enable it again in Browser → Import cookies only.", language: language)
         case .invalidProfile: return L10n.text("Профиль Chrome недоступен или его путь изменился. Обнови список профилей.", "The Chrome profile is unavailable or its path changed. Refresh the profile list.", language: language)
         case .unsupportedSchema: return L10n.text("Этот формат cookies Chrome пока не поддерживается. Импорт не выполнен.", "This Chrome cookie format is not supported yet. Nothing was imported.", language: language)
         case .keychain: return L10n.text("Не получен доступ к Chrome Safe Storage в Связке ключей. Разреши доступ при следующем явном импорте.", "Access to Chrome Safe Storage in Keychain was not granted. Allow access during your next explicit import.", language: language)

@@ -1,4 +1,6 @@
 import Foundation
+import CryptoKit
+import Security
 
 /// App-owned consent metadata. No cookies or Keychain material are persisted here.
 public struct ChromeSessionImportPolicy: Codable, Equatable, Sendable {
@@ -51,13 +53,29 @@ public struct ChromeSessionImportPolicy: Codable, Equatable, Sendable {
         return nil
     }
 
+    /// Reads a consent file and checks the app's signature over its content and folder (audit H2).
     public static func load(environment: URL) throws -> Self? {
         let file = environment.appendingPathComponent("chrome-session-import.json")
         guard FileManager.default.fileExists(atPath: file.path) else { return nil }
         guard file.resolvingSymlinksInPath().path == file.path,
               (try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max) <= 4096 else { throw ChromeCookieError.invalidProfile }
-        let value = try JSONDecoder().decode(Self.self, from: Data(contentsOf: file))
-        return try Self(profile: value.profile, site: value.site)
+        let value = try JSONDecoder().decode(SignedFile.self, from: Data(contentsOf: file))
+        let policy = try Self(profile: value.profile, site: value.site)
+        guard let mac = value.mac, let key = try PolicySigning.existingKey(),
+              PolicySigning.verify(mac, policy: policy, folder: environment, key: key) else { throw ChromeCookieError.unsignedPolicy }
+        return policy
+    }
+    /// The file format: the policy plus an HMAC that binds it to its folder.
+    struct SignedFile: Codable {
+        let profile: String
+        let site: String
+        let mac: String?
+    }
+    static func write(_ policy: Self, folder: URL, file: URL) throws {
+        let mac = PolicySigning.sign(policy, folder: folder, key: try PolicySigning.key())
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(SignedFile(profile: policy.profile, site: policy.site, mac: mac)).write(to: file, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
     }
 
     public static func save(_ policy: Self?, environment: URL, grant: BrowserProfileGrant?,
@@ -67,10 +85,8 @@ public struct ChromeSessionImportPolicy: Codable, Equatable, Sendable {
         guard let id = UUID(uuidString: environment.lastPathComponent) else { throw ChromeCookieError.missingEnvironment }
         try BrowserProfileStore(root: browserRoot).validate(grant, environment: id, allowHuman: true)
         let file = environment.appendingPathComponent("chrome-session-import.json")
-        if let policy {
-            try JSONEncoder().encode(policy).write(to: file, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
-        } else if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
+        if let policy { try write(policy, folder: environment, file: file) }
+        else if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
     }
 }
 
@@ -86,9 +102,83 @@ extension ChromeSessionImportPolicy {
               file.resolvingSymlinksInPath().path == file.path else { throw ChromeCookieError.invalidProfile }
         if let policy {
             try FileManager.default.createDirectory(at: browserRoot, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            try JSONEncoder().encode(policy).write(to: file, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+            try write(policy, folder: browserRoot, file: file)
         } else if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
+    }
+
+    /// Runs once, when the signing key is created: the consent files that already exist were written by the app
+    /// before signing existed, so they are signed in place. Files appearing later are never blessed this way.
+    /// Returns the folders whose files were signed.
+    @discardableResult
+    public static func adoptExistingPolicies(browserRoot: URL = BrowserEnvironmentStore.directory) throws -> [String] {
+        try adoptExistingPolicies(browserRoot: browserRoot, existingKey: PolicySigning.existingKey, createKey: PolicySigning.key)
+    }
+    static func adoptExistingPolicies(browserRoot: URL, existingKey: () throws -> SymmetricKey?, createKey: () throws -> SymmetricKey) throws -> [String] {
+        guard try existingKey() == nil else { return [] }
+        let key = try createKey()
+        var folders = [browserRoot]
+        let environments = browserRoot.appendingPathComponent("environments")
+        if let names = try? FileManager.default.contentsOfDirectory(atPath: environments.path) {
+            folders += names.filter { UUID(uuidString: $0) != nil }.map { environments.appendingPathComponent($0) }
+        }
+        var signed: [String] = []
+        for folder in folders {
+            let file = folder.appendingPathComponent("chrome-session-import.json")
+            guard FileManager.default.fileExists(atPath: file.path), file.resolvingSymlinksInPath().path == file.path,
+                  (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max) ?? Int.max <= 4096,
+                  let value = try? JSONDecoder().decode(SignedFile.self, from: Data(contentsOf: file)),
+                  let policy = try? Self(profile: value.profile, site: value.site) else { continue }
+            let mac = PolicySigning.sign(policy, folder: folder, key: key)
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            try encoder.encode(SignedFile(profile: policy.profile, site: policy.site, mac: mac)).write(to: file, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+            signed.append(folder.path)
+        }
+        return signed
+    }
+}
+
+/// HMAC key for consent files. In the built app it lives in the app's own Keychain item, which the native import
+/// helper (the same signed binary) can read and an agent process cannot without a prompt. Outside an `.app` bundle
+/// (unit tests, `swift run`) a fixed in-memory key is used, so tests never touch the real Keychain; the import
+/// helper always runs from the bundle.
+enum PolicySigning {
+    static let service = "Switchboard.BrowserImportPolicy.v1"
+    static let account = "hmac-key"
+    static let memoryKey: SymmetricKey? = Bundle.main.bundleURL.pathExtension == "app"
+        ? nil : SymmetricKey(data: SHA256.hash(data: Data("switchboard-unit-test-policy-key".utf8)))
+
+    static func existingKey() throws -> SymmetricKey? {
+        if let memoryKey { return memoryKey }
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+                                    kSecAttrAccount as String: account, kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = result as? Data, data.count == 32 else { throw ChromeCookieError.keychain }
+        return SymmetricKey(data: data)
+    }
+    /// Existing key, or a new random one stored in the Keychain.
+    static func key() throws -> SymmetricKey {
+        if let memoryKey { return memoryKey }
+        if let key = try existingKey() { return key }
+        let key = SymmetricKey(size: .bits256)
+        let data = key.withUnsafeBytes { Data($0) }
+        let item: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+                                   kSecAttrAccount as String: account, kSecValueData as String: data,
+                                   kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
+        guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw ChromeCookieError.keychain }
+        return key
+    }
+    static func message(_ policy: ChromeSessionImportPolicy, folder: URL) -> Data {
+        Data(["switchboard-import-policy-v1", folder.standardizedFileURL.resolvingSymlinksInPath().path, policy.profile, policy.site].joined(separator: "\n").utf8)
+    }
+    static func sign(_ policy: ChromeSessionImportPolicy, folder: URL, key: SymmetricKey) -> String {
+        Data(HMAC<SHA256>.authenticationCode(for: message(policy, folder: folder), using: key)).base64EncodedString()
+    }
+    static func verify(_ mac: String, policy: ChromeSessionImportPolicy, folder: URL, key: SymmetricKey) -> Bool {
+        guard let data = Data(base64Encoded: mac) else { return false }
+        return HMAC<SHA256>.isValidAuthenticationCode(data, authenticating: message(policy, folder: folder), using: key)
     }
 }
 

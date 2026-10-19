@@ -404,3 +404,53 @@ private actor CookieWriteProbe {
     #expect(try ChromeSessionImportPolicy.resolve(site: "github.com", environment: environment, browserRoot: root) == nil)
     #expect(!FileManager.default.fileExists(atPath: file.path))
 }
+
+@Test func importConsentFilesMustCarryTheAppSignatureForTheirOwnFolder() throws {
+    let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let environment = root.appendingPathComponent("environments/" + UUID().uuidString.lowercased())
+    let other = root.appendingPathComponent("environments/" + UUID().uuidString.lowercased())
+    try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+    let linkedin = try ChromeSessionImportPolicy(profile: "Default", site: "linkedin.com")
+    try ChromeSessionImportPolicy.save(linkedin, environment: environment, grant: nil, browserRoot: root)
+    let file = environment.appendingPathComponent("chrome-session-import.json")
+    let stored = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: file))
+    #expect(stored["mac"].string?.isEmpty == false && stored["site"].string == "linkedin.com")
+    // A file written by hand (the agent's own user) has no signature and is refused, not silently ignored.
+    try Data(#"{"profile":"Default","site":"*"}"#.utf8).write(to: root.appendingPathComponent("chrome-session-import.json"))
+    #expect(throws: ChromeCookieError.unsignedPolicy) { try ChromeSessionImportPolicy.loadShared(browserRoot: root) }
+    // Editing the site of a signed file breaks the signature.
+    var edited = stored.object; edited["site"] = .string("google.com")
+    try JSONEncoder().encode(JSONValue.object(edited)).write(to: file)
+    #expect(throws: ChromeCookieError.unsignedPolicy) { try ChromeSessionImportPolicy.load(environment: environment) }
+    // A valid file copied into another folder (for example the app-wide root) does not carry over.
+    try ChromeSessionImportPolicy.save(linkedin, environment: environment, grant: nil, browserRoot: root)
+    try FileManager.default.copyItem(at: file, to: other.appendingPathComponent("chrome-session-import.json"))
+    #expect(throws: ChromeCookieError.unsignedPolicy) { try ChromeSessionImportPolicy.load(environment: other) }
+    try FileManager.default.removeItem(at: root.appendingPathComponent("chrome-session-import.json"))
+    try FileManager.default.copyItem(at: file, to: root.appendingPathComponent("chrome-session-import.json"))
+    #expect(throws: ChromeCookieError.unsignedPolicy) { try ChromeSessionImportPolicy.loadShared(browserRoot: root) }
+    #expect(throws: ChromeCookieError.unsignedPolicy) { try ChromeSessionImportPolicy.resolve(site: "linkedin.com", environment: other, browserRoot: root) }
+    #expect(try ChromeSessionImportPolicy.load(environment: environment) == linkedin)
+    #expect(!ChromeCookieError.unsignedPolicy.message(language: .russian).isEmpty && ChromeCookieError.unsignedPolicy.message(language: .russian) != ChromeCookieError.unsignedPolicy.message(language: .english))
+}
+
+@Test func existingConsentFilesAreSignedOnlyWhenTheKeyIsFirstCreated() throws {
+    let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let environment = root.appendingPathComponent("environments/" + UUID().uuidString.lowercased())
+    try FileManager.default.createDirectory(at: environment, withIntermediateDirectories: true)
+    try Data(#"{"profile":"Default","site":"*"}"#.utf8).write(to: root.appendingPathComponent("chrome-session-import.json"))
+    try Data(#"{"site":"linkedin.com","profile":"Default"}"#.utf8).write(to: environment.appendingPathComponent("chrome-session-import.json"))
+    try Data(#"{"site":"not a domain","profile":"Default"}"#.utf8).write(to: root.appendingPathComponent("environments/x.json"))
+    let key = try #require(PolicySigning.memoryKey)
+    // A key already exists: nothing is blessed.
+    #expect(try ChromeSessionImportPolicy.adoptExistingPolicies(browserRoot: root, existingKey: { key }, createKey: { key }).isEmpty)
+    #expect(throws: ChromeCookieError.unsignedPolicy) { try ChromeSessionImportPolicy.loadShared(browserRoot: root) }
+    // First creation: both existing files are signed in place.
+    var created = 0
+    let signed = try ChromeSessionImportPolicy.adoptExistingPolicies(browserRoot: root, existingKey: { nil }, createKey: { created += 1; return key })
+    #expect(created == 1 && Set(signed) == [root.path, environment.path])
+    #expect(try ChromeSessionImportPolicy.loadShared(browserRoot: root)?.coversAnySite == true)
+    #expect(try ChromeSessionImportPolicy.load(environment: environment)?.site == "linkedin.com")
+}
