@@ -805,8 +805,11 @@ struct ChatView: View {
                         .frame(height: min(max(composerHeight, 40), 220)).padding(.horizontal, 16).padding(.top, 14).accessibilityLabel(L10n.text("Сообщение", "Message"))
                 }
                 if !model.roleApproximations.isEmpty {
+                    // No vertical fixedSize here: during the window's minimum-size pass it wrapped the notice one
+                    // character per line, so both columns got a ~1500 pt minimum height and overflowed the window.
                     Text(model.roleApproximationNotice).font(.ui(.caption)).foregroundStyle(.secondary)
-                        .padding(.horizontal, 16).padding(.top, 6).fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16).padding(.top, 6)
                         .accessibilityLabel(model.roleApproximationNotice)
                 }
                 HStack(spacing: 2) {
