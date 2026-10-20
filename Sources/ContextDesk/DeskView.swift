@@ -663,7 +663,11 @@ private struct ChatFileDrop: DropDelegate {
     func validateDrop(info: DropInfo) -> Bool { enabled && info.hasItemsConforming(to: [.fileURL]) }
     func dropEntered(info: DropInfo) { targeted = true }
     func dropExited(info: DropInfo) { targeted = false }
-    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: enabled ? .copy : .forbidden) }
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        // Re-arm the highlight: the watchdog may have cleared it while the drag is still on.
+        if !targeted { targeted = true }
+        return DropProposal(operation: enabled ? .copy : .forbidden)
+    }
     func performDrop(info: DropInfo) -> Bool {
         targeted = false
         guard enabled else { return false }
@@ -689,6 +693,54 @@ private struct ChatFileDrop: DropDelegate {
     }
 }
 
+/// Clears a drop highlight that outlived its drag. AppKit skips `dropExited` and `performDrop` when the drag source
+/// cancels over the view (a screenshot thumbnail that is dismissed mid-drag), which left the overlay on the chat and
+/// the composer unreachable. The watchdog clears the highlight once the mouse button is up or the user acts again.
+@MainActor
+final class DropTargetWatchdog: ObservableObject {
+    private var monitor: Any?
+    private var poll: Task<Void, Never>?
+    /// `clear` runs once the drag ended without a drop callback; the caller hides the highlight and restores focus.
+    func start(clear: @escaping @MainActor () -> Void) {
+        stop()
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .scrollWheel]) { event in
+            Task { @MainActor in clear() }
+            return event
+        }
+        poll = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(400))
+                guard !Task.isCancelled else { return }
+                if NSEvent.pressedMouseButtons & 1 == 0 { clear(); return }
+            }
+        }
+    }
+    func stop() {
+        poll?.cancel(); poll = nil
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+    }
+}
+
+/// Runs the watchdog while the drop highlight is on; kept out of the chat body so the type checker stays fast.
+private struct DropTargetRecovery: ViewModifier {
+    @Binding var targeted: Bool
+    let watchdog: DropTargetWatchdog
+    let recovered: () -> Void
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: targeted) { _, on in
+                guard on else { watchdog.stop(); return }
+                watchdog.start {
+                    guard targeted else { return }
+                    targeted = false
+                    recovered()
+                }
+            }
+            .onDisappear { watchdog.stop() }
+    }
+}
+
 struct DeskButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.font(.ui(.callout).weight(.medium)).padding(.horizontal, .ui(14)).padding(.vertical, .ui(10))
@@ -706,6 +758,7 @@ struct ChatView: View {
     @State private var composerHeight: CGFloat = 22
     @State private var handoff: ContextHandoff?
     @State private var fileDropTargeted = false
+    @StateObject private var dropWatchdog = DropTargetWatchdog()
     /// Files opened from answers in the preview pane, with back/forward history.
     @StateObject private var preview = DocumentPreviewSession()
     /// Composer column: the transcript's readable text width (magnified with the interface zoom) plus the composer's side insets.
@@ -910,6 +963,7 @@ struct ChatView: View {
                     .padding(12).allowsHitTesting(false)
             }
         }
+        .modifier(DropTargetRecovery(targeted: $fileDropTargeted, watchdog: dropWatchdog) { model.focusComposer() })
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 if let chat = model.selectedChat {

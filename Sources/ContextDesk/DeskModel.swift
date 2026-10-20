@@ -621,6 +621,8 @@ private struct ChatRunState {
     @Published var documentExpanded = false
     /// Files dropped anywhere on the chat go into the draft as paths, then the editor takes focus.
     /// Temporary files (a screenshot thumbnail's) are copied first, because their source deletes them after the drop.
+    /// Returns keyboard focus to the composer, e.g. after a drag that ended without a drop.
+    func focusComposer() { composerFocusRequest = UUID() }
     func addDroppedFiles(_ urls: [URL]) {
         let updated = DroppedFiles.appending(DroppedFiles.preserving(urls, in: DroppedFiles.directory), to: draft)
         guard updated != draft else { return }
