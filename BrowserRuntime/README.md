@@ -346,7 +346,11 @@ session quits this chat's Chrome (one graceful close, confirmed by process exit)
 returns `browserQuit: quit, outcomeUnknown: true`, which retires the fence and makes
 `browser_open` available again. While another task of the chat still has a tab, that
 task closes its own tab first. Only a confirmed Chrome exit clears the failed state;
-an unconfirmed quit keeps it. No app restart is needed.
+an unconfirmed quit keeps it. No app restart is needed. The failed state belongs to
+the client, not to a tab: when `browser_open` itself failed, or the owned tab was
+already invalidated, the client owns no session and `browser_close` accepts any
+`session` value (an owned tab still requires its own token). Without a recorded
+Chrome there is nothing to quit and the call returns `browserQuit: none`.
 
 Русский: `browser_snapshot` по умолчанию использует `mode=read`: один DOM-запрос без
 ожидания стабильности DOM, обхода iframe и построения дерева доступности. `selector`

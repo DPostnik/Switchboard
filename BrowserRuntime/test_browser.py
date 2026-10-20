@@ -301,6 +301,38 @@ class BrowserTests(unittest.TestCase):
         record = json.loads((Path(self.directory.name) / 'records/owner.json').read_text())
         self.assertEqual((record['state'], record['outcomeUnknown']), ('closed', True))
 
+    def test_close_after_failure_without_owned_tab_accepts_any_session(self):
+        # browser_open itself ended with an unknown outcome: failed, no session, no checkpoint.
+        browser = Browser(Path(self.directory.name), rpc=Mock(side_effect=TimeoutError('lost reply')))
+        chrome = browser.chrome = Mock(owner={'pid': 123})
+        chrome.process_gone.return_value = False
+        with self.assertRaises(TimeoutError):
+            browser.open('https://example.test/')
+        self.assertTrue(browser.failed)
+        self.assertIsNone(browser.session)
+        with self.assertRaisesRegex(Rejected, 'any session value|любым значением session'):
+            browser.open('https://example.test/')
+        chrome.process_gone.side_effect = [False, True]
+        browser.stopped.wait = lambda seconds: False
+        result = dispatch(browser, 'browser_close', {'session': 'stale-token'})
+        self.assertEqual((result['closed'], result['browserQuit'], result['outcomeUnknown']), (True, 'quit', True))
+        chrome.graceful_close.assert_called_once_with({'pid': 123})
+        self.assertFalse(browser.failed)
+        self.assertIsNone(browser.chrome)
+        self.assertEqual(list(Path(self.directory.name).glob('records/*.json')), [])  # Nothing to record without a session.
+
+    def test_close_after_failure_without_chrome_clears_failed_state(self):
+        browser = Browser(Path(self.directory.name), rpc=Mock())
+        browser.failed = True
+        result = dispatch(browser, 'browser_close', {'session': 'any'})
+        self.assertEqual((result['closed'], result['browserQuit']), (True, 'none'))
+        self.assertFalse(browser.failed)
+        browser.injected.assert_not_called()
+        # An owned tab still requires its own token.
+        browser.failed, browser.session, browser.page = True, 'owner', 7
+        with self.assertRaisesRegex(Rejected, 'session_not_owned'):
+            dispatch(browser, 'browser_close', {'session': 'other'})
+
     def test_close_after_failure_keeps_failed_state_when_exit_is_unconfirmed(self):
         self.browser.failed = True
         chrome = self.browser.chrome = Mock(owner={'pid': 123})

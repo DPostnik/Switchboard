@@ -164,15 +164,23 @@ class Browser:
 
         The uncertain action stays recorded and is never replayed. Only a confirmed
         process exit clears the failed state; an unconfirmed quit keeps it.
+
+        The failed state belongs to this client, not to a tab: when browser_open itself
+        failed (or the owned tab was already invalidated) there is no session to own,
+        so any session value is accepted. Otherwise open and close would block each other.
         """
-        require(self.session and token == self.session, 'session_not_owned')
+        require(self.session is None or token == self.session, 'session_not_owned')
         require(not shared, tr(
             'Исход прошлой операции неизвестен, а в этом Chrome ещё работает другая задача этого чата. Дождись её browser_close, затем повтори browser_close.',
             'A previous operation has an unknown outcome and another task of this chat still works in this Chrome. Wait for its browser_close, then call browser_close again.'))
+        if self.checkpoint is None:
+            self.checkpoint = {'session': self.session, 'pageId': self.page}
         self.checkpoint.update(state='close_after_unknown_outcome', outcomeUnknown=True)
         self.persist()
         chrome = self.chrome
         owner = chrome.owner if chrome is not None else None
+        # Without a recorded Chrome no DevTools transport was ever established, so the
+        # failed call never reached a browser: there is nothing to quit.
         if owner is not None and not chrome.process_gone(owner):
             try:
                 chrome.graceful_close(owner)
@@ -194,7 +202,7 @@ class Browser:
         self.dialog = self.dialog_session = None
         self.drop_cdp()
         self.failed = False
-        return {'closed': True, 'browserQuit': 'quit', 'outcomeUnknown': True, 'note': tr(
+        return {'closed': True, 'browserQuit': 'quit' if owner is not None else 'none', 'outcomeUnknown': True, 'note': tr(
             'Chrome этого чата закрыт после операции с неизвестным исходом. Не считай её выполненной или невыполненной; открой новую задачу через browser_open и проверь состояние на сайте.',
             'This chat’s Chrome was quit after an operation with an unknown outcome. Do not assume it happened or did not happen; start a new task with browser_open and check the state on the site.')}
 
@@ -273,7 +281,10 @@ class Browser:
         self.retire_exited_browser()
         require(not self.failed, tr(
             'Исход прошлой операции неизвестен. Вызови browser_close для этой сессии: он закроет Chrome чата, после чего browser_open снова доступен.',
-            'A previous operation has an unknown outcome. Call browser_close for this session: it quits the chat’s Chrome, after which browser_open is available again.'))
+            'A previous operation has an unknown outcome. Call browser_close for this session: it quits the chat’s Chrome, after which browser_open is available again.')
+            if self.session else tr(
+            'Исход прошлой операции неизвестен, а вкладка этой задаче не принадлежит. Вызови browser_close с любым значением session: он закроет Chrome чата, после чего browser_open снова доступен.',
+            'A previous operation has an unknown outcome and this task owns no tab. Call browser_close with any session value: it quits the chat’s Chrome, after which browser_open is available again.'))
         if self.session:
             inventory = self.text(self.native('list_pages', {}))
             require('## Pages' in inventory, 'page_inventory_not_confirmed')

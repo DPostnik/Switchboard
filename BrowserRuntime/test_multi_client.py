@@ -344,7 +344,8 @@ class MultiClientTests(unittest.TestCase):
         recovered = self.call(a, 'browser_close', session=first['session'])
         self.assertFalse(recovered.get('isError'), recovered)
         recovered = json.loads(recovered['content'][0]['text'])
-        self.assertEqual((recovered['closed'], recovered['browserQuit'], recovered['outcomeUnknown']), (True, 'quit', True))
+        # The fake executor browser has no Chrome: nothing to quit, yet the fence retires.
+        self.assertEqual((recovered['closed'], recovered['browserQuit'], recovered['outcomeUnknown']), (True, 'none', True))
         self.assertFalse(fence.exists())
         self.assertEqual(sum(row['name'] == 'click' for row in self.trace()), 1)
         self.assertEqual(json.loads((self.root / 'records/action-lost-action.json').read_text())['state'], 'outcome_unknown')
