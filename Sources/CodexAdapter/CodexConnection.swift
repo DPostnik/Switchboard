@@ -55,6 +55,8 @@ import ContextCore
         for key in ["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE"] {
             environment.removeValue(forKey: key)
         }
+        // One app-server serves every Codex chat, so only the instance label applies (swept at quit and next launch).
+        environment.merge(ProcessLabels.environment()) { _, new in new }
         child.environment = environment
         child.currentDirectoryURL = home
         child.standardInput = stdin; child.standardOutput = stdout; child.standardError = stderr

@@ -14,6 +14,8 @@ actor ClaudeWire {
     private var buffer = Data()
     private var pending: [String: CheckedContinuation<JSONValue, any Error>] = [:]
     private var ended = false
+    /// Chat label of the launched process; its leftovers are swept when the stream closes.
+    private var chatLabel: String?
     init() { let stream = AsyncStream<JSONValue>.makeStream(); frames = stream.stream; sink = stream.continuation }
     func start(executable: URL, arguments: [String], environment: [String: String], cwd: URL) throws {
         let child = Process(), input = Pipe(), output = Pipe(), errors = Pipe()
@@ -25,9 +27,13 @@ actor ClaudeWire {
             if data.isEmpty { chunks.continuation.finish() } else { chunks.continuation.yield(data) }
         }
         errors.fileHandleForReading.readabilityHandler = { _ = $0.availableData }
+        let label = environment[ProcessLabels.chatKey]
+        if let label { ProcessSweeper.shared.begin(chat: label) }
         do { try child.run() } catch {
+            if let label { ProcessSweeper.shared.end(chat: label) }
             output.fileHandleForReading.readabilityHandler = nil; errors.fileHandleForReading.readabilityHandler = nil; throw error
         }
+        chatLabel = label
         process = child; stdin = input; stdout = output; stderr = errors
         reader = Task { [weak self] in
             for await data in chunks.stream { await self?.ingest(data) }
@@ -81,6 +87,7 @@ actor ClaudeWire {
         stdout?.fileHandleForReading.readabilityHandler = nil; stderr?.fileHandleForReading.readabilityHandler = nil
         try? stdin?.fileHandleForWriting.close()
         sink.yield(.object(["type": .string("transport_closed")])); sink.finish()
+        if let chatLabel { ProcessSweeper.shared.end(chat: chatLabel); self.chatLabel = nil }
     }
     private static var closedError: ClientFailure {
         ClientFailure(L10n.text("Соединение Claude закрыто. Запрос не повторён.", "Claude connection closed. The request was not retried."))
@@ -93,6 +100,8 @@ enum ClaudeProfile {
         for key in ["HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL"] { result[key] = ProcessInfo.processInfo.environment[key] }
         result["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         result["CLAUDE_CONFIG_DIR"] = home.path; result["DISABLE_AUTOUPDATER"] = "1"
+        // Instance label for the orphan sweeper; chat launches add the chat label on top.
+        result.merge(ProcessLabels.environment()) { _, new in new }
         return result
     }
     /// The profile's CLAUDE.md with the user's global rules (often a symlink to ~/.claude/CLAUDE.md).

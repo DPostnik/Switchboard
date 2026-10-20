@@ -289,6 +289,8 @@ public actor ClaudeIntegration: AgentIntegration {
                                                    projectAgents: ProjectAgents.argument(projectPath: record.cwd), browserServer: server,
                                                    home: home, userChrome: userChrome)
                 var environment = ClaudeProfile.environment(home: home).merging(Self.sessionEnvironment) { _, new in new }
+                // Every descendant of this CLI (also after `setsid`) carries the chat label for the orphan sweeper.
+                environment.merge(ProcessLabels.environment(chat: id)) { _, new in new }
                 // Same startup/tool limits as the Codex MCP entry (30 s / 90 s).
                 if server != nil || policy.connectors { environment.merge(Self.browserEnvironment) { _, new in new } }
                 if policy.connectors { environment.merge(Self.connectorEnvironment) { _, new in new } }

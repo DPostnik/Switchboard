@@ -37,6 +37,8 @@ private struct ChatRunState {
 
 @MainActor final class DeskModel: ObservableObject {
     let mobileRemote = MobileRemoteHost()
+    /// Stops processes that chats leave behind (labelled through the launch environment).
+    let orphanProcesses = OrphanProcessController()
     private var remoteDeliveryResults: [String: Bool] = [:]
     private var configuringRemoteChats: Set<String> = []
     /// Chat ID -> last stored messages sent to the phone, keyed by store revision and native session.
@@ -266,6 +268,7 @@ private struct ChatRunState {
             }
         }
         step("state"); startBrowserActivityMonitor()
+        orphanProcesses.start()
         await restoreSummaryQueue(); step("summary queue")
         for chat in state.chats where chat.hasUnreadResponse {
             let project = state.projects.first { $0.id == chat.projectID }
@@ -1702,6 +1705,7 @@ private struct ChatRunState {
         step("Claude connection"); await claudeConnection.stop()
         claudeEventTask?.cancel()
         step("plugins"); await stopPlugins()
+        step("orphan processes"); await orphanProcesses.shutdown()
         step("done")
     }
     func saveAgentChoice() { persist() }

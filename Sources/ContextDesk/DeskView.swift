@@ -1173,6 +1173,7 @@ struct SettingsView: View {
                 Button(L10n.text("Разрешить уведомления", "Allow notifications")) { Task { await model.enableNotifications() } }
             }
             KeepAwakeSettings(controller: keepAwake)
+            OrphanProcessSettings(controller: model.orphanProcesses)
             NotchIslandSettings()
         }.formStyle(.grouped)
     }

@@ -142,6 +142,7 @@ public actor ProviderPluginRuntime {
         for key in ["LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR", "TMPDIR"] {
             if let value = ProcessInfo.processInfo.environment[key] { env[key] = value }
         }
+        env.merge(ProcessLabels.environment()) { _, new in new }
         child.environment = env
         child.currentDirectoryURL = plugin.directory
         child.standardInput = FileHandle.nullDevice

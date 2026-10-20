@@ -117,7 +117,7 @@ public actor ClaudeJobRunner: AgentScheduledExecutor {
         if let process, process.isRunning { process.terminate() }
     }
     private func capture(executable: URL, arguments: [String], cwd: URL, prompt: String, timeout: TimeInterval, execution: Bool = false,
-                         extraEnvironment: [String: String] = [:]) async throws -> (Int32, Data) {
+                         extraEnvironment: [String: String] = [:], runID: UUID = UUID()) async throws -> (Int32, Data) {
         guard !stopped else { throw CancellationError() }
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("contextdesk-job-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -133,9 +133,14 @@ public actor ClaudeJobRunner: AgentScheduledExecutor {
         // Running Switchboard from an agent must not mark this independent print session as nested.
         environment.removeValue(forKey: "CLAUDECODE")
         environment["PATH"] = [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin").path, "/opt/homebrew/bin", "/usr/local/bin", environment["PATH"] ?? "/usr/bin:/bin"].joined(separator: ":")
+        // Orphan sweeper labels: the run's processes are tracked while the CLI runs and swept when it ends.
+        let label = execution ? "scheduled-" + runID.uuidString.lowercased() : nil
+        environment.merge(ProcessLabels.environment(chat: label)) { _, new in new }
         environment.merge(extraEnvironment) { _, new in new }
         child.environment = environment
         child.standardInput = stdin; child.standardOutput = stdout; child.standardError = stderr
+        if let label { ProcessSweeper.shared.begin(chat: label) }
+        defer { if let label { ProcessSweeper.shared.end(chat: label) } }
         try child.run(); process = child
         if execution { dispatched = true }
         let deadline = Date().addingTimeInterval(timeout)
@@ -191,7 +196,7 @@ public actor ClaudeJobRunner: AgentScheduledExecutor {
         // Same startup/tool limits as the Codex MCP entry (30 s / 90 s).
         let mcpEnvironment = lease == nil ? [:] : ["MCP_TIMEOUT": "30000", "MCP_TOOL_TIMEOUT": "90000"]
         let (code, bytes) = try await capture(executable: executable, arguments: arguments, cwd: cwd, prompt: prompt, timeout: 3600,
-                                              execution: true, extraEnvironment: mcpEnvironment)
+                                              execution: true, extraEnvironment: mcpEnvironment, runID: runID)
         let value = try JSONDecoder().decode(JSONValue.self, from: bytes)
         guard value["type"].string == "result", value["is_error"].bool != nil, var text = value["result"].string ?? value["errors"].array.first?.string else {
             throw ClientFailure(L10n.text("Claude Code не вернул распознаваемый результат.", "Claude Code returned no recognized result."))
