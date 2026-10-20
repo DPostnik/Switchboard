@@ -333,6 +333,21 @@ full upstream accessibility snapshot, including frames, and may still be slow.
 There is no automatic fallback or retry between the modes. The transport deadline,
 session ownership, serialization and unknown-outcome fence remain in force.
 
+Unknown outcomes and recovery (2026-10-20). A lost CDP reply for one `browser_eval`
+or `browser_input` call (for example an awaited promise that outlives the eval
+`timeout`; Chrome awaits REPL-mode promises regardless of the CDP timeout) marks
+only that action `outcome_unknown` and reports `outcomeUnknown: true`. The tab stays
+usable: the agent must observe it with `browser_read` or `browser_screenshot` before
+acting again; the action ID is never replayed. A lost upstream MCP reply, an
+unconfirmed close or an uncertain import still put the executor browser into the
+failed state and leave the durable fence. The MCP front end no longer refuses every
+later call: `browser_status` reports the state, and `browser_close` on the failed
+session quits this chat's Chrome (one graceful close, confirmed by process exit) and
+returns `browserQuit: quit, outcomeUnknown: true`, which retires the fence and makes
+`browser_open` available again. While another task of the chat still has a tab, that
+task closes its own tab first. Only a confirmed Chrome exit clears the failed state;
+an unconfirmed quit keeps it. No app restart is needed.
+
 Русский: `browser_snapshot` по умолчанию использует `mode=read`: один DOM-запрос без
 ожидания стабильности DOM, обхода iframe и построения дерева доступности. `selector`
 позволяет прочитать отдельную часть профиля. Ограничения: 4 000 узлов, 24 000 символов

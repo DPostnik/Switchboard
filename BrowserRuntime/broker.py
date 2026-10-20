@@ -157,7 +157,9 @@ class RemoteBrowser:
 
     def call(self, name, arguments):
         from server import Rejected, require
-        require(not self.terminal and not self.stopped.is_set(), 'executor_stopped_outcome_may_be_unknown')
+        # The executor keeps the authoritative failed state and decides per tool
+        # (browser_close and browser_open can recover); only a lost wire stops this client.
+        require(not self.stopped.is_set(), 'executor_stopped_outcome_may_be_unknown')
         if self.wire is None:
             self.connect()
         self.counter += 1
@@ -353,27 +355,37 @@ class Executor:
                         continue
                     from profiles import validate
                     validate(self.root, client.profile_lease, browser.workspace, language=client.language)
-                    server.require(not self.quarantine(), server.tr(
-                        'Исход прошлой операции неизвестен. Действия остановлены без повтора. После проверки результата закрой выделенный Chrome; затем начни новую сессию.',
-                        'A previous operation has an unknown outcome. Actions are stopped without replay. After reviewing the result, close the dedicated Chrome, then start a new session.'))
-                    server.save(self.fence, {'client': id(client), 'request': message['id'],
-                        'tool': message.get('name'), 'state': 'outcome_unknown'})
+                    name = message.get('name')
+                    browser.uncertain = False
+                    was_failed = browser.failed
+                    shared = False
+                    if name == 'browser_close':
+                        with self.clients_lock:
+                            shared = any(c is not client and c.browser.session for c in self.clients)
+                    # browser_close passes an existing fence: a live task closes its own tab, and the
+                    # client whose action left the fence quits Chrome, which is what retires it.
+                    fenced = name == 'browser_close' and self.fence.exists()
+                    if not fenced:
+                        server.require(not self.quarantine(), server.tr(
+                            'Исход прошлой операции неизвестен. Действия остановлены без повтора. Вызови browser_close для своей сессии (закроет Chrome чата) или закрой выделенный Chrome; затем начни новую сессию.',
+                            'A previous operation has an unknown outcome. Actions are stopped without replay. Call browser_close for your session (it quits the chat’s Chrome) or close the dedicated Chrome, then start a new session.'))
+                        server.save(self.fence, {'client': id(client), 'request': message['id'],
+                            'tool': name, 'state': 'outcome_unknown'})
                     try:
-                        result = server.dispatch(browser, message.get('name'), message.get('arguments'))
+                        result = server.dispatch(browser, name, message.get('arguments'), shared=shared)
                         browser.persist()
-                        if message.get('name') == 'browser_close':
-                            with self.clients_lock:
-                                shared = any(c is not client and c.browser.session for c in self.clients)
+                        if name == 'browser_close' and 'browserQuit' not in result:
                             # Another task of this chat still works in the same Chrome: keep it.
                             result['browserQuit'] = 'kept' if shared else browser.quit_idle_chrome()
                             if result['browserQuit'] == 'kept':
                                 result.update(browser.kept_reason(other_task=shared))
                         response['result'] = result
                     finally:
-                        if not browser.failed:
+                        if not browser.failed and (not fenced or was_failed):
                             self.fence.unlink(missing_ok=True)
             except Exception as error:
-                response.update(error=str(error)[:2000], failed=browser.failed, outcomeUnknown=browser.failed or self.fence.exists())
+                response.update(error=str(error)[:2000], failed=browser.failed,
+                                outcomeUnknown=browser.failed or browser.uncertain or self.fence.exists())
             finally:
                 with client.lock:
                     client.pending = False

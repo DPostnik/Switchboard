@@ -317,6 +317,41 @@ class MultiClientTests(unittest.TestCase):
         record = json.loads((self.root / 'records/action-uncertain-action.json').read_text())
         self.assertEqual(record['state'], 'outcome_unknown')
 
+    def test_browser_close_recovers_from_unknown_action_without_restart(self):
+        self.start_executor()
+        a, b = self.client(), self.client()
+        first, second = self.opened(a), self.opened(b)
+        failed = self.call(a, 'browser_action', session=first['session'], actionID='lost-action',
+                           expectedURL='https://example.test/', name='click', arguments={'uid': '1_1'})
+        self.assertTrue(failed['isError'])
+        fence = self.root / 'executor-in-flight.json'
+        self.assertTrue(fence.exists())
+        # The chat is fenced, but the front end is not dead: status and close still reach the executor.
+        self.assertTrue(self.call(b, 'browser_snapshot', session=second['session'])['isError'])
+        self.assertTrue(self.call(a, 'browser_open', url='https://example.test/')['isError'])
+        status = self.call(a, 'browser_status', session=first['session'])
+        self.assertTrue(status['isError'])
+        self.assertNotIn('executor_stopped', status['content'][0]['text'])
+        # Another task still works in this Chrome: the failed task cannot quit it yet.
+        kept = self.call(a, 'browser_close', session=first['session'])
+        self.assertTrue(kept['isError'])
+        self.assertIn('another task', kept['content'][0]['text'])
+        self.assertTrue(fence.exists())
+        # The other task closes its own tab (its own Chrome, no replay), then the failed one quits Chrome.
+        closed = json.loads(self.call(b, 'browser_close', session=second['session'])['content'][0]['text'])
+        self.assertEqual((closed['closed'], closed['browserQuit']), (True, 'kept'))
+        self.assertTrue(fence.exists())
+        recovered = self.call(a, 'browser_close', session=first['session'])
+        self.assertFalse(recovered.get('isError'), recovered)
+        recovered = json.loads(recovered['content'][0]['text'])
+        self.assertEqual((recovered['closed'], recovered['browserQuit'], recovered['outcomeUnknown']), (True, 'quit', True))
+        self.assertFalse(fence.exists())
+        self.assertEqual(sum(row['name'] == 'click' for row in self.trace()), 1)
+        self.assertEqual(json.loads((self.root / 'records/action-lost-action.json').read_text())['state'], 'outcome_unknown')
+        self.opened(a)
+        self.opened(b)
+        self.assertEqual(sum(r['name'] == 'new_page' and r['phase'] == 'start' for r in self.trace()), 4)
+
     def disconnect_in_flight(self, cancel=False, crash=False):
         self.start_executor()
         a, b = self.client(), self.client()

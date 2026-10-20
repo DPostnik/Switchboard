@@ -264,13 +264,58 @@ class BrowserTests(unittest.TestCase):
             self.browser.open('https://example.test/')
         self.assertEqual(self.browser.session, 'owner')
 
-    def test_ambiguous_failure_cannot_be_cleared_by_open(self):
+    def test_ambiguous_failure_is_cleared_only_by_confirmed_chrome_exit(self):
         self.browser.failed = True
-        self.browser.chrome = Mock()
-        with self.assertRaises(Rejected):
+        self.browser.session = None
+        self.browser.chrome = Mock(owner={'pid': 123})
+        self.browser.chrome.process_gone.return_value = False
+        with self.assertRaisesRegex(Rejected, 'browser_close'):
             self.browser.open('https://example.test/')
-        self.browser.chrome.process_gone.assert_not_called()
+        self.assertTrue(self.browser.failed)
         self.assertEqual(self.calls, [])
+        # Chrome exited (user Cmd+Q or browser_close): a new session may start.
+        self.browser.chrome.process_gone.return_value = True
+        self.browser.injected = lambda name, args: {'content': [{'type': 'text', 'text': '9: ' + args['url'] if name == 'new_page' else 'ok'}]} if name != 'evaluate_script' else envelope({'url': 'https://example.test/', 'readyState': 'complete'})
+        self.assertEqual(self.browser.open('https://example.test/')['pageId'], 9)
+        self.assertFalse(self.browser.failed)
+
+    def test_close_after_failure_quits_chrome_once_and_reenables_open(self):
+        self.browser.failed = True
+        self.browser.checkpoint = {'state': 'navigated', 'url': 'https://example.test/'}
+        chrome = self.browser.chrome = Mock(owner={'pid': 123})
+        chrome.process_gone.side_effect = [False, False, True]
+        self.browser.stopped.wait = lambda seconds: False
+        with self.assertRaises(Rejected):
+            server.dispatch(self.browser, 'browser_close', {'session': 'other'})
+        with self.assertRaisesRegex(Rejected, 'другая задача|another task'):
+            server.dispatch(self.browser, 'browser_close', {'session': 'owner'}, shared=True)
+        chrome.graceful_close.assert_not_called()
+        self.assertTrue(self.browser.failed)
+        result = server.dispatch(self.browser, 'browser_close', {'session': 'owner'})
+        self.assertEqual((result['closed'], result['browserQuit'], result['outcomeUnknown']), (True, 'quit', True))
+        chrome.graceful_close.assert_called_once_with({'pid': 123})
+        self.assertFalse(self.browser.failed)
+        self.assertIsNone(self.browser.session)
+        self.assertIsNone(self.browser.chrome)
+        self.assertEqual(self.calls, [])  # No upstream tool call on a browser whose state is unknown.
+        record = json.loads((Path(self.directory.name) / 'records/owner.json').read_text())
+        self.assertEqual((record['state'], record['outcomeUnknown']), ('closed', True))
+
+    def test_close_after_failure_keeps_failed_state_when_exit_is_unconfirmed(self):
+        self.browser.failed = True
+        chrome = self.browser.chrome = Mock(owner={'pid': 123})
+        chrome.process_gone.return_value = False
+        self.browser.stopped.wait = lambda seconds: False
+        with self.assertRaises(Rejected):
+            self.browser.close_after_failure('owner', seconds=0.2)
+        chrome.graceful_close.assert_called_once()
+        self.assertTrue(self.browser.failed)
+        self.assertEqual(self.browser.session, 'owner')
+        chrome.graceful_close.side_effect = OSError('refused')
+        chrome.graceful_close.reset_mock()
+        with self.assertRaisesRegex(Rejected, 'refused'):
+            self.browser.close_after_failure('owner', seconds=0.2)
+        self.assertTrue(self.browser.failed)
 
     def observation(self, cards, **extra):
         return {'url': 'https://example.test/', 'cards': cards, 'placeholders': len(cards),

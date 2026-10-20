@@ -209,18 +209,23 @@ class BrowserInputTests(unittest.TestCase):
         with self.assertRaises(Rejected):
             self.browser.input('owner', 'key', expected_url='https://example.test/', key='nope+x')
 
-    def test_lost_dispatch_stops_without_replay(self):
+    def test_lost_dispatch_records_unknown_outcome_without_replay_and_keeps_tab_usable(self):
         self.browser.screenshot('owner')
         self.page.fail_on = 'Input.dispatchMouseEvent'
         with self.assertRaises(Rejected) as raised:
             self.browser.input('owner', 'click', 'click-000002', 'https://example.test/', x=1, y=1)
         self.assertIn('no_replay', str(raised.exception))
-        self.assertTrue(self.browser.failed)
+        self.assertIn('browser_read', str(raised.exception))
+        # The action is unknown, the browser is not: no app restart is needed to observe the page.
+        self.assertTrue(self.browser.uncertain)
+        self.assertFalse(self.browser.failed)
         record = json.loads((Path(self.directory.name) / 'records/action-click-000002.json').read_text())
         self.assertEqual(record['state'], 'outcome_unknown')
         self.assertEqual(len([m for m, _ in self.page.sent if m.startswith('Input.')]), 1)
         with self.assertRaises(Rejected):
-            self.browser.input('owner', 'hover', x=1, y=1)
+            self.browser.input('owner', 'click', 'click-000002', 'https://example.test/', x=1, y=1)
+        self.assertEqual(len([m for m, _ in self.page.sent if m.startswith('Input.')]), 1)
+        self.assertEqual(self.browser.screenshot('owner')['width'], 640)
 
     def test_wait_and_screenshot_flag(self):
         result = self.browser.input('owner', 'wait', seconds=1, screenshot=True)
@@ -611,10 +616,29 @@ class StageFourTests(unittest.TestCase):
         for bad in ({'expected_url': None}, {'expected_url': 'https://other.test/'}, {'timeout': 60}):
             with self.assertRaises(Rejected):
                 self.browser.evaluate_js('owner', '1+1', **{'expected_url': self.url, **bad})
-        self.page.fail_on = 'Runtime.evaluate'
-        self.page.send = original
-        with self.assertRaises(Rejected):
-            self.browser.evaluate_js('owner', '2+2', self.url)
+        # A lost reply (an awaited promise outliving the deadline) is unknown for that
+        # script only; the tab stays readable and nothing is replayed.
+        failures = {'2+2': cdp.CDPTransportError('cdp_deadline_outcome_may_be_unknown'),
+                    'while(true){}': cdp.CDPError('Internal error')}
+
+        def failing(method, params=None, seconds=None, interrupt=None, session=None):
+            if method == 'Runtime.evaluate' and params['expression'] in failures:
+                self.page.sent.append((method, params))
+                raise failures[params['expression']]
+            return original(method, params, seconds, interrupt, session)
+        self.page.send = failing
+        with self.assertRaisesRegex(Rejected, 'eval_outcome_unknown_no_replay'):
+            self.browser.evaluate_js('owner', '2+2', self.url, 'eval-00002')
+        self.assertTrue(self.browser.uncertain)
+        self.assertFalse(self.browser.failed)
+        self.assertEqual(json.loads((Path(self.directory.name) / 'records/action-eval-00002.json').read_text())['state'], 'outcome_unknown')
+        self.assertEqual(self.browser.screenshot('owner')['width'], 640)
+        # Chrome's own error reply (a synchronous loop stopped by timeout) is a determinate failure.
+        self.browser.uncertain = False
+        with self.assertRaisesRegex(Rejected, 'eval_error'):
+            self.browser.evaluate_js('owner', 'while(true){}', self.url, 'eval-00003')
+        self.assertFalse(self.browser.uncertain or self.browser.failed)
+        self.assertEqual(json.loads((Path(self.directory.name) / 'records/action-eval-00003.json').read_text())['state'], 'failed')
 
     def test_logs_use_devtools_collection(self):
         result = self.browser.logs('owner', 'console', 20, 1, True)
