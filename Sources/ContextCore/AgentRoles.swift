@@ -26,7 +26,7 @@ public struct AgentRole: Codable, Hashable, Identifiable, Sendable {
     /// Roles ordered by reach; a phone or a scheduled job can never select one above the project default.
     public var rank: Int { AgentRoleID.order.firstIndex(of: id) ?? AgentRoleID.order.count }
 
-    /// The profile for one project: extra roots and cookie sites come from the project, never from the agent.
+    /// The profile for one project: extra roots, cookie sites and approved MCP servers come from the project, never from the agent.
     public func profile(for project: Project) -> AgentPermissionProfile {
         var result = profile
         if case .project = result.filesystem {
@@ -36,6 +36,7 @@ public struct AgentRole: Codable, Hashable, Identifiable, Sendable {
         if case .sites = result.cookieImport {
             result.cookieImport = .sites((project.cookieSites ?? []).map { $0.lowercased() })
         }
+        result.mcpServers = project.mcpServers.flatMap { $0.isEmpty ? nil : $0 }
         return result
     }
 }

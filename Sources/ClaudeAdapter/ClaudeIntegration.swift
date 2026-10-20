@@ -242,9 +242,12 @@ public actor ClaudeIntegration: AgentIntegration {
             sessions[id]?.access = expectedAccess; sessions[id]?.profile = profile
             let scheduled = request.kind == .scheduled
             let policy = ClaudeLaunchPolicy(profile, scheduled: scheduled, userChromeEnabled: userChrome)
+            // Read at every turn: an edited `.mcp.json` entry no longer matches its approval and changes the launch.
+            let projectServers = ProjectMCPServers.approved(projectPath: record.cwd, approvals: profile.mcpServers)
             let launch = try Self.arguments(id: id, resumed: true, permissions: profile, model: request.model.model, effort: request.model.effort,
                                             scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
-                                            projectAgents: ProjectAgents.argument(projectPath: record.cwd), home: home, userChrome: userChrome)
+                                            projectAgents: ProjectAgents.argument(projectPath: record.cwd), projectServers: projectServers,
+                                            home: home, userChrome: userChrome)
             // A scheduled turn's CLI still running background tasks (sub-agents) takes the user's message instead of
             // restarting, which would end them: the attended approval rules are applied to the live process first.
             // `--chrome` cannot be added live, so that CLI stays without the user's Chrome until it is replaced.
@@ -253,7 +256,8 @@ public actor ClaudeIntegration: AgentIntegration {
                 func variant(scheduled: Bool, userChrome: Bool) throws -> [String] {
                     try Self.arguments(id: id, resumed: true, permissions: profile, model: request.model.model, effort: request.model.effort,
                                        scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
-                                       projectAgents: ProjectAgents.argument(projectPath: record.cwd), home: home, userChrome: userChrome)
+                                       projectAgents: ProjectAgents.argument(projectPath: record.cwd), projectServers: projectServers,
+                                       home: home, userChrome: userChrome)
                 }
                 let live = try variant(scheduled: false, userChrome: false)
                 if scheduledWires.contains(id), wireArguments[id] == (try variant(scheduled: true, userChrome: userChrome)) {
@@ -287,12 +291,12 @@ public actor ClaudeIntegration: AgentIntegration {
                                                    model: request.model.model, effort: request.model.effort, scheduled: scheduled,
                                                    projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                                    projectAgents: ProjectAgents.argument(projectPath: record.cwd), browserServer: server,
-                                                   home: home, userChrome: userChrome)
+                                                   projectServers: projectServers, home: home, userChrome: userChrome)
                 var environment = ClaudeProfile.environment(home: home).merging(Self.sessionEnvironment) { _, new in new }
                 // Every descendant of this CLI (also after `setsid`) carries the chat label for the orphan sweeper.
                 environment.merge(ProcessLabels.environment(chat: id)) { _, new in new }
                 // Same startup/tool limits as the Codex MCP entry (30 s / 90 s).
-                if server != nil || policy.connectors { environment.merge(Self.browserEnvironment) { _, new in new } }
+                if server != nil || policy.connectors || !projectServers.isEmpty { environment.merge(Self.browserEnvironment) { _, new in new } }
                 if policy.connectors { environment.merge(Self.connectorEnvironment) { _, new in new } }
                 try await wire.start(executable: executable, arguments: arguments, environment: environment, cwd: URL(fileURLWithPath: record.cwd))
                 wires[id] = wire; wireArguments[id] = launch; backgroundTasks[id] = []; stopWaiting(id)
@@ -327,7 +331,7 @@ public actor ClaudeIntegration: AgentIntegration {
     }
     /// Asks the CLI for `tool_use_summary` progress lines (a small extra model call per tool batch).
     static let sessionEnvironment = ["CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES": "1"]
-    /// `--safe-mode` would also drop `--mcp-config` servers, so browser chats spell out its isolation instead.
+    /// `--safe-mode` would also drop `--mcp-config` servers, so browser chats and chats with project servers spell out its isolation instead.
     static let browserEnvironment = ["MCP_TIMEOUT": "30000", "MCP_TOOL_TIMEOUT": "90000", "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1"]
     /// Full-access chats wait for claude.ai connectors so the first turn already has them.
     static let connectorEnvironment = ["MCP_CONNECTION_NONBLOCKING": "false"]
@@ -357,7 +361,7 @@ public actor ClaudeIntegration: AgentIntegration {
     /// Flags for one launch. A scheduled turn runs unattended, so connector actions are never held for approval.
     static func arguments(id: String, resumed: Bool, permissions requested: AgentPermissionProfile, model: String, effort: String?, scheduled: Bool = false,
                           projectInstructions: String? = nil, projectAgents: String? = nil, browserServer: [String]? = nil,
-                          home: URL? = nil, userChrome: Bool = false) throws -> [String] {
+                          projectServers: [String: JSONValue] = [:], home: URL? = nil, userChrome: Bool = false) throws -> [String] {
         let policy = ClaudeLaunchPolicy(requested, scheduled: scheduled, userChromeEnabled: userChrome)
         // Only roles with connectors load the account's claude.ai connectors such as Gmail.
         let connectors = policy.connectors
@@ -365,9 +369,11 @@ public actor ClaudeIntegration: AgentIntegration {
         var args = ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
                     "--permission-prompt-tool", "stdio", "--setting-sources", ""]
         if !connectors { args.append("--strict-mcp-config") }
-        if let browserServer, policy.profile.browser != .off {
-            // Only the app's browser server; its tools run without a prompt, like scheduled runs.
-            args += ["--disable-slash-commands"] + (try ClaudeJobRunner.browserArguments(browserServer))
+        let browser = policy.profile.browser != .off ? browserServer : nil
+        if browser != nil || !projectServers.isEmpty {
+            // The app's browser server (its tools run without a prompt, like scheduled runs) and the project's approved servers.
+            // `--disable-slash-commands` turns off skills only; the servers' prompts stay available as `/mcp__<server>__<prompt>`.
+            args += ["--disable-slash-commands"] + (try ClaudeJobRunner.mcpArguments(browser: browser, project: projectServers))
         } else if connectors {
             // `--safe-mode` would also drop claude.ai connectors, so its isolation is spelled out as in browser chats.
             args += ["--disable-slash-commands", "--mcp-config", "{\"mcpServers\":{}}"]
@@ -696,6 +702,8 @@ public actor ClaudeIntegration: AgentIntegration {
         case "AskUserQuestion": break
         default:
             if name.hasPrefix("mcp__switchboard_browser__") || name.hasPrefix("mcp__claude-in-chrome__") { await allow(); return }
+            // The user approved this project server in the project's permissions; its tools run without a prompt.
+            if policy.projectServer(of: name) != nil { await allow(); return }
             if name.hasPrefix(Self.connectorToolPrefix) {
                 let write = capability == .connectorWrite
                 switch profile.connectors {

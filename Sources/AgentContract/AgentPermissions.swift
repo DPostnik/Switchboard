@@ -55,6 +55,8 @@ public struct AgentPermissionProfile: Codable, Hashable, Sendable {
     public var scratch: String?
     /// Audit mode: the engine runs with unrestricted permissions while every action outside the role is recorded as "would deny".
     public var audit: Bool
+    /// Project MCP servers the user approved for this project: server name -> fingerprint of its approved `.mcp.json` entry.
+    public var mcpServers: [String: String]?
 
     public init(filesystem: Filesystem, network: Bool, webSearch: Bool, shell: Shell, projectWrites: ProjectWrites = .ask,
                 browser: Browser, connectors: Connectors, cookieImport: CookieImport = .none, approvals: Approvals,
@@ -77,7 +79,11 @@ public struct AgentPermissionProfile: Codable, Hashable, Sendable {
 
     public var isUnrestricted: Bool { filesystem == .unrestricted && approvals == .never }
     /// The profile the engine actually runs with: audit mode runs unrestricted while the role is only recorded.
-    public var effective: Self { audit ? Self.unrestricted : self }
+    public var effective: Self {
+        guard audit else { return self }
+        var result = Self.unrestricted; result.mcpServers = mcpServers
+        return result
+    }
     public var extraRoots: [Root] { if case .project(let roots) = filesystem { return roots }; return [] }
 }
 

@@ -73,13 +73,19 @@ public actor ClaudeJobRunner: AgentScheduledExecutor {
             + (ClaudeEffort.accepted(effort).map { ["--effort", $0.rawValue] } ?? [])
     }
     /// Argv after the base print flags. Variadic CLI options are each followed by another flag or end of argv.
-    public static func browserArguments(_ server: [String]) throws -> [String] {
-        let config: JSONValue = .object(["mcpServers": .object(["switchboard_browser": .object([
-            "type": .string("stdio"), "command": .string("/usr/bin/python3"), "args": .array(server.map(JSONValue.string))
-        ])])])
+    public static func browserArguments(_ server: [String]) throws -> [String] { try mcpArguments(browser: server) }
+    /// One `--mcp-config` with the app's browser server (when given) and the project's approved servers.
+    /// Only the browser's tools are pre-allowed; project tools go through the app's `can_use_tool` answers.
+    static func mcpArguments(browser server: [String]?, project: [String: JSONValue] = [:]) throws -> [String] {
+        var servers = project
+        if let server {
+            servers["switchboard_browser"] = .object([
+                "type": .string("stdio"), "command": .string("/usr/bin/python3"), "args": .array(server.map(JSONValue.string))
+            ])
+        }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.withoutEscapingSlashes, .sortedKeys]
-        return ["--mcp-config", String(decoding: try encoder.encode(config), as: UTF8.self),
-                "--allowedTools", "mcp__switchboard_browser"]
+        return ["--mcp-config", String(decoding: try encoder.encode(JSONValue.object(["mcpServers": .object(servers)])), as: UTF8.self)]
+            + (server == nil ? [] : ["--allowedTools", "mcp__switchboard_browser"])
     }
     private struct Lease { let session: AgentSessionReference; let grant: BrowserProfileGrant; let browser: Browser }
     /// Reserve, acknowledge and (optionally) authorize a fresh profile before dispatch. Nothing launches Chrome here.

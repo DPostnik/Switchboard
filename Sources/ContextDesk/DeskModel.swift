@@ -1012,7 +1012,8 @@ private struct ChatRunState {
     }
     func selectAccessMode(_ mode: AccessMode?) { selectRole(mode?.legacyRoleID) }
     /// Project defaults for chats and jobs plus the declared extra roots; the agent never changes these.
-    func updateProjectRoles(_ id: UUID, chatRole: String?, jobRole: String?, extraRoots: [AgentPermissionProfile.Root]?, cookieSites: [String]?) {
+    func updateProjectRoles(_ id: UUID, chatRole: String?, jobRole: String?, extraRoots: [AgentPermissionProfile.Root]?, cookieSites: [String]?,
+                            mcpServers: [String: String]? = nil) {
         guard let index = state.projects.firstIndex(where: { $0.id == id }) else { return }
         if let chatRole, let role = roleCatalog.role(chatRole) {
             state.projects[index].chatRoleID = chatRole; state.projects[index].defaultChatAccessMode = role.legacyAccessMode
@@ -1022,6 +1023,7 @@ private struct ChatRunState {
         }
         if let extraRoots { state.projects[index].extraRoots = extraRoots.filter { $0.path.hasPrefix("/") } }
         if let cookieSites { state.projects[index].cookieSites = cookieSites.map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty } }
+        if let mcpServers { state.projects[index].mcpServers = mcpServers.isEmpty ? nil : mcpServers }
         persist()
     }
     var queuedMessages: [QueuedMessage] { state.queuedMessages ?? [] }

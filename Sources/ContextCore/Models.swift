@@ -15,6 +15,8 @@ public struct Project: Identifiable, Codable, Hashable, Sendable {
     public var extraRoots: [AgentPermissionProfile.Root]?
     /// Sites a `routine-operator` job may import Chrome cookies for.
     public var cookieSites: [String]?
+    /// Approved servers from the project's `.mcp.json`: name -> fingerprint of the approved entry (`ProjectMCPServers`).
+    public var mcpServers: [String: String]?
     /// Sidebar visibility only; chats, permissions and scheduled work are retained.
     public var hidden: Bool?
     public var isHidden: Bool { hidden == true }

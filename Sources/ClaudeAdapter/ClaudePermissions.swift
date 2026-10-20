@@ -167,8 +167,13 @@ struct ClaudeLaunchPolicy: Equatable {
         if name.hasPrefix(ClaudeIntegration.connectorToolPrefix) { return connectors }
         if name.hasPrefix("mcp__switchboard_browser__") { return profile.browser != .off }
         if name.hasPrefix("mcp__claude-in-chrome__") { return userChrome }
+        if projectServer(of: name) != nil { return true }
         guard let tools else { return true }
         return tools.contains(name)
+    }
+    /// The approved project server a tool belongs to (`mcp__<server>__<tool>`), or nil.
+    func projectServer(of tool: String) -> String? {
+        (profile.mcpServers ?? [:]).keys.first { tool.hasPrefix("mcp__" + $0 + "__") }
     }
     /// Roots the role may read (all) and write (writable ones); the project itself is implied.
     var readableRoots: [String] { profile.extraRoots.map(\.path) }

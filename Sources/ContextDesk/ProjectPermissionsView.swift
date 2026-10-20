@@ -13,6 +13,9 @@ struct ProjectPermissionsView: View {
     @State private var jobRole: String
     @State private var extraRoots: [AgentPermissionProfile.Root]
     @State private var cookieSites: String
+    /// Approvals as saved; a server whose `.mcp.json` entry changed since shows as off and must be approved again.
+    @State private var mcpServers: [String: String]
+    private let projectServers: [ProjectMCPServers.Server]
 
     init(model: DeskModel, project: Project) {
         self.model = model; self.project = project
@@ -21,6 +24,8 @@ struct ProjectPermissionsView: View {
         _jobRole = State(initialValue: project.jobRole(catalog).id)
         _extraRoots = State(initialValue: project.extraRoots ?? [])
         _cookieSites = State(initialValue: (project.cookieSites ?? []).joined(separator: "\n"))
+        _mcpServers = State(initialValue: project.mcpServers ?? [:])
+        projectServers = ProjectMCPServers.servers(projectPath: project.path)
     }
 
     var body: some View {
@@ -64,18 +69,44 @@ struct ProjectPermissionsView: View {
                                    "One domain per line, for example linkedin.com. The Routine operator role may import a Chrome session only for these."))
                         .font(.ui(.caption)).foregroundStyle(.secondary)
                 }
+                Section(L10n.text("MCP-серверы проекта", "Project MCP servers")) {
+                    if projectServers.isEmpty {
+                        Text(L10n.text("В файле .mcp.json проекта нет серверов.", "The project's .mcp.json file has no servers."))
+                            .font(.ui(.caption)).foregroundStyle(.secondary)
+                    }
+                    ForEach(projectServers, id: \.name) { server in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Toggle(server.name, isOn: approval(server)).toggleStyle(.checkbox)
+                            Text(server.summary).font(.ui(.caption)).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
+                                .help(server.summary)
+                            if let saved = mcpServers[server.name], saved != server.fingerprint {
+                                Text(L10n.text("Запись в .mcp.json изменилась после одобрения. Сервер выключен, пока ты не одобришь его снова.",
+                                               "The .mcp.json entry changed after approval. The server stays off until you approve it again."))
+                                    .font(.ui(.caption)).foregroundStyle(.orange)
+                            }
+                        }
+                    }
+                    Text(L10n.text("Одобренные серверы запускаются в чатах Claude этого проекта от твоего имени, их инструменты работают без подтверждений. Одобряй только серверы, которым доверяешь.",
+                                   "Approved servers start in this project's Claude chats as your user, and their tools run without prompts. Approve only servers you trust."))
+                        .font(.ui(.caption)).foregroundStyle(.secondary)
+                }
             }.formStyle(.grouped)
             HStack {
                 Spacer()
                 Button(L10n.text("Отмена", "Cancel"), role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
                 Button(L10n.text("Сохранить", "Save")) {
                     model.updateProjectRoles(project.id, chatRole: chatRole, jobRole: jobRole, extraRoots: extraRoots,
-                                             cookieSites: cookieSites.split(whereSeparator: \.isNewline).map(String.init))
+                                             cookieSites: cookieSites.split(whereSeparator: \.isNewline).map(String.init), mcpServers: mcpServers)
                     dismiss()
                 }.keyboardShortcut(.defaultAction)
             }.padding()
         }
-        .frame(width: 520, height: 560)
+        .frame(width: 520, height: 640)
+    }
+
+    private func approval(_ server: ProjectMCPServers.Server) -> Binding<Bool> {
+        Binding(get: { mcpServers[server.name] == server.fingerprint },
+                set: { mcpServers[server.name] = $0 ? server.fingerprint : nil })
     }
 
     private func chooseFolder() {
