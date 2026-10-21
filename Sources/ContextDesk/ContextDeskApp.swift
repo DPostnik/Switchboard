@@ -16,7 +16,9 @@ import UserNotifications
         UNUserNotificationCenter.current().delegate = self
         NSApplication.shared.setActivationPolicy(.regular)
         restart.start(delegate: self)
+        nightlyTestsObserver = NightlyTestsReport.observe()
     }
+    private var nightlyTestsObserver: NSObjectProtocol?
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { showMainWindow(); return false }
@@ -86,6 +88,10 @@ import UserNotifications
     }
     func applicationWillTerminate(_ notification: Notification) { keepAwake.stop() }
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        if NightlyTestsReport.isReport(response.notification.request.content.userInfo) {
+            await MainActor.run { NightlyTestsReport.openLog() }
+            return
+        }
         let threadID = response.notification.request.content.userInfo["threadID"] as? String ?? ""
         let attention = response.notification.request.content.userInfo["attentionID"] != nil
         await MainActor.run { showMainWindow() }

@@ -175,7 +175,8 @@ public actor AttentionStore {
         let result = change(&value)
         guard value != ledger else { return (value, result) }
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        try JSONEncoder().encode(value).write(to: file, options: [.atomic, .completeFileProtectionUnlessOpen])
+        // No data-protection class: agents and jobs update this file while the Mac is locked; 0600 keeps it private.
+        try JSONEncoder().encode(value).write(to: file, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         ledger = value
         return (value, result)

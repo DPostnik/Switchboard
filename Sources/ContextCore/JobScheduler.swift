@@ -179,7 +179,8 @@ public actor JobStore {
     }
     private func commit(_ value: JobLedger) throws {
         let data = try JSONEncoder().encode(value)
-        try data.write(to: file, options: [.atomic, .completeFileProtectionUnlessOpen])
+        // No data-protection class: scheduled runs read this file while the Mac is locked; 0600 keeps it private.
+        try data.write(to: file, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         ledger = value
     }
