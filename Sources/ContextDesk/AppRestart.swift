@@ -88,6 +88,8 @@ struct RestartContinuation: Codable, Equatable {
     private var timer: Timer?
     @Published private(set) var requested = false
     var terminating = false
+    /// True only while the idle timer calls terminate(); a user's Cmd+Q is a plain quit even with a request pending.
+    private(set) var restartingNow = false
     @Published private(set) var continuationChatIDs: [String] = [] {
         didSet { delegate?.model?.restartWaitingChatIDs = continuationChatIDs }
     }
@@ -157,6 +159,9 @@ struct RestartContinuation: Codable, Equatable {
         let reasons = model.restartBlockers
         if reasons != blockers { blockers = reasons }
         guard model.readyForRestart else { return }
+        // applicationShouldTerminate runs synchronously inside terminate().
+        restartingNow = true
+        defer { restartingNow = false }
         NSApplication.shared.terminate(nil)
     }
 

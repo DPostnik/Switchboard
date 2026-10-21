@@ -38,11 +38,14 @@ import UserNotifications
             alert.addButton(withTitle: L10n.text("Остаться", "Stay")).keyEquivalent = "\u{1b}"
             if alert.runModal() != .alertFirstButtonReturn { return .terminateCancel }
         }
+        // A user's quit wins over a pending restart: the restart path would cancel it while work runs.
+        let restarting = restart.restartingNow
+        if !restarting && restart.requested { restart.cancel() }
         restart.terminating = true
-        AppLog.lifecycle.notice("Quit started (restart requested: \(self.restart.requested, privacy: .public))")
+        AppLog.lifecycle.notice("Quit started (restart: \(restarting, privacy: .public))")
         armShutdownDeadline()
         Task {
-            if restart.requested {
+            if restarting {
                 do {
                     guard let model else { throw RestartFailure.unavailable }
                     try await model.store.save(model.state)
