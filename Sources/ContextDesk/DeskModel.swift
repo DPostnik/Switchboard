@@ -31,6 +31,8 @@ private struct ChatRunState {
     var turnID: String?
     var queuePaused = true
     var priorityMessageID: String?
+    /// The queued message whose "Interrupt and send" stopped the last turn; it goes out with `InterruptedTurnNote`.
+    var interruptedFor: String?
     /// Live activity label for the running turn; never persisted.
     var status: String?
 }
@@ -1123,6 +1125,8 @@ private struct ChatRunState {
             runs[threadID, default: ChatRunState()].sending = false
             scheduleQueue(threadID: threadID)
         }
+        let afterInterrupt = run.interruptedFor == next.id
+        runs[threadID, default: ChatRunState()].interruptedFor = nil
         state.queuedMessages = queuedMessages.filter { $0.id != next.id }
         do { try await store.save(state) }
         catch {
@@ -1132,7 +1136,7 @@ private struct ChatRunState {
             return
         }
         await deliver(text: next.text, project: project, threadID: threadID, localID: next.id,
-                      selectedModel: next.model, selectedEffort: next.effort)
+                      selectedModel: next.model, selectedEffort: next.effort, afterInterrupt: afterInterrupt)
     }
     private func scheduleQueue(threadID: String) {
         let run = runs[threadID] ?? ChatRunState()
@@ -1160,7 +1164,7 @@ private struct ChatRunState {
     }
     private func deliver(text: String, project: Project, threadID: String?, localID: String,
                          selectedModel: String, selectedEffort: String, scheduledRun: UUID? = nil, scheduledRoute: RequestRoute? = nil, scheduledBrowserImport: ChromeSessionImportPolicy? = nil,
-                         scheduledAgent: AgentConnectionID = .originalCodex, scheduledRole: AgentRole? = nil) async {
+                         scheduledAgent: AgentConnectionID = .originalCodex, scheduledRole: AgentRole? = nil, afterInterrupt: Bool = false) async {
         let selection = selectionGeneration
         let visible = scheduledRun == nil && threadID == chatID && project.id == projectID
         if visible { items.append(TranscriptItem(id: localID, kind: "user", text: text, phase: L10n.text("Отправляется…", "Sending…"))) }
@@ -1237,7 +1241,7 @@ private struct ChatRunState {
                 try Task.checkCancellation()
                 guard !schedulerStopping else { throw CancellationError() }
             }
-            var outgoing = text
+            var outgoing = afterInterrupt ? InterruptedTurnNote.applying(L10n.text(InterruptedTurnNote.russian, InterruptedTurnNote.english), to: text) : text
             if let scheduledBrowserImport, scheduledRun != nil, state.browserEnabled == true {
                 let session = try sessionForChat(id)
                 try ScheduledBrowserImport.install(scheduledBrowserImport, session: session, browserEnabled: state.browserEnabled == true)
@@ -1290,6 +1294,7 @@ private struct ChatRunState {
                 state.queuedMessages = [QueuedMessage(id: localID, threadID: threadID, projectID: project.id, text: text,
                                                       model: selectedModel, effort: selectedEffort)] + queuedMessages
                 runs[threadID, default: ChatRunState()].queuePaused = false
+                if afterInterrupt { runs[threadID, default: ChatRunState()].interruptedFor = localID }
                 persist()
                 return
             }
@@ -1330,8 +1335,9 @@ private struct ChatRunState {
         runs[threadID, default: ChatRunState()].running = false
         runs[threadID, default: ChatRunState()].turnID = nil
         runs[threadID, default: ChatRunState()].stopRequested = false
-        if runs[threadID]?.priorityMessageID != nil && (status == .cancelled || status == .completed) && !hasError {
+        if let priority = runs[threadID]?.priorityMessageID, (status == .cancelled || status == .completed) && !hasError {
             runs[threadID, default: ChatRunState()].queuePaused = false
+            runs[threadID, default: ChatRunState()].interruptedFor = status == .cancelled ? priority : nil
         } else if status != .completed || hasError {
             runs[threadID, default: ChatRunState()].queuePaused = true
         }
@@ -1352,6 +1358,7 @@ private struct ChatRunState {
             return
         }
         runs[thread, default: ChatRunState()].priorityMessageID = nil
+        runs[thread, default: ChatRunState()].interruptedFor = nil
         runs[thread, default: ChatRunState()].queuePaused = true
         runs[thread, default: ChatRunState()].stopRequested = true
         guard let turn = runs[thread]?.turnID else { return }

@@ -1,4 +1,5 @@
 @_spi(NativeProtocol) import CodexAdapter
+import AgentContract
 import Foundation
 import Testing
 import ContextCore
@@ -68,6 +69,14 @@ import ContextCore
     }
     #expect(model.items.map(\.text) == ["First", "Third", "Second"])
     #expect(model.visibleQueue.isEmpty)
+    // Only the message that interrupted the turn tells the agent to finish the interrupted task; the transcript hides the note.
+    requests = try await connection.request("test/requests").array
+    let sent = requests.filter { $0["method"].string == "turn/start" }.map { $0["params"]["input"].array.compactMap { $0["text"].string }.joined() }
+    #expect(sent.count == 3)
+    #expect(sent[0] == "First" && sent[2] == "Second")
+    #expect(sent[1].hasPrefix("Third\n\n[Switchboard: ") && InterruptedTurnNote.stripped(sent[1]) == "Third")
+    #expect(TranscriptItem(id: "u", kind: "user", text: sent[1]).text == "Third")
+    #expect(InterruptedTurnNote.stripped("Third [Switchboard: other]") == "Third [Switchboard: other]")
     model.draft = "Keep for later"
     await model.send()
     await model.interrupt()
@@ -83,6 +92,9 @@ import ContextCore
         if model.busy && !model.sending { break }
         try await Task.sleep(for: .milliseconds(10))
     }
+    // After a plain Stop the next message carries no note.
+    requests = try await connection.request("test/requests").array
+    #expect(requests.filter { $0["method"].string == "turn/start" }.last?["params"]["input"].array.compactMap { $0["text"].string }.joined() == "Keep for later")
     model.draft = "Wait after failure"
     await model.send()
     model.finishActiveTurn(threadID: "t", turnID: "v4", status: .failed, hasError: true)

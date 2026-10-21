@@ -16,6 +16,21 @@ public struct ResponseTiming: Codable, Sendable, Equatable {
     }
 }
 
+/// Agent-facing note appended to a message sent with "Interrupt and send". Without it the agent read the new message
+/// as a replacement and silently dropped the interrupted request. Transcripts show the message without the note.
+public enum InterruptedTurnNote {
+    public static let russian = "[Switchboard: пользователь прервал предыдущий ход, чтобы отправить это сообщение. Если сообщение не отменяет и не заменяет прерванную задачу, учти его и доведи ту задачу до конца. Фоновые задачи прерванного хода могли остановиться; перезапусти те, что ещё нужны.]"
+    public static let english = "[Switchboard: the user interrupted the previous turn to send this message. Unless this message cancels or replaces the interrupted task, take it into account and finish that task. Background tasks of the interrupted turn may have stopped; restart the ones that are still needed.]"
+    static let separator = "\n\n"
+    public static func applying(_ note: String, to text: String) -> String { text + separator + note }
+    public static func stripped(_ text: String) -> String {
+        for note in [russian, english] where text.hasSuffix(separator + note) {
+            return String(text.dropLast(separator.count + note.count))
+        }
+        return text
+    }
+}
+
 public struct TranscriptItem: Identifiable, Codable, Sendable, Equatable {
     public var id: String
     public var kind: String
@@ -27,7 +42,8 @@ public struct TranscriptItem: Identifiable, Codable, Sendable, Equatable {
     public var timing: ResponseTiming?
     public var agentName: String?
     public init(id: String, kind: String, text: String, phase: String? = nil, timing: ResponseTiming? = nil) {
-        self.id = id; self.kind = kind; self.text = text; self.phase = phase; self.timing = timing
+        self.id = id; self.kind = kind; self.phase = phase; self.timing = timing
+        self.text = kind == "user" ? InterruptedTurnNote.stripped(text) : text
     }
     public static func merge(_ item: Self, into items: inout [Self]) {
         if let index = items.firstIndex(where: { $0.id == item.id }) {
