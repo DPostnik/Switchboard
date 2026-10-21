@@ -114,6 +114,20 @@ private func interactiveFixture(_ root: URL) throws -> URL {
             with (home/'submitted').open('a') as f: f.write(json.dumps({'prompt':value['message']['content'],'args':sys.argv,'pid':os.getpid(),'env':{k:os.environ[k] for k in ['MCP_TIMEOUT','MCP_TOOL_TIMEOUT','CLAUDE_CODE_DISABLE_CLAUDE_MDS','CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES','MCP_CONNECTION_NONBLOCKING'] if k in os.environ}})+'\n')
             prompt=value['message']['content']
             if prompt=='broken': print('invalid-json',flush=True); continue
+            if prompt=='notified':
+                # A resumed CLI first answers a notification about the previous process's task, with the message still queued.
+                def life(state): out({'type':'command_lifecycle','session_id':sid,'command_uuid':value['uuid'],'state':state,'uuid':'x-'+state})
+                out({'type':'system','subtype':'task_notification','session_id':sid,'task_id':'old','status':'stopped','summary':'old task'})
+                out({'type':'system','subtype':'init','session_id':sid,'model':'claude-test'})
+                life('queued')
+                out({'type':'assistant','session_id':sid,'message':{'id':'own-'+sid,'content':[{'type':'text','text':'No response requested.'}]}})
+                result()
+                life('started')
+                out({'type':'system','subtype':'init','session_id':sid,'model':'claude-test'})
+                out({'type':'assistant','session_id':sid,'message':{'id':'handled-'+sid,'content':[{'type':'text','text':'handled'}]}})
+                life('completed')
+                result()
+                continue
             if prompt=='unknown': out({'type':'control_request','request_id':'unknown','request':{'subtype':'unexpected_action'}}); continue
             if prompt=='wait': continue
             if prompt.startswith('hook:'):
@@ -991,6 +1005,24 @@ private func completedClaudeSession(_ adapter: ClaudeIntegration, binary: URL, h
     #expect(await events.subagents().last == [])
     #expect(try String(contentsOf: home.appendingPathComponent("launches"), encoding: .utf8).split(separator: "\n").count == 1)
     #expect(await events.diagnostics().isEmpty)
+    await adapter.disconnect()
+}
+
+@Test func claudeOwnTurnBeforeTheQueuedMessageDoesNotEndTheUserTurn() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "notified")).value()
+    try await waitFor { await events.completionCount() == 1 }
+    // The user's turn ends with the reply to the message, not with the result of the CLI's own turn before it.
+    let history = try await adapter.history(session, context: descriptor.context).value()
+    #expect(history.map { $0.items.map(\.text) } == [["notified", "No response requested.", "handled"]])
+    #expect(await events.startedCount() == 1)
     await adapter.disconnect()
 }
 

@@ -61,6 +61,9 @@ public actor ClaudeIntegration: AgentIntegration {
     }
     private var interactions: [UUID: Interaction] = [:]
     private var interrupted = Set<String>()
+    /// Session -> the active turn's user message as seen in the CLI's `command_lifecycle` events. A resumed CLI may first
+    /// run a turn of its own (a notification about a task of the previous process); its `result` must not end the user's turn.
+    private var commands: [String: (uuid: String, queued: Bool, started: Bool)] = [:]
     private var messageIDs: [String: String] = [:]
     /// Session -> the CLI's latest progress summary for its active turn.
     private var summaries: [String: (turn: String, text: String)] = [:]
@@ -118,7 +121,7 @@ public actor ClaudeIntegration: AgentIntegration {
         for wire in wires.values { await wire.close() }
         for id in Array(wires.keys) { finish(id, outcome: .uncertain) }
         wires.removeAll(); readers.removeAll(); interactions.removeAll(); seenRequests.removeAll()
-        sessions.removeAll(); messageIDs.removeAll(); summaries.removeAll(); interrupted.removeAll(); meters.removeAll()
+        sessions.removeAll(); messageIDs.removeAll(); summaries.removeAll(); interrupted.removeAll(); commands.removeAll(); meters.removeAll()
         backgroundTasks.removeAll(); waiting.removeAll(); wireArguments.removeAll(); warm.removeAll(); pendingSaves.removeAll()
         for id in subagents.keys { sink.yield(.init(session: reference(id), payload: .subagents([]))) }
         subagents.removeAll()
@@ -320,7 +323,9 @@ public actor ClaudeIntegration: AgentIntegration {
             sink.yield(.init(session: reference(id), payload: .started(turn: turn)))
             if subagents[id]?.clearFinished() == true { publishSubagents(id) }
             sink.yield(.init(session: reference(id), payload: .item(prompt)))
-            try await wire.send(.object(["type": .string("user"), "session_id": .string(id), "uuid": .string(UUID().uuidString),
+            let command = UUID().uuidString.lowercased()
+            commands[id] = (command, false, false)
+            try await wire.send(.object(["type": .string("user"), "session_id": .string(id), "uuid": .string(command),
                 "message": .object(["role": .string("user"), "content": .string(request.prompt)])]))
             return .success(.init(context: context, requestID: request.id, session: reference(id), turnID: turn))
         } catch {
@@ -543,8 +548,17 @@ public actor ClaudeIntegration: AgentIntegration {
             for part in value["message"]["content"].array where part["type"].string == "tool_result" {
                 if let key = part["tool_use_id"].string { emit(.init(id: key + ":result", kind: "activity", text: Self.toolResultText(part["content"])), session: id) }
             }
+        case "command_lifecycle":
+            guard let command = commands[id], value["command_uuid"].string?.lowercased() == command.uuid else { return }
+            switch value["state"].string {
+            case "queued": commands[id]?.queued = true
+            case "started": commands[id]?.started = true
+            default: break
+            }
         case "result":
             guard value["session_id"].string == id, value["is_error"].bool != nil else { await wire.close(); return }
+            // The CLI's own turn ended while the user's message still waits in its queue; that message starts next.
+            if let command = commands[id], command.queued, !command.started, !interrupted.contains(id) { return }
             let outcome: AgentExecutionOutcome = interrupted.contains(id) ? .cancelled : value["is_error"].bool == true ? .failed : .completed
             // Background tasks live in this CLI, which resumes the agent itself when they finish; a stopped turn ends them.
             let keep = !interrupted.contains(id) && !(backgroundTasks[id] ?? []).isEmpty
@@ -914,7 +928,7 @@ public actor ClaudeIntegration: AgentIntegration {
             meter.abandon() // No-op after a terminal result; otherwise observed calls still count.
             sessions[id]?.tokens = meter.base; sessions[id]?.contextWindow = meter.window; sessions[id]?.lastContext = meter.last
         }
-        interrupted.remove(id)
+        interrupted.remove(id); commands.removeValue(forKey: id)
         for (token, value) in interactions where value.session == id {
             interactions.removeValue(forKey: token); sink.yield(.init(session: reference(id), payload: .resolved(token)))
         }
