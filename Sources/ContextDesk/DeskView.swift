@@ -806,9 +806,19 @@ struct ChatView: View {
             }
             if let chat = model.selectedChat { SubagentsBar(model: model, chatID: chat.id) }
             if let chat = model.selectedChat, let notice = model.backgroundWaitNotice(chat.id) {
-                Label(notice, systemImage: "hourglass")
-                    .font(.ui(.callout)).foregroundStyle(.secondary)
-                    .frame(maxWidth: columnWidth, alignment: .leading).padding(.horizontal, 24).padding(.vertical, 8)
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Label(notice, systemImage: "hourglass").foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    Button { Task { await model.stopBackgroundTasks(threadID: chat.id) } } label: {
+                        Label(L10n.text("Остановить фоновые задачи", "Stop background tasks"), systemImage: "stop.circle")
+                    }
+                    .controlSize(.small).fixedSize()
+                    .disabled(model.stoppingTasks.contains(DeskModel.stopKey(threadID: chat.id, task: nil)))
+                    .help(L10n.text("Остановить все фоновые задачи и подагентов этого чата. Чат останется открытым.",
+                                    "Stop all background tasks and sub-agents of this chat. The chat stays open."))
+                }
+                .font(.ui(.callout))
+                .frame(maxWidth: columnWidth, alignment: .leading).padding(.horizontal, 24).padding(.vertical, 8)
             }
             if model.selectedChatIsArchived, let chat = model.selectedChat {
                 HStack {

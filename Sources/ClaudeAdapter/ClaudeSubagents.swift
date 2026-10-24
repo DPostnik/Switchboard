@@ -44,6 +44,7 @@ struct ClaudeSubagentTracker {
         default: return false
         }
     }
+    var runningIDs: [String] { agents.filter { $0.status == .running }.map(\.id) }
     /// The CLI is gone: sub-agents still running will not report anymore.
     mutating func stopRunning(now: Date = Date()) -> Bool {
         var changed = false

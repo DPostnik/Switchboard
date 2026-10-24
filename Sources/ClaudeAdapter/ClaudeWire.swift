@@ -69,7 +69,7 @@ actor ClaudeWire {
             if value["type"].string == "control_response", let id = value["response"]["request_id"].string,
                let continuation = pending.removeValue(forKey: id) {
                 if value["response"]["subtype"].string == "success" { continuation.resume(returning: value["response"]["response"]) }
-                else { continuation.resume(throwing: Self.closedError) }
+                else { continuation.resume(throwing: ClaudeControlRefusal(message: value["response"]["error"].string)) }
             } else { sink.yield(value) }
         }
         if buffer.count > 4 * 1024 * 1024 { close() }
@@ -91,6 +91,14 @@ actor ClaudeWire {
     }
     private static var closedError: ClientFailure {
         ClientFailure(L10n.text("Соединение Claude закрыто. Запрос не повторён.", "Claude connection closed. The request was not retried."))
+    }
+}
+
+/// The CLI answered a control request with an error; the stream stays open. `message` is CLI output, shown as data.
+struct ClaudeControlRefusal: LocalizedError {
+    let message: String?
+    var errorDescription: String? {
+        L10n.text("Claude отклонил запрос", "Claude rejected the request") + (message.map { ": " + $0 } ?? ".")
     }
 }
 

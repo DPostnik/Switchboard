@@ -467,6 +467,31 @@ public actor ClaudeIntegration: AgentIntegration {
         }
         return .success(.requested)
     }
+    public func stopTasks(_ task: String?, session: AgentSessionReference, context: AgentContext) async -> AgentResult<Void> {
+        guard context == self.context, session.connection == .appClaude, let wire = wires[session.nativeID] else { return .rejected(.unknownRequest) }
+        let id = session.nativeID
+        // Background shells and background sub-agents first; a stopped parent may already end its nested sub-agents.
+        var targets = (backgroundTasks[id] ?? []).sorted()
+        targets += (subagents[id]?.runningIDs ?? []).filter { !targets.contains($0) }
+        if let task {
+            guard targets.contains(task) else { return .rejected(.unknownRequest) }
+            targets = [task]
+        }
+        guard !targets.isEmpty else { return .rejected(.unknownRequest) }
+        var refusals: [String] = []
+        for target in targets where wires[id] === wire && runningTask(target, session: id) {
+            do { _ = try await wire.control(.object(["subtype": .string("stop_task"), "task_id": .string(target)])) }
+            catch let refusal as ClaudeControlRefusal {
+                // A task that ended meanwhile needs no stop.
+                if runningTask(target, session: id) { refusals.append(refusal.localizedDescription) }
+            } catch { return failed(error, uncertain: true) }
+        }
+        guard refusals.isEmpty else { return .failed(.init(delivery: .confirmed, diagnostic: refusals.joined(separator: "\n"))) }
+        return .success(())
+    }
+    private func runningTask(_ task: String, session id: String) -> Bool {
+        backgroundTasks[id]?.contains(task) == true || subagents[id]?.runningIDs.contains(task) == true
+    }
     private func expireInterrupt(session: String, turn: String?, wire: ClaudeWire) async {
         if wires[session] === wire, sessions[session]?.active == turn { await wire.close() }
     }

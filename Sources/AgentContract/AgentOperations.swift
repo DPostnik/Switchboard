@@ -185,6 +185,9 @@ public protocol AgentIntegration: Sendable {
     func prepare(_ request: AgentExecutionRequest) async -> AgentResult<AgentSessionReference>
     func submit(_ request: AgentExecutionRequest) async -> AgentResult<AgentExecutionHandle>
     func cancel(_ execution: AgentExecutionHandle) async -> AgentResult<AgentCancellation>
+    /// Stops one running background task or sub-agent (`task`), or all of the session's running ones (`nil`).
+    /// The turn itself keeps running. Each stop request is sent once; an uncertain delivery is not retried.
+    func stopTasks(_ task: String?, session: AgentSessionReference, context: AgentContext) async -> AgentResult<Void>
     func answer(_ id: UUID, session: AgentSessionReference, context: AgentContext, response: AgentInteractionResponse) async -> AgentResult<Void>
     func rejectInteraction(_ id: UUID) async
     func history(_ session: AgentSessionReference, context: AgentContext) async -> AgentResult<[AgentHistoryTurn]>
@@ -196,4 +199,9 @@ public protocol AgentIntegration: Sendable {
     func generate(_ request: AgentGenerationRequest, environment: AgentGenerationEnvironment,
                   willStart: @escaping @Sendable () async throws -> Void) async -> AgentResult<AgentGenerationOutput>
     func cancelGeneration(_ id: UUID) async
+}
+extension AgentIntegration {
+    public func stopTasks(_ task: String?, session: AgentSessionReference, context: AgentContext) async -> AgentResult<Void> {
+        .rejected(.unsupported(.interruption))
+    }
 }

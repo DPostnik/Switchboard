@@ -150,6 +150,8 @@ private struct ChatRunState {
     @Published private(set) var backgroundWaits: [String: Int] = [:]
     /// Thread ID -> sub-agents its agent delegated to (running ones and those finished since the last user message).
     @Published private(set) var subagents: [String: [AgentSubagent]] = [:]
+    /// Stop requests in flight, keyed by `stopKey`; their buttons stay disabled until the engine answers.
+    @Published private(set) var stoppingTasks: Set<String> = []
     @Published private(set) var deletingChatIDs: Set<String> = []
     @Published private(set) var archivingChatIDs: Set<String> = []
     func isChangingChat(_ id: String) -> Bool { deletingChatIDs.contains(id) || archivingChatIDs.contains(id) || configuringRemoteChats.contains(id) || configuringBrowserChats.contains(id) }
@@ -175,6 +177,15 @@ private struct ChatRunState {
         guard !isBusy(threadID: threadID), let count = backgroundWaits[threadID] else { return nil }
         return L10n.text("Агент ждёт фоновые задачи (\(count)) и продолжит сам, когда они завершатся. Писать можно как обычно.",
                          "The agent is waiting for background tasks (\(count)) and will continue on its own when they finish. You can still write as usual.")
+    }
+    static func stopKey(threadID: String, task: String?) -> String { threadID + ":" + (task ?? "*") }
+    /// Stops one background task or sub-agent of a chat (`task`), or all of them (`nil`). The request is sent once.
+    func stopBackgroundTasks(threadID: String, task: String? = nil) async {
+        let key = Self.stopKey(threadID: threadID, task: task)
+        guard stoppingTasks.insert(key).inserted else { return }
+        defer { stoppingTasks.remove(key) }
+        do { try await clientForChat(threadID).stopTasks(task, session: sessionForChat(threadID)) }
+        catch { self.error = error.localizedDescription }
     }
     private var turnStarts: [String: Date] = [:]
     private var tokenTotals: [String: TokenCounters] = [:]

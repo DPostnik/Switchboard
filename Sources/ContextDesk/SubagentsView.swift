@@ -88,7 +88,7 @@ struct SubagentsPanel: View {
                 }.padding(8)
             }.frame(width: 250).background(DeskPalette.sidebar)
             Divider()
-            if let selected { SubagentDetail(agent: selected).id(selected.id) }
+            if let selected { SubagentDetail(model: model, chatID: chatID, agent: selected).id(selected.id) }
             else {
                 Text(L10n.text("Подагентов нет", "No sub-agents")).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -126,6 +126,8 @@ private struct SubagentElapsed: View {
 }
 
 private struct SubagentDetail: View {
+    @ObservedObject var model: DeskModel
+    let chatID: String
     let agent: AgentSubagent
     @State private var showingPrompt = false
 
@@ -136,6 +138,15 @@ private struct SubagentDetail: View {
                 Text(agent.title).font(.ui(.headline)).lineLimit(2).textSelection(.enabled)
                 Spacer(minLength: 0)
                 Text(SubagentStatusIcon.title(agent.status)).font(.ui(.caption)).foregroundStyle(.secondary)
+                if agent.status == .running {
+                    let stopping = model.stoppingTasks.contains(DeskModel.stopKey(threadID: chatID, task: agent.id))
+                    Button { Task { await model.stopBackgroundTasks(threadID: chatID, task: agent.id) } } label: {
+                        Label(L10n.text("Остановить", "Stop"), systemImage: "stop.circle")
+                    }
+                    .controlSize(.small).disabled(stopping)
+                    .help(L10n.text("Остановить только этого подагента. Основной агент продолжит работу.",
+                                    "Stop only this sub-agent. The main agent keeps working."))
+                }
             }
             HStack(spacing: 6) {
                 if let type = agent.type { Text(type) }

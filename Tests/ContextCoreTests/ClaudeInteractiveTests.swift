@@ -106,8 +106,13 @@ private func interactiveFixture(_ root: URL) throws -> URL {
         value=json.loads(line)
         if value['type']=='control_request':
             with (home/'controls').open('a') as f: f.write(json.dumps({'request':value['request'],'pid':os.getpid()})+'\n')
+            if value['request']['subtype']=='stop_task' and (home/'refuse-stop').exists():
+                out({'type':'control_response','response':{'subtype':'error','request_id':value['request_id'],'error':'Task is busy'}}); continue
             out({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{}}})
             if value['request']['subtype']=='interrupt': result()
+            if value['request']['subtype']=='stop_task':
+                out({'type':'system','subtype':'task_notification','session_id':sid,'task_id':value['request']['task_id'],'status':'stopped','summary':'stopped'})
+                tasks()
         elif value['type']=='user':
             record=json.loads((home/'contextdesk-sessions'/(sid+'.json')).read_text())
             assert record['active'] and record['sent']
@@ -1023,6 +1028,49 @@ private func completedClaudeSession(_ adapter: ClaudeIntegration, binary: URL, h
     let history = try await adapter.history(session, context: descriptor.context).value()
     #expect(history.map { $0.items.map(\.text) } == [["notified", "No response requested.", "handled"]])
     #expect(await events.startedCount() == 1)
+    await adapter.disconnect()
+}
+
+@Test func claudeStopsOneBackgroundTaskWithoutEndingTheChat() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(backgroundWaitLimit: .seconds(10), backgroundSettleDelay: .milliseconds(100)), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    func stops() throws -> [String] {
+        try String(contentsOf: home.appendingPathComponent("controls"), encoding: .utf8).split(separator: "\n")
+            .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8))["request"] }
+            .filter { $0["subtype"].string == "stop_task" }.compactMap { $0["task_id"].string }
+    }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "background-hang")).value()
+    try await waitFor { await events.background().last == 1 }
+    // An unknown task is rejected before anything reaches the CLI.
+    guard case .rejected(.unknownRequest) = await adapter.stopTasks("other", session: session, context: descriptor.context) else {
+        Issue.record("unknown task was not rejected"); return
+    }
+    // The CLI's refusal is reported with its own text; the chat stays connected and the task keeps running.
+    try Data().write(to: home.appendingPathComponent("refuse-stop"))
+    guard case .failed(let failure) = await adapter.stopTasks(nil, session: session, context: descriptor.context) else {
+        Issue.record("refusal was not reported"); return
+    }
+    #expect(failure.delivery == .confirmed && failure.diagnostic?.contains("Task is busy") == true)
+    #expect(await events.subagents().last?.first?.status == .running)
+    try FileManager.default.removeItem(at: home.appendingPathComponent("refuse-stop"))
+    guard case .success = await adapter.stopTasks("b1", session: session, context: descriptor.context) else {
+        Issue.record("stop failed"); return
+    }
+    #expect(try stops() == ["b1", "b1"])
+    try await waitFor { await events.background().last == 0 }
+    #expect(await events.subagents().last?.first?.status == .stopped)
+    #expect(await events.diagnostics().isEmpty)
+    // The released CLI stays warm: the next message reuses it.
+    _ = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root, session: session)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session)).value()
+    try await waitFor { await events.completionCount() == 2 }
+    #expect(try String(contentsOf: home.appendingPathComponent("launches"), encoding: .utf8).split(separator: "\n").count == 1)
     await adapter.disconnect()
 }
 

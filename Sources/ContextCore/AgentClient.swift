@@ -111,6 +111,10 @@ public actor AgentClient {
         let context = try await descriptor().context
         _ = try await integration.cancel(.init(context: context, requestID: UUID(), session: session, turnID: turn)).value()
     }
+    /// Stops one background task or sub-agent of the session, or all of them when `task` is nil.
+    public func stopTasks(_ task: String?, session: AgentSessionReference) async throws {
+        try await integration.stopTasks(task, session: session, context: descriptor().context).value()
+    }
     public func answer(_ id: UUID, session: AgentSessionReference, response: AgentInteractionResponse) async throws {
         try await integration.answer(id, session: session, context: descriptor().context, response: response).value()
     }
