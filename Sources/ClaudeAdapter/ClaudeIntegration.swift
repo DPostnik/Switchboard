@@ -759,7 +759,11 @@ public actor ClaudeIntegration: AgentIntegration {
         if name == "AskUserQuestion" {
             let fields = input["questions"].array.compactMap { question -> AgentInteraction.Field? in
                 guard question["multiSelect"].bool != true, let text = question["question"].string, !text.isEmpty else { return nil }
-                return .init(id: text, text: text, options: question["options"].array.compactMap { $0["label"].string }, secret: false, required: true)
+                let options = question["options"].array.compactMap { option -> AgentInteraction.Field.Option? in
+                    guard let label = option["label"].string else { return nil }
+                    return .init(label: label, description: option["description"].string, preview: option["preview"].string)
+                }
+                return .init(id: text, text: text, options: options, secret: false, required: true)
             }
             guard !fields.isEmpty, fields.count <= 16, fields.count == input["questions"].array.count, Set(fields.map(\.id)).count == fields.count else {
                 await deny(L10n.text("Неподдерживаемая схема вопроса", "Unsupported question schema")); return

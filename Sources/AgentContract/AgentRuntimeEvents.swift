@@ -81,11 +81,24 @@ public struct AgentInteraction: Identifiable, Sendable {
     public struct Field: Identifiable, Sendable {
         public let id: String
         public let text: String
-        public let options: [String]
+        public let options: [Option]
         public let secret: Bool
         public let required: Bool
-        public init(id: String, text: String, options: [String], secret: Bool, required: Bool) {
+        public init(id: String, text: String, options: [Option], secret: Bool, required: Bool) {
             self.id = id; self.text = text; self.options = options; self.secret = secret; self.required = required
+        }
+        /// One selectable answer. `label` is the value sent back; `description` and `preview` are agent text shown beside it, as data.
+        public struct Option: Hashable, Sendable {
+            public let label: String
+            public let description: String?
+            public let preview: String?
+            public init(label: String, description: String? = nil, preview: String? = nil) {
+                func trimmed(_ text: String?) -> String? {
+                    let value = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    return value.isEmpty ? nil : value
+                }
+                self.label = label; self.description = trimmed(description); self.preview = trimmed(preview)
+            }
         }
     }
 }

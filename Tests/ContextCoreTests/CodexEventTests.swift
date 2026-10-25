@@ -34,6 +34,11 @@ private func request(_ method: String = "item/commandExecution/requestApproval",
     let questions = try #require(CodexPendingInteraction.parse(request("item/tool/requestUserInput", extra: ["questions": .array([question])])))
     guard case .questions(let fields) = questions.interaction.kind else { Issue.record("Expected questions"); return }
     #expect(fields[0].secret)
+    let described: JSONValue = .object(["id": .string("pick"), "question": .string("Pick"), "options": .array([
+        .object(["label": .string("A"), "description": .string("First")]), .object(["label": .string("B")])])])
+    let pick = try #require(CodexPendingInteraction.parse(request("item/tool/requestUserInput", extra: ["questions": .array([described])])))
+    guard case .questions(let pickFields) = pick.interaction.kind else { Issue.record("Expected questions"); return }
+    #expect(pickFields[0].options == [.init(label: "A", description: "First"), .init(label: "B")])
     #expect(throws: ClientFailure.self) { try questions.encode(.answers([:])) }
     #expect(throws: ClientFailure.self) { try questions.encode(.answers(["secret": "value", "extra": "x"])) }
     #expect(try questions.encode(.answers(["secret": "literal `$(data)`"]))["answers"]["secret"]["answers"] == .array([.string("literal `$(data)`")]))

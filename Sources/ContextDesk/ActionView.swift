@@ -53,14 +53,37 @@ struct ActionView: View {
     private func questionFields(_ fields: [AgentInteraction.Field], onSubmit: @escaping () -> Void) -> some View {
         ForEach(fields) { field in
             Text(field.text).textSelection(.enabled)
-            ForEach(field.options, id: \.self) { option in
-                Button(option) { answers[field.id] = option }
+            // Each option is a row: the label is the answer, the description explains it, the preview opens for the selected row.
+            ForEach(Array(field.options.enumerated()), id: \.offset) { _, option in
+                optionRow(option, selected: answers[field.id] == option.label) { answers[field.id] = option.label }
             }
             // Return submits the answers like the button instead of leaving the card silently open.
             Group {
                 if field.secret { SecureField(L10n.text("Твой ответ", "Your answer"), text: binding(field.id)) }
                 else { TextField(L10n.text("Твой ответ", "Your answer"), text: binding(field.id)) }
             }.onSubmit(onSubmit)
+        }
+    }
+    @ViewBuilder private func optionRow(_ option: AgentInteraction.Field.Option, selected: Bool, select: @escaping () -> Void) -> some View {
+        Button(action: select) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle").foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(option.label).fontWeight(.medium).fixedSize(horizontal: false, vertical: true)
+                    if let description = option.description {
+                        Text(description).font(.ui(.caption)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 6).padding(.horizontal, 10)
+            .background(selected ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 8))
+            .contentShape(Rectangle())
+        }.buttonStyle(PointerButtonStyle(base: .plain))
+        if selected, let preview = option.preview {
+            ScrollView {
+                Text(preview).font(.ui(.caption, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(maxHeight: 160).padding(8).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
         }
     }
     private func answerButton(_ fields: [AgentInteraction.Field]) -> some View {

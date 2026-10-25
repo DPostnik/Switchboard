@@ -152,7 +152,7 @@ private func interactiveFixture(_ root: URL) throws -> URL {
                 continue
             if prompt in ['approval','question','outside','connector']:
                 name='AskUserQuestion' if prompt=='question' else 'mcp__claude_ai_Gmail__send_message' if prompt=='connector' else 'Write'
-                args={'questions':[{'question':'Choose','options':[{'label':'Yes'},{'label':'No'}]}]} if prompt=='question' else {'file_path':'/outside-project/file' if prompt=='outside' else str(pathlib.Path.cwd()/'fixture.txt'),'content':'content'}
+                args={'questions':[{'question':'Choose','options':[{'label':'Yes','description':'Go ahead','preview':'print(1)'},{'label':'No','description':' '}]}]} if prompt=='question' else {'file_path':'/outside-project/file' if prompt=='outside' else str(pathlib.Path.cwd()/'fixture.txt'),'content':'content'}
                 out({'type':'control_request','request_id':'permission','request':{'subtype':'can_use_tool','tool_name':name,'input':args}})
                 continue
             usage={'input_tokens':10,'cache_creation_input_tokens':20,'cache_read_input_tokens':70,'output_tokens':1}
@@ -473,6 +473,11 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
         }
         let interaction = try #require(await events.interaction())
         #expect(!FileManager.default.fileExists(atPath: home.appendingPathComponent("answer").path))
+        if prompt == "question" {
+            // Option descriptions and previews travel with the label; blank descriptions are dropped.
+            guard case .questions(let fields) = interaction.kind else { Issue.record("Expected questions"); return }
+            #expect(fields.map(\.options) == [[.init(label: "Yes", description: "Go ahead", preview: "print(1)"), .init(label: "No")]])
+        }
         let response: AgentInteractionResponse = prompt == "question" ? .answers(["Choose": "Yes"]) : .allowOnce
         _ = try await adapter.answer(interaction.id, session: session, context: descriptor.context, response: response).value()
         guard case .rejected(.unknownRequest) = await adapter.answer(interaction.id, session: session, context: descriptor.context, response: response) else { Issue.record("Approval reused"); return }
