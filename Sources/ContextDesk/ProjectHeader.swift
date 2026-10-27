@@ -14,6 +14,7 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
     var remove: (() -> Void)? = nil
     var rename: (() -> Void)? = nil
     var menuShown: (Bool) -> Void = { _ in }
+    var hovered: (Bool) -> Void = { _ in }
     @ViewBuilder var content: Content
 
     func makeNSView(context: Context) -> ProjectHeaderView {
@@ -43,6 +44,7 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
         view.remove = remove
         view.rename = rename
         view.menuShown = menuShown
+        view.hovered = hovered
         view.setAccessibilityElement(true)
         view.setAccessibilityRole(.button)
         view.setAccessibilityLabel(project.name)
@@ -65,13 +67,17 @@ class SidebarRowView: NSView, NSDraggingSource {
     var targeted: (Bool) -> Void = { _ in }
     /// Reports while this row's context menu is open, so the row can show which item the menu acts on.
     var menuShown: (Bool) -> Void = { _ in }
+    /// Reports when the pointer enters or leaves the row.
+    var hovered: (Bool) -> Void = { _ in }
     var canDrag: Bool { true }
     private var pressedEvent: NSEvent?
     private var startedDrag = false
+    private var isHovered = false
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         registerForDraggedTypes([dragType])
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self))
     }
     convenience init() { self.init(frame: .zero) }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -89,6 +95,18 @@ class SidebarRowView: NSView, NSDraggingSource {
         }
     }
     override func accessibilityPerformPress() -> Bool { guard isInteractionEnabled else { return false }; activate(); return true }
+    override func mouseEntered(with event: NSEvent) { setHovered(true) }
+    override func mouseExited(with event: NSEvent) { setHovered(false) }
+    // A row removed under the pointer gets no exit event.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { setHovered(false) }
+    }
+    private func setHovered(_ value: Bool) {
+        guard value != isHovered else { return }
+        isHovered = value
+        hovered(value)
+    }
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
         super.willOpenMenu(menu, with: event)
         menuShown(true)

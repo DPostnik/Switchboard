@@ -184,3 +184,23 @@ import Testing
     #expect(selected == 0)
     #expect(view.dragGroup == "favorites")
 }
+
+@Test @MainActor func sidebarRowReportsHoverOnceAndClearsItWhenRemoved() throws {
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 260, height: 100),
+                          styleMask: [.borderless], backing: .buffered, defer: false)
+    defer { window.orderOut(nil) }
+    let view = ChatRowView(frame: NSRect(x: 0, y: 0, width: 260, height: 40))
+    window.contentView?.addSubview(view)
+    var states: [Bool] = []
+    view.hovered = { states.append($0) }
+    #expect(view.trackingAreas.contains { $0.options.contains(.mouseEnteredAndExited) && $0.options.contains(.inVisibleRect) })
+    let event = try #require(NSEvent.mouseEvent(with: .mouseMoved, location: NSPoint(x: 10, y: 10), modifierFlags: [],
+                                                timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0,
+                                                clickCount: 0, pressure: 0))
+    view.mouseEntered(with: event)
+    view.mouseEntered(with: event)
+    view.mouseExited(with: event)
+    view.mouseEntered(with: event)
+    view.removeFromSuperview()
+    #expect(states == [true, false, true, false])
+}

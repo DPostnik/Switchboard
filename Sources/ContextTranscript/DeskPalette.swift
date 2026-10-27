@@ -7,6 +7,8 @@ public enum DeskPalette {
     public static let sidebar = Color(white: 0.975)
     public static let subtle = Color(white: 0.96)
     public static let selection = Color(white: 0.925)
+    /// Sidebar row under the pointer or with its context menu open: visible on `sidebar`, lighter than `selection`.
+    public static let rowHover = Color(white: 0.945)
     public static let border = Color(white: 0.89)
     public static let focusBorder = Color(white: 0.66)
     public static let ink = Color(white: 0.12)

@@ -14,6 +14,7 @@ struct ChatRow: NSViewRepresentable {
     /// Favorites only open the chat: no reordering or multi-selection.
     var favorite = false
     var menuShown: (Bool) -> Void = { _ in }
+    var hovered: (Bool) -> Void = { _ in }
 
     func makeNSView(context: Context) -> ChatRowView {
         ChatRowView()
@@ -32,6 +33,7 @@ struct ChatRow: NSViewRepresentable {
         view.actions = actions
         view.favorite = favorite
         view.menuShown = menuShown
+        view.hovered = hovered
         view.setAccessibilityElement(true)
         view.setAccessibilityRole(.button)
         view.setAccessibilityLabel(chat.title)

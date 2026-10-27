@@ -17,6 +17,8 @@ struct DeskView: View {
     @State private var dropTargetChatID: String?
     /// Sidebar row whose context menu is open; it stays marked until the menu closes.
     @State private var menuRowID: String?
+    /// Hover sources per sidebar row: the native row itself, and `#tools` for a project's trailing buttons.
+    @State private var hoveredRows: Set<String> = []
     @State private var expandedProjects: Set<UUID> = []
     @State private var collapsedSearchProjects: Set<UUID> = []
     @State private var visibleChatCounts: [UUID: Int] = [:]
@@ -303,7 +305,8 @@ struct DeskView: View {
                     else if dropTargetProjectID == project.id { dropTargetProjectID = nil }
                 }, moveUp: adjacentProjectMove(project, offset: -1), moveDown: adjacentProjectMove(project, offset: 1),
                    remove: { Task { await model.hideProject(project.id) } },
-                   rename: { startRenaming(project) }, menuShown: menuShown("project:\(project.id)")) {
+                   rename: { startRenaming(project) }, menuShown: menuShown("project:\(project.id)"),
+                   hovered: hover("project:\(project.id)")) {
                     HStack(spacing: .ui(9)) {
                         Image(systemName: "chevron.right")
                             .font(.ui(.caption).weight(.semibold))
@@ -330,67 +333,70 @@ struct DeskView: View {
                 }
                 .frame(height: .ui(32))
 
-                Menu {
-                    Button { startChat(in: project) } label: {
-                        Label(L10n.text("Новый чат", "New chat"), systemImage: "square.and.pencil")
-                    }
-                    Divider()
-                    Button {
-                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: project.path)
+                HStack(spacing: .ui(2)) {
+                    Menu {
+                        Button { startChat(in: project) } label: {
+                            Label(L10n.text("Новый чат", "New chat"), systemImage: "square.and.pencil")
+                        }
+                        Divider()
+                        Button {
+                            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: project.path)
+                        } label: {
+                            Label(L10n.text("Открыть в Finder", "Open in Finder"), systemImage: "folder")
+                        }
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(project.path, forType: .string)
+                        } label: {
+                            Label(L10n.text("Скопировать путь", "Copy path"), systemImage: "doc.on.doc")
+                        }
+                        Button {
+                            selection.select(model.state.orderedChats(projectID: project.id, archived: false).map(\.id))
+                        } label: {
+                            Label(L10n.text("Выделить все чаты", "Select all chats"), systemImage: "checkmark.circle")
+                        }.disabled(!model.state.chats.contains { $0.projectID == project.id && !$0.isArchived })
+                        Button { startRenaming(project) } label: {
+                            Label(L10n.text("Переименовать…", "Rename…"), systemImage: "pencil")
+                        }
+                        Button { permissionsProject = project } label: {
+                            Label(L10n.text("Разрешения…", "Permissions…"), systemImage: "lock.shield")
+                        }
+                        Divider()
+                        Button(L10n.text("Переместить выше", "Move up")) {
+                            adjacentProjectMove(project, offset: -1)?()
+                        }.disabled(adjacentProjectMove(project, offset: -1) == nil)
+                        Button(L10n.text("Переместить ниже", "Move down")) {
+                            adjacentProjectMove(project, offset: 1)?()
+                        }.disabled(adjacentProjectMove(project, offset: 1) == nil)
+                        Divider()
+                        Button { Task { await model.hideProject(project.id) } } label: {
+                            Label(L10n.text("Убрать проект из списка", "Remove project from list"), systemImage: "minus.circle")
+                        }
+                        .help(L10n.text("Файлы и чаты сохранятся. Вернуть проект можно через «Добавить проект».", "Files and chats are kept. Restore it with Add project."))
                     } label: {
-                        Label(L10n.text("Открыть в Finder", "Open in Finder"), systemImage: "folder")
+                        Image(systemName: "ellipsis").frame(width: .ui(28), height: .ui(28)).contentShape(Rectangle())
                     }
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(project.path, forType: .string)
-                    } label: {
-                        Label(L10n.text("Скопировать путь", "Copy path"), systemImage: "doc.on.doc")
-                    }
-                    Button {
-                        selection.select(model.state.orderedChats(projectID: project.id, archived: false).map(\.id))
-                    } label: {
-                        Label(L10n.text("Выделить все чаты", "Select all chats"), systemImage: "checkmark.circle")
-                    }.disabled(!model.state.chats.contains { $0.projectID == project.id && !$0.isArchived })
-                    Button { startRenaming(project) } label: {
-                        Label(L10n.text("Переименовать…", "Rename…"), systemImage: "pencil")
-                    }
-                    Button { permissionsProject = project } label: {
-                        Label(L10n.text("Разрешения…", "Permissions…"), systemImage: "lock.shield")
-                    }
-                    Divider()
-                    Button(L10n.text("Переместить выше", "Move up")) {
-                        adjacentProjectMove(project, offset: -1)?()
-                    }.disabled(adjacentProjectMove(project, offset: -1) == nil)
-                    Button(L10n.text("Переместить ниже", "Move down")) {
-                        adjacentProjectMove(project, offset: 1)?()
-                    }.disabled(adjacentProjectMove(project, offset: 1) == nil)
-                    Divider()
-                    Button { Task { await model.hideProject(project.id) } } label: {
-                        Label(L10n.text("Убрать проект из списка", "Remove project from list"), systemImage: "minus.circle")
-                    }
-                    .help(L10n.text("Файлы и чаты сохранятся. Вернуть проект можно через «Добавить проект».", "Files and chats are kept. Restore it with Add project."))
-                } label: {
-                    Image(systemName: "ellipsis").frame(width: .ui(28), height: .ui(28)).contentShape(Rectangle())
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .pointingHandCursor()
-                .help(L10n.text("Действия проекта", "Project actions"))
-                .accessibilityLabel(L10n.text("Действия проекта: \(project.name)", "Project actions: \(project.name)"))
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .pointingHandCursor()
+                    .help(L10n.text("Действия проекта", "Project actions"))
+                    .accessibilityLabel(L10n.text("Действия проекта: \(project.name)", "Project actions: \(project.name)"))
 
-                Button { startChat(in: project) } label: {
-                    Image(systemName: "square.and.pencil").frame(width: .ui(28), height: .ui(28)).contentShape(Rectangle())
+                    Button { startChat(in: project) } label: {
+                        Image(systemName: "square.and.pencil").frame(width: .ui(28), height: .ui(28)).contentShape(Rectangle())
+                    }
+                    .buttonStyle(PointerButtonStyle(base: .plain))
+                    .help(L10n.text("Новый чат в проекте", "New chat in project"))
+                    .accessibilityLabel(L10n.text("Новый чат в проекте \(project.name)", "New chat in \(project.name)"))
                 }
-                .buttonStyle(PointerButtonStyle(base: .plain))
-                .help(L10n.text("Новый чат в проекте", "New chat in project"))
-                .accessibilityLabel(L10n.text("Новый чат в проекте \(project.name)", "New chat in \(project.name)"))
+                .onHover(perform: hover("project:\(project.id)#tools"))
             }
             .padding(.trailing, .ui(4))
             .frame(height: .ui(32))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(dropTargetProjectID == project.id || menuRowID == "project:\(project.id)" ? Color.accentColor : .clear, lineWidth: 2).allowsHitTesting(false))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(dropTargetProjectID == project.id || menuRowID == "project:\(project.id)" ? Color.accentColor : .clear, lineWidth: 2).allowsHitTesting(false))
             .background(model.projectID == project.id && model.chatID == nil && !model.showingJobs && !model.showingAttention && !model.showingArchive ? DeskPalette.selection
-                        : menuRowID == "project:\(project.id)" ? DeskPalette.subtle : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                        : rowHighlighted("project:\(project.id)") ? DeskPalette.rowHover : Color.clear, in: RoundedRectangle(cornerRadius: 8))
 
             SidebarDisclosure(isExpanded: isExpanded, animation: sidebarAnimation) {
                 VStack(alignment: .leading, spacing: .ui(4)) {
@@ -499,7 +505,7 @@ struct DeskView: View {
                         ChatRow(chat: chat, enabled: !model.isChangingChat(chat.id), activate: {
                             Task { await model.openChat(chat) }
                         }, move: { _ in false }, targeted: { _ in },
-                           actions: chatActions(chat, reorder: false), favorite: true, menuShown: menuShown(rowID))
+                           actions: chatActions(chat, reorder: false), favorite: true, menuShown: menuShown(rowID), hovered: hover(rowID))
                     }
             } else {
                 // Measure and render the same label; the native overlay only handles interaction.
@@ -517,12 +523,12 @@ struct DeskView: View {
                         }, move: { model.moveChat($0, to: chat.id) }, targeted: { targeted in
                             if targeted { dropTargetChatID = chat.id }
                             else if dropTargetChatID == chat.id { dropTargetChatID = nil }
-                        }, actions: chatActions(chat, reorder: true), menuShown: menuShown(rowID))
+                        }, actions: chatActions(chat, reorder: true), menuShown: menuShown(rowID), hovered: hover(rowID))
                     }
             }
         }
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke((!favorite && dropTargetChatID == chat.id) || menuRowID == rowID ? Color.accentColor : .clear, lineWidth: 2).allowsHitTesting(false))
-        .background(chatBackground(chat, favorite: favorite, menuShown: menuRowID == rowID), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder((!favorite && dropTargetChatID == chat.id) || menuRowID == rowID ? Color.accentColor : .clear, lineWidth: 2).allowsHitTesting(false))
+        .background(chatBackground(chat, favorite: favorite, highlighted: rowHighlighted(rowID)), in: RoundedRectangle(cornerRadius: 8))
         .disabled(model.isChangingChat(chat.id))
     }
 
@@ -532,15 +538,23 @@ struct DeskView: View {
     private var canArchiveSelection: Bool {
         !archivingSelection && selection.ids.allSatisfy { model.canDeleteChat($0) }
     }
-    private func chatBackground(_ chat: Chat, favorite: Bool, menuShown: Bool) -> Color {
+    private func chatBackground(_ chat: Chat, favorite: Bool, highlighted: Bool) -> Color {
         if !favorite && selection.contains(chat.id) { return Color.accentColor.opacity(0.18) }
         if model.chatID == chat.id && !model.showingJobs && !model.showingAttention && !model.showingArchive { return DeskPalette.selection }
-        return menuShown ? DeskPalette.subtle : .clear
+        return highlighted ? DeskPalette.rowHover : .clear
     }
     private func menuShown(_ rowID: String) -> (Bool) -> Void {
         { shown in
             if shown { menuRowID = rowID } else if menuRowID == rowID { menuRowID = nil }
         }
+    }
+    private func hover(_ source: String) -> (Bool) -> Void {
+        { inside in
+            if inside { hoveredRows.insert(source) } else { hoveredRows.remove(source) }
+        }
+    }
+    private func rowHighlighted(_ rowID: String) -> Bool {
+        menuRowID == rowID || hoveredRows.contains(rowID) || hoveredRows.contains(rowID + "#tools")
     }
     private func archiveSelection() {
         // Archive in sidebar order so partial failures are predictable.
