@@ -269,6 +269,23 @@ import ContextTranscript
     }
 }
 
+@Test @MainActor func firstUserBubbleTopIsDrawnInABandAboveItsText() throws {
+    let view = TranscriptScrollView()
+    view.frame = NSRect(x: 0, y: 0, width: 760, height: 400)
+    view.update(items: [TranscriptItem(id: "u", kind: "user", text: "посмотри сегодняшний поиск работы - утренний прогон\nтам было delivery unconfirmed")],
+                conversationID: "t", followOutput: false)
+    view.layoutSubtreeIfNeeded()
+    let text = view.transcript, origin = text.textContainerOrigin
+    let width = try #require(text.textContainer).containerSize.width
+    // Only the bubble's overhang above the first line: no glyphs lie inside this rect.
+    let band = NSRect(x: origin.x + width - 120, y: origin.y - 8, width: 80, height: 6)
+    let bitmap = try #require(text.bitmapImageRepForCachingDisplay(in: band))
+    text.cacheDisplay(in: band, to: bitmap)
+    let color = try #require(bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2)?.usingColorSpace(.deviceRGB))
+    #expect(color.alphaComponent > 0.9)
+    #expect(abs(color.redComponent - 0.95) < 0.03)
+}
+
 @Test @MainActor func copyMessageWritesOnlyItsFullSourceTextAndTracksUpdates() throws {
     let pasteboard = NSPasteboard.withUniqueName()
     defer { pasteboard.releaseGlobally() }

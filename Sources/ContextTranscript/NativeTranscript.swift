@@ -968,8 +968,14 @@ private final class TranscriptTextView: NSTextView {
         trackClick { super.mouseDown(with: event) }
     }
     override func draw(_ dirtyRect: NSRect) {
+        // Bubbles go under the selection and the text; the view itself draws no background.
+        (layoutManager as? BubbleLayoutManager)?.drawBubbles(in: dirtyRect, origin: textContainerOrigin)
         super.draw(dirtyRect)
         didDrawText?()
+    }
+    /// TextKit invalidates only the changed lines; a user bubble also covers its overhang beyond them.
+    override func setNeedsDisplay(_ rect: NSRect, avoidAdditionalLayout flag: Bool) {
+        super.setNeedsDisplay(rect.isEmpty ? rect : rect.insetBy(dx: 0, dy: -BubbleLayoutManager.bubbleOverhang), avoidAdditionalLayout: flag)
     }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -1019,6 +1025,32 @@ extension NSAttributedString.Key {
 
 /// Paint only visible message fragments; keep native selection and TextKit's bounded layout.
 private final class BubbleLayoutManager: NSLayoutManager {
+    /// A user bubble reaches this far above and below its text, outside the text's line fragments.
+    static let bubbleOverhang: CGFloat = 10
+    /// Paints user bubbles that reach into `dirtyRect`. Each bubble is drawn whole, so a rect that holds only
+    /// its overhang (above the first message) or a part of it still shows the right shape.
+    func drawBubbles(in dirtyRect: NSRect, origin: NSPoint) {
+        guard let storage = textStorage, storage.length > 0, let container = textContainers.first else { return }
+        let local = dirtyRect.offsetBy(dx: -origin.x, dy: -origin.y).insetBy(dx: 0, dy: -Self.bubbleOverhang)
+        let glyphs = glyphRange(forBoundingRect: local, in: container)
+        guard glyphs.length > 0 else { return }
+        let characters = characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+        let whole = NSRange(location: 0, length: storage.length)
+        storage.enumerateAttribute(.messageBubble, in: characters) { value, range, _ in
+            guard value != nil,
+                  let inset = storage.attribute(.outgoingBubble, at: range.location, effectiveRange: nil) as? CGFloat else { return }
+            var full = NSRange()
+            _ = storage.attribute(.messageBubble, at: range.location, longestEffectiveRange: &full, in: whole)
+            let bounds = boundingRect(forGlyphRange: glyphRange(forCharacterRange: full, actualCharacterRange: nil), in: container)
+            let width = container.containerSize.width
+            let top = bounds.minY - Self.bubbleOverhang
+            let rect = NSRect(x: origin.x + inset + 2, y: origin.y + top,
+                              width: max(1, width - inset - 4), height: bounds.maxY + Self.bubbleOverhang - top)
+            guard rect.intersects(dirtyRect) else { return }
+            DeskPalette.outgoingBubble.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: 18, yRadius: 18).fill()
+        }
+    }
     /// Selection follows the text line by line: it skips blank lines and the empty column, and stays inside user bubbles.
     override func fillBackgroundRectArray(_ rectArray: UnsafePointer<NSRect>, count rectCount: Int,
                                           forCharacterRange charRange: NSRange, color: NSColor) {
@@ -1098,18 +1130,6 @@ private final class BubbleLayoutManager: NSLayoutManager {
             NSColor.separatorColor.setFill()
             NSRect(x: origin.x + container.lineFragmentPadding, y: origin.y + bounds.maxY + 6,
                    width: max(1, container.containerSize.width - 2 * container.lineFragmentPadding), height: 1).fill()
-        }
-        storage.enumerateAttribute(.messageBubble, in: characters) { value, range, _ in
-            guard value != nil else { return }
-            guard let inset = storage.attribute(.outgoingBubble, at: range.location, effectiveRange: nil) as? CGFloat else { return }
-            let glyphs = glyphRange(forCharacterRange: range, actualCharacterRange: nil)
-            let bounds = boundingRect(forGlyphRange: glyphs, in: container)
-            let width = container.containerSize.width
-            let top = bounds.minY - 10
-            let rect = NSRect(x: origin.x + inset + 2, y: origin.y + top,
-                              width: max(1, width - inset - 4), height: bounds.maxY + 10 - top)
-            DeskPalette.outgoingBubble.setFill()
-            NSBezierPath(roundedRect: rect, xRadius: 18, yRadius: 18).fill()
         }
         let whole = NSRange(location: 0, length: storage.length)
         let padding = container.lineFragmentPadding
