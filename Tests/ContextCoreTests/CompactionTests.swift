@@ -70,3 +70,20 @@ private func compactionEvent(_ method: String) throws -> TranscriptItem {
     #expect(view.transcript.string.contains(L10n.text(
         "Сжатие контекста: завершение не подтверждено", "Context compaction: completion unconfirmed")))
 }
+
+@Test @MainActor func refusalShowsAnOrangeBadgeOutsideCollapsedTools() throws {
+    let notice = "A safety classifier stopped the response."
+    let items = [TranscriptItem(id: "user", kind: "user", text: "Question"),
+                 TranscriptItem(id: "tool", kind: "activity", text: "Tool detail"),
+                 TranscriptItem(id: "refusal:m1", kind: "refusal", text: notice, phase: "cyber"),
+                 TranscriptItem(id: "answer", kind: "assistant", text: "Safe answer")]
+    let view = TranscriptScrollView()
+    view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+    view.update(items: items, conversationID: "thread", followOutput: false, isWorking: false)
+    let range = (view.transcript.string as NSString).range(of: notice)
+    #expect(range.location != NSNotFound)
+    let storage = try #require(view.transcript.textStorage)
+    #expect(storage.attribute(NSAttributedString.Key("ContextDeskCompactionBadge"), at: range.location, effectiveRange: nil) != nil)
+    #expect(storage.attribute(NSAttributedString.Key("ContextDeskBadgeTint"), at: range.location, effectiveRange: nil) as? NSColor == .systemOrange)
+    #expect(view.transcript.string.contains("Safe answer"))
+}

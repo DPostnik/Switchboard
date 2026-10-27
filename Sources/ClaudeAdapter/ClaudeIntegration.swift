@@ -553,6 +553,9 @@ public actor ClaudeIntegration: AgentIntegration {
             if event["type"].string == "message_delta", main, let message = meters[id]?.current {
                 observeUsage(event["usage"], message: message, session: id, turn: turn)
             }
+            if event["type"].string == "message_delta", main, event["delta"]["stop_reason"].string == "refusal", let message = messageIDs[id] {
+                refusal(message, category: event["delta"]["stop_details"]["category"].string, session: id)
+            }
             if event["type"].string == "content_block_delta", main, event["delta"]["type"].string == "text_delta",
                let text = event["delta"]["text"].string, let message = messageIDs[id] {
                 sink.yield(.init(session: reference(id), payload: .delta(turn: turn, item: message, text: text)))
@@ -568,8 +571,13 @@ public actor ClaudeIntegration: AgentIntegration {
                 record(.init(tool: part["name"].string ?? "", capability: Self.capability(tool: part["name"].string ?? "", input: part["input"], cwd: sessions[id]?.cwd),
                              target: Self.target(tool: part["name"].string ?? "", input: part["input"]), decision: .used, turn: turn), session: id)
             }
+            if message["stop_reason"].string == "refusal", let key = message["id"].string {
+                refusal(key, category: message["stop_details"]["category"].string, session: id)
+            }
         case "user":
             guard value["parent_tool_use_id"].string == nil else { return }
+            // The CLI's note to the model after a refusal names the stopped message; the stream may not have shown its stop.
+            if let refused = value["refused_message_id"].string { refusal(refused, category: nil, session: id) }
             for part in value["message"]["content"].array where part["type"].string == "tool_result" {
                 if let key = part["tool_use_id"].string { emit(.init(id: key + ":result", kind: "activity", text: Self.toolResultText(part["content"])), session: id) }
             }
@@ -843,6 +851,19 @@ public actor ClaudeIntegration: AgentIntegration {
     }
     private static func decorated(_ value: TranscriptItem, turn: String) -> TranscriptItem {
         var item = value; item.turnID = turn; item.agentName = "Claude"; return item
+    }
+    /// A safety classifier stopped this message: the rest was withheld and its unfinished tool calls did not run.
+    /// Several events report the same stop; the first one with a category wins.
+    private func refusal(_ message: String, category: String?, session id: String) {
+        let key = "refusal:" + message
+        if let known = sessions[id]?.current.first(where: { $0.id == key }), category == nil || known.phase != nil { return }
+        emit(.init(id: key, kind: "refusal", text: Self.refusalText(category: category), phase: category), session: id)
+    }
+    static func refusalText(category: String?) -> String {
+        let text = L10n.text("Фильтр безопасности остановил ответ. Остаток не получен, незавершённые действия не выполнены.",
+                             "A safety classifier stopped the response. The rest was withheld, and unfinished actions did not run.")
+        guard let category, !category.isEmpty else { return text }
+        return text + " " + L10n.text("Категория: \(category).", "Category: \(category).")
     }
     private func emit(_ value: TranscriptItem, session id: String) {
         guard let turn = sessions[id]?.active else { return }

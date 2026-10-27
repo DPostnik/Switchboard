@@ -39,6 +39,9 @@ private actor ClaudeEvents {
     func capabilities() -> [AgentCapabilityRecord] {
         values.compactMap { if case .capability(let record) = $0.payload { return record }; return nil }
     }
+    func items() -> [TranscriptItem] {
+        values.compactMap { if case .item(let item) = $0.payload { return item }; return nil }
+    }
 }
 private func interactiveFixture(_ root: URL) throws -> URL {
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -157,6 +160,16 @@ private func interactiveFixture(_ root: URL) throws -> URL {
                 result()
                 if prompt=='background': threading.Timer(0.3, woke).start()
                 if prompt=='background-idle': threading.Timer(0.3, tasks).start()
+                continue
+            if prompt=='refusal':
+                # The classifier stops the first message; the CLI notes it to the model and the retry answers.
+                out({'type':'stream_event','session_id':sid,'event':{'type':'message_start','message':{'id':'refused','usage':{'input_tokens':1,'output_tokens':1}}}})
+                out({'type':'stream_event','session_id':sid,'event':{'type':'content_block_delta','delta':{'type':'text_delta','text':'partial'}}})
+                out({'type':'stream_event','session_id':sid,'event':{'type':'message_delta','delta':{'stop_reason':'refusal','stop_details':{'type':'refusal','category':'cyber'}},'usage':{'output_tokens':3}}})
+                out({'type':'assistant','session_id':sid,'message':{'id':'refused','stop_reason':'refusal','stop_details':{'category':'cyber'},'content':[{'type':'thinking','thinking':''}]}})
+                out({'type':'user','session_id':sid,'parent_tool_use_id':None,'refused_message_id':'refused','message':{'role':'user','content':'Your response above was stopped'}})
+                out({'type':'assistant','session_id':sid,'message':{'id':'retry','stop_reason':'end_turn','content':[{'type':'text','text':'safe answer'}]}})
+                result()
                 continue
             if prompt in ['approval','question','outside','connector']:
                 name='AskUserQuestion' if prompt=='question' else 'mcp__claude_ai_Gmail__send_message' if prompt=='connector' else 'Write'
@@ -1136,5 +1149,26 @@ private func completedClaudeSession(_ adapter: ClaudeIntegration, binary: URL, h
     // A settled CLI stays warm for the next message; one stopped at the wait limit is replaced.
     #expect(try launches() == (prompt == "background-hang" ? 2 : 1))
     #expect(await events.startedCount() == events.completionCount())
+    await adapter.disconnect()
+}
+
+@Test func claudeRefusalAddsOneStopNoticeBeforeTheRetry() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "refusal")).value()
+    try await waitFor { await events.completion() != nil }
+    #expect(await events.completion() == .completed)
+    let items = await events.items().filter { $0.kind != "user" }
+    // The stream, the stopped message and the CLI's note all report the stop; only the first carries the category.
+    #expect(items.map(\.id) == ["refusal:refused", "retry"])
+    #expect(items.first?.phase == "cyber")
+    #expect(items.first?.text == ClaudeIntegration.refusalText(category: "cyber"))
+    #expect(ClaudeIntegration.refusalText(category: "cyber").hasSuffix("cyber."))
     await adapter.disconnect()
 }

@@ -533,10 +533,14 @@ public struct NativeTranscript: NSViewRepresentable {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = item.kind == "activity" ? 1 : 4; paragraph.paragraphSpacing = item.kind == "activity" ? 2 : 0
         paragraph.lineBreakMode = .byWordWrapping
-        if item.kind == "compaction" {
-            let active = item.phase == "inProgress"
-            let color = active ? NSColor.controlAccentColor : NSColor.secondaryLabelColor
-            let symbol = active ? "arrow.triangle.2.circlepath" : item.phase == "completed" ? "checkmark.circle" : "minus.circle"
+        if item.kind == "compaction" || item.kind == "refusal" {
+            // A refusal is a stop notice from the safety classifier; a compaction tracks its own progress.
+            let refusal = item.kind == "refusal"
+            let active = !refusal && item.phase == "inProgress"
+            let tint: NSColor? = refusal ? .systemOrange : active ? .controlAccentColor : nil
+            let color = tint ?? NSColor.secondaryLabelColor
+            let symbol = refusal ? "exclamationmark.shield" : active ? "arrow.triangle.2.circlepath"
+                : item.phase == "completed" ? "checkmark.circle" : "minus.circle"
             let attachment = NSTextAttachment()
             attachment.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
                 .withSymbolConfiguration(.init(pointSize: 12, weight: .medium)
@@ -559,8 +563,9 @@ public struct NativeTranscript: NSViewRepresentable {
             result.addAttributes([
                 .font: NSFont.systemFont(ofSize: 12, weight: .medium),
                 .foregroundColor: color, .paragraphStyle: paragraph,
-                .compactionBadge: item.id, .compactionActive: active
+                .compactionBadge: item.id
             ], range: NSRange(location: badgeStart, length: result.length - badgeStart))
+            if let tint { result.addAttribute(.badgeTint, value: tint, range: NSRange(location: badgeStart, length: result.length - badgeStart)) }
             // Keep paragraph terminators outside the badge so it hugs its content.
             result.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: paragraph,
                 .font: NSFont.systemFont(ofSize: 12)]))
@@ -1012,7 +1017,8 @@ private final class HoverAttachmentCell: NSTextAttachmentCell {
 
 extension NSAttributedString.Key {
     static let compactionBadge = NSAttributedString.Key("ContextDeskCompactionBadge")
-    static let compactionActive = NSAttributedString.Key("ContextDeskCompactionActive")
+    /// The colour of a badge's fill and outline; badges without it are neutral.
+    static let badgeTint = NSAttributedString.Key("ContextDeskBadgeTint")
     static let quoteCard = NSAttributedString.Key("ContextDeskQuoteCard")
     static let quoteCopy = NSAttributedString.Key("ContextDeskQuoteCopy")
     static let quoteIndex = NSAttributedString.Key("ContextDeskQuoteIndex")
@@ -1113,13 +1119,11 @@ private final class BubbleLayoutManager: NSLayoutManager {
             let glyphs = glyphRange(forCharacterRange: fullRange, actualCharacterRange: nil)
             let bounds = boundingRect(forGlyphRange: glyphs, in: container)
             let rect = bounds.offsetBy(dx: origin.x, dy: origin.y).insetBy(dx: -10, dy: -6)
-            let active = storage.attribute(.compactionActive, at: range.location, effectiveRange: nil) as? Bool ?? false
+            let tint = storage.attribute(.badgeTint, at: range.location, effectiveRange: nil) as? NSColor
             let path = NSBezierPath(roundedRect: rect, xRadius: 9, yRadius: 9)
-            (active ? NSColor.controlAccentColor.withAlphaComponent(0.08)
-                    : NSColor.quaternaryLabelColor.withAlphaComponent(0.07)).setFill()
+            (tint?.withAlphaComponent(0.08) ?? NSColor.quaternaryLabelColor.withAlphaComponent(0.07)).setFill()
             path.fill()
-            (active ? NSColor.controlAccentColor.withAlphaComponent(0.18)
-                    : NSColor.separatorColor.withAlphaComponent(0.35)).setStroke()
+            (tint?.withAlphaComponent(0.18) ?? NSColor.separatorColor.withAlphaComponent(0.35)).setStroke()
             path.lineWidth = 0.5
             path.stroke()
         }
