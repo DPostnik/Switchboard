@@ -352,6 +352,16 @@ already invalidated, the client owns no session and `browser_close` accepts any
 `session` value (an owned tab still requires its own token). Without a recorded
 Chrome there is nothing to quit and the call returns `browserQuit: none`.
 
+A Claude or Codex restart ends the MCP connection; the executor records the session as
+`disconnected`, and the new connection owns no tab. `browser_close` with the token of
+such an earlier session of the same chat (proved by the record in this chat's root,
+known outcome only) closes its tab by the recorded target ID, together with any other
+dead tab of the chat, one request each and never retried. It returns
+`earlierSession: true`, then quits the chat's Chrome when only blank tabs remain. It
+never launches Chrome; when Chrome has already exited it returns `browserQuit: none`.
+Live sessions of the chat, unknown outcomes and malformed tokens still get
+`session_not_owned`.
+
 Русский: `browser_snapshot` по умолчанию использует `mode=read`: один DOM-запрос без
 ожидания стабильности DOM, обхода iframe и построения дерева доступности. `selector`
 позволяет прочитать отдельную часть профиля. Ограничения: 4 000 узлов, 24 000 символов

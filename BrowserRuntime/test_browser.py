@@ -246,6 +246,63 @@ class BrowserTests(unittest.TestCase):
         browser.chrome.close_target.assert_called_once_with({'pid': 123}, 'F' * 32)
         self.assertEqual(state('failing.json'), 'orphan_close_uncertain')
 
+    def test_close_with_earlier_session_token_after_restart_closes_its_tab_once(self):
+        # After a Claude restart the new connection owns no tab; the agent still holds the old token.
+        browser = Browser(Path(self.directory.name), rpc=Mock(side_effect=AssertionError('no upstream call')))
+        records = browser.records
+        earlier, other, live, uncertain = 'a' * 32, 'b' * 32, 'c' * 32, 'd' * 32
+        def record(token, **fields):
+            server.save(records / (token + '.json'), {'session': token, 'pageId': 2, **fields})
+        def state(token):
+            return json.loads((records / (token + '.json')).read_text())['state']
+        record(earlier, state='disconnected', outcomeUnknown=False, targetId='A' * 32)
+        record(other, state='disconnected', outcomeUnknown=False, targetId='B' * 32)
+        record(live, state='navigated', targetId='C' * 32)
+        record(uncertain, state='disconnected', outcomeUnknown=True, targetId='D' * 32)
+        chrome = browser.chrome = Mock(owner={'pid': 123})
+        chrome.process_gone.return_value = False
+        chrome.close_target.return_value = True
+        chrome.page_targets.return_value = {k * 32: 'https://jobs.test/' for k in 'ABCD'}
+        # A live task of this chat, an unknown outcome and a malformed token keep the old answer.
+        for token in (live, uncertain, '../' + earlier, 'e' * 32):
+            with self.subTest(token=token), self.assertRaisesRegex(Rejected, 'session_not_owned'):
+                dispatch(browser, 'browser_close', {'session': token})
+        chrome.close_target.assert_not_called()
+        result = dispatch(browser, 'browser_close', {'session': earlier})
+        self.assertEqual(result, {'closed': True, 'earlierSession': True})
+        self.assertEqual(sorted(c.args[1] for c in chrome.close_target.call_args_list), ['A' * 32, 'B' * 32])
+        self.assertEqual([state(t) for t in (earlier, other, live, uncertain)],
+                         ['orphan_closed', 'orphan_closed', 'navigated', 'disconnected'])
+        # A second close of the same token is never resent.
+        with self.assertRaisesRegex(Rejected, 'session_not_owned'):
+            dispatch(browser, 'browser_close', {'session': earlier})
+        self.assertEqual(chrome.close_target.call_count, 2)
+        # Only blank tabs remain: the executor's follow-up quits the chat's Chrome.
+        chrome.page_targets.return_value = {'E' * 32: 'about:blank'}
+        chrome.process_gone.return_value = True  # Confirmed exit after the one graceful close.
+        self.assertEqual(browser.quit_idle_chrome(), 'quit')
+        chrome.graceful_close.assert_called_once_with({'pid': 123})
+
+    def test_close_with_earlier_session_token_never_launches_chrome(self):
+        browser = Browser(Path(self.directory.name), rpc=Mock(side_effect=AssertionError('no upstream call')))
+        token = 'a' * 32
+        server.save(browser.records / (token + '.json'), {'session': token, 'state': 'disconnected',
+                                                          'outcomeUnknown': False, 'targetId': 'A' * 32})
+        with patch.object(server.ChromeHost, 'ensure', side_effect=AssertionError('launch')):
+            result = dispatch(browser, 'browser_close', {'session': token})
+        self.assertEqual(result, {'closed': True, 'earlierSession': True, 'browserQuit': 'none'})
+        self.assertEqual(json.loads((browser.records / (token + '.json')).read_text())['state'], 'orphan_browser_exited')
+        # Chrome alive but its tabs cannot be inspected: nothing is closed and the record stays usable.
+        server.save(browser.records / (token + '.json'), {'session': token, 'state': 'disconnected',
+                                                          'outcomeUnknown': False, 'targetId': 'A' * 32})
+        browser.chrome = Mock(owner={'pid': 123})
+        browser.chrome.process_gone.return_value = False
+        browser.chrome.page_targets.return_value = None
+        with self.assertRaisesRegex(Rejected, 'Nothing was closed|Ничего не закрыто'):
+            dispatch(browser, 'browser_close', {'session': token})
+        browser.chrome.close_target.assert_not_called()
+        self.assertEqual(json.loads((browser.records / (token + '.json')).read_text())['state'], 'disconnected')
+
     def test_explicit_open_detects_user_closed_tab_without_adopting_other_tab(self):
         def rpc(name, args):
             self.calls.append((name, args))
