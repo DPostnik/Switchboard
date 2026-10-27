@@ -591,6 +591,8 @@ public actor ClaudeIntegration: AgentIntegration {
             let park = !keep && outcome == .completed && sessions[id]?.active != nil
             if !keep && !park { wires.removeValue(forKey: id) }
             if let turn = sessions[id]?.active, var meter = meters[id] {
+            // A resumed CLI ended a turn of its own while the user's message is still being submitted (during `initialize`).
+            if sessions[id]?.active == nil, submitting.contains(id) { return }
                 meter.complete(result: value); meters[id] = meter
                 sink.yield(.init(session: reference(id), payload: .usage(turn: turn, total: meter.total, snapshot: meter.snapshot())))
             }

@@ -112,6 +112,14 @@ private func interactiveFixture(_ root: URL) throws -> URL {
             if value['request']['subtype']=='interrupt': result()
             if value['request']['subtype']=='stop_task':
                 out({'type':'system','subtype':'task_notification','session_id':sid,'task_id':value['request']['task_id'],'status':'stopped','summary':'stopped'})
+            if value['request']['subtype']=='initialize' and (home/'own-turn').exists():
+                # A resumed CLI runs a turn of its own (a notification about the previous process's tasks) before it answers.
+                (home/'own-turn').unlink()
+                out({'type':'system','subtype':'task_notification','session_id':sid,'task_id':'old','status':'stopped','summary':'old task'})
+                out({'type':'system','subtype':'init','session_id':sid,'model':'claude-test'})
+                out({'type':'assistant','session_id':sid,'message':{'id':'own-'+sid,'content':[{'type':'text','text':'No response requested.'}]}})
+                result()
+                time.sleep(0.5) # The real answer waits for MCP servers to start.
                 tasks()
         elif value['type']=='user':
             record=json.loads((home/'contextdesk-sessions'/(sid+'.json')).read_text())
@@ -1075,6 +1083,26 @@ private func completedClaudeSession(_ adapter: ClaudeIntegration, binary: URL, h
     _ = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root, session: session)).value()
     _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session)).value()
     try await waitFor { await events.completionCount() == 2 }
+    #expect(try String(contentsOf: home.appendingPathComponent("launches"), encoding: .utf8).split(separator: "\n").count == 1)
+    await adapter.disconnect()
+}
+
+@Test func claudeOwnTurnDuringStartupDoesNotCloseTheNewProcess() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
+    try Data().write(to: home.appendingPathComponent("own-turn"))
+    // The CLI's own turn ends before `initialize` is answered; the user's message is still delivered to the same process.
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session)).value()
+    try await waitFor { await events.completionCount() == 1 }
+    let history = try await adapter.history(session, context: descriptor.context).value()
+    #expect(history.last?.items.map(\.text).last == "hello")
+    #expect(await events.startedCount() == 1)
     #expect(try String(contentsOf: home.appendingPathComponent("launches"), encoding: .utf8).split(separator: "\n").count == 1)
     await adapter.disconnect()
 }
