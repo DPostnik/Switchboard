@@ -11,6 +11,9 @@ struct ChatRow: NSViewRepresentable {
     let move: (String) -> Bool
     let targeted: (Bool) -> Void
     let actions: [ChatRowAction]
+    /// Favorites only open the chat: no reordering or multi-selection.
+    var favorite = false
+    var menuShown: (Bool) -> Void = { _ in }
 
     func makeNSView(context: Context) -> ChatRowView {
         ChatRowView()
@@ -27,6 +30,8 @@ struct ChatRow: NSViewRepresentable {
         view.move = move
         view.targeted = targeted
         view.actions = actions
+        view.favorite = favorite
+        view.menuShown = menuShown
         view.setAccessibilityElement(true)
         view.setAccessibilityRole(.button)
         view.setAccessibilityLabel(chat.title)
@@ -50,15 +55,18 @@ final class ChatRowView: SidebarRowView {
     var move: (String) -> Bool = { _ in false }
     var select: (ChatRowSelection) -> Void = { _ in }
     var actions: [ChatRowAction] = []
+    var favorite = false
     override var dragType: NSPasteboard.PasteboardType { Self.pasteboardType }
     override var dragID: String { chatID }
-    override var dragGroup: String { projectID.uuidString + (archived ? ":archive" : ":active") }
+    override var dragGroup: String { favorite ? "favorites" : projectID.uuidString + (archived ? ":archive" : ":active") }
+    override var canDrag: Bool { !favorite }
     override func performMove(from source: SidebarRowView) -> Bool {
-        guard let source = source as? ChatRowView else { return false }
+        guard !favorite, let source = source as? ChatRowView else { return false }
         return move(source.chatID)
     }
     override func click(modifiers: NSEvent.ModifierFlags) {
-        if modifiers.contains(.command) { select(.toggle) }
+        if favorite { activate() }
+        else if modifiers.contains(.command) { select(.toggle) }
         else if modifiers.contains(.shift) { select(.extend) }
         else { activate() }
     }

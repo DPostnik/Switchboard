@@ -150,3 +150,37 @@ import Testing
     #expect(!target.performDragOperation(info))
     #expect(moved == ["source", "source"])
 }
+
+@Test @MainActor func sidebarRowReportsItsOpenContextMenu() throws {
+    let view = ProjectHeaderView(frame: NSRect(x: 0, y: 0, width: 260, height: 32))
+    var states: [Bool] = []
+    view.menuShown = { states.append($0) }
+    let event = try #require(NSEvent.mouseEvent(with: .rightMouseDown, location: NSPoint(x: 10, y: 10), modifierFlags: [],
+                                                timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0,
+                                                clickCount: 1, pressure: 1))
+    let menu = try #require(view.menu(for: event))
+    view.willOpenMenu(menu, with: event)
+    view.didCloseMenu(menu, with: nil)
+    #expect(states == [true, false])
+}
+
+@Test @MainActor func favoriteChatRowOnlyOpensTheChat() throws {
+    let view = ChatRowView(frame: NSRect(x: 0, y: 0, width: 260, height: 40))
+    view.favorite = true
+    var opened = 0, selected = 0
+    view.activate = { opened += 1 }
+    view.select = { _ in selected += 1 }
+    func event(_ type: NSEvent.EventType, x: CGFloat) throws -> NSEvent {
+        try #require(NSEvent.mouseEvent(with: type, location: NSPoint(x: x, y: 20), modifierFlags: [],
+                                      timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0,
+                                      clickCount: 1, pressure: 1))
+    }
+    view.mouseDown(with: try event(.leftMouseDown, x: 30))
+    view.mouseDragged(with: try event(.leftMouseDragged, x: 80))
+    view.mouseUp(with: try event(.leftMouseUp, x: 80))
+    view.click(modifiers: .command)
+    #expect(!view.canDrag)
+    #expect(opened == 2)
+    #expect(selected == 0)
+    #expect(view.dragGroup == "favorites")
+}

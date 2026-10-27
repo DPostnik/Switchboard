@@ -15,6 +15,8 @@ struct DeskView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dropTargetProjectID: UUID?
     @State private var dropTargetChatID: String?
+    /// Sidebar row whose context menu is open; it stays marked until the menu closes.
+    @State private var menuRowID: String?
     @State private var expandedProjects: Set<UUID> = []
     @State private var collapsedSearchProjects: Set<UUID> = []
     @State private var visibleChatCounts: [UUID: Int] = [:]
@@ -301,7 +303,7 @@ struct DeskView: View {
                     else if dropTargetProjectID == project.id { dropTargetProjectID = nil }
                 }, moveUp: adjacentProjectMove(project, offset: -1), moveDown: adjacentProjectMove(project, offset: 1),
                    remove: { Task { await model.hideProject(project.id) } },
-                   rename: { startRenaming(project) }) {
+                   rename: { startRenaming(project) }, menuShown: menuShown("project:\(project.id)")) {
                     HStack(spacing: .ui(9)) {
                         Image(systemName: "chevron.right")
                             .font(.ui(.caption).weight(.semibold))
@@ -386,8 +388,9 @@ struct DeskView: View {
             }
             .padding(.trailing, .ui(4))
             .frame(height: .ui(32))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(dropTargetProjectID == project.id ? Color.accentColor : .clear, lineWidth: 2).allowsHitTesting(false))
-            .background(model.projectID == project.id && model.chatID == nil && !model.showingJobs && !model.showingAttention && !model.showingArchive ? DeskPalette.selection : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(dropTargetProjectID == project.id || menuRowID == "project:\(project.id)" ? Color.accentColor : .clear, lineWidth: 2).allowsHitTesting(false))
+            .background(model.projectID == project.id && model.chatID == nil && !model.showingJobs && !model.showingAttention && !model.showingArchive ? DeskPalette.selection
+                        : menuRowID == "project:\(project.id)" ? DeskPalette.subtle : Color.clear, in: RoundedRectangle(cornerRadius: 8))
 
             SidebarDisclosure(isExpanded: isExpanded, animation: sidebarAnimation) {
                 VStack(alignment: .leading, spacing: .ui(4)) {
@@ -487,14 +490,16 @@ struct DeskView: View {
     }
 
     private func chatEntry(_ chat: Chat, favorite: Bool = false) -> some View {
-        Group {
+        let rowID = (favorite ? "favorite:" : "chat:") + chat.id
+        return Group {
             if favorite {
-                Button { Task { await model.openChat(chat) } } label: { chatLabel(chat, favorite: true) }
-                    .buttonStyle(PointerButtonStyle(base: .plain))
-                    .contextMenu {
-                        ForEach(Array(chatActions(chat, reorder: false).enumerated()), id: \.offset) { _, action in
-                            Button(action.title, action: action.perform).disabled(!action.enabled)
-                        }
+                chatLabel(chat, favorite: true)
+                    .accessibilityHidden(true)
+                    .overlay {
+                        ChatRow(chat: chat, enabled: !model.isChangingChat(chat.id), activate: {
+                            Task { await model.openChat(chat) }
+                        }, move: { _ in false }, targeted: { _ in },
+                           actions: chatActions(chat, reorder: false), favorite: true, menuShown: menuShown(rowID))
                     }
             } else {
                 // Measure and render the same label; the native overlay only handles interaction.
@@ -512,12 +517,12 @@ struct DeskView: View {
                         }, move: { model.moveChat($0, to: chat.id) }, targeted: { targeted in
                             if targeted { dropTargetChatID = chat.id }
                             else if dropTargetChatID == chat.id { dropTargetChatID = nil }
-                        }, actions: chatActions(chat, reorder: true))
+                        }, actions: chatActions(chat, reorder: true), menuShown: menuShown(rowID))
                     }
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(dropTargetChatID == chat.id ? Color.accentColor : .clear, lineWidth: 2).allowsHitTesting(false))
             }
         }
-        .background(chatBackground(chat, favorite: favorite), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke((!favorite && dropTargetChatID == chat.id) || menuRowID == rowID ? Color.accentColor : .clear, lineWidth: 2).allowsHitTesting(false))
+        .background(chatBackground(chat, favorite: favorite, menuShown: menuRowID == rowID), in: RoundedRectangle(cornerRadius: 8))
         .disabled(model.isChangingChat(chat.id))
     }
 
@@ -527,9 +532,15 @@ struct DeskView: View {
     private var canArchiveSelection: Bool {
         !archivingSelection && selection.ids.allSatisfy { model.canDeleteChat($0) }
     }
-    private func chatBackground(_ chat: Chat, favorite: Bool) -> Color {
+    private func chatBackground(_ chat: Chat, favorite: Bool, menuShown: Bool) -> Color {
         if !favorite && selection.contains(chat.id) { return Color.accentColor.opacity(0.18) }
-        return model.chatID == chat.id && !model.showingJobs && !model.showingAttention && !model.showingArchive ? DeskPalette.selection : .clear
+        if model.chatID == chat.id && !model.showingJobs && !model.showingAttention && !model.showingArchive { return DeskPalette.selection }
+        return menuShown ? DeskPalette.subtle : .clear
+    }
+    private func menuShown(_ rowID: String) -> (Bool) -> Void {
+        { shown in
+            if shown { menuRowID = rowID } else if menuRowID == rowID { menuRowID = nil }
+        }
     }
     private func archiveSelection() {
         // Archive in sidebar order so partial failures are predictable.

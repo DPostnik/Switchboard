@@ -13,6 +13,7 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
     let moveDown: (() -> Void)?
     var remove: (() -> Void)? = nil
     var rename: (() -> Void)? = nil
+    var menuShown: (Bool) -> Void = { _ in }
     @ViewBuilder var content: Content
 
     func makeNSView(context: Context) -> ProjectHeaderView {
@@ -41,6 +42,7 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
         view.moveDown = moveDown
         view.remove = remove
         view.rename = rename
+        view.menuShown = menuShown
         view.setAccessibilityElement(true)
         view.setAccessibilityRole(.button)
         view.setAccessibilityLabel(project.name)
@@ -61,6 +63,9 @@ class SidebarRowView: NSView, NSDraggingSource {
     var title = ""
     var activate: () -> Void = {}
     var targeted: (Bool) -> Void = { _ in }
+    /// Reports while this row's context menu is open, so the row can show which item the menu acts on.
+    var menuShown: (Bool) -> Void = { _ in }
+    var canDrag: Bool { true }
     private var pressedEvent: NSEvent?
     private var startedDrag = false
 
@@ -84,6 +89,14 @@ class SidebarRowView: NSView, NSDraggingSource {
         }
     }
     override func accessibilityPerformPress() -> Bool { guard isInteractionEnabled else { return false }; activate(); return true }
+    override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
+        super.willOpenMenu(menu, with: event)
+        menuShown(true)
+    }
+    override func didCloseMenu(_ menu: NSMenu, with event: NSEvent?) {
+        super.didCloseMenu(menu, with: event)
+        menuShown(false)
+    }
 
     override func mouseDown(with event: NSEvent) {
         guard isInteractionEnabled else { return }
@@ -91,7 +104,7 @@ class SidebarRowView: NSView, NSDraggingSource {
         startedDrag = false
     }
     override func mouseDragged(with event: NSEvent) {
-        guard isInteractionEnabled, let pressedEvent, !startedDrag else { return }
+        guard isInteractionEnabled, canDrag, let pressedEvent, !startedDrag else { return }
         let delta = NSPoint(x: event.locationInWindow.x - pressedEvent.locationInWindow.x,
                             y: event.locationInWindow.y - pressedEvent.locationInWindow.y)
         guard hypot(delta.x, delta.y) >= 4 else { return }
