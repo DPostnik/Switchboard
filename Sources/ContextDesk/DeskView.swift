@@ -1317,6 +1317,7 @@ struct SettingsView: View {
                 Text(model.notificationStatus).font(.ui(.callout))
                 Button(L10n.text("Разрешить уведомления", "Allow notifications")) { Task { await model.enableNotifications() } }
             }
+            TelegramSettings(bridge: model.telegram)
             KeepAwakeSettings(controller: keepAwake)
             OrphanProcessSettings(controller: model.orphanProcesses)
             NotchIslandSettings()

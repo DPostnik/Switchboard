@@ -21,6 +21,7 @@ import ContextCore
             while !Task.isCancelled {
                 await self?.watchScheduler()
                 await self?.tickJobs()
+                if let self { await self.telegram.tick(model: self) }
                 do { try await Task.sleep(for: .seconds(15)) } catch { return }
             }
         }

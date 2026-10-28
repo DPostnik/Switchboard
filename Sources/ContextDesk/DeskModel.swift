@@ -62,6 +62,8 @@ private struct ChatRunState {
     private var notifiedTurns: Set<String> = []
     /// The latest answer text per chat during a turn; it becomes the chat's recap when the turn ends.
     private var latestAnswers: [String: String] = [:]
+    /// Sends "needs you" waits to the user's Telegram notifier and brings Reply answers back.
+    let telegram = TelegramBridge()
     @Published var state = SavedState()
     @Published var projectID: UUID?
     @Published var chatID: String? {
@@ -1098,6 +1100,57 @@ private struct ChatRunState {
         AppLog.lifecycle.notice("Restart continuation queued for \(queued.count, privacy: .public) chat(s)")
         persist()
         for id in queued { scheduleQueue(threadID: id) }
+    }
+    /// What waits for the user in a form the Telegram notifier accepts: requests and failed unread turns.
+    /// Request details are cut short; the transcript itself never leaves the Mac.
+    func telegramWaits() -> [TelegramAlerts.Waiting] {
+        var result: [TelegramAlerts.Waiting] = []
+        for action in pending {
+            guard let chat = state.chats.first(where: { $0.id == action.threadID }), !chat.isArchived else { continue }
+            var question = action.title
+            if case .questions(let fields) = action.interaction.kind {
+                question += "\n" + fields.map { field in
+                    field.text + (field.options.isEmpty ? "" : "\n" + field.options.map { "• " + $0.label }.joined(separator: "\n"))
+                }.joined(separator: "\n\n")
+            } else {
+                if let reason = action.interaction.reason, !reason.isEmpty { question += ": " + reason }
+                question += "\n" + String(action.interaction.details.prefix(600))
+                question += "\n\n" + L10n.text("Одобрить можно только в Switchboard или в приложении на iPhone. Ответ через Reply встанет в очередь чата.",
+                                                 "Approve only in Switchboard or the iPhone app. A Reply answer is queued in the chat.")
+            }
+            result.append(.init(key: TelegramAlerts.key(chatID: chat.id, wait: action.id), chatID: chat.id, job: chat.title, question: question))
+        }
+        for chat in state.chats where chat.lastTurnFailed == true && chat.hasUnreadResponse && !chat.isArchived {
+            let question = L10n.text("Ход завершился ошибкой.", "The turn ended with an error.") + (chat.recap.map { "\n" + $0 } ?? "")
+            result.append(.init(key: TelegramAlerts.key(chatID: chat.id, wait: "failed-" + (chat.unreadCompletionID ?? "")),
+                                chatID: chat.id, job: chat.title, question: question))
+        }
+        return result
+    }
+    /// A Reply from Telegram: answers a single open question it fits, otherwise waits in the chat's queue.
+    /// Approvals are never answered from Telegram. Returns false when the reply was not placed.
+    func acceptTelegramReply(_ reply: TelegramNotifier.Reply) async -> Bool {
+        let text = reply.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, let chat = state.chats.first(where: { $0.id == reply.thread }), !chat.isArchived, chatIsAvailable(chat.id) else { return false }
+        if let action = pending.first(where: { $0.threadID == chat.id }), case .questions(let fields) = action.interaction.kind,
+           fields.count == 1, let field = fields.first, !field.secret,
+           let value = field.options.isEmpty ? text : field.options.first(where: { $0.label.caseInsensitiveCompare(text) == .orderedSame })?.label {
+            return await answer(action, result: .answers([field.id: value])) == nil
+        }
+        let claude = chat.nativeSession?.connection == .appClaude
+        let message = QueuedMessage(id: "local-user:telegram:" + String(reply.id), threadID: chat.id, projectID: chat.projectID,
+            text: L10n.text("Ответ пользователя из Telegram:", "The user's reply from Telegram:") + "\n\n" + text,
+            model: claude ? ClaudeModel.resolved(chat.model) : chat.model,
+            effort: claude ? ClaudeEffort.resolved(chat.effort ?? state.claudeEffort) : chat.effort ?? "medium")
+        guard !queuedMessages.contains(where: { $0.id == message.id }) else { return true }
+        state.queuedMessages = queuedMessages + [message]
+        do { try await store.save(state) } catch {
+            state.queuedMessages = queuedMessages.filter { $0.id != message.id }
+            return false
+        }
+        runs[chat.id, default: ChatRunState()].queuePaused = false
+        scheduleQueue(threadID: chat.id)
+        return true
     }
     /// A chat whose unpaused queue will send next; a restart in that gap would leave it paused.
     var hasDeliverableQueue: Bool {
