@@ -386,6 +386,9 @@ public actor ClaudeIntegration: AgentIntegration {
         // `--setting-sources ""` also skips the profile's settings.json; only its commit/PR attribution is carried over.
         var settings = policy.settings?.object ?? [:]
         if let home, let attribution = ClaudeProfile.attribution(home: home) { settings["attribution"] = attribution }
+        // Messages from other Claude sessions start CLI turns the app does not track; drop them
+        // (docs/cross-session-inbound-findings.md). Sending to other sessions still works.
+        settings["crossSessionInbound"] = .string("refuse")
         if !settings.isEmpty {
             let encoder = JSONEncoder(); encoder.outputFormatting = [.withoutEscapingSlashes, .sortedKeys]
             args += ["--settings", String(decoding: try encoder.encode(JSONValue.object(settings)), as: UTF8.self)]

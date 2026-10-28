@@ -35,7 +35,9 @@ import Testing
     try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: home); try? FileManager.default.removeItem(at: global) }
     let bare = try ClaudeIntegration.arguments(id: UUID().uuidString, resumed: false, access: .standard, model: "", effort: nil, profile: home)
-    #expect(!bare.contains("--settings"))
+    // Only the inbound-message policy: messages from other Claude sessions are refused.
+    let bareSettings = try JSONDecoder().decode(JSONValue.self, from: Data(bare[try #require(bare.firstIndex(of: "--settings")) + 1].utf8))
+    #expect(bareSettings == .object(["crossSessionInbound": .string("refuse")]))
 
     // The profile's CLAUDE.md is usually a symlink to ~/.claude/CLAUDE.md; only commit/PR attribution is taken from settings.json.
     try "No Co-Authored-By in commit messages.".write(to: global, atomically: true, encoding: .utf8)

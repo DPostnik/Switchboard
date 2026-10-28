@@ -147,7 +147,8 @@ private func settings(_ args: [String]) throws -> JSONValue {
     #expect(editor.contains("--strict-mcp-config") && editor.contains("--safe-mode") && editor.contains("--restricted"))
     #expect(value(after: "--tools", in: editor) == "Read,Glob,Grep,Write,Edit,AskUserQuestion")
     #expect(value(after: "--permission-mode", in: editor) == "acceptEdits") // project writes no longer ask
-    #expect(!editor.contains("--settings") && !editor.contains("--agents") && !editor.contains("--chrome") && !editor.contains("--add-dir"))
+    #expect(try settings(editor) == .object(["crossSessionInbound": .string("refuse")]))
+    #expect(!editor.contains("--agents") && !editor.contains("--chrome") && !editor.contains("--add-dir"))
     #expect(editor == (try ClaudeIntegration.arguments(id: value(after: "--session-id", in: editor)!, resumed: false, access: .standard, model: "", effort: nil, projectAgents: #"{"w":{"description":"d","prompt":"p"}}"#, userChrome: true)))
     let operatorArgs = try claudeArguments(preset(AgentRoleID.fullOperator), agents: #"{"w":{"description":"d","prompt":"p"}}"#)
     #expect(!operatorArgs.contains("--strict-mcp-config") && !operatorArgs.contains("--safe-mode") && !operatorArgs.contains("--restricted") && !operatorArgs.contains("--tools"))
@@ -155,7 +156,8 @@ private func settings(_ args: [String]) throws -> JSONValue {
     #expect(try settings(operatorArgs)["permissions"]["ask"].array.count == ClaudeIntegration.connectorApprovalRules.count)
     #expect(value(after: "--agents", in: operatorArgs) == #"{"w":{"description":"d","prompt":"p"}}"#)
     let scheduled = try claudeArguments(preset(AgentRoleID.fullOperator), scheduled: true)
-    #expect(!scheduled.contains("--settings") && !scheduled.contains("--chrome"))
+    #expect(try settings(scheduled)["permissions"] == .null && !scheduled.contains("--chrome"))
+    #expect(try settings(scheduled)["crossSessionInbound"] == .string("refuse"))
     // Audit mode runs exactly like the operator; only the hook is registered to record.
     let audit = try claudeArguments(preset(AgentRoleID.routineOperator), scheduled: true)
     #expect(audit == (try ClaudeIntegration.arguments(id: value(after: "--session-id", in: audit)!, resumed: false, access: .fullAccess, model: "", effort: nil, scheduled: true, userChrome: true)))

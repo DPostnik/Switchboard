@@ -85,7 +85,9 @@ private func interactiveFixture(_ root: URL) throws -> URL {
     assert ('--safe-mode' in sys.argv) == (not browser and not connectors) and '--setting-sources' in sys.argv
     # The editor and operator roles keep the old standard/full flags; scheduled operator turns run without connector approval rules.
     assert (not (full or editor)) or connectors == full
-    assert not editor or '--settings' not in sys.argv
+    launch_settings=json.loads(sys.argv[sys.argv.index('--settings')+1])
+    assert launch_settings.get('crossSessionInbound') == 'refuse'
+    assert not editor or launch_settings == {'crossSessionInbound': 'refuse'}
     assert '--append-system-prompt' in sys.argv
     assert len(sys.argv[sys.argv.index('--append-system-prompt')+1]) > 100
     assert sys.argv[sys.argv.index('--setting-sources')+1] == ''
@@ -569,8 +571,8 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     try await waitFor { await events.completionCount() == 2 }
     let launches = try String(contentsOf: home.appendingPathComponent("submitted"), encoding: .utf8).split(separator: "\n")
     try #require(launches.count == 2)
-    #expect(launches[0].contains("--session-id") && !launches[0].contains("--settings") && !launches[0].contains("--strict-mcp-config"))
-    #expect(launches[1].contains("--resume") && launches[1].contains("--settings"))
+    #expect(launches[0].contains("--session-id") && !launches[0].contains(#"\"permissions\""#) && !launches[0].contains("--strict-mcp-config"))
+    #expect(launches[1].contains("--resume") && launches[1].contains(#"\"permissions\""#))
     #expect(try await adapter.history(session, context: descriptor.context).value().count == 2)
     await adapter.disconnect()
 }
@@ -640,8 +642,8 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     for _ in 0..<1500 where !(!model.isBusy(threadID: chat.id) && model.items.filter { $0.kind == "user" }.count == 2) { try await Task.sleep(for: .milliseconds(10)) }
     let launches = try String(contentsOf: home.appendingPathComponent("submitted"), encoding: .utf8).split(separator: "\n")
     try #require(launches.count == 2)
-    #expect(launches[0].contains("claude-test") && !launches[0].contains("--settings"))
-    #expect(launches[1].contains("--resume") && launches[1].contains("--settings"))
+    #expect(launches[0].contains("claude-test") && !launches[0].contains(#"\"permissions\""#))
+    #expect(launches[1].contains("--resume") && launches[1].contains(#"\"permissions\""#))
     #expect(model.state.chats.count == 1 && model.error == nil)
     await model.stopScheduler()
     await model.shutdown()
