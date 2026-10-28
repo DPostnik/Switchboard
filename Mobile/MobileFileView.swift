@@ -92,8 +92,8 @@ struct MobileFileView: View {
                 case .text:
                     let chunks = Self.chunks(file.text ?? "")
                     ForEach(Array(chunks.enumerated()), id: \.offset) { index, chunk in
-                        Text(chunk).font(.system(.footnote, design: .monospaced)).textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading).identified(index == 0 ? "file-content" : nil)
+                        SelectableText(text: MarkdownInline.uiKit(plain: chunk, style: .footnote, monospaced: true))
+                            .identified(index == 0 ? "file-content" : nil)
                     }
                 case .pages:
                     let pages = file.pages ?? []

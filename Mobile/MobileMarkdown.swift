@@ -8,12 +8,13 @@ struct MarkdownMessageView: View {
     /// Accessibility identifier of the first block, so UI tests can find the message text.
     var identifier: String?
     var depth = 0
+    var secondary = false
 
     var body: some View {
         let blocks = depth > 3 ? [.paragraph(text)] : MarkdownBlocks.parse(text)
         VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
-                MarkdownBlockView(block: block, depth: depth)
+                MarkdownBlockView(block: block, depth: depth, secondary: secondary)
                     // Consecutive list items read as one list.
                     .padding(.top, index > 0 && block.isListItem && blocks[index - 1].isListItem ? -5 : 0)
                     .identified(index == 0 ? identifier : nil)
@@ -35,16 +36,17 @@ extension View {
 struct MarkdownBlockView: View {
     let block: MarkdownBlock
     let depth: Int
+    var secondary = false
 
     var body: some View {
+        let color: UIColor = secondary ? .secondaryLabel : .label
         switch block {
         case .paragraph(let text):
-            Text(MarkdownInline.render(text)).font(.body).textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            SelectableText(text: MarkdownInline.uiKit(MarkdownInline.render(text), color: color))
         case .heading(let level, let text):
-            Text(MarkdownInline.render(text))
-                .font(level == 1 ? .title3.weight(.semibold) : level == 2 ? .headline : .subheadline.weight(.semibold))
-                .padding(.top, 4).frame(maxWidth: .infinity, alignment: .leading)
+            SelectableText(text: MarkdownInline.uiKit(MarkdownInline.render(text), style: level == 1 ? .title3 : level == 2 ? .headline : .subheadline,
+                                                      weight: .semibold, color: color))
+                .padding(.top, 4)
                 .accessibilityAddTraits(.isHeader)
         case .listItem(let item):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -57,15 +59,14 @@ struct MarkdownBlockView: View {
                 } else {
                     Text(item.depth == 0 ? "•" : "◦").foregroundStyle(.secondary)
                 }
-                Text(MarkdownInline.render(item.text)).textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                SelectableText(text: MarkdownInline.uiKit(MarkdownInline.render(item.text), color: color))
             }.padding(.leading, CGFloat(min(item.depth, 4)) * 18)
         case .code(let code):
             CodeCard(code: code)
         case .quote(let text):
             HStack(alignment: .top, spacing: 10) {
                 RoundedRectangle(cornerRadius: 1.5).fill(Color.secondary.opacity(0.35)).frame(width: 3)
-                MarkdownMessageView(text: text, depth: depth + 1).foregroundStyle(.secondary)
+                MarkdownMessageView(text: text, depth: depth + 1, secondary: true).foregroundStyle(.secondary)
             }.fixedSize(horizontal: false, vertical: true)
         case .callout(let callout):
             CalloutCard(callout: callout, depth: depth)
@@ -130,6 +131,99 @@ private struct CalloutCard: View {
         case .important: (L10n.text("Важно", "Important"), "exclamationmark.bubble", .purple)
         case .warning: (L10n.text("Внимание", "Warning"), "exclamationmark.triangle", .orange)
         case .caution: (L10n.text("Осторожно", "Caution"), "xmark.octagon", .red)
+        }
+    }
+}
+
+/// Puts a selected fragment into the open chat's reply field as a quote.
+struct QuoteSelectionAction {
+    let handler: @MainActor (String) -> Void
+    @MainActor func callAsFunction(_ text: String) { handler(text) }
+
+    /// The selection as Markdown quote lines, appended after the current draft.
+    static func appending(_ selection: String, to draft: String) -> String {
+        let lines = selection.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: .newlines)
+        let quote = lines.map { $0.isEmpty ? ">" : "> " + $0 }.joined(separator: "\n")
+        let head = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (head.isEmpty ? "" : head + "\n\n") + quote + "\n\n"
+    }
+}
+
+private struct QuoteSelectionKey: EnvironmentKey {
+    static var defaultValue: QuoteSelectionAction? { nil }
+}
+
+extension EnvironmentValues {
+    var quoteSelection: QuoteSelectionAction? {
+        get { self[QuoteSelectionKey.self] }
+        set { self[QuoteSelectionKey.self] = newValue }
+    }
+}
+
+/// Read-only text with the system selection handles, so a part of a message can be selected.
+/// SwiftUI `Text` with `.textSelection` on iOS only copies a whole block.
+struct SelectableText: UIViewRepresentable {
+    let text: NSAttributedString
+    /// Detect web links in literal text (user messages); Markdown links are already attributes.
+    var detectsLinks = false
+    /// Size to the text instead of the offered width, for bubbles.
+    var hugsText = false
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.isScrollEnabled = false
+        view.backgroundColor = .clear
+        view.textContainerInset = .zero
+        view.textContainer.lineFragmentPadding = 0
+        view.adjustsFontForContentSizeCategory = true
+        view.dataDetectorTypes = detectsLinks ? .link : []
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.delegate = context.coordinator
+        return view
+    }
+
+    func updateUIView(_ view: UITextView, context: Context) {
+        context.coordinator.openURL = context.environment.openURL
+        context.coordinator.quote = context.environment.quoteSelection
+        // Reassigning equal text would drop the user's selection on every redraw.
+        guard context.coordinator.shown != text else { return }
+        context.coordinator.shown = text
+        view.attributedText = text
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
+        let offered = proposal.width.flatMap { $0.isFinite ? $0 : nil }
+        let limit = offered ?? .greatestFiniteMagnitude
+        let height = ceil(uiView.sizeThatFits(CGSize(width: limit, height: .greatestFiniteMagnitude)).height)
+        if let offered, !hugsText { return CGSize(width: offered, height: height) }
+        let used = text.boundingRect(with: CGSize(width: limit, height: .greatestFiniteMagnitude),
+                                     options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil).width
+        return CGSize(width: min(limit, ceil(used)), height: height)
+    }
+
+    @MainActor final class Coordinator: NSObject, UITextViewDelegate {
+        var openURL: OpenURLAction?
+        var quote: QuoteSelectionAction?
+        var shown: NSAttributedString?
+
+        // Links go through the SwiftUI handler, so file paths open through the Mac as before.
+        func textView(_ textView: UITextView, primaryActionFor textItem: UITextItem, defaultAction: UIAction) -> UIAction? {
+            guard case .link(let url) = textItem.content, let openURL else { return defaultAction }
+            return UIAction { _ in openURL(url) }
+        }
+
+        func textView(_ textView: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
+            guard let quote, range.length > 0, NSMaxRange(range) <= textView.attributedText.length else { return nil }
+            let selection = textView.attributedText.attributedSubstring(from: range).string
+            let action = UIAction(title: L10n.text("Цитировать в ответ", "Quote in reply"), image: UIImage(systemName: "text.quote")) { _ in
+                quote(selection)
+            }
+            // First, so it is not hidden behind the menu's overflow arrow.
+            return UIMenu(children: [action] + suggestedActions)
         }
     }
 }
@@ -270,6 +364,47 @@ enum MarkdownInline {
         highlightMarks(&text)
         linkBareURLs(&text)
         return text
+    }
+
+    /// `render` output for `SelectableText`: SwiftUI fonts and colors do not carry over to UIKit,
+    /// so emphasis, code chips, highlights and links are rebuilt from the run attributes.
+    static func uiKit(_ text: AttributedString, style: UIFont.TextStyle = .body, weight: UIFont.Weight = .regular,
+                      monospaced: Bool = false, color: UIColor = .label) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        for run in text.runs {
+            let intent = run.inlinePresentationIntent ?? []
+            var traits: UIFontDescriptor.SymbolicTraits = []
+            if intent.contains(.stronglyEmphasized) { traits.insert(.traitBold) }
+            if intent.contains(.emphasized) { traits.insert(.traitItalic) }
+            let code = intent.contains(.code)
+            var attributes: [NSAttributedString.Key: Any] = [
+                .font: font(code ? .callout : style, weight: weight, monospaced: monospaced || code, traits: traits),
+                .foregroundColor: color,
+            ]
+            if intent.contains(.strikethrough) { attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
+            if let background = run.attributes[AttributeScopes.SwiftUIAttributes.BackgroundColorAttribute.self] {
+                attributes[.backgroundColor] = UIColor(background)
+            }
+            if let link = run.link { attributes[.link] = link }
+            result.append(NSAttributedString(string: String(text[run.range].characters), attributes: attributes))
+        }
+        return result
+    }
+
+    /// Literal text (user messages, files, approval details) for `SelectableText`.
+    static func uiKit(plain text: String, style: UIFont.TextStyle = .body, monospaced: Bool = false) -> NSAttributedString {
+        NSAttributedString(string: text, attributes: [.font: font(style, monospaced: monospaced), .foregroundColor: UIColor.label])
+    }
+
+    /// A Dynamic Type font: built at the default size, then scaled, so the text view follows size changes.
+    private static func font(_ style: UIFont.TextStyle, weight: UIFont.Weight = .regular, monospaced: Bool = false,
+                             traits: UIFontDescriptor.SymbolicTraits = []) -> UIFont {
+        let size = UIFont.preferredFont(forTextStyle: style, compatibleWith: UITraitCollection(preferredContentSizeCategory: .large)).pointSize
+        var font = monospaced ? UIFont.monospacedSystemFont(ofSize: size, weight: weight) : UIFont.systemFont(ofSize: size, weight: weight)
+        if !traits.isEmpty, let descriptor = font.fontDescriptor.withSymbolicTraits(font.fontDescriptor.symbolicTraits.union(traits)) {
+            font = UIFont(descriptor: descriptor, size: size)
+        }
+        return UIFontMetrics(forTextStyle: style).scaledFont(for: font)
     }
 
     /// One-line text for chat list previews.

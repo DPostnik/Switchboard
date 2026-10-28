@@ -769,6 +769,10 @@ struct MobileChatView: View {
                             let lastUser = chat.messages.last { $0.role == "user" }?.id
                             ForEach(chat.messages) { message in
                                 MessageBubble(message: message, openFile: project?.canReadFiles == true ? { openedFile = OpenedFile(path: $0) } : nil)
+                                    .environment(\.quoteSelection, QuoteSelectionAction { selection in
+                                        draft.wrappedValue = QuoteSelectionAction.appending(selection, to: draft.wrappedValue)
+                                        writing = true
+                                    })
                                 if message.id == lastUser, let status = sendStatus(lastCommand, chat: chat) {
                                     Text(status).font(.caption).foregroundStyle(.secondary)
                                         .frame(maxWidth: .infinity, alignment: .trailing).padding(.top, -14)
@@ -797,7 +801,7 @@ struct MobileChatView: View {
                                 VStack(alignment: .leading, spacing: 12) {
                                     Label(L10n.text("Требуется подтверждение", "Approval required"), systemImage: "hand.raised.fill")
                                         .font(.headline).foregroundStyle(.orange)
-                                    Text(approval.details).font(.system(.footnote, design: .monospaced)).textSelection(.enabled)
+                                    SelectableText(text: MarkdownInline.uiKit(plain: approval.details, style: .footnote, monospaced: true))
                                         .padding(10).frame(maxWidth: .infinity, alignment: .leading)
                                         .background(Color(.systemBackground).opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
                                     HStack(spacing: 10) {
@@ -1105,10 +1109,10 @@ struct MessageBubble: View {
             // The user's words stay literal, like on the Mac.
             HStack(alignment: .top) {
                 Spacer(minLength: 56)
-                Text(message.text).font(.body).textSelection(.enabled)
+                // Long press selects a fragment; the selection menu copies, shares or quotes it.
+                SelectableText(text: MarkdownInline.uiKit(plain: message.text), detectsLinks: true, hugsText: true)
                     .padding(.horizontal, 14).padding(.vertical, 10)
                     .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-                    .contextMenu { menu }
                     .accessibilityIdentifier("message-text-" + message.id)
             }.accessibilityElement(children: .contain).accessibilityIdentifier("message-" + message.id)
         } else {
@@ -1121,11 +1125,15 @@ struct MessageBubble: View {
                 HStack(spacing: 18) {
                     CopyControl(title: L10n.text("Копировать ответ", "Copy answer"), text: message.text, identifier: "copy-message-" + message.id)
                     ShareLink(item: message.text) { Label(L10n.text("Поделиться", "Share"), systemImage: "square.and.arrow.up").font(.caption.weight(.medium)) }
+                    let links = Self.links(in: message.text)
+                    if !links.isEmpty {
+                        Menu { linkMenu(links) } label: { Label(L10n.text("Ссылки", "Links"), systemImage: "link").font(.caption.weight(.medium)) }
+                            .accessibilityIdentifier("message-links-" + message.id)
+                    }
                     if copiedPath { Text(L10n.text("Путь скопирован", "Path copied")).font(.caption) }
                 }.labelStyle(.iconOnly).foregroundStyle(.secondary).buttonStyle(.borderless)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .contextMenu { menu }
             .environment(\.openURL, OpenURLAction { url in
                 // The file lives on the Mac: open it through the Mac when it can send files, otherwise copy the path.
                 guard let path = MarkdownInline.copiedValue(url) ?? MarkdownInline.filePath(url) else { return .systemAction }
@@ -1139,22 +1147,18 @@ struct MessageBubble: View {
             .accessibilityElement(children: .contain).accessibilityIdentifier("message-" + message.id)
         }
     }
-    @ViewBuilder private var menu: some View {
-        Button { UIPasteboard.general.string = message.text } label: { Label(L10n.text("Копировать", "Copy"), systemImage: "doc.on.doc") }
-        ShareLink(item: message.text) { Label(L10n.text("Поделиться", "Share"), systemImage: "square.and.arrow.up") }
-        let links = Self.links(in: message.text)
-        if !links.isEmpty {
-            Menu {
-                ForEach(links, id: \.self) { url in
-                    Link(destination: url) { Label(MarkdownInline.shortened(url), systemImage: "safari") }
-                }
-            } label: { Label(L10n.text("Открыть ссылку", "Open link"), systemImage: "link") }
-            Menu {
-                ForEach(links, id: \.self) { url in
-                    Button(MarkdownInline.shortened(url)) { UIPasteboard.general.url = url }
-                }
-            } label: { Label(L10n.text("Копировать ссылку", "Copy link"), systemImage: "link.badge.plus") }
-        }
+    // The answer itself has no long-press menu: long press selects text instead.
+    @ViewBuilder private func linkMenu(_ links: [URL]) -> some View {
+        Menu {
+            ForEach(links, id: \.self) { url in
+                Link(destination: url) { Label(MarkdownInline.shortened(url), systemImage: "safari") }
+            }
+        } label: { Label(L10n.text("Открыть ссылку", "Open link"), systemImage: "safari") }
+        Menu {
+            ForEach(links, id: \.self) { url in
+                Button(MarkdownInline.shortened(url)) { UIPasteboard.general.url = url }
+            }
+        } label: { Label(L10n.text("Копировать ссылку", "Copy link"), systemImage: "link.badge.plus") }
     }
     static func links(in text: String) -> [URL] {
         guard text.contains("http"), let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return [] }

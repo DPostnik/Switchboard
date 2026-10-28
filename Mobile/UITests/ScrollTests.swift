@@ -48,7 +48,7 @@ final class ScrollTests: XCTestCase {
             XCTAssertTrue(app.buttons["chat-row-second-project-12"].exists)
             XCTAssertFalse(expand.exists)
             hidden.tap()
-            XCTAssertTrue(app.staticTexts["message-text-list-message"].waitForExistence(timeout: 5), "Disclosed/search rows open the live chat")
+            XCTAssertTrue(app.textViews["message-text-list-message"].waitForExistence(timeout: 5), "Disclosed/search rows open the live chat")
             app.navigationBars.buttons.firstMatch.tap()
             XCTAssertTrue(search.waitForExistence(timeout: 5))
             search.tap(); search.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 7))
@@ -138,7 +138,7 @@ final class ScrollTests: XCTestCase {
             app.launchArguments = ["-mobile-preview", "-preview-chat", "-preview-offline", "-interfaceLanguage", language]
             app.launch()
             XCTAssertTrue(app.staticTexts[status].firstMatch.waitForExistence(timeout: 10))
-            XCTAssertTrue(app.staticTexts["message-text-m2"].exists)
+            XCTAssertTrue(app.textViews["message-text-m2"].exists)
             XCTAssertTrue(app.descendants(matching: .any)["message-input"].firstMatch.exists)
             app.terminate()
         }
@@ -201,7 +201,7 @@ final class ScrollTests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-mobile-preview", "-preview-chat", "-preview-long", "-interfaceLanguage", "en"]
         app.launch()
-        let tail = app.staticTexts["message-text-long-19"]
+        let tail = app.textViews["message-text-long-19"]
         XCTAssertTrue(tail.waitForExistence(timeout: 15))
         XCTAssertTrue(tail.isHittable, "Opening a long chat must show the last message")
         let scroll = app.scrollViews["conversation-scroll"]
@@ -238,14 +238,39 @@ final class AnswerControlTests: XCTestCase {
             let path = app.links["Sources/ContextCore/MobileRemote.swift"].firstMatch
             XCTAssertTrue(path.waitForExistence(timeout: 5))
             path.tap()
-            let content = app.staticTexts["file-content"].firstMatch
+            let content = app.textViews["file-content"].firstMatch
             XCTAssertTrue(content.waitForExistence(timeout: 5))
-            XCTAssertTrue(content.label.contains("let line1 = 1"), content.label)
+            let text = content.value as? String ?? ""
+            XCTAssertTrue(text.contains("let line1 = 1"), text)
             XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", truncated)).firstMatch.exists)
             let shot = XCTAttachment(screenshot: app.screenshot())
             shot.name = "File viewer " + language; shot.lifetime = .keepAlways; add(shot)
             app.buttons[done].firstMatch.tap()
             XCTAssertTrue(app.scrollViews["conversation-scroll"].waitForExistence(timeout: 5))
+            app.terminate()
+        }
+    }
+
+    @MainActor func testSelectionQuotesIntoReplyInBothLanguages() throws {
+        for (language, quote) in [("ru", "Цитировать в ответ"), ("en", "Quote in reply")] {
+            let app = XCUIApplication()
+            app.launchArguments = ["-mobile-preview", "-preview-chat", "-interfaceLanguage", language]
+            app.launch()
+            // Long press selects one word of the answer, not the whole message.
+            let answer = app.textViews["message-text-m2"]
+            XCTAssertTrue(answer.waitForExistence(timeout: 10))
+            answer.press(forDuration: 1.0)
+            let action = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", quote)).firstMatch
+            XCTAssertTrue(action.waitForExistence(timeout: 5))
+            let shot = XCTAttachment(screenshot: app.screenshot())
+            shot.name = "Selection menu " + language; shot.lifetime = .keepAlways; add(shot)
+            action.tap()
+            let input = app.descendants(matching: .any)["message-input"].firstMatch
+            let quoted = NSPredicate { _, _ in (input.value as? String)?.hasPrefix("> ") == true }
+            expectation(for: quoted, evaluatedWith: nil)
+            waitForExpectations(timeout: 5)
+            let draft = input.value as? String ?? ""
+            XCTAssertLessThan(draft.count, 40, "Only the selected fragment is quoted: " + draft)
             app.terminate()
         }
     }
@@ -272,7 +297,7 @@ final class AnswerControlTests: XCTestCase {
             bottom.name = "Rich answer bottom " + language; bottom.lifetime = .keepAlways; add(bottom)
             app.scrollViews["conversation-scroll"].swipeDown(velocity: .fast)
             app.scrollViews["conversation-scroll"].swipeDown(velocity: .fast)
-            XCTAssertTrue(app.staticTexts["message-text-rich"].waitForExistence(timeout: 3))
+            XCTAssertTrue(app.textViews["message-text-rich"].waitForExistence(timeout: 3))
             let top = XCTAttachment(screenshot: app.screenshot())
             top.name = "Rich answer top " + language; top.lifetime = .keepAlways; add(top)
             app.navigationBars.buttons.firstMatch.tap()
