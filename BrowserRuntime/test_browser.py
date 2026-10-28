@@ -67,6 +67,44 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual([n for n, _ in self.calls].count('list_pages'), 2)
         self.assertIsNone(self.browser.session)
 
+    def test_close_also_closes_tabs_sites_opened_from_the_task_tab(self):
+        owned, popup, nested, person = 'A' * 32, 'B' * 32, 'C' * 32, 'D' * 32
+        page = Mock()
+        page.__enter__ = Mock(return_value=page)
+        page.send.return_value = {'targetInfos': [
+            {'targetId': owned, 'type': 'page'},
+            {'targetId': nested, 'type': 'page', 'openerId': popup},
+            {'targetId': popup, 'type': 'page', 'openerId': owned},
+            {'targetId': person, 'type': 'page'},
+            {'targetId': 'E' * 32, 'type': 'service_worker', 'openerId': owned}]}
+        self.browser.page_session_factory = lambda: page
+        self.browser.checkpoint = {'state': 'opened', 'targetId': owned}
+        chrome = self.browser.chrome = Mock(owner={'pid': 123})
+        chrome.process_gone.return_value = False
+        chrome.page_targets.side_effect = [{nested: 'https://ats.test/', person: 'https://linkedin.test/'},
+                                           {person: 'https://linkedin.test/'}]
+        self.browser.injected = lambda name, args: {'content': [{'type': 'text', 'text': '## Pages\n1: about:blank' if name == 'list_pages' else 'closed'}]}
+        self.assertEqual(self.browser.close_session('owner'), {'closed': True, 'siteTabsClosed': 2})
+        self.assertEqual(sorted(c.args[1] for c in chrome.close_target.call_args_list), [popup, nested])
+        record = json.loads((self.browser.records / 'owner.json').read_text())
+        self.assertEqual((record['state'], record['siteTabs'], record['siteTabsClosed']), ('closed', [popup, nested], 2))
+        # An unconfirmed close is reported, never resent.
+        self.browser.session, self.browser.page = 'owner', 7
+        self.browser.checkpoint = {'state': 'opened', 'targetId': owned}
+        chrome.reset_mock()
+        chrome.page_targets.side_effect = None
+        chrome.page_targets.return_value = {popup: 'https://ats.test/'}
+        self.assertEqual(self.browser.close_session('owner', confirmation_timeout=0),
+                         {'closed': True, 'siteTabsClosed': 1, 'siteTabsUnconfirmed': 1})
+        self.assertEqual(chrome.close_target.call_count, 2)
+        # Without the opener inventory nothing beyond the task tab is touched.
+        self.browser.session, self.browser.page = 'owner', 7
+        self.browser.checkpoint = {'state': 'opened', 'targetId': owned}
+        chrome.reset_mock()
+        page.send.side_effect = server.CDPTransportError('lost')
+        self.assertEqual(self.browser.close_session('owner'), {'closed': True})
+        chrome.close_target.assert_not_called()
+
     def test_kept_reason_names_hosts_and_never_blames_another_chat(self):
         browser = Browser(Path(self.directory.name), rpc=Mock())
         browser.chrome = Mock(owner={'pid': 123})
