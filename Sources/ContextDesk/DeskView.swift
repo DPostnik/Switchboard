@@ -1046,14 +1046,14 @@ struct ChatView: View {
         .inspector(isPresented: Binding(get: { preview.current != nil && !preview.expanded },
                                         set: { if !$0 && !preview.expanded { preview.close() } })) {
             if let current = preview.current, !preview.expanded {
-                DocumentPreviewView(session: preview, model: current)
+                DocumentPreviewView(session: preview, model: current, onQuote: quoteIntoDraft)
                     .id(current.id)
                     .inspectorColumnWidth(min: 320, ideal: 520, max: 1100)
             }
         }
         .overlay {
             if preview.expanded, let current = preview.current {
-                DocumentPreviewView(session: preview, model: current)
+                DocumentPreviewView(session: preview, model: current, onQuote: quoteIntoDraft)
                     .id(current.id)
                     .background(DeskPalette.canvas)
             }
@@ -1064,6 +1064,15 @@ struct ChatView: View {
 
     private func openPreview(_ url: URL, line: Int?) {
         preview.open(url, line: line)
+    }
+
+    /// A fragment selected in the preview goes into the draft with its file and lines; nothing is sent.
+    private func quoteIntoDraft(_ url: URL, text: String, lines: ClosedRange<Int>?) {
+        let path = TranscriptScrollView.relativePath(url.path, project: model.selectedProject?.path) ?? url.path
+        model.draft = DocumentQuote.draft(path: path, lines: lines, text: text, appendingTo: model.draft)
+        // The composer is hidden behind an expanded preview.
+        preview.expanded = false
+        model.focusComposer()
     }
 }
 

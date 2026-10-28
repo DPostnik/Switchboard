@@ -326,3 +326,56 @@ private func temporaryDirectory() throws -> URL {
     view.update(items: items, conversationID: "c", followOutput: false, isWorking: true)
     #expect(!view.transcript.string.contains("Second tool"))
 }
+
+@Test func quotedMarkdownSelectionFindsItsSourceLines() {
+    let source = """
+    # Plan
+
+    The **first** step uses `cv.md` and [the guide](docs/guide.md).
+    - Send the batch
+    - [ ] Check the reply
+    Repeated line
+    Repeated line
+    """
+    // Rendered text has no markup; list marks may be part of the selection.
+    #expect(DocumentQuote.lines(of: "The first step uses cv.md and the guide.", in: source) == 3...3)
+    #expect(DocumentQuote.lines(of: "Plan\n\nThe first step uses cv.md", in: source) == 1...3)
+    #expect(DocumentQuote.lines(of: "• Send the batch\nCheck the reply", in: source) == 4...5)
+    // Several or no matches give no lines rather than a wrong range.
+    #expect(DocumentQuote.lines(of: "Repeated line", in: source) == nil)
+    #expect(DocumentQuote.lines(of: "Not in the file", in: source) == nil)
+    #expect(DocumentQuote.lines(of: "  \n ", in: source) == nil)
+}
+
+@Test func quotedSelectionGoesIntoTheDraftWithFileAndLines() {
+    #expect(DocumentQuote.draft(path: "docs/plan.md", lines: 3...5, text: "one\n\ntwo\n", appendingTo: "")
+            == "`docs/plan.md:3-5`\n> one\n>\n> two\n\n")
+    #expect(DocumentQuote.draft(path: "cv.md", lines: 7...7, text: "line", appendingTo: "Fix this:  \n")
+            == "Fix this:\n\n`cv.md:7`\n> line\n\n")
+    #expect(DocumentQuote.draft(path: "/tmp/a.txt", lines: nil, text: "x", appendingTo: "") == "`/tmp/a.txt`\n> x\n\n")
+}
+
+@Test @MainActor func codeSelectionMenuQuotesTheTextWithItsLines() throws {
+    let code = (1...60).map { "let value\($0) = \($0)" }.joined(separator: "\n")
+    let view = TranscriptScrollView()
+    view.isDocument = true
+    view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+    view.update(items: [DocumentTextView.item(DocumentPreview.transcriptText(code, kind: .code(language: "swift")))],
+                conversationID: "doc", followOutput: false)
+    view.layoutSubtreeIfNeeded()
+    let event = try #require(NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+    var quoted: [(String, ClosedRange<Int>?)] = []
+    view.onQuoteSelection = { quoted.append(($0, $1)) }
+    // No selection: no quote item.
+    view.transcript.setSelectedRange(NSRange(location: 0, length: 0))
+    #expect(try #require(view.textView(view.transcript, menu: NSMenu(), for: event, at: 0)).items.isEmpty)
+    let string = view.transcript.string as NSString
+    let start = string.range(of: "value45 = 45").location
+    let end = NSMaxRange(string.range(of: "let value46"))
+    view.transcript.setSelectedRange(NSRange(location: start, length: end - start))
+    let menu = try #require(view.textView(view.transcript, menu: NSMenu(), for: event, at: start))
+    #expect(menu.items.first?.title == L10n.text("Попросить агента изменить", "Ask Agent to Edit"))
+    menu.items.first.map { item in _ = (item.target as AnyObject?)?.perform(item.action, with: item) }
+    #expect(quoted.count == 1 && quoted.first?.0 == "value45 = 45\nlet value46" && quoted.first?.1 == 45...46)
+}

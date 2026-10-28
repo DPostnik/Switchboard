@@ -59,6 +59,8 @@ public struct NativeTranscript: NSViewRepresentable {
     private var projectPath: String?
     /// Previews a file the user clicked in an answer (URL and optional line); without it files open externally.
     public var onOpenFile: ((URL, Int?) -> Void)?
+    /// Quotes the selected text into the chat with its numbered code lines, if any; nil hides the menu item.
+    public var onQuoteSelection: ((String, ClosedRange<Int>?) -> Void)?
     /// A document shown in the preview pane: no grouping, author headers or copy-all control, code never collapses.
     public var isDocument = false
     /// The file shown in document mode; wiki links and relative paths resolve from it.
@@ -911,12 +913,21 @@ public struct NativeTranscript: NSViewRepresentable {
 
     /// Links get their own actions above the standard text menu.
     public func textView(_ view: NSTextView, menu: NSMenu, for event: NSEvent, at charIndex: Int) -> NSMenu? {
-        guard let storage = transcript.textStorage, charIndex >= 0, charIndex < storage.length,
-              let url = storage.attribute(.link, at: charIndex, effectiveRange: nil) as? URL,
-              TranscriptLinks.destination(url.absoluteString) != nil else { return menu }
         var items: [NSMenuItem] = []
         func add(_ title: String, _ action: @escaping () -> Void) {
             items.append(LinkMenuItem(title: title, perform: action))
+        }
+        if let onQuoteSelection, let quote = selectedQuote(view) {
+            add(L10n.text("Попросить агента изменить", "Ask Agent to Edit")) { onQuoteSelection(quote.text, quote.lines) }
+        }
+        guard let storage = transcript.textStorage, charIndex >= 0, charIndex < storage.length,
+              let url = storage.attribute(.link, at: charIndex, effectiveRange: nil) as? URL,
+              TranscriptLinks.destination(url.absoluteString) != nil else {
+            if !items.isEmpty {
+                items.append(.separator())
+                for (offset, item) in items.enumerated() { menu.insertItem(item, at: offset) }
+            }
+            return menu
         }
         let pasteboard = self.pasteboard
         if url.isFileURL {
@@ -950,6 +961,23 @@ public struct NativeTranscript: NSViewRepresentable {
         items.append(.separator())
         for (offset, item) in items.enumerated() { menu.insertItem(item, at: offset) }
         return menu
+    }
+
+    /// The selected text and, in numbered code, its first and last line (the number sits on each line's first character).
+    private func selectedQuote(_ view: NSTextView) -> (text: String, lines: ClosedRange<Int>?)? {
+        let range = view.selectedRange()
+        guard range.length > 0, let storage = view.textStorage, NSMaxRange(range) <= storage.length else { return nil }
+        let text = storage.attributedSubstring(from: range).string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        func line(at index: Int) -> Int? {
+            var found: Int?
+            storage.enumerateAttribute(.codeLineNumber, in: NSRange(location: 0, length: index + 1), options: .reverse) { value, _, stop in
+                if let number = value as? Int { found = number; stop.pointee = true }
+            }
+            return found
+        }
+        guard let first = line(at: range.location), let last = line(at: NSMaxRange(range) - 1) else { return (text, nil) }
+        return (text, min(first, last)...max(first, last))
     }
 }
 

@@ -163,6 +163,39 @@ public enum DocumentPreview {
     }
 }
 
+/// A selection in the preview, quoted into the chat draft so the user can ask the agent to change it.
+public enum DocumentQuote {
+    /// Source lines of a rendered Markdown selection: its first and last lines must each match one source line.
+    public static func lines(of selection: String, in source: String) -> ClosedRange<Int>? {
+        let wanted = selection.components(separatedBy: .newlines).map(plain).filter { !$0.isEmpty }
+        guard let first = wanted.first, let last = wanted.last else { return nil }
+        let lines = source.components(separatedBy: .newlines).map(plain)
+        func unique(_ text: String) -> Int? {
+            let hits = lines.indices.filter { lines[$0].contains(text) }
+            return hits.count == 1 ? hits[0] + 1 : nil
+        }
+        guard let start = unique(first), let end = unique(last), end >= start else { return nil }
+        return start...end
+    }
+
+    /// The file, its lines and the quote after the current draft; the user adds the request below it.
+    public static func draft(path: String, lines: ClosedRange<Int>?, text: String, appendingTo draft: String) -> String {
+        let location = lines.map { $0.count == 1 ? "\(path):\($0.lowerBound)" : "\(path):\($0.lowerBound)-\($0.upperBound)" } ?? path
+        let quote = text.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: .newlines)
+            .map { $0.isEmpty ? ">" : "> " + $0 }.joined(separator: "\n")
+        let head = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (head.isEmpty ? "" : head + "\n\n") + "`" + location + "`\n" + quote + "\n\n"
+    }
+
+    /// A line without Markdown markup or rendered list marks, so rendered text matches its source.
+    static func plain(_ line: String) -> String {
+        var text = line.replacingOccurrences(of: #"!?\[([^\]]*)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"^\s*((#{1,6}|[-*+]|\d+[.)]|>|[•◦▪‣☐☑✓])\s+|\[[ xX]\]\s+)*"#, with: "", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"[*_`~]"#, with: "", options: .regularExpression)
+        return text.trimmingCharacters(in: .whitespaces)
+    }
+}
+
 /// Files opened in the pane with back and forward history.
 @MainActor public final class DocumentPreviewSession: ObservableObject {
     @Published public private(set) var current: DocumentPreviewModel?
@@ -219,9 +252,11 @@ public enum DocumentPreview {
 public struct DocumentPreviewView: View {
     @ObservedObject var session: DocumentPreviewSession
     @ObservedObject var model: DocumentPreviewModel
+    /// Puts a selected fragment (file, source lines, text) into the chat draft; nil hides the menu item.
+    let onQuote: ((URL, String, ClosedRange<Int>?) -> Void)?
 
-    public init(session: DocumentPreviewSession, model: DocumentPreviewModel) {
-        self.session = session; self.model = model
+    public init(session: DocumentPreviewSession, model: DocumentPreviewModel, onQuote: ((URL, String, ClosedRange<Int>?) -> Void)? = nil) {
+        self.session = session; self.model = model; self.onQuote = onQuote
     }
 
     public var body: some View {
@@ -282,7 +317,12 @@ public struct DocumentPreviewView: View {
                 Text(failure).foregroundStyle(.secondary)
             }
         } else if model.text != nil {
-            DocumentTextView(model: model, onOpenFile: { session.open($0, line: $1) })
+            DocumentTextView(model: model, onOpenFile: { session.open($0, line: $1) },
+                             onQuote: onQuote.map { quote in { [model] text, codeLines in
+                                 // Code documents number their lines; Markdown is found in its source.
+                                 let lines = model.kind == .markdown ? model.text.flatMap { DocumentQuote.lines(of: text, in: $0) } : codeLines
+                                 quote(model.url, text, lines)
+                             } })
         } else {
             QuickLookPreview(url: model.url, revision: model.revision)
         }
@@ -294,6 +334,7 @@ public struct DocumentPreviewView: View {
 struct DocumentTextView: NSViewRepresentable {
     @ObservedObject var model: DocumentPreviewModel
     let onOpenFile: (URL, Int?) -> Void
+    var onQuote: ((String, ClosedRange<Int>?) -> Void)?
     let zoom = InterfaceZoom.shared.scale
 
     func makeNSView(context: Context) -> TranscriptScrollView {
@@ -306,6 +347,7 @@ struct DocumentTextView: NSViewRepresentable {
 
     func updateNSView(_ view: TranscriptScrollView, context: Context) {
         view.onOpenFile = onOpenFile
+        view.onQuoteSelection = onQuote
         view.zoom = zoom
         view.documentURL = model.url
         model.documentView = view
