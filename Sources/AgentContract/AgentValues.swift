@@ -66,10 +66,23 @@ public struct UsageSnapshot: Codable, Sendable, Equatable {
     public var cached: Int?
     public var output: Int?
     public var measuredAt: Date
+    /// When the latest model request was made; each request refreshes the prompt cache.
+    public var lastRequestAt: Date?
+    /// Prompt cache lifetime in seconds, from the latest request that wrote cache.
+    public var cacheTTL: TimeInterval?
     public init(last: Int? = nil, window: Int? = nil, input: Int? = nil, cached: Int? = nil,
-                output: Int? = nil, measuredAt: Date = Date()) {
+                output: Int? = nil, measuredAt: Date = Date(), lastRequestAt: Date? = nil, cacheTTL: TimeInterval? = nil) {
         self.last = last; self.window = window; self.input = input
         self.cached = cached; self.output = output; self.measuredAt = measuredAt
+        self.lastRequestAt = lastRequestAt; self.cacheTTL = cacheTTL
+    }
+    /// Prompt cache freshness at `now`; nil until a request with a known cache lifetime.
+    public func cacheState(now: Date = Date()) -> PromptCacheState? {
+        guard let lastRequestAt, let cacheTTL, cacheTTL > 0 else { return nil }
+        let remaining = cacheTTL - now.timeIntervalSince(lastRequestAt)
+        guard remaining > 0 else { return .cold }
+        // The last fifth of the lifetime, at most five minutes: time to send now or start a new chat.
+        return remaining <= min(300, cacheTTL / 5) ? .expiring(remaining: remaining) : .warm(remaining: remaining)
     }
     public var contextFraction: Double? {
         guard let last, let window, last >= 0, window > 0 else { return nil }
@@ -78,6 +91,14 @@ public struct UsageSnapshot: Codable, Sendable, Equatable {
     public var uncached: Int? {
         guard let input, let cached, input >= cached else { return nil }; return input - cached
     }
+}
+
+/// Whether the next request re-reads the conversation from the prompt cache or pays for it again.
+public enum PromptCacheState: Sendable, Equatable {
+    case warm(remaining: TimeInterval)
+    case expiring(remaining: TimeInterval)
+    case cold
+    public var needsAttention: Bool { if case .warm = self { false } else { true } }
 }
 
 public struct TokenCounters: Codable, Sendable, Equatable {

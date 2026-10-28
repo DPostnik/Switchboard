@@ -19,6 +19,10 @@ struct ClaudeUsageMeter: Sendable, Equatable {
     var model: String?
     /// The main-thread call whose `message_delta` is pending; deltas carry no message id.
     var current: String?
+    /// When the latest main-thread call started; each call refreshes the prompt cache.
+    private(set) var lastRequestAt: Date?
+    /// Cache lifetime from the latest call that wrote cache; reads alone keep the previous value.
+    private(set) var cacheTTL: TimeInterval?
     private var messages: [String: TokenCounters] = [:]
     private var latest: String?
 
@@ -34,15 +38,24 @@ struct ClaudeUsageMeter: Sendable, Equatable {
         return .init(input: uncached + created + read, cached: read, output: output)
     }
 
+    /// Lifetime of the cache a call wrote: `cache_creation` splits it into 1 h and 5 min entries.
+    static func cacheTTL(_ usage: JSONValue) -> TimeInterval? {
+        let created = usage["cache_creation"]
+        if (created["ephemeral_1h_input_tokens"].int ?? 0) > 0 { return 3600 }
+        if (created["ephemeral_5m_input_tokens"].int ?? 0) > 0 { return 300 }
+        return nil
+    }
+
     /// Usage blocks repeat (start, per-block assistant events, final delta); fields only grow.
-    mutating func observe(message: String, usage: JSONValue) -> Bool {
+    mutating func observe(message: String, usage: JSONValue, at date: Date = Date()) -> Bool {
         // A final delta may omit input fields; the merge keeps the input from the start event.
         guard let value = Self.counters(usage) ?? usage["output_tokens"].int.flatMap({ $0 >= 0 ? TokenCounters(input: 0, cached: 0, output: $0) : nil })
         else { return false }
         let previous = messages[message]
         let merged = TokenCounters(input: max(previous?.input ?? 0, value.input), cached: max(previous?.cached ?? 0, value.cached),
                                    output: max(previous?.output ?? 0, value.output))
-        if previous == nil { latest = message }
+        if previous == nil { latest = message; lastRequestAt = date }
+        if let ttl = Self.cacheTTL(usage) { cacheTTL = ttl }
         messages[message] = merged
         if latest == message { last = merged.input + merged.output }
         return merged != previous
@@ -80,7 +93,8 @@ struct ClaudeUsageMeter: Sendable, Equatable {
 
     func snapshot(at date: Date = Date()) -> UsageSnapshot {
         let total = total
-        return UsageSnapshot(last: last, window: window, input: total.input, cached: total.cached, output: total.output, measuredAt: date)
+        return UsageSnapshot(last: last, window: window, input: total.input, cached: total.cached, output: total.output, measuredAt: date,
+                             lastRequestAt: lastRequestAt, cacheTTL: cacheTTL)
     }
 
     private static func add(_ lhs: TokenCounters, _ rhs: TokenCounters) -> TokenCounters {

@@ -456,7 +456,9 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     #expect(first.first?.turn == nil && first.first?.total == .zero)
     // Subagent calls stay out of the main context; the window comes from the session model.
     #expect(first.allSatisfy { ($0.snapshot.last ?? 0) < 9000 })
-    #expect(first.last?.snapshot == UsageSnapshot(last: 105, window: 1000, input: 100, cached: 70, output: 5, measuredAt: first.last!.snapshot.measuredAt))
+    #expect(first.last?.snapshot == UsageSnapshot(last: 105, window: 1000, input: 100, cached: 70, output: 5, measuredAt: first.last!.snapshot.measuredAt,
+                                                  lastRequestAt: first.last!.snapshot.lastRequestAt, cacheTTL: first.last!.snapshot.cacheTTL))
+    #expect(first.last?.snapshot.lastRequestAt != nil)
     #expect(first.last?.snapshot.contextFraction == 0.105)
     guard case .rejected(.unknownRequest) = await adapter.submit(request) else { Issue.record("Replay accepted"); return }
     await adapter.disconnect()
@@ -868,6 +870,51 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     #expect(UsageDetail.footer(UsageSnapshot(last: 12_345), language: .russian) == "Контекст (токены): 12\u{a0}345")
     #expect(UsageDetail.footer(UsageSnapshot(last: 500, window: 1000), language: .russian) == "Контекст ≈50%")
     #expect(UsageDetail.footer(nil, language: .russian) == "Контекст: нет данных")
+}
+
+@Test func claudeUsageMeterRecordsRequestTimeAndCacheLifetime() {
+    var meter = ClaudeUsageMeter(base: nil, window: 200_000, last: nil)
+    let first = Date(timeIntervalSince1970: 1000), second = Date(timeIntervalSince1970: 1600)
+    #expect(meter.snapshot().lastRequestAt == nil && meter.snapshot().cacheTTL == nil)
+    let written: JSONValue = .object(["input_tokens": .number(3), "cache_creation_input_tokens": .number(500), "cache_read_input_tokens": .number(0),
+                                      "cache_creation": .object(["ephemeral_5m_input_tokens": .number(0), "ephemeral_1h_input_tokens": .number(500)])])
+    _ = meter.observe(message: "a", usage: written, at: first)
+    // Repeated blocks and the final delta of the same call do not move the request time.
+    _ = meter.observe(message: "a", usage: .object(["output_tokens": .number(9)]), at: second)
+    #expect(meter.lastRequestAt == first && meter.cacheTTL == 3600)
+    // A call that only reads the cache keeps the known lifetime; a 5-minute write replaces it.
+    _ = meter.observe(message: "b", usage: .object(["input_tokens": .number(1), "cache_read_input_tokens": .number(500)]), at: second)
+    #expect(meter.lastRequestAt == second && meter.cacheTTL == 3600)
+    _ = meter.observe(message: "c", usage: .object(["input_tokens": .number(1), "cache_creation": .object(["ephemeral_5m_input_tokens": .number(20)])]), at: second)
+    #expect(meter.cacheTTL == 300)
+    let snapshot = meter.snapshot(at: Date(timeIntervalSince1970: 5000))
+    #expect(snapshot.lastRequestAt == second && snapshot.cacheTTL == 300 && snapshot.measuredAt == Date(timeIntervalSince1970: 5000))
+}
+
+@Test func promptCacheStateFollowsTheLifetime() {
+    let requested = Date(timeIntervalSince1970: 0)
+    let hour = UsageSnapshot(lastRequestAt: requested, cacheTTL: 3600)
+    #expect(UsageSnapshot().cacheState(now: requested) == nil)
+    #expect(UsageSnapshot(lastRequestAt: requested).cacheState(now: requested) == nil)
+    #expect(hour.cacheState(now: requested.addingTimeInterval(600)) == .warm(remaining: 3000))
+    #expect(hour.cacheState(now: requested.addingTimeInterval(3300)) == .expiring(remaining: 300))
+    #expect(hour.cacheState(now: requested.addingTimeInterval(3600)) == .cold)
+    // A 5-minute cache warns in its last minute.
+    let short = UsageSnapshot(lastRequestAt: requested, cacheTTL: 300)
+    #expect(short.cacheState(now: requested.addingTimeInterval(200)) == .warm(remaining: 100))
+    #expect(short.cacheState(now: requested.addingTimeInterval(240)) == .expiring(remaining: 60))
+    #expect(!PromptCacheState.warm(remaining: 1).needsAttention && PromptCacheState.cold.needsAttention)
+    // Older saved snapshots without the new fields still decode.
+    let old = try? JSONDecoder().decode(UsageSnapshot.self, from: Data(#"{"last":5,"measuredAt":0}"#.utf8))
+    #expect(old?.last == 5 && old?.lastRequestAt == nil && old?.cacheTTL == nil)
+}
+
+@MainActor @Test func cacheBadgeShowsMinutesLeftInBothLanguages() {
+    #expect(UsageDetail.cacheBadge(.warm(remaining: 2500), language: .english) == "Cache: 42 min")
+    #expect(UsageDetail.cacheBadge(.expiring(remaining: 10), language: .russian) == "Кэш: 1 мин")
+    #expect(UsageDetail.cacheBadge(.cold, language: .english) == "Cache expired")
+    #expect(UsageDetail.cacheBadge(.cold, language: .russian) == "Кэш остыл")
+    #expect(UsageDetail.cacheLifetime(3600, language: .russian) == "1 ч" && UsageDetail.cacheLifetime(300, language: .english) == "5 min")
 }
 
 private let claudeSkills = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Skills")

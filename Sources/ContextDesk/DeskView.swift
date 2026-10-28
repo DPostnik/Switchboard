@@ -981,6 +981,15 @@ struct ChatView: View {
                 Button { showingUsage.toggle() } label: {
                     Text(UsageDetail.footer(model.currentUsage))
                 }.buttonStyle(PointerButtonStyle(base: .plain)).popover(isPresented: $showingUsage) { UsageDetail(usage: model.currentUsage, claude: model.currentAgent == .appClaude).padding(20).frame(width: 330) }
+                if let usage = model.currentUsage, usage.cacheTTL != nil {
+                    TimelineView(.periodic(from: .now, by: 30)) { context in
+                        if let state = usage.cacheState(now: context.date) {
+                            Text(UsageDetail.cacheBadge(state))
+                                .foregroundStyle(state.needsAttention ? Color.orange : Color.secondary)
+                                .help(UsageDetail.cacheHelp)
+                        }
+                    }
+                }
                 Spacer()
                 Toggle(L10n.text("Следить за ответом", "Follow response"), isOn: $followOutput).toggleStyle(.checkbox).pointingHandCursor()
             }.font(.ui(.caption2)).foregroundStyle(.secondary).padding(.horizontal, 12)
@@ -1129,6 +1138,23 @@ struct UsageDetail: View {
         }
         return L10n.text("Контекст: нет данных", "Context: no data", language: language)
     }
+    /// Footer badge: minutes left in the prompt cache, or that it has expired.
+    static func cacheBadge(_ state: PromptCacheState, language: AppLanguage = L10n.language) -> String {
+        switch state {
+        case .warm(let remaining), .expiring(let remaining):
+            let minutes = max(1, Int((remaining / 60).rounded(.up)))
+            return L10n.text("Кэш: \(minutes) мин", "Cache: \(minutes) min", language: language)
+        case .cold: return L10n.text("Кэш остыл", "Cache expired", language: language)
+        }
+    }
+    static var cacheHelp: String {
+        L10n.text("Кэш промпта живёт ограниченное время после последнего запроса. Пока он тёплый, следующее сообщение перечитывает разговор дёшево. После истечения следующее сообщение заново оплачивает весь контекст: для длинного чата дешевле начать новый или сделать передачу.",
+                  "The prompt cache lasts a limited time after the last request. While it is warm, the next message re-reads the conversation cheaply. After it expires, the next message pays for the whole context again: for a long chat, a new chat or a handoff costs less.")
+    }
+    static func cacheLifetime(_ ttl: TimeInterval, language: AppLanguage = L10n.language) -> String {
+        ttl >= 3600 ? L10n.text("\(Int(ttl / 3600)) ч", "\(Int(ttl / 3600)) h", language: language)
+                    : L10n.text("\(Int(ttl / 60)) мин", "\(Int(ttl / 60)) min", language: language)
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(L10n.text("Контекст и токены", "Context and tokens")).font(.ui(.headline))
@@ -1139,6 +1165,12 @@ struct UsageDetail: View {
                 LabeledContent(L10n.text("Входные за разговор", "Conversation input"), value: usage.input.map(String.init) ?? L10n.text("Нет данных", "No data"))
                 LabeledContent(L10n.text("Из них из кэша", "Cached input"), value: usage.cached.map(String.init) ?? L10n.text("Нет данных", "No data"))
                 LabeledContent(L10n.text("Выходные", "Output"), value: usage.output.map(String.init) ?? L10n.text("Нет данных", "No data"))
+                if let requested = usage.lastRequestAt, let ttl = usage.cacheTTL, let state = usage.cacheState() {
+                    Divider()
+                    LabeledContent(L10n.text("Кэш промпта", "Prompt cache"), value: Self.cacheBadge(state))
+                    LabeledContent(L10n.text("Срок кэша", "Cache lifetime"), value: Self.cacheLifetime(ttl))
+                    LabeledContent(L10n.text("Запрос к модели", "Model request"), value: L10n.date(requested))
+                }
                 Text(L10n.text("Измерено: \(L10n.date(usage.measuredAt))", "Measured: \(L10n.date(usage.measuredAt))")).font(.ui(.caption))
             } else { Text(claude ? L10n.text("Показатели появятся после ответа Claude.", "Metrics will appear after Claude responds.") : L10n.text("Показатели появятся после ответа Codex.", "Metrics will appear after Codex responds.")) }
             Text(L10n.text("Процент — оценка по последнему событию, а не точный порог сжатия. Кэш уже входит во входные токены. Эти числа не равны расходу лимита подписки.", "The percentage is an estimate from the latest event, not an exact compaction threshold. Cached tokens are included in input tokens. These numbers do not represent subscription usage."))

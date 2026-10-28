@@ -1878,6 +1878,12 @@ private struct ChatRunState {
                     // A turn-less report is the engine's cumulative baseline before a turn starts.
                     tokenTotals[id] = total
                 }
+                // Turn-start and wake reports carry no request time; the cache age stays from the last call.
+                var snapshot = snapshot
+                if snapshot.lastRequestAt == nil, let previous = usage[id] {
+                    snapshot.lastRequestAt = previous.lastRequestAt
+                    snapshot.cacheTTL = snapshot.cacheTTL ?? previous.cacheTTL
+                }
                 usage[id] = snapshot
                 try? await store.saveUsage(threadID: id, snapshot: snapshot)
             }
