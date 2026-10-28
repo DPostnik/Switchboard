@@ -80,7 +80,8 @@ public struct AttentionLedger: Codable, Equatable, Sendable {
             for index in items.indices where items[index].isOpen && items[index].kind == .runProblem && items[index].jobID == source.jobID {
                 items[index].resolved = now; items[index].resolvedAutomatically = true
             }
-        case .starting, .running, .interrupted: break
+        // A skipped run found nothing to do; it neither raises nor clears problems.
+        case .starting, .running, .interrupted, .skipped: break
         }
         prune()
         return created

@@ -269,6 +269,20 @@ struct JobEditor: View {
                     Text(L10n.text("Claude работает в профиле Claude приложения, как обычный чат: каждый запуск появляется чатом, который можно продолжить. Разрешения задаёт режим доступа проекта; при полном доступе действия коннекторов claude.ai (Gmail, Calendar…) выполняются без подтверждения. Нужен вход по подписке Claude в настройках.", "Claude runs in the app's Claude profile like a regular chat: each run appears as a chat you can continue. The project's access mode sets permissions; with full access, claude.ai connector actions (Gmail, Calendar…) run without approval. Requires signing in with your Claude subscription in settings.")).font(.ui(.caption)).frame(maxWidth: 460, alignment: .leading).fixedSize(horizontal: false, vertical: true)
                 }
                 }
+                Section(L10n.text("Проверка перед запуском", "Pre-run check")) {
+                    TextField(L10n.text("Команда", "Command"), text: Binding(get: { job.precondition?.command ?? "" }, set: { value in
+                        job.precondition = value.isEmpty ? nil : JobPrecondition(command: value, timeout: job.precondition?.timeout ?? 60)
+                    }), prompt: Text(verbatim: "python3 scripts/new-mail.py"), axis: .vertical)
+                        .font(.system(.body, design: .monospaced))
+                    if job.precondition != nil {
+                        Stepper(value: Binding(get: { job.precondition?.timeout ?? 60 }, set: { job.precondition?.timeout = $0 }),
+                                in: 5...JobPrecondition.maximumTimeout, step: 5) {
+                            Text(L10n.text("Лимит времени: \(Int(job.precondition?.timeout ?? 60)) с", "Time limit: \(Int(job.precondition?.timeout ?? 60)) s"))
+                        }
+                    }
+                    Text(L10n.text("Необязательно. Команда выполняется в папке проекта перед каждым запуском, без модели и без подтверждения. Код 0: агент запускается, а вывод команды добавляется к заданию. Код 1: запуск пропускается («нового нет»), лимиты не тратятся. Другой код или превышение лимита времени: запуск помечается как требующий внимания. Агенты не могут задать или изменить эту команду.", "Optional. The command runs in the project folder before each run, without a model and without approval. Exit 0: the agent starts and the command's output is added to the instructions. Exit 1: the run is skipped (\"nothing new\") and uses no limits. Any other exit or the time limit: the run is marked as needing attention. Agents cannot set or change this command."))
+                        .font(.ui(.caption)).foregroundStyle(.secondary).frame(maxWidth: 460, alignment: .leading).fixedSize(horizontal: false, vertical: true)
+                }
                 Section(L10n.text("Расписание", "Schedule")) {
                 Picker(L10n.text("Расписание", "Schedule"), selection: $mode) {
                     Text(L10n.text("Повторять", "Repeat")).tag("rule")

@@ -116,7 +116,16 @@ import ContextCore
                             await finishJob(run.id, status: .blocked, output: error.localizedDescription); return
                         }
                     }
-                    let request = job.executionRequest(runID: run.id, project: project, descriptor: descriptor)
+                    var runJob = job
+                    if let check = job.precondition, !check.isEmpty {
+                        switch await check.evaluate(in: project.path, label: "precondition-" + run.id.uuidString.lowercased()) {
+                        case .skip: await finishJob(run.id, status: .skipped); return
+                        case .broken(let reason): await finishJob(run.id, status: .blocked, output: reason); return
+                        case .run(let output): runJob.prompt = JobPrecondition.prompt(job.prompt, output: output)
+                        }
+                        guard !Task.isCancelled, !schedulerStopping else { await finishJob(run.id, status: .interrupted); return }
+                    }
+                    let request = runJob.executionRequest(runID: run.id, project: project, descriptor: descriptor)
                     let result = try await executor.execute(request) { [weak self] in
                         guard let self else { throw CancellationError() }
                         // A print run (installed CLI) has no engine session; its chat is a local read-only record.

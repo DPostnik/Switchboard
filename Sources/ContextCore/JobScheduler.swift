@@ -83,6 +83,8 @@ public struct ManagedJob: Identifiable, Codable, Equatable, Sendable {
     public var browserSessionImport: ChromeSessionImportPolicy?
     /// A frozen revision: editing the library never silently changes scheduled work.
     public var routine: RoutineInvocation?
+    /// Command that decides whether a run starts; only the app's job editor sets it.
+    public var precondition: JobPrecondition?
     public init() {}
     public func validate() throws {
         try validateBrowserSessionImport()
@@ -100,7 +102,7 @@ public struct ManagedJob: Identifiable, Codable, Equatable, Sendable {
     }
 }
 public enum JobRunStatus: String, Codable, Sendable {
-    case starting, running, completed, failed, interrupted, uncertain, blocked
+    case starting, running, completed, failed, interrupted, uncertain, blocked, skipped
     public var active: Bool { self == .starting || self == .running }
     public var title: String {
         switch self {
@@ -111,6 +113,7 @@ public enum JobRunStatus: String, Codable, Sendable {
         case .interrupted: return L10n.text("Остановлено", "Stopped")
         case .uncertain: return L10n.text("Результат не подтверждён", "Outcome unconfirmed")
         case .blocked: return L10n.text("Нужны разрешения", "Permissions needed")
+        case .skipped: return L10n.text("Пропущено: нового нет", "Skipped: nothing new")
         }
     }
 }
