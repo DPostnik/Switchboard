@@ -51,8 +51,10 @@ public struct AgentModelSelection: Codable, Hashable, Sendable {
     public let context: AgentContext
     public let model: String
     public let effort: String?
-    public init(context: AgentContext, model: String, effort: String? = nil) {
-        self.context = context; self.model = model; self.effort = effort
+    /// Claude advisor model consulted at decision points; nil runs without one.
+    public let advisor: String?
+    public init(context: AgentContext, model: String, effort: String? = nil, advisor: String? = nil) {
+        self.context = context; self.model = model; self.effort = effort; self.advisor = advisor
     }
 }
 

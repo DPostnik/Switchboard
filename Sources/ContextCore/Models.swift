@@ -95,6 +95,8 @@ public struct SavedState: Codable, Sendable {
     public var claudeModel: String?
     /// Empty or absent keeps the CLI default reasoning effort.
     public var claudeEffort: String?
+    /// Advisor for Claude chats on a weaker main model ("opus", "fable"); absent or empty runs without one.
+    public var claudeAdvisor: String?
     public var browserEnabled: Bool?
     /// Absent means on: full-access Claude chats may use the user's Chrome via Claude in Chrome.
     public var userChromeEnabled: Bool?

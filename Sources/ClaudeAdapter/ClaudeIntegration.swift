@@ -248,7 +248,7 @@ public actor ClaudeIntegration: AgentIntegration {
             // Read at every turn: an edited `.mcp.json` entry no longer matches its approval and changes the launch.
             let projectServers = ProjectMCPServers.approved(projectPath: record.cwd, approvals: profile.mcpServers)
             let launch = try Self.arguments(id: id, resumed: true, permissions: profile, model: request.model.model, effort: request.model.effort,
-                                            scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
+                                            advisor: request.model.advisor, scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                             projectAgents: ProjectAgents.argument(projectPath: record.cwd), projectServers: projectServers,
                                             home: home, userChrome: userChrome)
             // A scheduled turn's CLI still running background tasks (sub-agents) takes the user's message instead of
@@ -258,7 +258,7 @@ public actor ClaudeIntegration: AgentIntegration {
             if let current = wires[id], !scheduled, !(backgroundTasks[id] ?? []).isEmpty {
                 func variant(scheduled: Bool, userChrome: Bool) throws -> [String] {
                     try Self.arguments(id: id, resumed: true, permissions: profile, model: request.model.model, effort: request.model.effort,
-                                       scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
+                                       advisor: request.model.advisor, scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                        projectAgents: ProjectAgents.argument(projectPath: record.cwd), projectServers: projectServers,
                                        home: home, userChrome: userChrome)
                 }
@@ -291,7 +291,7 @@ public actor ClaudeIntegration: AgentIntegration {
                                                             policy: BrowserLaunchPolicy(profile, scheduled: scheduled))
                 } }
                 let arguments = try Self.arguments(id: id, resumed: record.sent, permissions: profile,
-                                                   model: request.model.model, effort: request.model.effort, scheduled: scheduled,
+                                                   model: request.model.model, effort: request.model.effort, advisor: request.model.advisor, scheduled: scheduled,
                                                    projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                                    projectAgents: ProjectAgents.argument(projectPath: record.cwd), browserServer: server,
                                                    projectServers: projectServers, home: home, userChrome: userChrome)
@@ -364,7 +364,7 @@ public actor ClaudeIntegration: AgentIntegration {
                       home: profile, userChrome: userChrome)
     }
     /// Flags for one launch. A scheduled turn runs unattended, so connector actions are never held for approval.
-    static func arguments(id: String, resumed: Bool, permissions requested: AgentPermissionProfile, model: String, effort: String?, scheduled: Bool = false,
+    static func arguments(id: String, resumed: Bool, permissions requested: AgentPermissionProfile, model: String, effort: String?, advisor: String? = nil, scheduled: Bool = false,
                           projectInstructions: String? = nil, projectAgents: String? = nil, browserServer: [String]? = nil,
                           projectServers: [String: JSONValue] = [:], home: URL? = nil, userChrome: Bool = false) throws -> [String] {
         let policy = ClaudeLaunchPolicy(requested, scheduled: scheduled, userChromeEnabled: userChrome)
@@ -389,6 +389,8 @@ public actor ClaudeIntegration: AgentIntegration {
         // Messages from other Claude sessions start CLI turns the app does not track; drop them
         // (docs/cross-session-inbound-findings.md). Sending to other sessions still works.
         settings["crossSessionInbound"] = .string("refuse")
+        // A setting, not `--advisor`: the flag exits at launch on an unsupported pairing, the setting is skipped.
+        if let advisor, !advisor.isEmpty { settings["advisorModel"] = .string(advisor) }
         if !settings.isEmpty {
             let encoder = JSONEncoder(); encoder.outputFormatting = [.withoutEscapingSlashes, .sortedKeys]
             args += ["--settings", String(decoding: try encoder.encode(JSONValue.object(settings)), as: UTF8.self)]

@@ -356,6 +356,10 @@ private struct ChatRunState {
     func selectDefaultRoute(_ route: RequestRoute) { state.defaultRoute = route; persist() }
     func selectBrowserEnabled(_ enabled: Bool) { state.browserEnabled = enabled; persist() }
     /// Applied by reconnecting Claude; while a Claude chat is busy it waits for the next reconnect.
+    /// Read at every send; a changed advisor relaunches the chat's CLI on its next message.
+    func selectClaudeAdvisor(_ advisor: String) {
+        state.claudeAdvisor = advisor.isEmpty ? nil : advisor; persist()
+    }
     func selectUserChromeEnabled(_ enabled: Bool) {
         state.userChromeEnabled = enabled; persist()
         if claudeConnected { Task { await connectClaude() } }
@@ -1270,6 +1274,7 @@ private struct ChatRunState {
             }
             let submittedTurn = try await client.send(outgoing, to: sessionForChat(id), projectPath: project.path,
                                                           permissions: access, model: selectedModel, effort: selectedEffort,
+                                                          advisor: ClaudeAdvisor.attached(state.claudeAdvisor, mainModel: selectedModel),
                                                           kind: scheduledRun == nil ? .interactive : .scheduled, conversation: ConversationID(id))
             if threadID == nil && scheduledRun == nil {
                 generateChatTitle(id, firstMessage: text, model: selectedModel, route: route)

@@ -287,3 +287,30 @@ private func settings(_ args: [String]) throws -> JSONValue {
                                                             grant: nil, policy: policy(AgentRoleID.developer))
     #expect(developer.contains("--allow-eval") && developer.contains("--allow-upload"))
 }
+
+// MARK: - Claude advisor
+
+@Test func claudeAdvisorAttachesOnlyToAWeakerMainModel() throws {
+    #expect(ClaudeAdvisor.attached("opus", mainModel: "claude-sonnet-5-5") == "opus")
+    #expect(ClaudeAdvisor.attached("opus", mainModel: "claude-haiku-4-5-20251001") == "opus")
+    #expect(ClaudeAdvisor.attached("opus", mainModel: "claude-opus-5-5") == nil)
+    #expect(ClaudeAdvisor.attached("fable", mainModel: "claude-opus-5-5") == "fable")
+    #expect(ClaudeAdvisor.attached("fable", mainModel: "claude-fable-5-1") == nil)
+    // The CLI default and unknown models stay without an advisor; so does no setting.
+    #expect(ClaudeAdvisor.attached("opus", mainModel: "") == nil)
+    #expect(ClaudeAdvisor.attached("opus", mainModel: "gpt-5.5") == nil)
+    #expect(ClaudeAdvisor.attached(nil, mainModel: "claude-sonnet-5-5") == nil && ClaudeAdvisor.attached("", mainModel: "sonnet") == nil)
+
+    let advised = try ClaudeIntegration.arguments(id: UUID().uuidString, resumed: false, permissions: preset(AgentRoleID.editor).profile(for: project()),
+                                                  model: "claude-sonnet-5-5", effort: nil, advisor: "opus")
+    #expect(try settings(advised)["advisorModel"] == .string("opus") && !advised.contains("--advisor"))
+    let plain = try ClaudeIntegration.arguments(id: UUID().uuidString, resumed: false, permissions: preset(AgentRoleID.editor).profile(for: project()),
+                                                model: "claude-sonnet-5-5", effort: nil)
+    #expect(try settings(plain)["advisorModel"] == .null)
+    // Requests saved before the advisor existed still decode.
+    let selection = AgentModelSelection(context: AgentContext(connection: .appClaude, accountRevision: UUID()), model: "m", effort: "high")
+    var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(selection)) as! [String: Any]
+    object.removeValue(forKey: "advisor")
+    let decoded = try JSONDecoder().decode(AgentModelSelection.self, from: JSONSerialization.data(withJSONObject: object))
+    #expect(decoded.advisor == nil && decoded.model == "m")
+}

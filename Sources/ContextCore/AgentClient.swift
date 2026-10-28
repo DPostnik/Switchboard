@@ -63,14 +63,14 @@ public actor AgentClient {
         try await integration.configure(.init(servers: [], workflowDirectories: [directory]), context: context).value()
     }
     private func request(prompt: String, session: AgentSessionReference?, projectPath: String, permissions profile: AgentPermissionProfile,
-                         model: String, effort: String = "", route: RequestRoute, kind: AgentExecutionRequest.Kind = .interactive,
+                         model: String, effort: String = "", advisor: String? = nil, route: RequestRoute, kind: AgentExecutionRequest.Kind = .interactive,
                          conversation: ConversationID = ConversationID(), context suppliedContext: AgentContext? = nil,
                          browserProfile: AgentBrowserProfile? = nil) async throws -> AgentExecutionRequest {
         let context: AgentContext
         if let suppliedContext { context = suppliedContext } else { context = try await descriptor().context }
         return AgentExecutionRequest(conversation: conversation, session: session, kind: kind, prompt: prompt, projectPath: projectPath,
             permissions: .profile(profile, root: projectPath),
-            model: .init(context: context, model: model, effort: effort), route: route.agentRoute, browserProfile: browserProfile)
+            model: .init(context: context, model: model, effort: effort, advisor: advisor), route: route.agentRoute, browserProfile: browserProfile)
     }
     public func createSession(projectPath: String, permissions: AgentPermissionProfile, model: String, route: RequestRoute,
                               context: AgentContext? = nil, browserProfile: AgentBrowserProfile? = nil,
@@ -84,13 +84,13 @@ public actor AgentClient {
         _ = try await integration.prepare(request).value(); sessionRoutes[session] = route; sessionContexts[session] = request.model.context
     }
     public func send(_ text: String, to session: AgentSessionReference, projectPath: String, permissions: AgentPermissionProfile,
-                     model: String, effort: String, kind: AgentExecutionRequest.Kind = .interactive,
+                     model: String, effort: String, advisor: String? = nil, kind: AgentExecutionRequest.Kind = .interactive,
                      conversation: ConversationID = ConversationID()) async throws -> String? {
         guard let route = sessionRoutes[session], let context = sessionContexts[session] else {
             throw AgentOperationFailure(rejection: .staleContext, failure: nil)
         }
         let request = try await request(prompt: text, session: session, projectPath: projectPath, permissions: permissions, model: model,
-            effort: effort, route: route, kind: kind, conversation: conversation, context: context)
+            effort: effort, advisor: advisor, route: route, kind: kind, conversation: conversation, context: context)
         return try await integration.submit(request).value().turnID
     }
     // Legacy entry points: the old access modes stand for the editor and operator roles.

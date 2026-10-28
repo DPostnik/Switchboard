@@ -164,3 +164,21 @@ public struct ClaudeModel: Hashable, Sendable, Identifiable {
         return trimmed.isEmpty ? defaultID : trimmed
     }
 }
+
+/// The advisor a Claude chat consults at decision points (`advisorModel`). It is attached only to a
+/// main model of a weaker family, so routine work on Sonnet gets Opus advice while Opus chats do not
+/// spend limits on a second Opus. An unknown or default (empty) main model gets none.
+public enum ClaudeAdvisor {
+    /// Choices for the setting; an empty identifier means no advisor.
+    public static let options: [(id: String, name: String)] = [("", L10n.text("Нет", "None")), ("opus", "Opus"), ("fable", "Fable")]
+
+    public static func attached(_ setting: String?, mainModel: String) -> String? {
+        guard let setting, !setting.isEmpty, let advisor = rank(setting), let main = rank(mainModel), advisor > main else { return nil }
+        return setting
+    }
+
+    private static func rank(_ model: String) -> Int? {
+        let name = model.lowercased()
+        return ["haiku", "sonnet", "opus", "fable"].firstIndex { name.contains($0) }
+    }
+}

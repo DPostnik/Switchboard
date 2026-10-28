@@ -1309,13 +1309,20 @@ struct SettingsView: View {
             }
             Section(L10n.text("Подписка Claude", "Claude subscription")) {
                 Text(model.claudeAuthenticated ? L10n.text("Вход выполнен", "Signed in") : L10n.text("Вход не выполнен", "Not signed in"))
-                Text(L10n.text("Официальный Claude Code 2.1.260. Вход открывается в Terminal, в отдельном профиле Switchboard. После входа нажми «Проверить вход». Существующий профиль Claude Code не изменяется.", "Official Claude Code 2.1.260. Sign-in opens in Terminal using a separate Switchboard profile. Afterwards, click Check sign-in. Your existing Claude Code profile is unchanged."))
+                Text(L10n.text("Официальный Claude Code \(ClaudeRuntime.pinnedVersion). Вход открывается в Terminal, в отдельном профиле Switchboard. После входа нажми «Проверить вход». Существующий профиль Claude Code не изменяется.", "Official Claude Code \(ClaudeRuntime.pinnedVersion). Sign-in opens in Terminal using a separate Switchboard profile. Afterwards, click Check sign-in. Your existing Claude Code profile is unchanged."))
                     .font(.ui(.caption)).foregroundStyle(.secondary)
                 Button(L10n.text("Войти по подписке Claude", "Sign in with Claude subscription")) { Task { await model.loginClaude() } }.disabled(model.anyBusy || model.claudeConnecting)
                 Button(L10n.text("Проверить вход", "Check sign-in")) { Task { if model.claudeConnected { await model.refreshClaudeAccount() } else { await model.connectClaude() } } }.disabled(model.claudeConnecting)
                 if model.claudeAuthenticated {
                     Button(L10n.text("Выйти из Claude в этом приложении", "Sign out of Claude in this app")) { Task { await model.logoutClaude() } }.disabled(model.anyBusy)
                 }
+            }
+            Section(L10n.text("Советник Claude", "Claude advisor")) {
+                Picker(L10n.text("Советник", "Advisor"), selection: Binding(get: { model.state.claudeAdvisor ?? "" }, set: { model.selectClaudeAdvisor($0) })) {
+                    ForEach(ClaudeAdvisor.options, id: \.id) { Text($0.name).tag($0.id) }
+                }
+                Text(L10n.text("Более сильная модель, с которой Claude советуется перед выбором подхода, при повторяющейся ошибке и перед завершением задачи. Подключается только к чатам и задачам на более слабой модели: Sonnet или Haiku получат Opus, Opus получит только Fable. Советы расходуют лимиты подписки, Fable может списывать кредиты. Применяется со следующего сообщения.", "A stronger model Claude consults before choosing an approach, on a recurring error and before finishing a task. It applies only to chats and jobs on a weaker model: Sonnet or Haiku get Opus, Opus gets only Fable. Advice counts toward subscription limits; Fable may use usage credits. Takes effect from the next message."))
+                    .font(.ui(.caption)).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped)
     }
