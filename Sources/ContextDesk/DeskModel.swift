@@ -60,6 +60,8 @@ private struct ChatRunState {
     @Published var notices: [DeskNotice] = []
     @Published private(set) var unreadResponseItems: [String: String] = [:]
     private var notifiedTurns: Set<String> = []
+    /// The latest answer text per chat during a turn; it becomes the chat's recap when the turn ends.
+    private var latestAnswers: [String: String] = [:]
     @Published var state = SavedState()
     @Published var projectID: UUID?
     @Published var chatID: String? {
@@ -1392,7 +1394,35 @@ private struct ChatRunState {
             notificationStatus = allowed ? L10n.text("Уведомления включены", "Notifications are on") : L10n.text("Уведомления запрещены в настройках macOS", "Notifications are disabled in macOS Settings")
         } catch { self.error = error.localizedDescription }
     }
-    private func postNotice(threadID: String, title: String, identifier: String, completionID: String? = nil, actionID: String? = nil) {
+    /// The turn's answer (or error) as one short line; persisted with the chat by `recordUnreadCompletion`.
+    private func recordRecap(threadID: String, failed: Bool, error: String?) {
+        guard let index = state.chats.firstIndex(where: { $0.id == threadID }) else { return }
+        let answer = latestAnswers.removeValue(forKey: threadID)
+            ?? (chatID == threadID ? items.last(where: { $0.kind == "assistant" })?.text : nil)
+        state.chats[index].lastTurnFailed = failed ? true : nil
+        if let recap = TurnRecap.make((failed ? error : nil) ?? answer ?? "") { state.chats[index].recap = recap }
+    }
+    /// Chats that wait for the user: approvals and questions first, then failed and unread results.
+    var attentionChats: [(chat: Chat, attention: ChatAttention)] {
+        let hidden = Set(state.projects.filter(\.isHidden).map(\.id))
+        return state.chats.compactMap { chat -> (Chat, ChatAttention)? in
+            guard !chat.isArchived, !hidden.contains(chat.projectID) else { return nil }
+            let requests = pending.filter { $0.threadID == chat.id }
+            let approval = requests.contains { if case .approval = $0.interaction.kind { true } else { false } }
+            guard let attention = ChatAttention.of(approval: approval, question: !requests.isEmpty && !approval, running: isBusy(threadID: chat.id),
+                                                   unread: chat.hasUnreadResponse, failed: chat.lastTurnFailed == true) else { return nil }
+            return (chat, attention)
+        }.sorted { $0.1 != $1.1 ? $0.1 < $1.1 : $0.0.updated > $1.0.updated }
+    }
+    /// Second line of a waiting chat: what the request asks, otherwise the turn's recap.
+    func attentionDetail(_ chat: Chat) -> String? {
+        if let request = pending.first(where: { $0.threadID == chat.id }) {
+            let reason = (request.interaction.reason ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return reason.isEmpty ? request.title : request.title + ": " + reason
+        }
+        return chat.recap
+    }
+    private func postNotice(threadID: String, title: String, identifier: String, completionID: String? = nil, actionID: String? = nil, body: String? = nil) {
         let chat = state.chats.first { $0.id == threadID }
         let project = state.projects.first { $0.id == chat?.projectID }
         let detail = [project?.name, chat?.title].compactMap { $0 }.joined(separator: " · ")
@@ -1401,7 +1431,8 @@ private struct ChatRunState {
         // System notifications need an app bundle; headless hosts (tests) keep the in-app notice only.
         guard Bundle.main.bundleURL.pathExtension == "app" else { return }
         let content = UNMutableNotificationContent()
-        content.title = title; content.body = detail
+        content.title = title
+        if let body { content.subtitle = detail; content.body = body } else { content.body = detail }
         content.sound = .default; content.userInfo = ["threadID": threadID]
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil), withCompletionHandler: nil)
     }
@@ -1917,8 +1948,10 @@ private struct ChatRunState {
                 let status = completion.status
                 let title = completion.hasError || (status != .completed && status != .cancelled) ? L10n.text("Ошибка в разговоре", "Conversation error") : status == .cancelled ? L10n.text("Ответ остановлен", "Response stopped") : L10n.text("Ответ готов", "Response ready")
                 let completionID = "turn:" + threadID + ":" + turnID
+                recordRecap(threadID: threadID, failed: completion.hasError || (status != .completed && status != .cancelled), error: completion.error)
                 recordUnreadCompletion(threadID: threadID, completionID: completionID)
-                postNotice(threadID: threadID, title: title, identifier: completionID, completionID: completionID)
+                postNotice(threadID: threadID, title: title, identifier: completionID, completionID: completionID,
+                           body: state.chats.first { $0.id == threadID }?.recap)
             }
             finishActiveTurn(threadID: thread, turnID: turnID,
                              status: completion.status, hasError: completion.hasError)
@@ -1930,6 +1963,7 @@ private struct ChatRunState {
             if completion.hasError { error = completion.error ?? L10n.text("Задача завершилась с ошибкой", "The task failed") }
         case .item(let item):
             if let thread { historyEventRevisions[thread, default: 0] += 1 }
+            if let thread, item.kind == "assistant", !item.text.isEmpty { latestAnswers[thread] = item.text }
             if let thread, let source = event.session {
                 do { try await store.recordTranscriptItem(item, conversationID: thread, source: source) }
                 catch { self.error = error.localizedDescription }

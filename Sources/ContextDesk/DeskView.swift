@@ -135,6 +135,16 @@ struct DeskView: View {
                     .padding(.horizontal, .ui(12))
                 ScrollView {
                     VStack(alignment: .leading, spacing: .ui(4)) {
+                        let waiting = search.isEmpty ? Array(model.attentionChats.prefix(8)) : []
+                        if !waiting.isEmpty {
+                            Text(L10n.text("Ждёт тебя", "Needs you"))
+                                .font(.ui(.caption).weight(.semibold)).foregroundStyle(.secondary)
+                                .padding(.horizontal, .ui(8)).padding(.top, .ui(8)).padding(.bottom, .ui(4))
+                            ForEach(waiting, id: \.chat.id) { entry in
+                                chatEntry(entry.chat, waiting: true)
+                            }
+                            Divider().padding(.vertical, .ui(6))
+                        }
                         if !model.state.visiblePinnedChats.isEmpty {
                             Text(L10n.text("Избранное", "Favorites"))
                                 .font(.ui(.caption).weight(.semibold)).foregroundStyle(.secondary)
@@ -495,11 +505,13 @@ struct DeskView: View {
         return actions
     }
 
-    private func chatEntry(_ chat: Chat, favorite: Bool = false) -> some View {
-        let rowID = (favorite ? "favorite:" : "chat:") + chat.id
+    /// `waiting` rows sit in the "Needs you" group: like favorites (no reordering) plus what the chat waits for.
+    private func chatEntry(_ chat: Chat, favorite: Bool = false, waiting: Bool = false) -> some View {
+        let rowID = (waiting ? "waiting:" : favorite ? "favorite:" : "chat:") + chat.id
+        let favorite = favorite || waiting
         return Group {
             if favorite {
-                chatLabel(chat, favorite: true)
+                chatLabel(chat, favorite: true, detail: waiting ? model.attentionDetail(chat) : nil)
                     .accessibilityHidden(true)
                     .overlay {
                         ChatRow(chat: chat, enabled: !model.isChangingChat(chat.id), activate: {
@@ -586,7 +598,7 @@ struct DeskView: View {
         .padding(.horizontal, .ui(12))
     }
 
-    private func chatLabel(_ chat: Chat, favorite: Bool) -> some View {
+    private func chatLabel(_ chat: Chat, favorite: Bool, detail: String? = nil) -> some View {
             HStack(spacing: .ui(8)) {
                 if !favorite && selection.contains(chat.id) {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.accentColor)
@@ -601,6 +613,9 @@ struct DeskView: View {
                     if favorite, let project = model.state.projects.first(where: { $0.id == chat.projectID }) {
                         Text(project.name).font(.ui(.caption2)).foregroundStyle(.secondary).lineLimit(1)
                             .help(project.path)
+                    }
+                    if let detail {
+                        Text(detail).font(.ui(.caption)).foregroundStyle(.secondary).lineLimit(2).help(detail)
                     }
                 }
                 if model.runningBrowserChats[chat.id] != nil {

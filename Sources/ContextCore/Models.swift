@@ -39,6 +39,10 @@ public struct Chat: Identifiable, Codable, Hashable, Sendable {
     /// The latest completion remains unread until its transcript end is visible.
     public var unreadCompletionID: String?
     public var hasUnreadResponse: Bool { unreadCompletionID != nil }
+    /// Short line about the latest finished turn (`TurnRecap`), for the sidebar and notifications.
+    public var recap: String?
+    /// The latest turn ended with an error; cleared by the next successful turn.
+    public var lastTurnFailed: Bool?
     public var sidebarOrder: Int?
     public var pinned: Bool?
     public var isPinned: Bool { pinned == true }
