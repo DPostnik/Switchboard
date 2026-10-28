@@ -495,6 +495,13 @@ struct DeskView: View {
         actions += [
             ChatRowAction(title: chat.isPinned ? L10n.text("Открепить из избранного", "Unpin from favorites") : L10n.text("Закрепить в избранном", "Pin to favorites")) { model.toggleChatPin(chat.id) },
             ChatRowAction(title: L10n.text("Переименовать…", "Rename…")) { renaming = chat; newTitle = chat.title },
+        ]
+        if chat.nativeSession?.connection == .appClaude {
+            actions.append(ChatRowAction(title: chat.chatDirectoryAccess == true
+                ? L10n.text("Закрыть доступ к другим чатам", "Remove access to other chats")
+                : L10n.text("Дать доступ к другим чатам", "Give access to other chats")) { model.toggleChatDirectory(chat.id) })
+        }
+        actions += [
             ChatRowAction(title: chat.isArchived ? L10n.text("Восстановить из архива", "Restore from archive") : L10n.text("Архивировать", "Archive"), enabled: model.canDeleteChat(chat.id)) {
                 Task {
                     await model.setChatArchived(chat.id, archived: !chat.isArchived)

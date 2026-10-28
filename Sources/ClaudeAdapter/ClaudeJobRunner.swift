@@ -76,16 +76,23 @@ public actor ClaudeJobRunner: AgentScheduledExecutor {
     public static func browserArguments(_ server: [String]) throws -> [String] { try mcpArguments(browser: server) }
     /// One `--mcp-config` with the app's browser server (when given) and the project's approved servers.
     /// Only the browser's tools are pre-allowed; project tools go through the app's `can_use_tool` answers.
-    static func mcpArguments(browser server: [String]?, project: [String: JSONValue] = [:]) throws -> [String] {
+    static func mcpArguments(browser server: [String]?, project: [String: JSONValue] = [:], chats: [String]? = nil) throws -> [String] {
         var servers = project
         if let server {
             servers["switchboard_browser"] = .object([
                 "type": .string("stdio"), "command": .string("/usr/bin/python3"), "args": .array(server.map(JSONValue.string))
             ])
         }
+        // The read-only chat directory; `-I` keeps the script folder out of Python's import path.
+        if let chats {
+            servers[ChatDirectory.serverName] = .object([
+                "type": .string("stdio"), "command": .string("/usr/bin/python3"), "args": .array((["-I"] + chats).map(JSONValue.string))
+            ])
+        }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.withoutEscapingSlashes, .sortedKeys]
+        let allowed = (server == nil ? [] : ["mcp__switchboard_browser"]) + (chats == nil ? [] : ["mcp__" + ChatDirectory.serverName])
         return ["--mcp-config", String(decoding: try encoder.encode(JSONValue.object(["mcpServers": .object(servers)])), as: UTF8.self)]
-            + (server == nil ? [] : ["--allowedTools", "mcp__switchboard_browser"])
+            + (allowed.isEmpty ? [] : ["--allowedTools", allowed.joined(separator: ",")])
     }
     private struct Lease { let session: AgentSessionReference; let grant: BrowserProfileGrant; let browser: Browser }
     /// Reserve, acknowledge and (optionally) authorize a fresh profile before dispatch. Nothing launches Chrome here.

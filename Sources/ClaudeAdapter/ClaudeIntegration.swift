@@ -248,7 +248,7 @@ public actor ClaudeIntegration: AgentIntegration {
             // Read at every turn: an edited `.mcp.json` entry no longer matches its approval and changes the launch.
             let projectServers = ProjectMCPServers.approved(projectPath: record.cwd, approvals: profile.mcpServers)
             let launch = try Self.arguments(id: id, resumed: true, permissions: profile, model: request.model.model, effort: request.model.effort,
-                                            advisor: request.model.advisor, scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
+                                            advisor: request.model.advisor, chatDirectory: request.chatDirectory, scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                             projectAgents: ProjectAgents.argument(projectPath: record.cwd), projectServers: projectServers,
                                             home: home, userChrome: userChrome)
             // A scheduled turn's CLI still running background tasks (sub-agents) takes the user's message instead of
@@ -258,7 +258,7 @@ public actor ClaudeIntegration: AgentIntegration {
             if let current = wires[id], !scheduled, !(backgroundTasks[id] ?? []).isEmpty {
                 func variant(scheduled: Bool, userChrome: Bool) throws -> [String] {
                     try Self.arguments(id: id, resumed: true, permissions: profile, model: request.model.model, effort: request.model.effort,
-                                       advisor: request.model.advisor, scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
+                                       advisor: request.model.advisor, chatDirectory: request.chatDirectory, scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                        projectAgents: ProjectAgents.argument(projectPath: record.cwd), projectServers: projectServers,
                                        home: home, userChrome: userChrome)
                 }
@@ -291,7 +291,8 @@ public actor ClaudeIntegration: AgentIntegration {
                                                             policy: BrowserLaunchPolicy(profile, scheduled: scheduled))
                 } }
                 let arguments = try Self.arguments(id: id, resumed: record.sent, permissions: profile,
-                                                   model: request.model.model, effort: request.model.effort, advisor: request.model.advisor, scheduled: scheduled,
+                                                   model: request.model.model, effort: request.model.effort, advisor: request.model.advisor,
+                                                   chatDirectory: request.chatDirectory, scheduled: scheduled,
                                                    projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                                    projectAgents: ProjectAgents.argument(projectPath: record.cwd), browserServer: server,
                                                    projectServers: projectServers, home: home, userChrome: userChrome)
@@ -364,7 +365,7 @@ public actor ClaudeIntegration: AgentIntegration {
                       home: profile, userChrome: userChrome)
     }
     /// Flags for one launch. A scheduled turn runs unattended, so connector actions are never held for approval.
-    static func arguments(id: String, resumed: Bool, permissions requested: AgentPermissionProfile, model: String, effort: String?, advisor: String? = nil, scheduled: Bool = false,
+    static func arguments(id: String, resumed: Bool, permissions requested: AgentPermissionProfile, model: String, effort: String?, advisor: String? = nil, chatDirectory: [String]? = nil, scheduled: Bool = false,
                           projectInstructions: String? = nil, projectAgents: String? = nil, browserServer: [String]? = nil,
                           projectServers: [String: JSONValue] = [:], home: URL? = nil, userChrome: Bool = false) throws -> [String] {
         let policy = ClaudeLaunchPolicy(requested, scheduled: scheduled, userChromeEnabled: userChrome)
@@ -375,10 +376,10 @@ public actor ClaudeIntegration: AgentIntegration {
                     "--permission-prompt-tool", "stdio", "--setting-sources", ""]
         if !connectors { args.append("--strict-mcp-config") }
         let browser = policy.profile.browser != .off ? browserServer : nil
-        if browser != nil || !projectServers.isEmpty {
+        if browser != nil || !projectServers.isEmpty || chatDirectory != nil {
             // The app's browser server (its tools run without a prompt, like scheduled runs) and the project's approved servers.
             // `--disable-slash-commands` turns off skills only; the servers' prompts stay available as `/mcp__<server>__<prompt>`.
-            args += ["--disable-slash-commands"] + (try ClaudeJobRunner.mcpArguments(browser: browser, project: projectServers))
+            args += ["--disable-slash-commands"] + (try ClaudeJobRunner.mcpArguments(browser: browser, project: projectServers, chats: chatDirectory))
         } else if connectors {
             // `--safe-mode` would also drop claude.ai connectors, so its isolation is spelled out as in browser chats.
             args += ["--disable-slash-commands", "--mcp-config", "{\"mcpServers\":{}}"]
@@ -756,6 +757,8 @@ public actor ClaudeIntegration: AgentIntegration {
         case "AskUserQuestion": break
         default:
             if name.hasPrefix("mcp__switchboard_browser__") || name.hasPrefix("mcp__claude-in-chrome__") { await allow(); return }
+            // The chat directory only reads the app's snapshot; it is attached only to chats the user opted in.
+            if name.hasPrefix("mcp__" + ChatDirectory.serverName + "__") { await allow(); return }
             // The user approved this project server in the project's permissions; its tools run without a prompt.
             if policy.projectServer(of: name) != nil { await allow(); return }
             if name.hasPrefix(Self.connectorToolPrefix) {

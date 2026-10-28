@@ -43,6 +43,8 @@ public struct Chat: Identifiable, Codable, Hashable, Sendable {
     public var recap: String?
     /// The latest turn ended with an error; cleared by the next successful turn.
     public var lastTurnFailed: Bool?
+    /// The user let this chat read the other chats through the chat directory tools.
+    public var chatDirectoryAccess: Bool?
     public var sidebarOrder: Int?
     public var pinned: Bool?
     public var isPinned: Bool { pinned == true }

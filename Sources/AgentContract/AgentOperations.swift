@@ -12,6 +12,8 @@ public struct AgentExecutionRequest: Sendable {
     public let model: AgentModelSelection
     public let route: AgentRoute
     public let browserProfile: AgentBrowserProfile?
+    /// Command line of the app's read-only chat directory MCP server; nil unless the user opted this chat in.
+    public let chatDirectory: [String]?
 
     public enum Kind: Sendable {
         case interactive, scheduled
@@ -19,11 +21,11 @@ public struct AgentExecutionRequest: Sendable {
     }
     public init(id: UUID = UUID(), conversation: ConversationID, session: AgentSessionReference? = nil,
                 kind: Kind, prompt: String, projectPath: String, permissions: AgentPermissionIntent,
-                model: AgentModelSelection, route: AgentRoute, browserProfile: AgentBrowserProfile? = nil) {
+                model: AgentModelSelection, route: AgentRoute, browserProfile: AgentBrowserProfile? = nil, chatDirectory: [String]? = nil) {
         self.id = id; self.conversation = conversation; self.session = session; self.kind = kind
         self.prompt = prompt; self.projectPath = projectPath; self.permissions = permissions
         self.model = model; self.route = route
-        self.browserProfile = browserProfile
+        self.browserProfile = browserProfile; self.chatDirectory = chatDirectory
     }
 }
 

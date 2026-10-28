@@ -9,7 +9,7 @@ public enum ProjectMCPServers {
     static let file = ".mcp.json"
     static let limit = 64 * 1024
     /// Names the app itself uses for MCP tool prefixes.
-    static let reservedNames = ["switchboard_browser", "claude-in-chrome"]
+    static let reservedNames = ["switchboard_browser", "switchboard_chats", "claude-in-chrome"]
     static let reservedPrefix = "claude_ai"
 
     public struct Server: Hashable, Sendable {

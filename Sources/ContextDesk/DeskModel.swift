@@ -64,6 +64,8 @@ private struct ChatRunState {
     private var latestAnswers: [String: String] = [:]
     /// Sends "needs you" waits to the user's Telegram notifier and brings Reply answers back.
     let telegram = TelegramBridge()
+    /// Latest messages per chat for the chat directory, reloaded when the chat changes.
+    private var directoryHistoryCache: [String: (updated: Date, messages: [TranscriptItem])] = [:]
     @Published var state = SavedState()
     @Published var projectID: UUID?
     @Published var chatID: String? {
@@ -1101,6 +1103,48 @@ private struct ChatRunState {
         persist()
         for id in queued { scheduleQueue(threadID: id) }
     }
+    /// The chat directory server's command line for a chat the user opted in (Claude chats only, plan Phase 5).
+    func chatDirectoryArguments(for id: String) -> [String]? {
+        guard let chat = state.chats.first(where: { $0.id == id }), chat.chatDirectoryAccess == true,
+              chat.nativeSession?.connection == .appClaude,
+              let script = Bundle.main.resourceURL?.appendingPathComponent("ChatDirectoryRuntime/server.py"),
+              FileManager.default.fileExists(atPath: script.path) else { return nil }
+        return ChatDirectory.serverArguments(script: script.path, snapshot: chatDirectoryFile.path, chat: id)
+    }
+    var chatDirectoryFile: URL { Locations.root.appendingPathComponent(ChatDirectory.fileName) }
+    /// Gives or takes a chat's access to the other chats; it applies from the chat's next message.
+    func toggleChatDirectory(_ id: String) {
+        guard let index = state.chats.firstIndex(where: { $0.id == id }) else { return }
+        state.chats[index].chatDirectoryAccess = state.chats[index].chatDirectoryAccess == true ? nil : true
+        persist()
+        Task { await refreshChatDirectory() }
+    }
+    /// Rewrites the snapshot the chat directory server reads; removes it when no chat has access.
+    func refreshChatDirectory(now: Date = Date()) async {
+        let file = chatDirectoryFile
+        guard state.chats.contains(where: { $0.chatDirectoryAccess == true && !$0.isArchived }) else {
+            try? FileManager.default.removeItem(at: file); return
+        }
+        let attention = Dictionary(attentionChats.map { ($0.chat.id, $0.attention) }, uniquingKeysWith: { first, _ in first })
+        var entries: [ChatDirectory.Entry] = []
+        for chat in state.chats where !chat.isArchived && !chat.isScheduledRecord {
+            let messages: [TranscriptItem]
+            if let cached = directoryHistoryCache[chat.id], cached.updated == chat.updated { messages = cached.messages }
+            else {
+                let history = try? await store.loadTranscript(conversationID: chat.id)
+                messages = Array((history.map(LocalHistory.items) ?? []).filter { ["user", "assistant"].contains($0.kind) }.suffix(ChatDirectory.messageCount))
+                directoryHistoryCache[chat.id] = (chat.updated, messages)
+            }
+            let running = isBusy(threadID: chat.id)
+            entries.append(.init(id: chat.id, title: chat.title, project: state.projects.first { $0.id == chat.projectID }?.name ?? "",
+                                 agent: chat.nativeSession?.connection == .appClaude ? "Claude" : "Codex",
+                                 state: ChatDirectory.state(attention[chat.id], running: running), detail: attentionDetail(chat),
+                                 activity: running ? runActivity(threadID: chat.id).status : nil, updated: chat.updated,
+                                 messages: messages.map { .init(role: $0.kind, text: $0.text) }))
+        }
+        do { try ChatDirectory.write(.init(generatedAt: now, chats: entries), to: file) }
+        catch { AppLog.delivery.error("Chat directory snapshot failed: \(error.localizedDescription, privacy: .public)") }
+    }
     /// What waits for the user in a form the Telegram notifier accepts: requests and failed unread turns.
     /// Request details are cut short; the transcript itself never leaves the Mac.
     func telegramWaits() -> [TelegramAlerts.Waiting] {
@@ -1330,7 +1374,8 @@ private struct ChatRunState {
             let submittedTurn = try await client.send(outgoing, to: sessionForChat(id), projectPath: project.path,
                                                           permissions: access, model: selectedModel, effort: selectedEffort,
                                                           advisor: ClaudeAdvisor.attached(state.claudeAdvisor, mainModel: selectedModel),
-                                                          kind: scheduledRun == nil ? .interactive : .scheduled, conversation: ConversationID(id))
+                                                          kind: scheduledRun == nil ? .interactive : .scheduled, conversation: ConversationID(id),
+                                                          chatDirectory: chatDirectoryArguments(for: id))
             if threadID == nil && scheduledRun == nil {
                 generateChatTitle(id, firstMessage: text, model: selectedModel, route: route)
             }

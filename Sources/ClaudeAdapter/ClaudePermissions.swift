@@ -167,6 +167,7 @@ struct ClaudeLaunchPolicy: Equatable {
         if name.hasPrefix(ClaudeIntegration.connectorToolPrefix) { return connectors }
         if name.hasPrefix("mcp__switchboard_browser__") { return profile.browser != .off }
         if name.hasPrefix("mcp__claude-in-chrome__") { return userChrome }
+        if name.hasPrefix("mcp__" + ChatDirectory.serverName + "__") { return true }
         if projectServer(of: name) != nil { return true }
         guard let tools else { return true }
         return tools.contains(name)
