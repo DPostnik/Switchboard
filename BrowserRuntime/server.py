@@ -1438,15 +1438,16 @@ class Browser:
         if 'error' in value:
             self.failed = value.get('outcomeUnknown') is True
             raise Rejected(value['error'])
+        counts = ('verified', 'skipped', 'unverified', 'localStorageVerified', 'localStorageSkipped', 'localStorageUnverified')
         if not all(isinstance(value.get(k), int) and not isinstance(value.get(k), bool) and value[k] >= 0
-                   for k in ('verified', 'skipped', 'unverified')) or value.get('websiteSignInVerified') is not False:
+                   for k in counts) or value.get('websiteSignInVerified') is not False:
             self.failed = True
             raise Rejected(tr('Исход импорта неизвестен. Повтора не было.', 'Import outcome is unknown. Nothing was retried.'))
         self.imported_sites.add((token, site))
         self.checkpoint.update(importedSite=site, state='cookies_imported_sign_in_unverified')
         self.persist()
-        # Return only counts. A separate navigation/read must check website sign-in.
-        return {k: value[k] for k in ('verified', 'skipped', 'unverified', 'websiteSignInVerified')}
+        # Return only counts (cookies and Local Storage). A separate navigation/read must check website sign-in.
+        return {k: value[k] for k in counts + ('websiteSignInVerified',)}
 
     def opened_tabs(self):
         """Page targets that sites opened from the owned tab, directly or through one another.
@@ -1653,7 +1654,7 @@ def catalog():
     action = {**token, 'actionID': string, 'expectedURL': string}
     definitions = [
         ('browser_open', 'Открыть собственную вкладку; сохрани session. Другие чаты могут держать свои вкладки: операции выполняются по очереди. После закрытия Chrome начни новую сессию без повторения действий.', 'Open your own tab; retain its session token. Other chats can keep their tabs: operations run serially. After Chrome exits, start a new session without replaying actions.', {'url': string}, ['url'], False),
-        ('browser_import_session', 'При отсутствии авторизации импортировать cookies текущего сайта из разрешённого профиля Chrome. Разреши сайт или все сайты один раз в меню Браузер → Импортировать только cookies. Обычный Chrome можно не закрывать; возможен запрос Связки ключей. Затем обнови страницу отдельным действием и проверь вход. Не используй для сетевых ошибок, CAPTCHA или обхода блокировок. Не повторяй неопределённый импорт.', 'When sign-in is missing, import current-site cookies from the enabled Chrome profile. Enable the site or all sites once in Browser → Import cookies only. Regular Chrome can stay open; Keychain may prompt. Then reload with a separate action and verify sign-in. Do not use for network errors, CAPTCHA or bypassing blocks. Never replay an uncertain import.', {**token, 'expectedURL': string}, ['session', 'expectedURL'], False),
+        ('browser_import_session', 'При отсутствии авторизации импортировать сессию текущего сайта из разрешённого профиля Chrome: его cookies и localStorage (там хранят токен входа такие сайты, как Discord). Разреши сайт или все сайты один раз в меню Браузер → Импорт сессии. Обычный Chrome можно не закрывать; возможен запрос Связки ключей. localStorage переносится только в уже открытую вкладку этого сайта. Затем обнови страницу отдельным действием и проверь вход. Не используй для сетевых ошибок, CAPTCHA или обхода блокировок. Не повторяй неопределённый импорт.', 'When sign-in is missing, import the current site\'s session from the enabled Chrome profile: its cookies and its local storage (where sites like Discord keep the login token). Enable the site or all sites once in Browser → Import session. Regular Chrome can stay open; Keychain may prompt. Local storage is only written into an already open tab of that site. Then reload with a separate action and verify sign-in. Do not use for network errors, CAPTCHA or bypassing blocks. Never replay an uncertain import.', {**token, 'expectedURL': string}, ['session', 'expectedURL'], False),
         ('browser_cards', 'Прочитать карточки, включая date/excerpt. expectedCards — только для проверенного статического списка; иначе обход с прокруткой. complete относится к одной странице.', 'Read compact cards including date/excerpt. Set expectedCards only for an audited static list; otherwise scroll normally. complete describes one page.', {**token, 'selectors': config, 'timeout': timeout, 'expectedCards': {'type': 'integer', 'minimum': 1, 'maximum': 500}}, ['session', 'selectors'], True),
         ('browser_next', 'Передай либо nextToken для обычной ссылки Далее без снимка, либо наблюдаемый uid для клика. Проверяет смену ID; не повторяет действие.', 'Supply either nextToken for an ordinary Next link without a snapshot, or an observed uid to click. Verifies changed IDs; never replays an action.', {**action, 'uid': string, 'nextToken': string, 'selectors': config, 'timeout': timeout}, [*action, 'selectors'], False),
         ('browser_action', 'Одно действие Chrome DevTools. Результат требует проверки через browser_verify; actionID нельзя повторять.', 'One native Chrome DevTools action. Verify the result with browser_verify; never reuse an actionID.', {**action, 'name': {'type': 'string', 'enum': ['click', 'fill', 'fill_form', 'press_key', 'type_text', 'upload_file', 'navigate_page']}, 'arguments': {'type': 'object'}}, [*action, 'name', 'arguments'], False),

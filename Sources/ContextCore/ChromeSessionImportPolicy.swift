@@ -186,7 +186,7 @@ extension ChromeCookieImporter {
     /// The executor holds operation.lock and has verified the lease and owned endpoint.
     /// Secrets stay inside this native process and the destination CDP connection.
     public static func importSession(environment: URL, site: String, endpoint: URL,
-                                     sourceIsRunning: @Sendable () -> Bool) async throws -> ChromeCookieImportResult {
+                                     sourceIsRunning: @Sendable () -> Bool) async throws -> ChromeSessionImportResult {
         let root = BrowserEnvironmentStore.directory.standardizedFileURL
         guard environment.deletingLastPathComponent().standardizedFileURL.path == root.appendingPathComponent("environments").path,
               environment.resolvingSymlinksInPath().path == environment.path,
@@ -203,9 +203,75 @@ extension ChromeCookieImporter {
         let connection = try CookieCDP(endpoint: endpoint)
         defer { connection.close() }
         _ = try await connection.call("Browser.getVersion")
-        return try await writeAndVerify(read, fence: environment.appendingPathComponent("executor-in-flight.json"), executorFence: true) { method, parameters in
+        let cookies = try await writeAndVerify(read, fence: environment.appendingPathComponent("executor-in-flight.json"), executorFence: true) { method, parameters in
             try await connection.call(method, parameters: parameters)
         }
+        // Local Storage carries the login token for sites like Discord. It rides on the same per-site consent,
+        // but is additive: any failure leaves the verified cookie import untouched and simply transfers nothing.
+        let localStorage = await importLocalStorage(connection: connection, profile: scope.profile,
+                                                    host: scope.site ?? scope.pageHost ?? site, sourceIsRunning: sourceIsRunning)
+        return ChromeSessionImportResult(cookies: cookies, localStorage: localStorage)
+    }
+
+    /// Finds the owned page at the site's origin, reads that origin's Local Storage from the source profile,
+    /// and replays each item with `localStorage.setItem` inside the page, verifying by read-back. Never throws
+    /// and never surfaces a protocol response: a remote value could hold a secret.
+    static func importLocalStorage(connection: CookieCDP, profile: String, host: String,
+                                   sourceIsRunning: @Sendable () -> Bool) async -> LocalStorageImportResult {
+        do {
+            let targets = try await connection.call("Target.getTargets")
+            guard let target = targets["targetInfos"].array.first(where: { info in
+                guard info["type"].string == "page", let url = info["url"].string,
+                      let components = URLComponents(string: url), components.scheme == "https", let pageHost = components.host
+                else { return false }
+                return ChromeSessionImportPolicy.includes(host: pageHost, site: host)
+            }), let targetID = target["targetId"].string else { return .none }
+            let attached = try await connection.call("Target.attachToTarget", parameters: .object(["targetId": .string(targetID), "flatten": .bool(true)]))
+            guard let sessionID = attached["sessionId"].string else { return .none }
+            // Closing the whole CDP connection (importSession's defer) detaches every session, so no explicit detach.
+            guard let origin = try await evaluate("location.origin", connection: connection, sessionID: sessionID)?.string,
+                  let originHost = URLComponents(string: origin)?.host, ChromeSessionImportPolicy.includes(host: originHost, site: host) else { return .none }
+            let read = try ChromeLocalStorageSource.read(profile: profile, originSerialized: origin, sourceIsRunning: sourceIsRunning)
+            guard !read.items.isEmpty else { return LocalStorageImportResult(verified: 0, skipped: read.unsupported, unverified: 0) }
+            let payload = JSONValue.array(read.items.map { .array([.string($0.key), .string($0.value)]) })
+            let json = String(decoding: (try? JSONEncoder().encode(payload)) ?? Data(), as: UTF8.self)
+            guard !json.isEmpty, json.utf8.count <= ChromeLocalStorageSource.maximumBytes else { return .none }
+            // No eval/new Function, so a strict page CSP does not block the transfer.
+            let expression = """
+            (function(){try{var d=JSON.parse(\(jsStringLiteral(json)));var n=0;\
+            for(var i=0;i<d.length;i++){try{localStorage.setItem(d[i][0],d[i][1]);\
+            if(localStorage.getItem(d[i][0])===d[i][1]){n++;}}catch(e){}}return n;}catch(e){return -1;}})()
+            """
+            let verified = try await evaluate(expression, connection: connection, sessionID: sessionID)?.int ?? -1
+            guard verified >= 0 else { return .none }
+            return LocalStorageImportResult(verified: min(verified, read.items.count), skipped: read.unsupported,
+                                            unverified: read.items.count - min(verified, read.items.count))
+        } catch { return .none }
+    }
+
+    private static func evaluate(_ expression: String, connection: CookieCDP, sessionID: String) async throws -> JSONValue? {
+        let result = try await connection.call("Runtime.evaluate", parameters: .object([
+            "expression": .string(expression), "returnByValue": .bool(true), "userGesture": .bool(false)]), sessionId: sessionID)
+        guard result["exceptionDetails"] == .null else { return nil }
+        return result["result"]["value"]
+    }
+
+    /// Encodes a string as a JavaScript string literal, escaping the line separators JSON leaves raw.
+    static func jsStringLiteral(_ value: String) -> String {
+        var out = "\""
+        for scalar in value.unicodeScalars {
+            switch scalar {
+            case "\\": out += "\\\\"
+            case "\"": out += "\\\""
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\u{2028}": out += "\\u2028"
+            case "\u{2029}": out += "\\u2029"
+            default:
+                if scalar.value < 0x20 { out += String(format: "\\u%04x", scalar.value) } else { out.unicodeScalars.append(scalar) }
+            }
+        }
+        return out + "\""
     }
 }
 

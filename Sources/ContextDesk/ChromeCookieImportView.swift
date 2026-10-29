@@ -40,8 +40,8 @@ struct ChromeCookieImportView: View {
             Text(L10n.text("Импорт заменит совпадающие cookies. Некоторые сайты потребуют входа заново. Пароли и файлы авторизации Codex / Claude Code не переносятся.",
                            "Import replaces matching cookies. Some sites will require signing in again. Passwords and Codex / Claude Code authentication files are not transferred."))
                 .font(.ui(.caption)).foregroundStyle(.secondary)
-            Text(L10n.text("localStorage, IndexedDB, аккаунт Chrome и значок профиля не переносятся. Проверка cookies не подтверждает вход на сайте.",
-                           "localStorage, IndexedDB, the Chrome account and profile avatar are not transferred. Cookie verification does not confirm website sign-in."))
+            Text(L10n.text("Эта кнопка переносит только cookies; IndexedDB, аккаунт Chrome и значок профиля не переносятся. Импорт сессии агентом ниже дополнительно переносит localStorage сайта. Проверка cookies не подтверждает вход на сайте.",
+                           "This button transfers cookies only; IndexedDB, the Chrome account and profile avatar are not transferred. The agent session import below also transfers the site’s local storage. Cookie verification does not confirm website sign-in."))
                 .font(.ui(.caption)).foregroundStyle(.secondary)
             Divider()
             Text(L10n.text("Импорт сессии агентом", "Agent session import")).font(.ui(.headline))
@@ -51,8 +51,8 @@ struct ChromeCookieImportView: View {
                     .disabled(importing)
             }
             Toggle(L10n.text("Во всех чатах", "In every chat"), isOn: $automaticAllChats).disabled(importing)
-            Text(L10n.text("Разреши агенту переносить cookies сайта из выбранного профиля Chrome при отсутствии входа. Для одного сайта переносятся cookies сайта и его поддоменов; для любого сайта — только cookies, которые Chrome отправил бы открытой странице. Разрешение для чата действует для этого браузерного профиля, включая чаты, которым он будет передан; разрешение для всех чатов — для каждого браузера чата. Обычный Chrome можно не закрывать.",
-                           "Allow the agent to import site cookies from the selected Chrome profile when sign-in is missing. For one site, cookies of the site and its subdomains are imported; for any site, only the cookies Chrome would send to the open page. Chat permission applies to this browser profile, including chats it is handed to; every-chat permission applies to each chat browser. Regular Chrome can stay open."))
+            Text(L10n.text("Разреши агенту переносить сессию сайта из выбранного профиля Chrome при отсутствии входа: cookies и localStorage открытой страницы (там держат токен входа такие сайты, как Discord). Для одного сайта переносятся cookies сайта и его поддоменов; для любого сайта — только cookies, которые Chrome отправил бы открытой странице. localStorage переносится только для origin открытой вкладки. Разрешение для чата действует для этого браузерного профиля, включая чаты, которым он будет передан; разрешение для всех чатов — для каждого браузера чата. Обычный Chrome можно не закрывать.",
+                           "Allow the agent to import the site session from the selected Chrome profile when sign-in is missing: cookies and the open page’s local storage (where sites like Discord keep the login token). For one site, cookies of the site and its subdomains are imported; for any site, only the cookies Chrome would send to the open page. Local storage is transferred only for the open tab’s origin. Chat permission applies to this browser profile, including chats it is handed to; every-chat permission applies to each chat browser. Regular Chrome can stay open."))
                 .font(.ui(.caption)).foregroundStyle(.secondary)
             if let automaticPolicy {
                 HStack {

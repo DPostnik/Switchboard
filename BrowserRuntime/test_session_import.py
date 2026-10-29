@@ -24,7 +24,8 @@ class SessionImportTests(unittest.TestCase):
         self.policy = self.root / 'chrome-session-import.json'
         self.policy.write_text(json.dumps({'site': 'linkedin.com', 'profile': 'Default'}))
         self.url = 'https://www.linkedin.com/login'
-        self.result = {'verified': 2, 'skipped': 0, 'unverified': 0, 'websiteSignInVerified': False}
+        self.result = {'verified': 2, 'skipped': 0, 'unverified': 0, 'websiteSignInVerified': False,
+                       'localStorageVerified': 1, 'localStorageSkipped': 0, 'localStorageUnverified': 0}
 
     def tearDown(self):
         self.temp.cleanup()

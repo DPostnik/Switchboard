@@ -425,6 +425,18 @@ session lifetime. A new separate profile needs its own explicit import; a saved
 profile can instead be reused as described below. There is no shared login vault,
 background sync or automatic seeding.
 
+The agent-only `browser_import_session` additionally transfers the open tab
+origin's Local Storage, which carries the login token for sites like Discord. It
+reads the profile's `Local Storage/leveldb` from a private snapshot with a
+read-only LevelDB reader (`ChromeLevelDB`); Local Storage values are not
+encrypted, so no Keychain material is used. Items for the exact page origin are
+replayed in that tab with `localStorage.setItem` and verified by read-back. This
+half is best-effort: any failure leaves the verified cookie import untouched and
+simply transfers nothing, and a zero `localStorageVerified` count means the token
+is not in Local Storage (it may be in memory or IndexedDB) — use QR sign-in then.
+The manual Import button stays cookies-only, because it has no live tab at the
+origin to write into.
+
 Русский: в чате открой «Браузер → Импортировать только cookies…». Заверши обычный
 Chrome через Cmd+Q и закрой браузер чата. Выбери профиль и нажми «Импортировать»;
 macOS может запросить доступ к Chrome Safe Storage в Связке ключей. Cookies сайтов
@@ -440,6 +452,18 @@ Cookies сеанса сохраняют свой срок жизни. Новом
 При неопределённом результате автоматического повтора нет; проверь браузер и
 заверши его через Cmd+Q перед новой попыткой. Расшифрованные значения cookies не попадают в
 журналы, сообщения агента или временные файлы.
+
+Только агентский `browser_import_session` дополнительно переносит localStorage
+origin открытой вкладки — там хранят токен входа такие сайты, как Discord. Он
+читает `Local Storage/leveldb` профиля из приватного снимка собственным
+read-only ридером LevelDB (`ChromeLevelDB`); значения localStorage не шифруются,
+Связка ключей не нужна. Записи точного origin страницы повторяются во вкладке
+через `localStorage.setItem` и проверяются обратным чтением. Эта часть
+необязательная: при любой ошибке проверенный импорт cookies не затрагивается и
+ничего не переносится, а `localStorageVerified: 0` значит, что токена в
+localStorage нет (он может быть в памяти или IndexedDB) — тогда вход по QR.
+Ручная кнопка «Импортировать» переносит только cookies: у неё нет открытой
+вкладки нужного origin для записи.
 
 Development: ChromeCookieTests uses synthetic encrypted SQLite fixtures and
 known OpenSSL vectors. ChromeCookieLiveTests is opt-in with

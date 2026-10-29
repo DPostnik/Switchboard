@@ -147,10 +147,12 @@ final class CookieCDP: @unchecked Sendable {
         socket.resume()
     }
     func close() { socket.cancel(with: .goingAway, reason: nil); session.invalidateAndCancel() }
-    func call(_ method: String, parameters: JSONValue = .object([:])) async throws -> JSONValue {
+    func call(_ method: String, parameters: JSONValue = .object([:]), sessionId: String? = nil) async throws -> JSONValue {
         sequence += 1
         let id = sequence
-        let request: JSONValue = .object(["id": .number(Double(id)), "method": .string(method), "params": parameters])
+        var fields: [String: JSONValue] = ["id": .number(Double(id)), "method": .string(method), "params": parameters]
+        if let sessionId { fields["sessionId"] = .string(sessionId) }
+        let request: JSONValue = .object(fields)
         let data = try JSONEncoder().encode(request)
         return try await withTaskCancellationHandler {
             try await withThrowingTaskGroup(of: JSONValue.self) { group in
