@@ -362,6 +362,15 @@ never launches Chrome; when Chrome has already exited it returns `browserQuit: n
 Live sessions of the chat, unknown outcomes and malformed tokens still get
 `session_not_owned`.
 
+Aborted `browser_open` (2026-10-29). When the agent's client aborts a silent
+`browser_open` (Claude Code's MCP idle timeout), the tab may already exist but its
+token never reaches the agent, and the next connection starts without a session. While
+the chat's fence exists, `browser_close` from a client that owns no tab accepts any
+`session` value: it adopts this chat's recorded Chrome without launching one, quits it
+once, waits for the confirmed exit and retires the fence (`outcomeUnknown: true`,
+`browserQuit: quit` or `none`). Another live task of the chat still blocks the quit;
+an owned tab still requires its own token. Nothing is replayed.
+
 Русский: `browser_snapshot` по умолчанию использует `mode=read`: один DOM-запрос без
 ожидания стабильности DOM, обхода iframe и построения дерева доступности. `selector`
 позволяет прочитать отдельную часть профиля. Ограничения: 4 000 узлов, 24 000 символов

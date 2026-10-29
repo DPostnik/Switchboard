@@ -416,6 +416,29 @@ class BrowserTests(unittest.TestCase):
         self.assertIsNone(browser.chrome)
         self.assertEqual(list(Path(self.directory.name).glob('records/*.json')), [])  # Nothing to record without a session.
 
+    def test_fenced_close_without_session_quits_chat_chrome_of_lost_connection(self):
+        # browser_open hung and the agent aborted it: its token never arrived. The next
+        # connection of this chat starts clean, owns no tab and only sees the fence.
+        browser = Browser(Path(self.directory.name), rpc=Mock())
+        chrome = Mock(owner={'pid': 123})
+        chrome.process_gone.side_effect = [False, True]
+        browser.attached_chrome = Mock(return_value=chrome)
+        browser.stopped.wait = lambda seconds: False
+        with self.assertRaisesRegex(Rejected, 'session_not_owned'):
+            dispatch(browser, 'browser_close', {'session': ''})  # Without a fence: an earlier-session close.
+        with self.assertRaisesRegex(Rejected, 'другая задача|another task'):
+            dispatch(browser, 'browser_close', {'session': ''}, shared=True, fenced=True)
+        chrome.graceful_close.assert_not_called()
+        result = dispatch(browser, 'browser_close', {'session': ''}, fenced=True)
+        self.assertEqual((result['closed'], result['browserQuit'], result['outcomeUnknown']), (True, 'quit', True))
+        chrome.graceful_close.assert_called_once_with({'pid': 123})
+        browser.injected.assert_not_called()
+        self.assertIsNone(browser.chrome)
+        # A live tab of this client still requires its own token, fence or not.
+        browser.session, browser.page = 'owner', 7
+        with self.assertRaisesRegex(Rejected, 'session_not_owned'):
+            dispatch(browser, 'browser_close', {'session': ''}, fenced=True)
+
     def test_close_after_failure_without_chrome_clears_failed_state(self):
         browser = Browser(Path(self.directory.name), rpc=Mock())
         browser.failed = True

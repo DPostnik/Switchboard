@@ -36,6 +36,9 @@ def serve_fake():
                     pages[counter[0]] = arguments['url']
                     text = str(counter[0]) + ': ' + arguments['url']
                 elif name == 'navigate_page':
+                    if 'hang' in arguments['url']:
+                        self.stopped.wait(10)
+                        raise TimeoutError('injected hung navigation')
                     pages[arguments['pageId']] = arguments['url']
                     text = 'navigated'
                 elif name == 'evaluate_script':
@@ -352,6 +355,42 @@ class MultiClientTests(unittest.TestCase):
         self.opened(a)
         self.opened(b)
         self.assertEqual(sum(r['name'] == 'new_page' and r['phase'] == 'start' for r in self.trace()), 4)
+
+    def test_close_without_token_recovers_after_hung_open_was_aborted(self):
+        self.start_executor()
+        a = self.client()
+        errors = []
+        def hung_open():
+            try:
+                a.rpc('tools/call', {'name': 'browser_open', 'arguments': {'url': 'https://example.test/hang'}},
+                      'hung', time.monotonic_ns() + 8_000_000_000)
+            except Exception as error:
+                errors.append(error)
+        worker = threading.Thread(target=hung_open)
+        worker.start()
+        deadline = time.monotonic() + 3
+        while not any(row['name'] == 'navigate_page' for row in self.trace()):
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+        # The agent's client aborts the silent call; the session token never reaches it.
+        a.notify('notifications/cancelled', {'requestId': 'hung'})
+        a.process.wait(timeout=3)
+        worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        fence = self.root / 'executor-in-flight.json'
+        self.assertTrue(fence.exists())
+        c = self.client()
+        refused = self.call(c, 'browser_open', url='https://example.test/')
+        self.assertTrue(refused['isError'])
+        self.assertIn('any session value', refused['content'][0]['text'])
+        recovered = self.call(c, 'browser_close', session='')
+        self.assertFalse(recovered.get('isError'), recovered)
+        recovered = json.loads(recovered['content'][0]['text'])
+        # The fake executor browser has no Chrome record: nothing to quit, yet the fence retires.
+        self.assertEqual((recovered['closed'], recovered['browserQuit'], recovered['outcomeUnknown']), (True, 'none', True))
+        self.assertFalse(fence.exists())
+        self.opened(c)
+        self.assertEqual(sum(row['name'] == 'navigate_page' and row['phase'] == 'start' for row in self.trace()), 2)
 
     def disconnect_in_flight(self, cancel=False, crash=False):
         self.start_executor()

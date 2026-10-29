@@ -367,12 +367,16 @@ class Executor:
                     fenced = name == 'browser_close' and self.fence.exists()
                     if not fenced:
                         server.require(not self.quarantine(), server.tr(
-                            'Исход прошлой операции неизвестен. Действия остановлены без повтора. Вызови browser_close для своей сессии (закроет Chrome чата) или закрой выделенный Chrome; затем начни новую сессию.',
-                            'A previous operation has an unknown outcome. Actions are stopped without replay. Call browser_close for your session (it quits the chat’s Chrome) or close the dedicated Chrome, then start a new session.'))
+                            'Исход прошлой операции неизвестен. Действия остановлены без повтора. Вызови browser_close для своей сессии; если session нет (например, browser_open не ответил), передай любое значение session. Вызов закроет Chrome чата; затем начни новую сессию через browser_open.',
+                            'A previous operation has an unknown outcome. Actions are stopped without replay. Call browser_close for your session; if you have no session (for example, browser_open did not answer), pass any session value. It quits the chat’s Chrome; then start a new session with browser_open.'))
                         server.save(self.fence, {'client': id(client), 'request': message['id'],
                             'tool': name, 'state': 'outcome_unknown'})
+                    retired = False
                     try:
-                        result = server.dispatch(browser, name, message.get('arguments'), shared=shared)
+                        result = server.dispatch(browser, name, message.get('arguments'), shared=shared, fenced=fenced)
+                        # A close that quit (or found no) Chrome after an unknown outcome retires the
+                        # fence, even one left by an earlier connection of this chat.
+                        retired = fenced and result.get('outcomeUnknown') is True
                         browser.persist()
                         if name == 'browser_close' and 'browserQuit' not in result:
                             # Another task of this chat still works in the same Chrome: keep it.
@@ -381,7 +385,7 @@ class Executor:
                                 result.update(browser.kept_reason(other_task=shared))
                         response['result'] = result
                     finally:
-                        if not browser.failed and (not fenced or was_failed):
+                        if not browser.failed and (not fenced or was_failed or retired):
                             self.fence.unlink(missing_ok=True)
             except Exception as error:
                 response.update(error=str(error)[:2000], failed=browser.failed,
