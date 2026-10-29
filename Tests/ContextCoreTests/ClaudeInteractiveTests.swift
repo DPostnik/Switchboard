@@ -113,10 +113,6 @@ private func interactiveFixture(_ root: URL) throws -> URL {
             with (home/'controls').open('a') as f: f.write(json.dumps({'request':value['request'],'pid':os.getpid()})+'\n')
             if value['request']['subtype']=='stop_task' and (home/'refuse-stop').exists():
                 out({'type':'control_response','response':{'subtype':'error','request_id':value['request_id'],'error':'Task is busy'}}); continue
-            out({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{}}})
-            if value['request']['subtype']=='interrupt': result()
-            if value['request']['subtype']=='stop_task':
-                out({'type':'system','subtype':'task_notification','session_id':sid,'task_id':value['request']['task_id'],'status':'stopped','summary':'stopped'})
             if value['request']['subtype']=='initialize' and (home/'own-turn').exists():
                 # A resumed CLI runs a turn of its own (a notification about the previous process's tasks) before it answers.
                 (home/'own-turn').unlink()
@@ -125,6 +121,10 @@ private func interactiveFixture(_ root: URL) throws -> URL {
                 out({'type':'assistant','session_id':sid,'message':{'id':'own-'+sid,'content':[{'type':'text','text':'No response requested.'}]}})
                 result()
                 time.sleep(0.5) # The real answer waits for MCP servers to start.
+            out({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{}}})
+            if value['request']['subtype']=='interrupt': result()
+            if value['request']['subtype']=='stop_task':
+                out({'type':'system','subtype':'task_notification','session_id':sid,'task_id':value['request']['task_id'],'status':'stopped','summary':'stopped'})
                 tasks()
         elif value['type']=='user':
             record=json.loads((home/'contextdesk-sessions'/(sid+'.json')).read_text())
