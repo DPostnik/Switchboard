@@ -25,7 +25,7 @@ private func latin1Value(_ bytes: [UInt8]) -> [UInt8] { [0x01] + bytes }
 }
 
 @Test func localStorageKeepsOnlyMatchingOrigin() {
-    let origin = "https://discord.com"
+    let origin = "https://example.com"
     let pairs: [(key: [UInt8], value: [UInt8])] = [
         (dataKey(origin: origin, key: latin1Value(Array("token".utf8))), latin1Value(Array("secret-value".utf8))),
         (dataKey(origin: origin, key: utf16Value("locale")), utf16Value("en-US")),
@@ -34,7 +34,7 @@ private func latin1Value(_ bytes: [UInt8]) -> [UInt8] { [0x01] + bytes }
         // Another origin is ignored.
         (dataKey(origin: "https://evil.test", key: latin1Value(Array("token".utf8))), latin1Value(Array("nope".utf8))),
         // Metadata key (META: prefix) is ignored.
-        (Array("META:https://discord.com".utf8), latin1Value(Array("x".utf8))),
+        (Array("META:https://example.com".utf8), latin1Value(Array("x".utf8))),
     ]
     let read = ChromeLocalStorageSource.decode(pairs, origin: origin)
     let items = Dictionary(uniqueKeysWithValues: read.items.map { ($0.key, $0.value) })
@@ -43,7 +43,7 @@ private func latin1Value(_ bytes: [UInt8]) -> [UInt8] { [0x01] + bytes }
 }
 
 @Test func localStorageDropsUndecodableValueButKeepsCount() {
-    let origin = "https://discord.com"
+    let origin = "https://example.com"
     let pairs: [(key: [UInt8], value: [UInt8])] = [
         (dataKey(origin: origin, key: latin1Value(Array("good".utf8))), latin1Value(Array("v".utf8))),
         (dataKey(origin: origin, key: latin1Value(Array("bad".utf8))), [0x00, 0x41]), // odd UTF-16 body

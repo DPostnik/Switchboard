@@ -206,7 +206,7 @@ extension ChromeCookieImporter {
         let cookies = try await writeAndVerify(read, fence: environment.appendingPathComponent("executor-in-flight.json"), executorFence: true) { method, parameters in
             try await connection.call(method, parameters: parameters)
         }
-        // Local Storage carries the login token for sites like Discord. It rides on the same per-site consent,
+        // Local Storage carries the login token for some sites. It rides on the same per-site consent,
         // but is additive: any failure leaves the verified cookie import untouched and simply transfers nothing.
         let localStorage = await importLocalStorage(connection: connection, profile: scope.profile,
                                                     host: scope.site ?? scope.pageHost ?? site, sourceIsRunning: sourceIsRunning)

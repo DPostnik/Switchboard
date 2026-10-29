@@ -435,7 +435,7 @@ profile can instead be reused as described below. There is no shared login vault
 background sync or automatic seeding.
 
 The agent-only `browser_import_session` additionally transfers the open tab
-origin's Local Storage, which carries the login token for sites like Discord. It
+origin's Local Storage, which carries the login token for some sites. It
 reads the profile's `Local Storage/leveldb` from a private snapshot with a
 read-only LevelDB reader (`ChromeLevelDB`); Local Storage values are not
 encrypted, so no Keychain material is used. Items for the exact page origin are
@@ -463,7 +463,7 @@ Cookies сеанса сохраняют свой срок жизни. Новом
 журналы, сообщения агента или временные файлы.
 
 Только агентский `browser_import_session` дополнительно переносит localStorage
-origin открытой вкладки — там хранят токен входа такие сайты, как Discord. Он
+origin открытой вкладки — там некоторые сайты хранят токен входа. Он
 читает `Local Storage/leveldb` профиля из приватного снимка собственным
 read-only ридером LevelDB (`ChromeLevelDB`); значения localStorage не шифруются,
 Связка ключей не нужна. Записи точного origin страницы повторяются во вкладке

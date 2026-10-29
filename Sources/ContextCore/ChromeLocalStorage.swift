@@ -39,7 +39,7 @@ public enum ChromeLocalStorageSource {
     public static let maximumItemBytes = 1024 * 1024
     public static let maximumItems = 5_000
 
-    /// `originSerialized` must be the exact `location.origin` of the page (e.g. `https://discord.com`).
+    /// `originSerialized` must be the exact `location.origin` of the page (e.g. `https://example.com`).
     public static func read(profile: String, root: URL = ChromeCookieSource.directory, originSerialized origin: String,
                             sourceIsRunning: () -> Bool,
                             temporaryRoot: URL = FileManager.default.temporaryDirectory) throws -> ChromeLocalStorageRead {
