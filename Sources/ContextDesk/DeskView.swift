@@ -18,7 +18,7 @@ struct DeskView: View {
     /// Sidebar row whose context menu is open; it stays marked until the menu closes.
     @State private var menuRowID: String?
     /// Hover sources per sidebar row: the native row itself, and `#tools` for a project's trailing buttons.
-    @State private var hoveredRows: Set<String> = []
+    @State private var rowHover = SidebarHover()
     @State private var expandedProjects: Set<UUID> = []
     @State private var collapsedSearchProjects: Set<UUID> = []
     @State private var visibleChatCounts: [UUID: Int] = [:]
@@ -407,8 +407,8 @@ struct DeskView: View {
             .padding(.trailing, .ui(4))
             .frame(height: .ui(32))
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(dropTargetProjectID == project.id || menuRowID == "project:\(project.id)" ? Color.accentColor : .clear, lineWidth: 2).allowsHitTesting(false))
-            .background(model.projectID == project.id && model.chatID == nil && !model.showingJobs && !model.showingAttention && !model.showingArchive ? DeskPalette.selection
-                        : rowHighlighted("project:\(project.id)") ? DeskPalette.rowHover : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+            .background(SidebarRowBackground(hover: rowHover, rowID: "project:\(project.id)", base: model.projectID == project.id && model.chatID == nil && !model.showingJobs && !model.showingAttention && !model.showingArchive ? DeskPalette.selection
+                        : rowHighlighted("project:\(project.id)") ? DeskPalette.rowHover : Color.clear))
 
             SidebarDisclosure(isExpanded: isExpanded, animation: sidebarAnimation) {
                 VStack(alignment: .leading, spacing: .ui(4)) {
@@ -549,7 +549,8 @@ struct DeskView: View {
             }
         }
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder((!favorite && dropTargetChatID == chat.id) || menuRowID == rowID ? Color.accentColor : .clear, lineWidth: 2).allowsHitTesting(false))
-        .background(chatBackground(chat, favorite: favorite, highlighted: rowHighlighted(rowID)), in: RoundedRectangle(cornerRadius: 8))
+        .background(SidebarRowBackground(hover: rowHover, rowID: rowID,
+                                         base: chatBackground(chat, favorite: favorite, highlighted: rowHighlighted(rowID))))
         .disabled(model.isChangingChat(chat.id))
     }
 
@@ -571,11 +572,12 @@ struct DeskView: View {
     }
     private func hover(_ source: String) -> (Bool) -> Void {
         { inside in
-            if inside { hoveredRows.insert(source) } else { hoveredRows.remove(source) }
+            rowHover.set(source, inside: inside)
         }
     }
+    /// Hover is drawn by `SidebarRowBackground`; reading it here would re-render the window on every hover change.
     private func rowHighlighted(_ rowID: String) -> Bool {
-        menuRowID == rowID || hoveredRows.contains(rowID) || hoveredRows.contains(rowID + "#tools")
+        menuRowID == rowID
     }
     private func archiveSelection() {
         // Archive in sidebar order so partial failures are predictable.

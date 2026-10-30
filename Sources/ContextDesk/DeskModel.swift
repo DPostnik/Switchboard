@@ -718,8 +718,11 @@ private struct ChatRunState {
                 let turns = try await clientForChat(chat.id).history(session)
                 guard !Task.isCancelled else { return }
                 let timings = try await store.loadTimings(threadID: chat.id)
-                let snapshot = try LocalHistory.snapshot(conversation: ConversationID(chat.id), source: session,
-                    turns: turns, timings: timings, capturedAt: capturedAt)
+                // Encoding a long transcript takes tens of milliseconds; on the main actor it made scrolling stutter.
+                let conversation = ConversationID(chat.id)
+                let snapshot = try await Task.detached(priority: .utility) {
+                    try LocalHistory.snapshot(conversation: conversation, source: session, turns: turns, timings: timings, capturedAt: capturedAt)
+                }.value
                 try await store.saveTranscript(snapshot)
             } catch {
                 // Keep the last readable revision; opening the chat exposes any read error.
