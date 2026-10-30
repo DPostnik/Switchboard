@@ -497,6 +497,10 @@ struct DeskView: View {
         actions += [
             ChatRowAction(title: chat.isPinned ? L10n.text("Открепить из избранного", "Unpin from favorites") : L10n.text("Закрепить в избранном", "Pin to favorites")) { model.toggleChatPin(chat.id) },
             ChatRowAction(title: L10n.text("Переименовать…", "Rename…")) { renaming = chat; newTitle = chat.title },
+            ChatRowAction(title: L10n.text("Скопировать ID чата", "Copy chat ID")) { copyToPasteboard(chat.id) },
+            ChatRowAction(title: L10n.text("Скопировать ссылку на чат для агента", "Copy chat reference for an agent")) {
+                copyToPasteboard(ChatReference.text(chat, projectPath: model.state.projects.first { $0.id == chat.projectID }?.path))
+            },
         ]
         if chat.nativeSession?.connection == .appClaude {
             actions.append(ChatRowAction(title: chat.chatDirectoryAccess == true
@@ -512,6 +516,9 @@ struct DeskView: View {
             ChatRowAction(title: L10n.text("Удалить чат…", "Delete chat…"), enabled: model.canDeleteChat(chat.id)) { deleting = chat }
         ]
         return actions
+    }
+    private func copyToPasteboard(_ text: String) {
+        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
     }
 
     /// `waiting` rows sit in the "Needs you" group: like favorites (no reordering) plus what the chat waits for.

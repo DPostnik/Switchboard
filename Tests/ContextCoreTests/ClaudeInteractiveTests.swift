@@ -123,7 +123,8 @@ private func interactiveFixture(_ root: URL) throws -> URL {
                 time.sleep(0.5) # The real answer waits for MCP servers to start.
             out({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{}}})
             if value['request']['subtype']=='interrupt': result()
-            if value['request']['subtype']=='stop_task':
+            # An idle real CLI may confirm a stop without any task event after it.
+            if value['request']['subtype']=='stop_task' and not (home/'silent-stop').exists():
                 out({'type':'system','subtype':'task_notification','session_id':sid,'task_id':value['request']['task_id'],'status':'stopped','summary':'stopped'})
                 tasks()
         elif value['type']=='user':
@@ -1122,10 +1123,12 @@ private func completedClaudeSession(_ adapter: ClaudeIntegration, binary: URL, h
     let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
     _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "background-hang")).value()
     try await waitFor { await events.background().last == 1 }
-    // An unknown task is rejected before anything reaches the CLI.
-    guard case .rejected(.unknownRequest) = await adapter.stopTasks("other", session: session, context: descriptor.context) else {
-        Issue.record("unknown task was not rejected"); return
+    // A task that is not running needs no stop: nothing reaches the CLI and it is not an error.
+    guard case .success = await adapter.stopTasks("other", session: session, context: descriptor.context) else {
+        Issue.record("stopping a task that is not running failed"); return
     }
+    let sent = FileManager.default.fileExists(atPath: home.appendingPathComponent("controls").path) ? try stops() : []
+    #expect(sent.isEmpty)
     // The CLI's refusal is reported with its own text; the chat stays connected and the task keeps running.
     try Data().write(to: home.appendingPathComponent("refuse-stop"))
     guard case .failed(let failure) = await adapter.stopTasks(nil, session: session, context: descriptor.context) else {
@@ -1166,6 +1169,38 @@ private func completedClaudeSession(_ adapter: ClaudeIntegration, binary: URL, h
     #expect(history.last?.items.map(\.text).last == "hello")
     #expect(await events.startedCount() == 1)
     #expect(try String(contentsOf: home.appendingPathComponent("launches"), encoding: .utf8).split(separator: "\n").count == 1)
+    await adapter.disconnect()
+}
+
+@Test func claudeConfirmedStopClearsTheWaitWithoutTaskEvents() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    // The wait limit is longer than `waitFor`, so only the stop itself can clear the notice.
+    let adapter = ClaudeIntegration(backgroundWaitLimit: .seconds(60), backgroundSettleDelay: .milliseconds(100)), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    func stops() throws -> Int {
+        try String(contentsOf: home.appendingPathComponent("controls"), encoding: .utf8).split(separator: "\n")
+            .filter { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8))["request"]["subtype"].string == "stop_task" }.count
+    }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "background-hang")).value()
+    try await waitFor { await events.background().last == 1 }
+    // The CLI confirms the stop but sends no task event: the notice and the sub-agent still update.
+    try Data().write(to: home.appendingPathComponent("silent-stop"))
+    guard case .success = await adapter.stopTasks(nil, session: session, context: descriptor.context) else {
+        Issue.record("stop failed"); return
+    }
+    try await waitFor { await events.background().last == 0 }
+    try await waitFor { await events.subagents().last?.first?.status == .stopped }
+    // A second press finds nothing to stop; it is not an error and sends nothing.
+    guard case .success = await adapter.stopTasks(nil, session: session, context: descriptor.context) else {
+        Issue.record("second stop failed"); return
+    }
+    #expect(try stops() == 1)
+    #expect(await events.diagnostics().isEmpty)
     await adapter.disconnect()
 }
 

@@ -479,24 +479,38 @@ public actor ClaudeIntegration: AgentIntegration {
         // Background shells and background sub-agents first; a stopped parent may already end its nested sub-agents.
         var targets = (backgroundTasks[id] ?? []).sorted()
         targets += (subagents[id]?.runningIDs ?? []).filter { !targets.contains($0) }
-        if let task {
-            guard targets.contains(task) else { return .rejected(.unknownRequest) }
-            targets = [task]
-        }
-        guard !targets.isEmpty else { return .rejected(.unknownRequest) }
+        if let task { targets = targets.contains(task) ? [task] : [] }
         var refusals: [String] = []
         for target in targets where wires[id] === wire && runningTask(target, session: id) {
-            do { _ = try await wire.control(.object(["subtype": .string("stop_task"), "task_id": .string(target)])) }
-            catch let refusal as ClaudeControlRefusal {
+            do {
+                _ = try await wire.control(.object(["subtype": .string("stop_task"), "task_id": .string(target)]))
+                // The CLI confirmed the stop; its `background_tasks_changed` may come later or not at all while it is idle.
+                backgroundTasks[id]?.remove(target)
+                if subagents[id]?.stop(target) == true { publishSubagents(id) }
+            } catch let refusal as ClaudeControlRefusal {
                 // A task that ended meanwhile needs no stop.
                 if runningTask(target, session: id) { refusals.append(refusal.localizedDescription) }
             } catch { return failed(error, uncertain: true) }
         }
+        // Nothing left to stop (the list on screen was older than the CLI's) is not an error; show the current state.
+        if wires[id] === wire { settleStoppedTasks(id, wire: wire) }
         guard refusals.isEmpty else { return .failed(.init(delivery: .confirmed, diagnostic: refusals.joined(separator: "\n"))) }
         return .success(())
     }
     private func runningTask(_ task: String, session id: String) -> Bool {
         backgroundTasks[id]?.contains(task) == true || subagents[id]?.runningIDs.contains(task) == true
+    }
+    /// After a user stop the wait notice shows the remaining count at once; with none left the idle CLI is released after the
+    /// usual settle delay, in case the CLI still resumes the agent.
+    private func settleStoppedTasks(_ id: String, wire: ClaudeWire) {
+        guard let token = waiting[id] else { return }
+        publishBackground(id)
+        guard backgroundTasks[id]?.isEmpty != false else { return }
+        let delay = backgroundSettleDelay
+        Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            await self?.releaseIdle(id, token: token, wire: wire, settled: true)
+        }
     }
     private func expireInterrupt(session: String, turn: String?, wire: ClaudeWire) async {
         if wires[session] === wire, sessions[session]?.active == turn { await wire.close() }

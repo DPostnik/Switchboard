@@ -53,6 +53,12 @@ struct ClaudeSubagentTracker {
         }
         return changed
     }
+    /// The CLI confirmed a user stop of this sub-agent. Returns true when the list changed.
+    mutating func stop(_ id: String, now: Date = Date()) -> Bool {
+        guard let index = agents.firstIndex(where: { $0.id == id && $0.status == .running }) else { return false }
+        finish(index, status: .stopped, now: now)
+        return true
+    }
     /// A new user message starts a fresh delegation round; running sub-agents stay visible.
     mutating func clearFinished() -> Bool {
         let before = agents.count
