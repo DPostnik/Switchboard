@@ -78,6 +78,10 @@ public struct NativeTranscript: NSViewRepresentable {
     private var readCheckScheduled = false
     public var onReadToEnd: ((String, String) -> Void)?
     private var styledWidth: CGFloat = 0
+    /// True from a trackpad gesture's start through its momentum. Moving the clip view meanwhile fought the
+    /// rubber band at the end, so streamed text waits; `deferredEndScroll` is the end the reader was at.
+    private var liveScrolling = false
+    private var deferredEndScroll: CGFloat?
     public private(set) var editCount = 0
     public let workingIndicator = WorkingIndicatorView()
     private var workingStatus: String?
@@ -134,6 +138,10 @@ public struct NativeTranscript: NSViewRepresentable {
         contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(viewportChanged),
                                                name: NSView.boundsDidChangeNotification, object: contentView)
+        NotificationCenter.default.addObserver(self, selector: #selector(liveScrollStarted),
+                                               name: NSScrollView.willStartLiveScrollNotification, object: self)
+        NotificationCenter.default.addObserver(self, selector: #selector(liveScrollEnded),
+                                               name: NSScrollView.didEndLiveScrollNotification, object: self)
         NotificationCenter.default.addObserver(self, selector: #selector(scheduleReadCheck),
                                                name: NSWindow.didBecomeKeyNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(scheduleReadCheck),
@@ -194,6 +202,9 @@ public struct NativeTranscript: NSViewRepresentable {
         let wasAtEnd = followOutput && !switched && isAtTranscriptEnd
         guard let storage = transcript.textStorage else { return }
         let oldOrigin = contentView.bounds.origin
+        // Clamped: past the end the rubber band stretches the viewport beyond the document.
+        let oldBottom = min(contentView.bounds.maxY, transcript.frame.maxY)
+        let stretched = liveScrolling && contentView.bounds.maxY > oldBottom + 0.5
         var common = 0
         if !switched && !finished && !projectChanged {
             while common < min(previous.count, items.count), previous[common] == items[common] { common += 1 }
@@ -201,6 +212,10 @@ public struct NativeTranscript: NSViewRepresentable {
         // A message the user just sent is brought into view even if they had scrolled up to re-read.
         let knownIDs = Set(previous.map(\.id))
         let sentMessage = followOutput && !switched && items.dropFirst(common).contains { $0.kind == "user" && !knownIDs.contains($0.id) }
+        // Streaming rewrites only the last message or appends; text above the viewport keeps its place.
+        let tailOnly = !switched && !finished && !projectChanged && common + 1 >= previous.count
+        // Re-rendering the last message briefly shortens the document and clamps the viewport; an anchor survives that.
+        let gestureAnchor = liveScrolling && tailOnly && wasAtEnd && !stretched ? capturePosition(anchorAtEnd: true) : nil
         let start = common < ranges.count ? ranges[common].location : storage.length
         storage.beginEditing()
         storage.deleteCharacters(in: NSRange(location: start, length: storage.length - start))
@@ -217,10 +232,16 @@ public struct NativeTranscript: NSViewRepresentable {
             needsEndScroll = false
             pendingPosition = conversationID.flatMap { positions.values[$0] }
             if pendingPosition == nil { scrollToEnd() }
-        } else if followOutput && (wasAtEnd || resumeFollowing || sentMessage) { scrollToEnd() }
+        } else if followOutput && (resumeFollowing || sentMessage) { scrollToEnd() }
+        else if wasAtEnd && !(liveScrolling && tailOnly) { scrollToEnd() }
         else {
+            if wasAtEnd { deferredEndScroll = deferredEndScroll ?? oldBottom }
             if case .anchor = savedPosition { pendingPosition = savedPosition }
-            contentView.scroll(to: oldOrigin); reflectScrolledClipView(contentView)
+            if let gestureAnchor { pendingPosition = gestureAnchor }
+            // Past the end the rubber band owns the origin; clamping it here would snap the stretch back.
+            if !stretched {
+                contentView.scroll(to: oldOrigin); reflectScrolledClipView(contentView)
+            }
         }
     }
 
@@ -258,7 +279,7 @@ public struct NativeTranscript: NSViewRepresentable {
     private func keepEndPinned() {
         let height = contentView.bounds.height
         defer { lastViewportHeight = height }
-        guard pinnedToEnd, lastViewportHeight > 0, abs(height - lastViewportHeight) > 0.5, pendingPosition == nil else { return }
+        guard pinnedToEnd, !liveScrolling, lastViewportHeight > 0, abs(height - lastViewportHeight) > 0.5, pendingPosition == nil else { return }
         needsEndScroll = true
         needsLayout = true
     }
@@ -296,6 +317,16 @@ public struct NativeTranscript: NSViewRepresentable {
         }
     }
 
+    @objc private func liveScrollStarted() { liveScrolling = true }
+
+    /// A reader who stayed at the end through the gesture follows the text that arrived meanwhile.
+    @objc private func liveScrollEnded() {
+        liveScrolling = false
+        guard let end = deferredEndScroll else { return }
+        deferredEndScroll = nil
+        if contentView.bounds.maxY >= end - 2 { scrollToEnd() }
+    }
+
     @objc private func viewportChanged() {
         workingIndicator.refreshAnimation()
         keepEndPinned()
@@ -310,12 +341,12 @@ public struct NativeTranscript: NSViewRepresentable {
         if case .end = position { pinnedToEnd = true } else { pinnedToEnd = false }
     }
 
-    private func capturePosition() -> TranscriptReadingPositions.Position? {
+    private func capturePosition(anchorAtEnd: Bool = false) -> TranscriptReadingPositions.Position? {
         guard !previous.isEmpty, contentSize.width > 0, contentSize.height > 0,
               let manager = transcript.layoutManager, let container = transcript.textContainer,
               let storage = transcript.textStorage, storage.length > 0 else { return nil }
         // Documents keep their place by anchor; checking the end lays out the whole text, which is costly for long files.
-        if needsEndScroll || (!isDocument && isAtTranscriptEnd) { return .end }
+        if !anchorAtEnd, needsEndScroll || (!isDocument && isAtTranscriptEnd) { return .end }
         let origin = contentView.bounds.origin
         let point = NSPoint(x: container.lineFragmentPadding,
                             y: max(0, origin.y - transcript.textContainerOrigin.y))
@@ -446,7 +477,9 @@ public struct NativeTranscript: NSViewRepresentable {
         storage.endEditing()
         previous[previous.count - 1] = row
         ranges[ranges.count - 1] = NSRange(location: range.location, length: rendered.length)
-        if wasAtEnd { scrollToEnd() }
+        if wasAtEnd && liveScrolling {
+            deferredEndScroll = deferredEndScroll ?? min(contentView.bounds.maxY, transcript.frame.maxY)
+        } else if wasAtEnd { scrollToEnd() }
     }
 
     private func positionWorkingIndicator() {

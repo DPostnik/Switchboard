@@ -76,3 +76,31 @@ import ContextCore
     view.layoutSubtreeIfNeeded()
     #expect(view.isAtTranscriptEnd)
 }
+
+@Test @MainActor func streamedTextWaitsForTheScrollGestureToEnd() {
+    let positions = TranscriptReadingPositions()
+    let items = readingItems()
+    let view = readingView(positions)
+    view.update(items: items, conversationID: "a", followOutput: true)
+    view.layoutSubtreeIfNeeded()
+    let origin = view.contentView.bounds.origin.y
+    NotificationCenter.default.post(name: NSScrollView.willStartLiveScrollNotification, object: view)
+    let streamed = items + [TranscriptItem(id: "reply", kind: "assistant", text: String(repeating: "Streamed\n", count: 40))]
+    view.update(items: streamed, conversationID: "a", followOutput: true)
+    view.layoutSubtreeIfNeeded()
+    #expect(abs(view.contentView.bounds.origin.y - origin) < 1)
+    NotificationCenter.default.post(name: NSScrollView.didEndLiveScrollNotification, object: view)
+    view.layoutSubtreeIfNeeded()
+    #expect(view.isAtTranscriptEnd)
+
+    // A reader who scrolls up during the gesture keeps their place.
+    NotificationCenter.default.post(name: NSScrollView.willStartLiveScrollNotification, object: view)
+    view.update(items: streamed + [TranscriptItem(id: "more", kind: "assistant", text: "More\n")], conversationID: "a", followOutput: true)
+    view.layoutSubtreeIfNeeded()
+    view.contentView.scroll(to: NSPoint(x: 0, y: 900))
+    view.reflectScrolledClipView(view.contentView)
+    NotificationCenter.default.post(name: NSScrollView.didEndLiveScrollNotification, object: view)
+    view.layoutSubtreeIfNeeded()
+    #expect(!view.isAtTranscriptEnd)
+    #expect(abs(view.contentView.bounds.origin.y - 900) < 2)
+}
