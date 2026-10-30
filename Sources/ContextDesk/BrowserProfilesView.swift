@@ -9,7 +9,7 @@ enum BrowserProfileAction: Sendable {
 struct BrowserProfilesView: View {
     let session: AgentSessionReference
     let project: String
-    let ownerNames: [String: String]
+    let ownerName: (String) -> String?
     let change: (BrowserProfileAction) async throws -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var current: BrowserProfile?
@@ -63,7 +63,7 @@ struct BrowserProfilesView: View {
                                 Text((profile.name ?? "") + " · " + String(profile.id.uuidString.prefix(8)))
                                 Text(profile.owner == nil && profile.state == .available ? L10n.text("Доступен", "Available") : status(profile.state))
                                     .font(.ui(.caption)).foregroundStyle(.secondary)
-                                if let owner = profile.owner, let title = ownerNames[owner] {
+                                if let owner = profile.owner, let title = ownerName(owner) {
                                     Text(L10n.text("Чат: ", "Chat: ") + title).font(.ui(.caption)).lineLimit(2)
                                 }
                             }
@@ -117,7 +117,7 @@ struct BrowserProfilesView: View {
 struct NewChatBrowserProfilePicker: View {
     let project: String
     let connection: AgentConnectionID
-    let ownerNames: [String: String]
+    let ownerName: (String) -> String?
     @Binding var selection: UUID?
     @State private var profiles: [BrowserProfile] = []
     @State private var error: String?
@@ -126,7 +126,7 @@ struct NewChatBrowserProfilePicker: View {
             Button(L10n.text("Новый отдельный профиль", "New separate profile")) { selection = nil }
             ForEach(profiles) { profile in
                 Button((profile.name ?? "") + " · " + String(profile.id.uuidString.prefix(8)) +
-                       (profile.owner.flatMap { ownerNames[$0] }.map { L10n.text(" — чат: ", " — chat: ") + $0 } ?? "")) { selection = profile.id }
+                       (profile.owner.flatMap(ownerName).map { L10n.text(" — чат: ", " — chat: ") + $0 } ?? "")) { selection = profile.id }
                     .disabled(profile.state != .available || profile.owner != nil)
             }
             if let error { Text(error) }

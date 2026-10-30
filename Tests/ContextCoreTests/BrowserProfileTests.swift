@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 import AgentContract
@@ -50,6 +51,15 @@ private struct ProfileFixture {
     #expect(BrowserProfileStore.key(f.a) != BrowserProfileStore.key(other))
     #expect(try BrowserEnvironmentStore.existingEnvironment(session: f.a.nativeID, root: f.root)?.lastPathComponent == legacy.uuidString.lowercased())
     #expect(throws: BrowserProfileError.scope) { try f.store.prepare(session: f.a, project: f.root.appendingPathComponent("another-project").path) }
+}
+
+@Test func memoizedProfileKeyKeepsPersistedFormat() throws {
+    let session = AgentSessionReference(connection: .init(agent: .codex, id: UUID()), nativeID: "memo-" + UUID().uuidString)
+    let data = try JSONEncoder().encode([session.connection.agent.rawValue, session.connection.id.uuidString.lowercased(), session.nativeID])
+    let expected = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    #expect(BrowserProfileStore.key(session) == expected)
+    #expect(BrowserProfileStore.key(session) == expected)
+    #expect(BrowserProfileStore.key(.init(connection: session.connection, nativeID: session.nativeID + "x")) != expected)
 }
 
 @Test func profileChangeRequiresClosedChromeAndAcknowledgementBeforeDispatch() throws {

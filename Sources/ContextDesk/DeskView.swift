@@ -1112,7 +1112,7 @@ struct ChatView: View {
                        [.originalCodex, .appClaude].contains(session.connection) {
                         ChatBrowserControls(session: session, project: model.selectedProject?.path ?? "",
                                             busy: model.isBusy(threadID: chat.id) || model.isChangingChat(chat.id),
-                                            ownerNames: model.browserProfileOwnerNames) { action in
+                                            ownerName: model.browserProfileOwnerName) { action in
                             try await model.changeBrowserProfile(chatID: chat.id, action: action)
                         }
                             .id(session.nativeID)
@@ -1127,7 +1127,7 @@ struct ChatView: View {
                     }.pointingHandCursor().help(L10n.text("Передать контекст в новый чат", "Hand off context to a new chat"))
                         .disabled(model.loadingChat || model.creatingHandoff || model.preparingHandoff || model.isBusy(threadID: chat.id))
                 } else if model.state.browserEnabled == true, [.originalCodex, .appClaude].contains(model.currentAgent), let project = model.selectedProject {
-                    NewChatBrowserProfilePicker(project: project.path, connection: model.currentAgent, ownerNames: model.browserProfileOwnerNames, selection: Binding(
+                    NewChatBrowserProfilePicker(project: project.path, connection: model.currentAgent, ownerName: model.browserProfileOwnerName, selection: Binding(
                         get: { model.newChatBrowserProfiles[project.id] },
                         set: { model.newChatBrowserProfiles[project.id] = $0 }))
                         .disabled(model.sending)

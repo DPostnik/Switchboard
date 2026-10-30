@@ -47,10 +47,16 @@ public struct BrowserProfileStore: Sendable {
         var profiles: [String: BrowserProfile] = [:]
         var bindings: [String: BrowserProfileGrant] = [:]
     }
+    /// Views and the browser monitor hash every chat's session; memoizing keeps that off the hot render path.
+    private static let keyLock = NSLock()
+    nonisolated(unsafe) private static var keyCache: [[String]: String] = [:]
     public static func key(_ session: AgentSessionReference) -> String {
         let value = [session.connection.agent.rawValue, session.connection.id.uuidString.lowercased(), session.nativeID]
+        if let cached = keyLock.withLock({ keyCache[value] }) { return cached }
         let data = try! JSONEncoder().encode(value)
-        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let key = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        keyLock.withLock { keyCache[value] = key }
+        return key
     }
     public func environment(_ id: UUID) -> URL { root.appendingPathComponent("environments/" + id.uuidString.lowercased()) }
     private func canonical(_ project: String) throws -> String {

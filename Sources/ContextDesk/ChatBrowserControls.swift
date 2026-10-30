@@ -7,7 +7,7 @@ struct ChatBrowserControls: View {
     let session: AgentSessionReference
     let project: String
     let busy: Bool
-    let ownerNames: [String: String]
+    let ownerName: (String) -> String?
     let changeProfile: (BrowserProfileAction) async throws -> Void
     @State private var running: Bool?
     @State private var operating = false
@@ -42,7 +42,7 @@ struct ChatBrowserControls: View {
             ChromeCookieImportView(session: session) { perform() }
         }
         .sheet(isPresented: $showingProfiles) {
-            BrowserProfilesView(session: session, project: project, ownerNames: ownerNames, change: changeProfile)
+            BrowserProfilesView(session: session, project: project, ownerName: ownerName, change: changeProfile)
         }
         .alert(L10n.text("Браузер чата", "Chat browser"), isPresented: Binding(
             get: { error != nil }, set: { if !$0 { error = nil } })) {

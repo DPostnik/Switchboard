@@ -26,10 +26,9 @@ extension DeskModel {
         app.unhide()
         return app.activate(options: [])
     }
-    var browserProfileOwnerNames: [String: String] {
-        Dictionary(state.chats.compactMap { chat in
-            chat.nativeSession.map { (BrowserProfileStore.key($0), chat.title) }
-        }, uniquingKeysWith: { first, _ in first })
+    /// Resolved on demand: toolbars re-render on every keystroke, so they must not hash all chats up front.
+    func browserProfileOwnerName(_ key: String) -> String? {
+        state.chats.first { chat in chat.nativeSession.map { BrowserProfileStore.key($0) == key } ?? false }?.title
     }
     func changeBrowserProfile(chatID: String, action: BrowserProfileAction) async throws {
         guard !isBusy(threadID: chatID), !isChangingChat(chatID),
