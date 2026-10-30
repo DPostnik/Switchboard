@@ -11,6 +11,8 @@ public enum ChromeCookieError: Error, LocalizedError, Sendable {
     case unsignedPolicy
     /// This site was imported into this chat browser within the last hour, or too many sites were.
     case recentlyImported, importLimit
+    /// IndexedDB transfer was requested for a site the user has not granted it for, or the origin has no store.
+    case indexedDBDisabled, indexedDBMissing
 
     public var errorDescription: String? { message(language: L10n.language) }
     public func message(language: AppLanguage) -> String {
@@ -32,6 +34,8 @@ public enum ChromeCookieError: Error, LocalizedError, Sendable {
         case .missingEnvironment: return L10n.text("У чата ещё нет среды браузера. Примени настройку браузера и открой чат снова.", "This chat has no browser environment yet. Apply the browser setting and reopen the chat.", language: language)
         case .browserLimit: return L10n.text("Достигнут лимит одновременно открытых браузеров Switchboard. Cookies не отправлены; заверши неиспользуемый браузер чата или увеличь лимит в настройках.", "The Switchboard limit of simultaneously open browsers is reached. Cookies were not sent; quit an unused chat browser or increase the limit in settings.", language: language)
         case .empty: return L10n.text("В профиле нет поддерживаемых действующих cookies для импорта.", "The profile has no supported, unexpired cookies to import.", language: language)
+        case .indexedDBDisabled: return L10n.text("Перенос IndexedDB не разрешён для этого сайта. Включи его в Браузер → Импорт сессии для конкретного сайта.", "IndexedDB transfer is not enabled for this site. Enable it in Browser → Import session for a specific site.", language: language)
+        case .indexedDBMissing: return L10n.text("В выбранном профиле Chrome нет базы IndexedDB для этого сайта. Перенос не выполнен.", "The selected Chrome profile has no IndexedDB store for this site. Nothing was transferred.", language: language)
         }
     }
 }

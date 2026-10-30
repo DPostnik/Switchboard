@@ -108,7 +108,7 @@ class MultiClientTests(unittest.TestCase):
         client = StdioRPC(command, cwd=str(workspace) if workspace else None).start()
         self.clients.append(client)
         info = client.initialize_mcp(expected_server_version=server.VERSION)
-        self.assertEqual(len(info['tools']), 15)
+        self.assertEqual(len(info['tools']), 16)
         return client
 
     def call(self, client, tool, **arguments):

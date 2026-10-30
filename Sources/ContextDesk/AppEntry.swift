@@ -6,6 +6,7 @@ import SwiftUI
     @MainActor static func main() async {
         if RestartCommand.run(arguments: CommandLine.arguments) { return }
         if await ChromeSessionImportCommand.run(arguments: CommandLine.arguments) { return }
+        if await ChromeIndexedDBImportCommand.run(arguments: CommandLine.arguments) { return }
         if NightlyTestsReport.run(arguments: CommandLine.arguments) { return }
         guard LaunchMigration.run() else { return }
         ContextDeskApp.main()

@@ -170,8 +170,13 @@ enum PolicySigning {
         guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw ChromeCookieError.keychain }
         return key
     }
+    /// A distinct MAC domain keeps IndexedDB consent signatures from matching cookie consent, so one grant can
+    /// never be replayed as the other.
+    static func message(prefix: String, profile: String, site: String, folder: URL) -> Data {
+        Data([prefix, folder.standardizedFileURL.resolvingSymlinksInPath().path, profile, site].joined(separator: "\n").utf8)
+    }
     static func message(_ policy: ChromeSessionImportPolicy, folder: URL) -> Data {
-        Data(["switchboard-import-policy-v1", folder.standardizedFileURL.resolvingSymlinksInPath().path, policy.profile, policy.site].joined(separator: "\n").utf8)
+        message(prefix: "switchboard-import-policy-v1", profile: policy.profile, site: policy.site, folder: folder)
     }
     static func sign(_ policy: ChromeSessionImportPolicy, folder: URL, key: SymmetricKey) -> String {
         Data(HMAC<SHA256>.authenticationCode(for: message(policy, folder: folder), using: key)).base64EncodedString()
@@ -179,6 +184,13 @@ enum PolicySigning {
     static func verify(_ mac: String, policy: ChromeSessionImportPolicy, folder: URL, key: SymmetricKey) -> Bool {
         guard let data = Data(base64Encoded: mac) else { return false }
         return HMAC<SHA256>.isValidAuthenticationCode(data, authenticating: message(policy, folder: folder), using: key)
+    }
+    static func sign(prefix: String, profile: String, site: String, folder: URL, key: SymmetricKey) -> String {
+        Data(HMAC<SHA256>.authenticationCode(for: message(prefix: prefix, profile: profile, site: site, folder: folder), using: key)).base64EncodedString()
+    }
+    static func verify(prefix: String, _ mac: String, profile: String, site: String, folder: URL, key: SymmetricKey) -> Bool {
+        guard let data = Data(base64Encoded: mac) else { return false }
+        return HMAC<SHA256>.isValidAuthenticationCode(data, authenticating: message(prefix: prefix, profile: profile, site: site, folder: folder), using: key)
     }
 }
 

@@ -296,6 +296,7 @@ class Browser:
             if not re.search(r'^' + str(self.page) + r':', inventory, re.M):
                 self.invalidate_session('owned_page_missing')
         require(self.session is None, 'browser_busy_close_owned_session_first')
+        self.apply_pending_indexeddb()
         token = uuid.uuid4().hex
         marker = 'about:blank#context-desk-' + token
         self.start()
@@ -1454,6 +1455,98 @@ class Browser:
         # Return only counts (cookies and Local Storage). A separate navigation/read must check website sign-in.
         return {k: value[k] for k in counts + ('websiteSignInVerified',)}
 
+    def import_indexeddb(self, token, expected_url):
+        """Request that this site's IndexedDB be carried in from the enabled Chrome profile.
+
+        IndexedDB has no live-tab write path, so unlike cookies this cannot run on the open tab. It is a
+        whole-origin file clone that must happen while the chat's Chrome is closed. So this call only records
+        a one-shot request after confirming a separate, user-granted IndexedDB permission for the exact site;
+        the clone itself runs before the next browser_open. The agent then closes the browser and reopens.
+        """
+        self.owner(token)
+        web_url(expected_url)
+        host = (urlparse(expected_url).hostname or '').lower()
+        domain = re.compile(r'[a-z0-9]+(?:[a-z0-9.-]*[a-z0-9])?')
+        require(domain.fullmatch(host) and '.' in host and '..' not in host, tr(
+            'Перенос IndexedDB возможен только для сайта с доменным именем.', 'IndexedDB transfer requires a site with a domain name.'))
+        disabled = tr('Перенос IndexedDB не разрешён для этого сайта. Включи его в Браузер → Импорт сессии для конкретного сайта.',
+                      'IndexedDB transfer is not enabled for this site. Enable it in Browser → Import session for a specific site.')
+        require(self.indexeddb_consent_covers(host), disabled)
+        self.expected(expected_url)
+        marker = self.root / 'indexeddb-import-pending.json'
+        require(not marker.is_symlink(), disabled)
+        temporary = marker.with_suffix('.tmp')
+        temporary.write_text(json.dumps({'site': host}))
+        os.chmod(temporary, 0o600)
+        temporary.replace(marker)
+        return {'pendingIndexedDB': host, 'nextStep': 'close_then_open', 'note': tr(
+            'Запрос записан. Закрой браузер чата (browser_close), затем открой сайт снова (browser_open): IndexedDB будет перенесён до запуска Chrome. После этого обнови страницу и проверь вход.',
+            'Request recorded. Close the chat browser (browser_close), then open the site again (browser_open): IndexedDB is carried in before Chrome launches. Then reload the page and check sign-in.')}
+
+    def indexeddb_consent_covers(self, host):
+        """True when a user-granted, non-wildcard IndexedDB permission in the environment or browser root
+        names exactly this host. The native helper re-checks a signed grant; this is the front-end gate."""
+        roots = [self.root] + ([self.installation_root] if self.installation_root != self.root else [])
+        for root in roots:
+            consent_file = root / 'chrome-indexeddb-import.json'
+            try:
+                if not consent_file.is_file() or consent_file.is_symlink() or consent_file.stat().st_size > 4096:
+                    continue
+                site = json.loads(consent_file.read_text()).get('site')
+            except (OSError, ValueError, AttributeError):
+                continue
+            if isinstance(site, str) and site != '*' and (host == site or host.endswith('.' + site)):
+                return True
+        return False
+
+    def env_chrome_running(self):
+        """Whether this environment's Chrome is still alive, read from the owner record without launching one."""
+        record = self.root / 'testing-chrome-owner.json'
+        try:
+            owner = json.loads(record.read_text())
+        except (OSError, ValueError):
+            return False
+        if not isinstance(owner, dict):
+            return False
+        host = self.chrome or ChromeHost(self.root, language=LANGUAGE, max_browsers=self.max_browsers)
+        return not host.process_gone(owner)
+
+    def apply_pending_indexeddb(self):
+        """Before launching Chrome, carry in a requested site's IndexedDB. One-shot: the request is consumed
+        whether or not the clone succeeds, so nothing is replayed. The clone runs only with Chrome closed."""
+        marker = self.root / 'indexeddb-import-pending.json'
+        if not marker.exists():
+            return
+        site = None
+        try:
+            if marker.is_file() and not marker.is_symlink() and marker.stat().st_size <= 4096:
+                site = json.loads(marker.read_text()).get('site')
+        except (OSError, ValueError, AttributeError):
+            site = None
+        domain = re.compile(r'[a-z0-9]+(?:[a-z0-9.-]*[a-z0-9])?')
+        if not (isinstance(site, str) and domain.fullmatch(site) and '.' in site and '..' not in site):
+            marker.unlink(missing_ok=True)
+            return
+        # Never drop files into a live profile. Keep the request and ask the agent to close Chrome first.
+        require(not self.env_chrome_running(), tr(
+            'Перед переносом IndexedDB закрой Chrome этого чата (browser_close), затем открой сайт снова.',
+            'Before carrying IndexedDB in, close this chat\'s Chrome (browser_close), then open the site again.'))
+        marker.unlink(missing_ok=True)
+        helper = Path(__file__).resolve().parents[2] / 'MacOS' / 'Switchboard'
+        require(helper.is_file(), tr('Нужна собранная версия Switchboard.', 'A built Switchboard app is required.'))
+        try:
+            result = subprocess.run([str(helper), '--browser-import-indexeddb', str(self.root), site, LANGUAGE],
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=180, check=False)
+            require(result.returncode == 0 and len(result.stdout) <= 32768, 'native_indexeddb_failed')
+            value = json.loads(result.stdout)
+            require(isinstance(value, dict), 'invalid_indexeddb_result')
+        except Rejected:
+            raise
+        except Exception:
+            raise Rejected(tr('Перенос IndexedDB не выполнен. Повтора не было.', 'IndexedDB transfer did not run. Nothing was retried.'))
+        if 'error' in value:
+            raise Rejected(value['error'])
+
     def opened_tabs(self):
         """Page targets that sites opened from the owned tab, directly or through one another.
 
@@ -1660,6 +1753,7 @@ def catalog():
     definitions = [
         ('browser_open', 'Открыть собственную вкладку; сохрани session. Другие чаты могут держать свои вкладки: операции выполняются по очереди. После закрытия Chrome начни новую сессию без повторения действий.', 'Open your own tab; retain its session token. Other chats can keep their tabs: operations run serially. After Chrome exits, start a new session without replaying actions.', {'url': string}, ['url'], False),
         ('browser_import_session', 'При отсутствии авторизации импортировать сессию текущего сайта из разрешённого профиля Chrome: его cookies и localStorage (там некоторые сайты хранят токен входа). Разреши сайт или все сайты один раз в меню Браузер → Импорт сессии. Обычный Chrome можно не закрывать; возможен запрос Связки ключей. localStorage переносится только в уже открытую вкладку этого сайта. Затем обнови страницу отдельным действием и проверь вход. Не используй для сетевых ошибок, CAPTCHA или обхода блокировок. Не повторяй неопределённый импорт.', 'When sign-in is missing, import the current site\'s session from the enabled Chrome profile: its cookies and its local storage (where some sites keep the login token). Enable the site or all sites once in Browser → Import session. Regular Chrome can stay open; Keychain may prompt. Local storage is only written into an already open tab of that site. Then reload with a separate action and verify sign-in. Do not use for network errors, CAPTCHA or bypassing blocks. Never replay an uncertain import.', {**token, 'expectedURL': string}, ['session', 'expectedURL'], False),
+        ('browser_import_indexeddb', 'Если cookies и localStorage не вернули вход, а токен сайта хранится в IndexedDB: запросить перенос IndexedDB этого сайта из разрешённого профиля Chrome. Это отдельное разрешение, которое включают для конкретного сайта в меню Браузер → Импорт сессии (не «любой сайт»). Перенос — это копия всей базы origin, она возможна только при закрытом Chrome чата, поэтому вызов лишь записывает запрос: затем закрой браузер (browser_close) и открой сайт снова (browser_open), IndexedDB перенесётся до запуска Chrome. После этого обнови страницу и проверь вход. Не используй для сетевых ошибок, CAPTCHA или обхода блокировок. Не повторяй неопределённый перенос.', 'When cookies and local storage did not restore sign-in and the site keeps its token in IndexedDB: request that this site\'s IndexedDB be carried in from the enabled Chrome profile. This is a separate permission, enabled for a specific site in Browser → Import session (not "any site"). The transfer is a whole-origin database copy and is only possible while the chat\'s Chrome is closed, so this call only records the request: then close the browser (browser_close) and open the site again (browser_open), and IndexedDB is carried in before Chrome launches. Then reload the page and check sign-in. Do not use for network errors, CAPTCHA or bypassing blocks. Never replay an uncertain transfer.', {**token, 'expectedURL': string}, ['session', 'expectedURL'], False),
         ('browser_cards', 'Прочитать карточки, включая date/excerpt. expectedCards — только для проверенного статического списка; иначе обход с прокруткой. complete относится к одной странице.', 'Read compact cards including date/excerpt. Set expectedCards only for an audited static list; otherwise scroll normally. complete describes one page.', {**token, 'selectors': config, 'timeout': timeout, 'expectedCards': {'type': 'integer', 'minimum': 1, 'maximum': 500}}, ['session', 'selectors'], True),
         ('browser_next', 'Передай либо nextToken для обычной ссылки Далее без снимка, либо наблюдаемый uid для клика. Проверяет смену ID; не повторяет действие.', 'Supply either nextToken for an ordinary Next link without a snapshot, or an observed uid to click. Verifies changed IDs; never replays an action.', {**action, 'uid': string, 'nextToken': string, 'selectors': config, 'timeout': timeout}, [*action, 'selectors'], False),
         ('browser_action', 'Одно действие Chrome DevTools. Результат требует проверки через browser_verify; actionID нельзя повторять.', 'One native Chrome DevTools action. Verify the result with browser_verify; never reuse an actionID.', {**action, 'name': {'type': 'string', 'enum': ['click', 'fill', 'fill_form', 'press_key', 'type_text', 'upload_file', 'navigate_page']}, 'arguments': {'type': 'object'}}, [*action, 'name', 'arguments'], False),
@@ -1690,10 +1784,10 @@ class RolePolicy:
     def hidden(self):
         return set() if self.allow_eval else {'browser_eval'}
 
-    def listed_site_covers(self, host):
+    def listed_site_covers(self, host, filename='chrome-session-import.json'):
         """True when a non-wildcard site policy in the environment or browser root covers the host."""
         for root in self.roots:
-            policy_file = root / 'chrome-session-import.json'
+            policy_file = root / filename
             try:
                 if not policy_file.is_file() or policy_file.is_symlink() or policy_file.stat().st_size > 4096:
                     continue
@@ -1718,6 +1812,12 @@ class RolePolicy:
                 require(self.listed_site_covers(host), tr(
                     'Запуск без присмотра импортирует cookies только для сайтов своего задания; разрешение «любой сайт» к нему не относится.',
                     'An unattended run imports cookies only for its own sites; the "any site" setting does not apply to it.'))
+        if name == 'browser_import_indexeddb':
+            require(self.import_scope != 'none', tr('Роль этого чата не разрешает перенос сессии.', "This chat's role does not allow session import."))
+            host = (urlparse(a.get('expectedURL', '') if isinstance(a, dict) else '').hostname or '').lower()
+            require(self.listed_site_covers(host, 'chrome-indexeddb-import.json'), tr(
+                'Перенос IndexedDB разрешён только для конкретного сайта, включённого в настройках; разрешение «любой сайт» к нему не относится.',
+                'IndexedDB transfer is only allowed for a specific site enabled in settings; the "any site" setting does not apply.'))
 
 
 def dispatch(browser, name, a, shared=False, fenced=False):
@@ -1739,6 +1839,8 @@ def dispatch(browser, name, a, shared=False, fenced=False):
     browser.owner(a['session'])
     if name == 'browser_import_session':
         return browser.import_session(a['session'], a['expectedURL'])
+    if name == 'browser_import_indexeddb':
+        return browser.import_indexeddb(a['session'], a['expectedURL'])
     if name == 'browser_cards':
         return browser.cards(a['session'], a['selectors'], a.get('timeout', 12), expected_cards=a.get('expectedCards'))
     if name == 'browser_next':

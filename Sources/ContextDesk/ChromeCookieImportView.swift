@@ -19,6 +19,10 @@ struct ChromeCookieImportView: View {
     @State private var sharedPolicy: ChromeSessionImportPolicy?
     @State private var automaticAnySite = false
     @State private var automaticAllChats = false
+    @State private var indexedDBSite = "linkedin.com"
+    @State private var indexedDBPolicy: ChromeIndexedDBConsent?
+    @State private var indexedDBShared: ChromeIndexedDBConsent?
+    @State private var indexedDBAllChats = false
     @AppStorage("chromeCookieSourceProfile") private var lastProfile = "Default"
     @AppStorage("parallelBrowserLimit") private var maxBrowsers = 2
 
@@ -68,6 +72,28 @@ struct ChromeCookieImportView: View {
             }
             Button(L10n.text("Разрешить импорт агенту", "Enable agent import")) { saveAutomaticPolicy(enabled: true, shared: automaticAllChats) }
                 .disabled(importing || loading || selection.isEmpty)
+            Divider()
+            Text(L10n.text("Перенос IndexedDB (для одного сайта)", "IndexedDB transfer (one site)")).font(.ui(.headline))
+            TextField(L10n.text("Домен сайта, например linkedin.com", "Site domain, for example linkedin.com"), text: $indexedDBSite)
+                .disabled(importing)
+            Toggle(L10n.text("Во всех чатах", "In every chat"), isOn: $indexedDBAllChats).disabled(importing)
+            Text(L10n.text("Отдельное разрешение: агент может запросить перенос IndexedDB этого сайта из выбранного профиля Chrome, когда вход хранится там, а не в cookies. Это копия всей базы origin; она переносится при закрытом браузере чата, перед его следующим запуском. «Любой сайт» здесь недоступен — нужен точный домен. Проверка не подтверждает вход; открой сайт и проверь.",
+                           "A separate permission: the agent may request this site’s IndexedDB from the selected Chrome profile when sign-in lives there instead of in cookies. It is a whole-origin database copy, carried in while the chat browser is closed, before its next launch. There is no “any site” here — an exact domain is required. The transfer does not confirm sign-in; open the site and check."))
+                .font(.ui(.caption)).foregroundStyle(.secondary)
+            if let indexedDBPolicy {
+                HStack {
+                    Text(L10n.text("Разрешено в этом чате: ", "Enabled in this chat: ") + indexedDBPolicy.site + " · " + indexedDBPolicy.profile).font(.ui(.callout))
+                    Button(L10n.text("Отключить", "Disable")) { saveIndexedDBConsent(enabled: false, shared: false) }.disabled(importing)
+                }
+            }
+            if let indexedDBShared {
+                HStack {
+                    Text(L10n.text("Разрешено во всех чатах: ", "Enabled in every chat: ") + indexedDBShared.site + " · " + indexedDBShared.profile).font(.ui(.callout))
+                    Button(L10n.text("Отключить", "Disable")) { saveIndexedDBConsent(enabled: false, shared: true) }.disabled(importing)
+                }
+            }
+            Button(L10n.text("Разрешить перенос IndexedDB", "Enable IndexedDB transfer")) { saveIndexedDBConsent(enabled: true, shared: indexedDBAllChats) }
+                .disabled(importing || loading || selection.isEmpty)
             if let receipt, result == nil {
                 Text(L10n.text("Последний импорт: ", "Last import: ") + receipt.date.formatted(date: .abbreviated, time: .shortened) + " · " +
                      L10n.text("Проверено cookies: \(receipt.result.verified). Вход на сайте не проверен.",
@@ -104,14 +130,20 @@ struct ChromeCookieImportView: View {
             do {
                 profiles = try await Task.detached { try ChromeCookieSource.profiles() }.value
                 sharedPolicy = try ChromeSessionImportPolicy.loadShared()
+                indexedDBShared = try ChromeIndexedDBConsent.loadShared()
                 if let environment = try BrowserEnvironmentStore.existingEnvironment(session: session) {
                     receipt = try ChromeCookieImportReceipt.last(environment: environment)
                     automaticPolicy = try ChromeSessionImportPolicy.load(environment: environment)
+                    indexedDBPolicy = try ChromeIndexedDBConsent.load(environment: environment)
                 }
                 if let current = automaticPolicy ?? sharedPolicy {
                     automaticAnySite = current.coversAnySite
                     automaticAllChats = automaticPolicy == nil
                     if !current.coversAnySite { automaticSite = current.site }
+                }
+                if let current = indexedDBPolicy ?? indexedDBShared {
+                    indexedDBSite = current.site
+                    indexedDBAllChats = indexedDBPolicy == nil
                 }
                 let preferred = automaticPolicy?.profile ?? sharedPolicy?.profile ?? lastProfile
                 selection = profiles.contains(where: { $0.id == preferred }) ? preferred : profiles.first?.id ?? ""
@@ -147,6 +179,28 @@ struct ChromeCookieImportView: View {
             self.error = (error as? BrowserProfileError)?.localizedDescription ??
                 L10n.text("Не удалось сохранить разрешение. Проверь домен и профиль Chrome; дождись завершения операции браузера.",
                           "Could not save permission. Check the domain and Chrome profile; wait for the browser operation to finish.")
+        }
+    }
+
+    private func saveIndexedDBConsent(enabled: Bool, shared: Bool) {
+        error = nil
+        do {
+            if shared {
+                let consent = enabled ? try ChromeIndexedDBConsent(profile: selection, site: indexedDBSite) : nil
+                try ChromeIndexedDBConsent.saveShared(consent)
+                indexedDBShared = consent
+                return
+            }
+            guard let root = try BrowserEnvironmentStore.existingEnvironment(session: session) else { throw ChromeCookieError.missingEnvironment }
+            let store = BrowserProfileStore(), reference = session
+            let grant = try store.current(session: reference) == nil ? nil : store.ownedGrant(session: reference, allowHuman: true)
+            let consent = enabled ? try ChromeIndexedDBConsent(profile: selection, site: indexedDBSite) : nil
+            try ChromeIndexedDBConsent.save(consent, environment: root, grant: grant)
+            indexedDBPolicy = consent
+        } catch {
+            self.error = (error as? BrowserProfileError)?.localizedDescription ??
+                L10n.text("Не удалось сохранить разрешение IndexedDB. Проверь домен и профиль Chrome; дождись завершения операции браузера.",
+                          "Could not save the IndexedDB permission. Check the domain and Chrome profile; wait for the browser operation to finish.")
         }
     }
 
