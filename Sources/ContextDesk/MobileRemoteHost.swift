@@ -16,7 +16,10 @@ import IOKit.ps
     @Published var autoEnable = true { didSet { if autoEnable != oldValue { saveConfig() } } }
     @Published private(set) var enabled = false
     @Published private(set) var transitioning = false
-    @Published private(set) var status = ""
+    /// Any new status clears the failure mark; `fail` sets it again.
+    @Published private(set) var status = "" { didSet { statusFailed = false } }
+    /// The status text reports an error rather than progress.
+    @Published private(set) var statusFailed = false
     @Published private(set) var connectionState: RemoteConnectionState = .stopped
     private var realtime: RemoteRealtime?
     private let publication = RemoteEventWork()
@@ -61,7 +64,10 @@ import IOKit.ps
             try FileManager.default.createDirectory(at: configFile.deletingLastPathComponent(), withIntermediateDirectories: true)
             try JSONEncoder().encode(Config(url: url, key: key, device: device, projects: projects, autoEnable: autoEnable, active: active))
                 .write(to: configFile, options: .atomic)
-        } catch { status = error.localizedDescription }
+        } catch { fail(error.localizedDescription) }
+    }
+    private func fail(_ message: String) {
+        status = message; statusFailed = true
     }
     // Called once from app boot, so tests and background model instances never connect.
     func restoreOnLaunch(model: DeskModel) async {
@@ -86,7 +92,7 @@ import IOKit.ps
                 url = setup.url; key = setup.key; email = setup.email; password = setup.password
                 status = L10n.text("Подключение подготовлено. Выберите проекты и включите доступ.", "Connection prepared. Select projects and enable access.")
             }
-        } catch { status = error.localizedDescription }
+        } catch { fail(error.localizedDescription) }
     }
     func enable(model: DeskModel) async {
         guard !enabled, !transitioning else { return }
@@ -112,13 +118,14 @@ import IOKit.ps
             channel.onState = { [weak self] value in
                 guard let self else { return }
                 connectionState = value; status = value.text
+                if value == .failed || value == .authenticationRequired { statusFailed = true }
                 AppLog.remote.notice("Remote connection: \(String(describing: value), privacy: .public)")
                 if value == .connecting { publication.cancel() }
                 if value == .connected { requestPublication(); requestCommands() }
             }
             channel.onError = { [weak self] error in
                 AppLog.remote.error("Remote channel error: \(error.localizedDescription, privacy: .public)")
-                self?.status = error.localizedDescription
+                self?.fail(error.localizedDescription)
             }
             channel.onChange = { [weak self] event in
                 guard let self, event.device.lowercased() == device.lowercased(), event.entity == "command" else { return }
@@ -132,7 +139,7 @@ import IOKit.ps
             observePowerAndSleep()
             updateSleepAssertion()
             channel.start()
-        } catch { password = ""; status = error.localizedDescription }
+        } catch { password = ""; fail(error.localizedDescription) }
     }
     private func publishCurrent() async throws {
         guard enabled, !sleeping, let model, let api else { throw CancellationError() }
@@ -287,7 +294,7 @@ import IOKit.ps
             try await client.deleteDevice(device)
             try await client.signOut()
             status = L10n.text("Облачная копия и очередь удалены", "Cloud copy and queue deleted")
-        } catch { status = error.localizedDescription }
+        } catch { fail(error.localizedDescription) }
     }
     private func updateSleepAssertion() {
         let info = IOPSCopyPowerSourcesInfo().takeRetainedValue()
@@ -305,6 +312,7 @@ import IOKit.ps
 struct MobileRemoteSettings: View {
     @ObservedObject var host: MobileRemoteHost
     @ObservedObject var model: DeskModel
+    @State private var confirmingDelete = false
     var body: some View {
         Section(L10n.text("Мобильный доступ · Supabase", "Mobile access · Supabase")) {
             Group {
@@ -332,8 +340,18 @@ struct MobileRemoteSettings: View {
             } else {
                 Button(L10n.text("Включить и обработать очередь", "Enable and process queue")) { Task { await host.enable(model: model) } }.disabled(host.projects.isEmpty || host.transitioning)
             }
-            Button(L10n.text("Удалить облачную копию и очередь", "Delete cloud copy and queue"), role: .destructive) { Task { await host.forgetCloudCopy() } }
-            if !host.status.isEmpty { Text(host.status).font(.ui(.caption)).textSelection(.enabled) }
+            Button(L10n.text("Удалить облачную копию и очередь", "Delete cloud copy and queue"), role: .destructive) { confirmingDelete = true }
+                .confirmationDialog(L10n.text("Удалить облачную копию и очередь?", "Delete the cloud copy and queue?"),
+                                    isPresented: $confirmingDelete, titleVisibility: .visible) {
+                    Button(L10n.text("Удалить", "Delete"), role: .destructive) { Task { await host.forgetCloudCopy() } }
+                    Button(L10n.text("Отмена", "Cancel"), role: .cancel) {}
+                } message: {
+                    Text(L10n.text("Доступ с телефона выключится, а команды в очереди будут потеряны. Потом нужно будет снова войти в Supabase.",
+                                   "Phone access stops and queued commands are lost. You will need to sign in to Supabase again."))
+                }
+            if !host.status.isEmpty {
+                Text(host.status).font(.ui(.caption)).foregroundStyle(host.statusFailed ? Color.orange : Color.primary).textSelection(.enabled)
+            }
         }
         .task { host.prepareConnection() }
     }

@@ -61,7 +61,7 @@ struct AccountLimitsView: View {
         } else {
             if !connected { Label(L10n.text("Нет подключения. Данные могут быть устаревшими.", "Disconnected. Data may be out of date."), systemImage: "wifi.slash") }
             if let issue {
-                Label(issue, systemImage: "exclamationmark.circle").font(.ui(.callout)).foregroundStyle(.secondary)
+                Label(issue, systemImage: "exclamationmark.circle").font(.ui(.callout)).foregroundStyle(.orange)
             }
             if let snapshot = limits {
                 if snapshot.ordinaryUsageAllowed == false {

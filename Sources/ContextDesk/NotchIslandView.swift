@@ -6,6 +6,7 @@ import ContextCore
 struct NotchIslandView: View {
     @ObservedObject var state: NotchIslandState
     let onHeight: (CGFloat) -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 0) {
@@ -21,11 +22,11 @@ struct NotchIslandView: View {
             header
             if state.mode == .peek, let peek = state.peek {
                 NotchPeekLine(chat: peek.chat, waiting: peek.waiting)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .transition(reduceMotion ? AnyTransition.opacity : .opacity.combined(with: .move(edge: .top)))
             }
             if expanded {
                 NotchExpandedContent(state: state)
-                    .transition(.opacity.combined(with: .scale(scale: 0.92, anchor: .top)))
+                    .transition(reduceMotion ? AnyTransition.opacity : .opacity.combined(with: .scale(scale: 0.92, anchor: .top)))
             }
         }
         .frame(width: width)
@@ -35,7 +36,9 @@ struct NotchIslandView: View {
         })
         .background(Color.black, in: UnevenRoundedRectangle(bottomLeadingRadius: radius, bottomTrailingRadius: radius, style: .continuous))
         .opacity(state.mode == .hidden ? 0 : 1)
-        .animation(.spring(response: 0.38, dampingFraction: 0.78), value: state.mode)
+        // Same curve as the controller's mode change; it also carries the peek and settings
+        // updates the controller makes just before, outside its own animation.
+        .animation(NotchIslandController.animation(reduceMotion: reduceMotion), value: state.mode)
     }
 
     private var width: CGFloat {
@@ -60,7 +63,7 @@ struct NotchIslandView: View {
             Color.clear.frame(width: state.notch.width)
             HStack {
                 if state.mode == .expanded {
-                    Button { withAnimation(.easeInOut(duration: 0.2)) { state.showingSettings.toggle() } } label: {
+                    Button { withAnimation(NotchIslandController.animation(reduceMotion: reduceMotion)) { state.showingSettings.toggle() } } label: {
                         Image(systemName: state.showingSettings ? "xmark" : "gearshape.fill")
                             .font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.75))
                             .frame(width: 24, height: 24).contentShape(Rectangle())
@@ -78,12 +81,14 @@ struct NotchIslandView: View {
 /// A chat row's status mark: a spinner while it works, a pulsing dot while it waits, a check when done.
 private struct NotchStatusIndicator: View {
     let summary: NotchSummary
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
             switch summary {
             case .working: NotchLoopMark(kind: .spinner)
-            case .waiting: NotchLoopMark(kind: .pulse)
+            // Reduce Motion keeps the orange dot and drops its expanding halo.
+            case .waiting: NotchLoopMark(kind: reduceMotion ? .dot : .pulse).id(reduceMotion)
             case .finished:
                 Image(systemName: "checkmark.circle.fill").font(.system(size: 13, weight: .bold)).foregroundStyle(.green)
             case .idle:
@@ -96,7 +101,7 @@ private struct NotchStatusIndicator: View {
 
 /// Looping row marks on Core Animation, so they stay smooth while the main thread is busy.
 private struct NotchLoopMark: NSViewRepresentable {
-    enum Kind { case spinner, pulse }
+    enum Kind { case spinner, pulse, dot }
     let kind: Kind
 
     func makeNSView(context: Context) -> NSView {
@@ -120,7 +125,7 @@ private struct NotchLoopMark: NSViewRepresentable {
             spin.duration = 0.9; spin.repeatCount = .infinity; spin.isRemovedOnCompletion = false
             ring.add(spin, forKey: "spin")
             root.addSublayer(ring)
-        case .pulse:
+        case .pulse, .dot:
             let dotBox = box.insetBy(dx: 3, dy: 3)
             let halo = CAShapeLayer()
             halo.frame = box
@@ -133,12 +138,14 @@ private struct NotchLoopMark: NSViewRepresentable {
             let group = CAAnimationGroup()
             group.animations = [grow, fade]; group.duration = 1.1; group.repeatCount = .infinity
             group.timingFunction = CAMediaTimingFunction(name: .easeOut); group.isRemovedOnCompletion = false
-            halo.add(group, forKey: "pulse")
             let dot = CAShapeLayer()
             dot.frame = box
             dot.path = CGPath(ellipseIn: dotBox, transform: nil)
             dot.fillColor = NSColor.systemOrange.cgColor
-            root.addSublayer(halo)
+            if kind == .pulse {
+                halo.add(group, forKey: "pulse")
+                root.addSublayer(halo)
+            }
             root.addSublayer(dot)
         }
         return view
@@ -270,9 +277,16 @@ private struct NotchChatRow: View {
     }
 
     @ViewBuilder private var subtitle: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            Text(subtitleText(now: context.date)).font(.system(size: 11)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
+        // Only a working row with a start time shows a duration; the others need no clock.
+        if chat.phase == .working, chat.since != nil {
+            TimelineView(.periodic(from: .now, by: 1)) { context in subtitleLine(now: context.date) }
+        } else {
+            subtitleLine(now: .now)
         }
+    }
+
+    private func subtitleLine(now: Date) -> some View {
+        Text(subtitleText(now: now)).font(.system(size: 11)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
     }
 
     private func subtitleText(now: Date) -> String {
@@ -295,6 +309,9 @@ private struct NotchActionCard: View {
     @State private var submitting = false
     @State private var failure: String?
     @State private var showingDetails = false
+    @State private var detailsHeight: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private static let collapsedDetailsHeight: CGFloat = 48
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -308,10 +325,25 @@ private struct NotchActionCard: View {
                         Text(action.interaction.details).font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(.white.opacity(0.8)).textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(GeometryReader { proxy in
+                                Color.clear.onAppear { detailsHeight = proxy.size.height }
+                                    .onChange(of: proxy.size.height) { _, height in detailsHeight = height }
+                            })
                     }
-                    .frame(maxHeight: showingDetails ? 160 : 48)
+                    .frame(maxHeight: showingDetails ? 160 : Self.collapsedDetailsHeight)
                     .padding(8).background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
-                    .onTapGesture { withAnimation(.easeInOut(duration: 0.2)) { showingDetails.toggle() } }
+                    // An explicit control, so selecting the text never resizes the box.
+                    if detailsHeight > Self.collapsedDetailsHeight {
+                        Button {
+                            withAnimation(NotchIslandController.animation(reduceMotion: reduceMotion)) { showingDetails.toggle() }
+                        } label: {
+                            Label(showingDetails ? L10n.text("Свернуть", "Show less") : L10n.text("Показать всё", "Show all"),
+                                  systemImage: showingDetails ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.6))
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
                 if !canAllow {
                     Text(L10n.text("Этот запрос нельзя подтвердить в приложении.", "This request cannot be approved in the app."))

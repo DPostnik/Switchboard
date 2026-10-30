@@ -9,6 +9,7 @@ struct JobsView: View {
     @State private var deleting: ManagedJob?
     @State private var showingRoutines = false
     @State private var search = ""
+    @State private var refreshing = false
     var body: some View {
         VStack(spacing: 0) {
             ViewThatFits(in: .horizontal) {
@@ -88,7 +89,10 @@ struct JobsView: View {
     private var pageActions: some View {
         HStack {
             Button(L10n.text("Библиотека рутин", "Routine library")) { showingRoutines = true }
-            Button(L10n.text("Обновить", "Refresh")) { Task { await model.refreshJobs() } }
+            if refreshing { ProgressView().uiSmallSpinner() }
+            Button(L10n.text("Обновить", "Refresh")) {
+                Task { refreshing = true; await model.refreshJobs(); refreshing = false }
+            }.disabled(refreshing)
             Button(L10n.text("Создать", "New task"), systemImage: "plus") {
                 var job = ManagedJob(); job.projectID = model.projectID; job.model = model.currentAgent == .originalCodex ? model.currentModel : model.state.model; job.effort = model.currentAgent == .originalCodex ? model.effort : ""; job.route = model.defaultRoute; editing = job
             }.disabled(!model.schedulerReady)
@@ -100,10 +104,22 @@ struct JobsView: View {
         return formatter.string(from: date)
     }
     @ViewBuilder private func taskActions(_ job: ManagedJob, active: Bool) -> some View {
-                    Button(L10n.text("Запустить сейчас", "Run now")) { Task { await model.launchJob(job.id) } }.disabled(active || !model.schedulerReady || model.routineIssue(job) != nil || model.jobLedger.runs.filter { $0.status.active }.count >= 3)
+                    let blocker = runBlocker(job, active: active)
+                    Button(L10n.text("Запустить сейчас", "Run now")) { Task { await model.launchJob(job.id) } }.disabled(blocker != nil)
+                        .help(blocker ?? L10n.text("Запустить задание сейчас, не дожидаясь расписания", "Run the task now without waiting for its schedule"))
                     Button(job.enabled ? L10n.text("Пауза", "Pause") : L10n.text("Включить", "Enable")) { Task { await model.toggleJob(job) } }.disabled(active || !model.schedulerReady || (job.schedule.rule.isEmpty && job.schedule.once == nil))
                     Button(L10n.text("Изменить", "Edit")) { editing = job }.disabled(active || !model.schedulerReady)
                     Button(role: .destructive) { deleting = job } label: { Image(systemName: "trash") }.accessibilityLabel(L10n.text("Удалить задание", "Delete task")).disabled(active || !model.schedulerReady)
+    }
+    /// Why "Run now" is unavailable, or nil when the task can start.
+    private func runBlocker(_ job: ManagedJob, active: Bool) -> String? {
+        if active { return L10n.text("Задание уже выполняется", "The task is already running") }
+        if !model.schedulerReady { return L10n.text("Планировщик недоступен", "The scheduler is unavailable") }
+        if let issue = model.routineIssue(job) { return issue }
+        if model.jobLedger.runs.filter({ $0.status.active }).count >= 3 {
+            return L10n.text("Уже выполняются три задания. Дождись, пока одно закончится.", "Three tasks are already running. Wait for one to finish.")
+        }
+        return nil
     }
     private func managedDetail(_ job: ManagedJob) -> some View {
         let active = model.jobLedger.runs.first { $0.jobID == job.id && $0.status.active }

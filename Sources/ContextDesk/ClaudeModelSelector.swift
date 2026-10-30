@@ -10,6 +10,7 @@ import ContextCore
 struct ClaudeModelSelector: View {
     @ObservedObject var model: DeskModel
     @State private var entering = false
+    @FocusState private var fieldFocused: Bool
     @State private var draft = ""
 
     private var help: String {
@@ -43,6 +44,9 @@ struct ClaudeModelSelector: View {
                           prompt: Text(ClaudeModel.title(for: ClaudeModel.defaultID)))
                     .onSubmit { commit() }
                     .onExitCommand { entering = false }
+                    // The field replaces the menu the user just chose from, so typing can start at once.
+                    .focused($fieldFocused)
+                    .onAppear { fieldFocused = true }
                     .accessibilityLabel(L10n.text("Модель Claude", "Claude model"))
             } else {
                 ChipMenu(title: ClaudeModel.title(for: model.currentModel)) {

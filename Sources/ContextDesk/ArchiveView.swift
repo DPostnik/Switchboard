@@ -38,8 +38,10 @@ struct ArchiveView: View {
                     TextField(L10n.text("Найти чат или проект в архиве", "Find a chat or project in the archive"), text: $search)
                         .textFieldStyle(.roundedBorder)
                 }.padding()
-                if archivedChats.contains(where: { model.archiveSummaries[$0.id] == nil }) {
-                    Button(L10n.text("Подготовить итоги архивных чатов", "Summarize archived chats")) {
+                // The same chats `queueMissingArchiveSummaries` queues: every archived one, not just the search results.
+                let missing = model.state.chats.filter { $0.isArchived && model.supportsSummaries($0.id) && model.archiveSummaries[$0.id] == nil }.count
+                if missing > 0, archivedChats.contains(where: { model.archiveSummaries[$0.id] == nil }) {
+                    Button(Self.summarizeTitle(missing)) {
                         Task { await model.queueMissingArchiveSummaries() }
                     }.buttonStyle(DeskButtonStyle()).disabled(!archivedChats.contains { model.archiveSummaries[$0.id] == nil && model.canGenerateSummary($0.id) })
                         .help(L10n.text("Создать краткие итоги для архива. Использует модель и лимиты твоего аккаунта.", "Create compact archive summaries. Uses your model and account allowance."))
@@ -99,6 +101,13 @@ struct ArchiveView: View {
                     }
                 }
             }
+    }
+
+    static func summarizeTitle(_ count: Int) -> String {
+        // Genitive after "итоги": 1, 21, 31… take the singular, every other number the plural.
+        let singular = count % 10 == 1 && count % 100 != 11
+        return L10n.text(singular ? "Подготовить итоги \(count) архивного чата" : "Подготовить итоги \(count) архивных чатов",
+                         count == 1 ? "Summarize 1 archived chat" : "Summarize \(count) archived chats")
     }
 }
 

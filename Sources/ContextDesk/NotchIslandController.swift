@@ -31,6 +31,11 @@ import ContextCore
     static let panelSize = CGSize(width: 520, height: 460)
     static let wing: CGFloat = 36
     static let expandedWidth: CGFloat = 440
+    /// The island's one motion for opening, closing and switching panes: critically damped, so it
+    /// settles without overshoot. Reduce Motion replaces it with a short fade.
+    nonisolated static func animation(reduceMotion: Bool) -> Animation {
+        reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.35, dampingFraction: 1.0)
+    }
 
     private let model: DeskModel
     private let state = NotchIslandState()
@@ -213,7 +218,7 @@ import ContextCore
         let mode = NotchPolicy.mode(resting: resting, hovering: hovering, pinnedOpen: pinnedOpen, peeking: state.peek != nil)
         if mode != .expanded, state.showingSettings { state.showingSettings = false }
         if state.mode != mode {
-            withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) { state.mode = mode }
+            withAnimation(Self.animation(reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)) { state.mode = mode }
         }
         updateClickThrough()
     }
@@ -240,8 +245,11 @@ import ContextCore
         guard screen != nil else { return }
         let mouse = NSEvent.mouseLocation
         // Quantized so ordinary pointer motion redraws the buddy only when its gaze really moves.
-        let gaze = (max(-1, min(1, (mouse.x - panel.frame.midX) / 320)) * 8).rounded() / 8
-        if state.look.x != gaze { state.look.x = gaze }
+        // A hidden island has no visible buddy, so its gaze waits for the next move after it shows.
+        if state.mode != .hidden {
+            let gaze = (max(-1, min(1, (mouse.x - panel.frame.midX) / 320)) * 8).rounded() / 8
+            if state.look.x != gaze { state.look.x = gaze }
+        }
         // Once open, the island stays open while the pointer is over it.
         let inside = islandRect(for: hovering || pinnedOpen ? .expanded : state.mode).insetBy(dx: -4, dy: -4).contains(mouse)
         if inside != hovering {

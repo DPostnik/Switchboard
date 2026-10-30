@@ -10,9 +10,10 @@ import ContextCore
 }
 
 /// Switchboard's own island character: a coral squircle whose face follows the agents.
-/// Sleepy when idle, reading while they work, wide-eyed and wiggling when one needs the user,
+/// Sleepy and still when idle, reading while they work, wide-eyed and wiggling when one needs the user,
 /// happy with a jump when a turn finishes. Core Animation runs every loop in the render server,
-/// so a busy main thread never makes it stutter and it keeps the display's full frame rate.
+/// so a busy main thread never makes it stutter; the loops ask for at most 30 fps, which is plenty
+/// for a 20-point face. Reduce Motion keeps the faces and the blink and drops every movement.
 struct DeskBuddy: NSViewRepresentable {
     enum Mood { case idle, working, waiting, happy }
     let mood: Mood
@@ -54,9 +55,11 @@ final class DeskBuddyView: NSView {
     private var size: CGFloat = 0
     private var celebratedAt: Date?
     private var gaze: CGFloat = 0
+    private var reduceMotion = false
 
     override init(frame: NSRect) {
         super.init(frame: frame)
+        reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let root = CALayer()
         root.isGeometryFlipped = true
         // Layer-hosting: the view owns this layer tree and never draws through AppKit.
@@ -70,17 +73,30 @@ final class DeskBuddyView: NSView {
         for (eye, highlight) in zip(eyes, highlights) { face.addSublayer(eye); eye.addSublayer(highlight) }
         cheeks.forEach(face.addSublayer)
         face.addSublayer(mouth)
+        // Selector-based, so the center drops the observer when the view goes away.
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(displayOptionsChanged),
+                                                          name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     override var isFlipped: Bool { true }
+
+    @objc nonisolated private func displayOptionsChanged(_ notification: Notification) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            guard reduce != reduceMotion else { return }
+            reduceMotion = reduce
+            rebuild()
+        }
+    }
 
     func update(mood: DeskBuddy.Mood, size: CGFloat, celebratedAt: Date?, gaze: CGFloat, paused: Bool) {
         if mood != self.mood || size != self.size {
             self.mood = mood; self.size = size
             rebuild()
         }
-        if let celebratedAt, celebratedAt != self.celebratedAt, Date().timeIntervalSince(celebratedAt) < 1 { celebrate() }
+        if let celebratedAt, celebratedAt != self.celebratedAt, Date().timeIntervalSince(celebratedAt) < 1, !reduceMotion { celebrate() }
         self.celebratedAt = celebratedAt
         if gaze != self.gaze { self.gaze = gaze; applyGaze() }
         // A hidden island freezes the buddy instead of animating something nobody sees.
@@ -177,25 +193,31 @@ final class DeskBuddyView: NSView {
     }
 
     private func addLoops(for mood: DeskBuddy.Mood) {
-        let s = size
+        let s = size, still = reduceMotion
+        // Idle has no loop at all: the sleepy face just rests, so a quiet desk costs no frames.
         switch mood {
-        case .idle:
-            motion.add(Self.loop("transform.scale", values: [1, 1.03, 1], duration: 3.9), forKey: "breathe")
+        case .idle: break
         case .working:
-            motion.add(Self.loop("transform.translation.y", values: [0, s * 0.04, 0, -s * 0.04, 0], duration: 1.05), forKey: "bob")
-            // Eyes scan left and right like reading.
-            face.add(Self.loop("transform.translation.x", values: [0, s * 0.07, 0, -s * 0.07, 0], duration: 2.85), forKey: "scan")
+            if !still {
+                motion.add(Self.loop("transform.translation.y", values: [0, s * 0.04, 0, -s * 0.04, 0], duration: 1.05), forKey: "bob")
+                // Eyes scan left and right like reading.
+                face.add(Self.loop("transform.translation.x", values: [0, s * 0.07, 0, -s * 0.07, 0], duration: 2.85), forKey: "scan")
+            }
             eyes.forEach { $0.add(Self.blink(every: 3.7), forKey: "blink") }
         case .waiting:
-            motion.add(Self.loop("transform.rotation.z", values: [0, 0.16, -0.16, 0.16, -0.12, 0, 0], keyTimes: [0, 0.05, 0.1, 0.15, 0.22, 0.28, 1], duration: 1.6), forKey: "wiggle")
-            let grow = Self.loop("transform.scale", values: [1, 1.58], duration: 1.2, smooth: false)
-            let fade = Self.loop("opacity", values: [1, 0], duration: 1.2, smooth: false)
-            let pulse = CAAnimationGroup()
-            pulse.animations = [grow, fade]; pulse.duration = 1.2; pulse.repeatCount = .infinity
-            glow.add(pulse, forKey: "pulse")
+            // Under Reduce Motion the glow stays lit as a steady ring instead of pulsing.
+            if !still {
+                motion.add(Self.loop("transform.rotation.z", values: [0, 0.16, -0.16, 0.16, -0.12, 0, 0], keyTimes: [0, 0.05, 0.1, 0.15, 0.22, 0.28, 1], duration: 1.6), forKey: "wiggle")
+                let grow = Self.loop("transform.scale", values: [1, 1.58], duration: 1.2, smooth: false)
+                let fade = Self.loop("opacity", values: [1, 0], duration: 1.2, smooth: false)
+                let pulse = CAAnimationGroup()
+                pulse.animations = [grow, fade]; pulse.duration = 1.2; pulse.repeatCount = .infinity
+                pulse.preferredFrameRateRange = Self.frameRate
+                glow.add(pulse, forKey: "pulse")
+            }
             eyes.forEach { $0.add(Self.blink(every: 5.3), forKey: "blink") }
         case .happy:
-            motion.add(Self.loop("transform.translation.y", values: [0, -s * 0.05, 0], duration: 1.05), forKey: "hop")
+            if !still { motion.add(Self.loop("transform.translation.y", values: [0, -s * 0.05, 0], duration: 1.05), forKey: "hop") }
         }
     }
 
@@ -219,6 +241,9 @@ final class DeskBuddyView: NSView {
         jump.add(hop, forKey: "celebrate")
     }
 
+    /// A small face reads as smooth at 24 fps; capping the loops spares ProMotion displays from 120 Hz redraws.
+    private static let frameRate = CAFrameRateRange(minimum: 8, maximum: 30, preferred: 24)
+
     private static func loop(_ keyPath: String, values: [CGFloat], keyTimes: [NSNumber]? = nil, duration: CFTimeInterval, smooth: Bool = true) -> CAKeyframeAnimation {
         let animation = CAKeyframeAnimation(keyPath: keyPath)
         animation.values = values
@@ -228,6 +253,7 @@ final class DeskBuddyView: NSView {
         animation.calculationMode = smooth ? .cubic : .linear
         if !smooth { animation.timingFunction = CAMediaTimingFunction(name: .easeOut) }
         animation.isRemovedOnCompletion = false
+        animation.preferredFrameRateRange = frameRate
         return animation
     }
 
@@ -239,6 +265,7 @@ final class DeskBuddyView: NSView {
         animation.duration = period
         animation.repeatCount = .infinity
         animation.isRemovedOnCompletion = false
+        animation.preferredFrameRateRange = frameRate
         return animation
     }
 }

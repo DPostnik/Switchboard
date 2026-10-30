@@ -114,14 +114,21 @@ private struct SubagentRow: View {
 private struct SubagentElapsed: View {
     let agent: AgentSubagent
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            let seconds = Int(max(0, (agent.endedAt ?? context.date).timeIntervalSince(agent.startedAt)))
-            var parts = [String(format: "%d:%02d", seconds / 60, seconds % 60)]
-            if let tools = agent.toolUses { parts.append(L10n.text("инструментов: \(tools)", "tools: \(tools)")) }
-            if let tokens = agent.tokens { parts.append(L10n.text("токенов: \(tokens.formatted())", "tokens: \(tokens.formatted())")) }
-            if agent.background { parts.append(L10n.text("в фоне", "background")) }
-            return Text(parts.joined(separator: " · "))
+        // A finished agent's time is fixed, so only a running one needs the clock.
+        if let endedAt = agent.endedAt {
+            Text(line(until: endedAt))
+        } else {
+            TimelineView(.periodic(from: .now, by: 1)) { context in Text(line(until: context.date)) }
         }
+    }
+
+    private func line(until end: Date) -> String {
+        let seconds = Int(max(0, end.timeIntervalSince(agent.startedAt)))
+        var parts = [String(format: "%d:%02d", seconds / 60, seconds % 60)]
+        if let tools = agent.toolUses { parts.append(L10n.text("инструментов: \(tools)", "tools: \(tools)")) }
+        if let tokens = agent.tokens { parts.append(L10n.text("токенов: \(tokens.formatted())", "tokens: \(tokens.formatted())")) }
+        if agent.background { parts.append(L10n.text("в фоне", "background")) }
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -130,6 +137,14 @@ private struct SubagentDetail: View {
     let chatID: String
     let agent: AgentSubagent
     @State private var showingPrompt = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The list follows new steps only while the user is at (or near) its end.
+    @State private var followsEnd = true
+    @State private var viewportHeight: CGFloat = 0
+    /// Content already measured; a geometry change from newer content is not a user scroll.
+    @State private var seenSteps = 0
+    @State private var seenStatus: AgentSubagent.Status?
+    private static let stepsSpace = "subagentSteps"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -179,13 +194,37 @@ private struct SubagentDetail: View {
                                 .background(.green.opacity(0.07), in: RoundedRectangle(cornerRadius: 8)).id("report")
                         }
                         Color.clear.frame(height: 1).id("end")
+                            .background(GeometryReader { end in
+                                Color.clear.onChange(of: end.frame(in: .named(Self.stepsSpace)).minY) { _, y in
+                                    guard agent.steps.count == seenSteps, agent.status == seenStatus else { return }
+                                    followsEnd = y - viewportHeight < 80
+                                }
+                            })
                     }.padding(.vertical, 4)
                 }
-                .onAppear { proxy.scrollTo("end", anchor: .bottom) }
-                .onChange(of: agent.steps.count) { _, _ in withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
-                .onChange(of: agent.status) { _, _ in withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
+                .coordinateSpace(.named(Self.stepsSpace))
+                .background(GeometryReader { box in
+                    Color.clear.onAppear { viewportHeight = box.size.height }
+                        .onChange(of: box.size.height) { _, height in viewportHeight = height }
+                })
+                .onAppear {
+                    seenSteps = agent.steps.count; seenStatus = agent.status
+                    proxy.scrollTo("end", anchor: .bottom)
+                }
+                .onChange(of: agent.steps.count) { _, count in
+                    if followsEnd { scrollToEnd(proxy) }
+                    seenSteps = count
+                }
+                .onChange(of: agent.status) { _, status in
+                    if followsEnd { scrollToEnd(proxy) }
+                    seenStatus = status
+                }
             }
         }.padding(16).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func scrollToEnd(_ proxy: ScrollViewProxy) {
+        withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo("end", anchor: .bottom) }
     }
 }
 

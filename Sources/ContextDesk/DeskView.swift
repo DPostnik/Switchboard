@@ -25,7 +25,7 @@ struct DeskView: View {
     @State private var selection = ChatSelection()
     @State private var archivingSelection = false
     private let chatPageSize = 5
-    private var sidebarAnimation: Animation? { reduceMotion ? nil : .spring(response: 0.36, dampingFraction: 0.9) }
+    private var sidebarAnimation: Animation? { DeskMotion.standard(reduceMotion) }
     @State private var newTitle = ""
     @State private var showingNotifications = false
     @State private var showingLimits = false
@@ -51,7 +51,7 @@ struct DeskView: View {
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button {
-                    withAnimation { columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly }
+                    withAnimation(DeskMotion.standard(reduceMotion)) { columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly }
                 } label: {
                     Image(systemName: "sidebar.left")
                 }
@@ -71,7 +71,7 @@ struct DeskView: View {
             revealSelectedChat()
         }
         .onChange(of: model.documentExpanded) { _, expanded in
-            withAnimation {
+            withAnimation(DeskMotion.standard(reduceMotion)) {
                 if expanded {
                     sidebarBeforeDocument = columnVisibility
                     columnVisibility = .detailOnly
@@ -83,9 +83,6 @@ struct DeskView: View {
         }
         .onChange(of: activeChatIDs) { _, ids in
             selection.prune(keeping: ids)
-        }
-        .popover(isPresented: $showingNotifications) {
-            notificationsPanel
         }
         .sheet(item: $permissionsProject) { project in ProjectPermissionsView(model: model, project: project) }
         .alert(L10n.text("Название чата", "Chat title"), isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
@@ -116,9 +113,12 @@ struct DeskView: View {
                         Image(systemName: (model.notices.isEmpty && !model.state.chats.contains(where: \.hasUnreadResponse)) ? "bell" : "bell.badge.fill")
                             .foregroundStyle((model.notices.isEmpty && !model.state.chats.contains(where: \.hasUnreadResponse)) ? Color.primary : .blue)
                     }.buttonStyle(PointerButtonStyle(base: .plain)).help(L10n.text("Уведомления", "Notifications"))
+                        // Anchored to the bell, so the panel visibly comes from the control that opened it.
+                        .popover(isPresented: $showingNotifications, arrowEdge: .bottom) { notificationsPanel }
                 }.padding(.horizontal, .ui(16)).padding(.top, .ui(16))
-                if model.openAttentionCount > 0 && !model.showingAttention {
+                if showAttentionBanner {
                     AttentionBanner(model: model).padding(.horizontal, .ui(12))
+                        .transition(DeskMotion.slide(from: .top, reduceMotion))
                 }
                 Button { model.newChat() } label: {
                     Label(L10n.text("Новый чат", "New chat"), systemImage: "square.and.pencil").frame(maxWidth: .infinity, alignment: .leading)
@@ -168,14 +168,12 @@ struct DeskView: View {
                         Button { model.openProject() } label: {
                             Label(L10n.text("Добавить проект…", "Add project…"), systemImage: "folder.badge.plus")
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, .ui(8)).padding(.vertical, .ui(10)).contentShape(Rectangle())
-                        }.buttonStyle(PointerButtonStyle(base: .plain))
+                        }.buttonStyle(SidebarItemStyle())
                         Divider().padding(.vertical, .ui(6))
                         Button { model.showingArchive = false; model.showingAttention = false; model.showingJobs = true; Task { await model.refreshJobs() } } label: {
                             Label(L10n.text("По расписанию", "Scheduled jobs"), systemImage: "calendar")
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, .ui(8)).padding(.vertical, .ui(10)).contentShape(Rectangle())
-                        }.buttonStyle(PointerButtonStyle(base: .plain))
+                        }.buttonStyle(SidebarItemStyle(selected: model.showingJobs))
                         Button { model.openAttention() } label: {
                             HStack {
                                 Label(L10n.text("Важное", "Important"), systemImage: model.openAttentionCount > 0 ? "exclamationmark.triangle.fill" : "exclamationmark.triangle")
@@ -186,9 +184,7 @@ struct DeskView: View {
                                         .padding(.horizontal, .ui(7)).padding(.vertical, .ui(2)).background(AttentionPalette.accent, in: Capsule())
                                 }
                             }
-                            .padding(.horizontal, .ui(8)).padding(.vertical, .ui(10)).contentShape(Rectangle())
-                            .background(model.showingAttention ? DeskPalette.selection : .clear, in: RoundedRectangle(cornerRadius: 8))
-                        }.buttonStyle(PointerButtonStyle(base: .plain))
+                        }.buttonStyle(SidebarItemStyle(selected: model.showingAttention))
                     }.padding(.horizontal, .ui(12)).padding(.bottom, .ui(8))
                         // Legacy scrollers take layout width only while the list overflows; reserve it otherwise so rows keep their width.
                         .padding(.trailing, sidebarScrollerReserve)
@@ -198,8 +194,9 @@ struct DeskView: View {
                 .onReceive(NotificationCenter.default.publisher(for: NSScroller.preferredScrollerStyleDidChangeNotification)) { _ in
                     scrollerStyle = NSScroller.preferredScrollerStyle
                 }
-                DeskPalette.border.frame(height: 0.5)
-                if !selection.isEmpty { selectionBar }
+                // The edge line only marks where the list scrolls under the controls below it.
+                DeskPalette.border.frame(height: 0.5).opacity(sidebarContentHeight > sidebarViewportHeight ? 1 : 0)
+                if !selection.isEmpty { selectionBar.transition(DeskMotion.slide(from: .bottom, reduceMotion)) }
                 Button { limitsPlacement = limitsAnchor.placement; showingLimits = true } label: {
                     Label(L10n.text("Usage и лимиты", "Usage and limits"), systemImage: "chart.bar")
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -214,9 +211,12 @@ struct DeskView: View {
                     SettingsLink { Image(systemName: "gearshape") }.buttonStyle(PointerButtonStyle(base: .plain))
                 }.padding(.ui(14))
             }.background(DeskPalette.sidebar)
+                .animation(sidebarAnimation, value: showAttentionBanner)
+                .animation(sidebarAnimation, value: selection.isEmpty)
                 .navigationSplitViewColumnWidth(min: .ui(240), ideal: .ui(285), max: .ui(380))
                 .background(SidebarWidthLimits(min: .ui(240), ideal: .ui(285), max: .ui(380)))
     }
+    private var showAttentionBanner: Bool { model.openAttentionCount > 0 && !model.showingAttention }
     private var sidebarScrollerReserve: CGFloat {
         guard scrollerStyle == .legacy, sidebarContentHeight <= sidebarViewportHeight else { return 0 }
         return NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
@@ -225,11 +225,12 @@ struct DeskView: View {
             VStack(spacing: 0) {
                 if let error = model.error {
                     HStack(alignment: .top) {
-                        Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.blue)
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                         Text(error).font(.ui(.callout)).textSelection(.enabled)
                         Spacer()
                         Button { model.error = nil } label: { Image(systemName: "xmark") }.buttonStyle(PointerButtonStyle(base: .plain)).help(L10n.text("Закрыть", "Close"))
-                    }.padding().background(.blue.opacity(0.08))
+                    }.padding().background(.orange.opacity(0.1))
+                        .transition(DeskMotion.slide(from: .top, reduceMotion))
                 }
                 if model.showingArchive {
                     ArchiveView(model: model)
@@ -241,7 +242,8 @@ struct DeskView: View {
                     EmptyState(icon: "folder", title: L10n.text("С каким проектом работаем?", "Which project are we working on?"), text: L10n.text("Проект — это папка на компьютере. Добавь свои проекты, и чаты появятся под каждой папкой слева.", "A project is a folder on your computer. Add your projects, and chats will appear under each folder on the left."))
                     Button(L10n.text("Добавить проект…", "Add project…")) { model.openProject() }.buttonStyle(DeskButtonStyle()).padding(.bottom, .ui(60))
                 } else { ChatView(model: model) }
-            }.navigationTitle(detailTitle)
+            }.animation(DeskMotion.standard(reduceMotion), value: model.error)
+                .navigationTitle(detailTitle)
                 .navigationSubtitle(detailSubtitle)
                 .modifier(ZoomedWindowTitle(title: detailTitle, subtitle: detailSubtitle))
     }
@@ -788,12 +790,76 @@ private struct DropTargetRecovery: ViewModifier {
     }
 }
 
+/// One motion vocabulary for the shell: a critically damped spring (no overshoot without a flick behind it),
+/// and opacity-only changes under Reduce Motion.
+enum DeskMotion {
+    static func standard(_ reduceMotion: Bool, response: Double = 0.32) -> Animation? {
+        reduceMotion ? nil : .spring(response: response, dampingFraction: 1)
+    }
+    /// Enters and leaves along the same edge; a plain fade under Reduce Motion.
+    static func slide(from edge: Edge, _ reduceMotion: Bool) -> AnyTransition {
+        reduceMotion ? .opacity : .move(edge: edge).combined(with: .opacity)
+    }
+}
+
 struct DeskButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label.font(.ui(.callout).weight(.medium)).padding(.horizontal, .ui(14)).padding(.vertical, .ui(10))
-            .background(configuration.isPressed ? DeskPalette.selection : DeskPalette.subtle, in: RoundedRectangle(cornerRadius: 12))
-            .contentShape(RoundedRectangle(cornerRadius: 12))
-            .pointingHandCursor()
+    func makeBody(configuration: Configuration) -> some View { StyledBody(configuration: configuration) }
+
+    private struct StyledBody: View {
+        let configuration: ButtonStyleConfiguration
+        @Environment(\.isEnabled) private var isEnabled
+        @State private var hovering = false
+
+        var body: some View {
+            configuration.label.font(.ui(.callout).weight(.medium)).padding(.horizontal, .ui(14)).padding(.vertical, .ui(10))
+                .background(configuration.isPressed ? DeskPalette.selection : hovering && isEnabled ? DeskPalette.rowHover : DeskPalette.subtle,
+                            in: RoundedRectangle(cornerRadius: 12))
+                .contentShape(RoundedRectangle(cornerRadius: 12))
+                .onHover { hovering = $0 }
+                .pointingHandCursor()
+        }
+    }
+}
+
+/// The composer's round send/stop control: it gives under the pointer on press.
+struct RoundControlStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { StyledBody(configuration: configuration) }
+
+    private struct StyledBody: View {
+        let configuration: ButtonStyleConfiguration
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+        var body: some View {
+            configuration.label
+                .scaleEffect(configuration.isPressed && !reduceMotion ? 0.92 : 1)
+                .opacity(configuration.isPressed ? 0.85 : 1)
+                .animation(.snappy(duration: 0.12), value: configuration.isPressed)
+                .contentShape(Circle())
+                .pointingHandCursor()
+        }
+    }
+}
+
+/// Sidebar navigation items look and respond like the project and chat rows around them:
+/// hover highlight, darker on press, and the selection fill while their pane is open.
+struct SidebarItemStyle: ButtonStyle {
+    var selected = false
+    func makeBody(configuration: Configuration) -> some View { StyledBody(configuration: configuration, selected: selected) }
+
+    private struct StyledBody: View {
+        let configuration: ButtonStyleConfiguration
+        let selected: Bool
+        @State private var hovering = false
+
+        var body: some View {
+            configuration.label
+                .padding(.horizontal, .ui(8)).padding(.vertical, .ui(10))
+                .background(selected || configuration.isPressed ? DeskPalette.selection : hovering ? DeskPalette.rowHover : .clear,
+                            in: RoundedRectangle(cornerRadius: 8))
+                .contentShape(Rectangle())
+                .onHover { hovering = $0 }
+                .pointingHandCursor()
+        }
     }
 }
 
@@ -803,6 +869,7 @@ struct ChatView: View {
     @State private var showingUsage = false
     @State private var composerFocused = false
     @State private var composerHeight: CGFloat = 22
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var handoff: ContextHandoff?
     @State private var fileDropTargeted = false
     @StateObject private var dropWatchdog = DropTargetWatchdog()
@@ -843,8 +910,10 @@ struct ChatView: View {
                     .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                         model.markActionRead(action)
                     }
-                    .padding(12)
-                    .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 14)).tint(.blue).padding(.horizontal, 24)
+                    .tint(.blue)
+                    // Same column as the composer it sits on, and it arrives from the composer's side.
+                    .frame(maxWidth: columnWidth).padding(.horizontal, 24)
+                    .transition(DeskMotion.slide(from: .bottom, reduceMotion))
             }
             if let chat = model.selectedChat, chat.isScheduledRecord, !model.selectedChatIsArchived {
                 Label(DeskModel.scheduledRecordFollowUpNotice, systemImage: "clock.arrow.circlepath")
@@ -909,7 +978,7 @@ struct ChatView: View {
             if !model.selectedChatIsArchived {
             VStack(spacing: 4) {
                 ZStack(alignment: .topLeading) {
-                    if model.draft.isEmpty { Text(model.selectedChat?.isScheduledRecord == true ? L10n.text("Ответить в новом чате…", "Reply in a new chat…") : L10n.text("Напиши сообщение…", "Write a message…")).foregroundStyle(.secondary).padding(.horizontal, 21).padding(.top, 16).allowsHitTesting(false) }
+                    if model.draft.isEmpty { Text(model.selectedChat?.isScheduledRecord == true ? L10n.text("Ответить в новом чате…", "Reply in a new chat…") : L10n.text("Напиши сообщение…", "Write a message…")).font(.ui(size: 14)).foregroundStyle(.secondary).padding(.horizontal, 21).padding(.top, 16).allowsHitTesting(false) }
                     MessageComposer(text: $model.draft, focused: $composerFocused, focusRequest: model.composerFocusRequest,
                                     onContentHeight: { composerHeight = $0 }) { Task { await model.send() } }
                         .frame(height: min(max(composerHeight, 40), 220)).padding(.horizontal, 16).padding(.top, 14).accessibilityLabel(L10n.text("Сообщение", "Message"))
@@ -972,20 +1041,22 @@ struct ChatView: View {
                         }
                     }
                     // One round control: stop while a response runs and nothing is typed, otherwise send or queue.
-                    if model.busy && model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Button { Task { await model.interrupt() } } label: {
-                            Image(systemName: "stop.fill").font(.ui(size: 11)).frame(width: 32, height: 32)
-                                .foregroundStyle(.white).background(DeskPalette.ink, in: Circle())
-                        }.buttonStyle(PointerButtonStyle(base: .plain)).padding(.leading, 6)
-                            .help(L10n.text("Остановить ответ", "Stop response")).accessibilityLabel(L10n.text("Остановить ответ", "Stop response"))
-                    } else {
-                        Button { Task { await model.send() } } label: {
-                            Image(systemName: "arrow.up").font(.ui(size: 14, weight: .semibold)).frame(width: 32, height: 32)
-                                .foregroundStyle(.white)
-                                .background(DeskPalette.ink.opacity(model.canSend ? 1 : 0.2), in: Circle())
-                        }.buttonStyle(PointerButtonStyle(base: .plain)).keyboardShortcut(.return, modifiers: .command).disabled(!model.canSend).padding(.leading, 6)
-                            .help(model.busy ? L10n.text("Добавить в очередь · Enter. Shift+Enter — новая строка", "Add to queue · Enter. Shift+Enter for a new line") : L10n.text("Отправить · Enter. Shift+Enter — новая строка", "Send · Enter. Shift+Enter for a new line")).accessibilityLabel(L10n.text("Отправить сообщение", "Send message"))
-                    }
+                    // A single button, so the symbol morphs in place instead of one control replacing another.
+                    let stops = model.busy && model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    Button { Task { if stops { await model.interrupt() } else { await model.send() } } } label: {
+                        Image(systemName: stops ? "stop.fill" : "arrow.up")
+                            .font(stops ? .ui(size: 11) : .ui(size: 14, weight: .semibold))
+                            .contentTransition(.symbolEffect(.replace))
+                            .frame(width: 32, height: 32)
+                            .foregroundStyle(.white)
+                            .background(DeskPalette.ink.opacity(stops || model.canSend ? 1 : 0.2), in: Circle())
+                    }.buttonStyle(RoundControlStyle())
+                        .keyboardShortcut(stops ? nil : KeyboardShortcut(.return, modifiers: .command))
+                        .disabled(!stops && !model.canSend).padding(.leading, 6)
+                        .animation(reduceMotion ? nil : .snappy(duration: 0.18), value: stops)
+                        .animation(.easeOut(duration: 0.12), value: model.canSend)
+                        .help(stops ? L10n.text("Остановить ответ", "Stop response") : model.busy ? L10n.text("Добавить в очередь · Enter. Shift+Enter — новая строка", "Add to queue · Enter. Shift+Enter for a new line") : L10n.text("Отправить · Enter. Shift+Enter — новая строка", "Send · Enter. Shift+Enter for a new line"))
+                        .accessibilityLabel(stops ? L10n.text("Остановить ответ", "Stop response") : L10n.text("Отправить сообщение", "Send message"))
                 }.padding(.horizontal, 8).padding(.bottom, 8)
             }.background(DeskPalette.canvas, in: RoundedRectangle(cornerRadius: 20))
                 .overlay(RoundedRectangle(cornerRadius: 20).stroke(composerFocused ? DeskPalette.focusBorder : DeskPalette.border, lineWidth: 1)
@@ -1017,17 +1088,21 @@ struct ChatView: View {
             }.font(.ui(.caption2)).foregroundStyle(.secondary).padding(.horizontal, 12)
                 .frame(maxWidth: columnWidth).padding(.horizontal, 24).padding(.top, 8).padding(.bottom, 12)
         }
+        .animation(DeskMotion.standard(reduceMotion), value: model.currentAction?.id)
         .background(DeskPalette.canvas)
         // The whole chat accepts dropped files, such as a screenshot thumbnail, and adds their paths to the draft.
         .onDrop(of: [.fileURL], delegate: ChatFileDrop(enabled: !model.selectedChatIsArchived, targeted: $fileDropTargeted) { model.addDroppedFiles($0) })
         .overlay {
+            ZStack {
             if fileDropTargeted && !model.selectedChatIsArchived {
                 RoundedRectangle(cornerRadius: 16).fill(DeskPalette.subtle.opacity(0.6))
                     .overlay(RoundedRectangle(cornerRadius: 16).stroke(DeskPalette.focusBorder, style: StrokeStyle(lineWidth: 2, dash: [8, 6])))
                     .overlay(Label(L10n.text("Отпусти, чтобы добавить путь к файлу в сообщение", "Drop to add the file path to the message"), systemImage: "photo.badge.plus")
                         .font(.ui(.title3).weight(.medium)).foregroundStyle(.secondary))
                     .padding(12).allowsHitTesting(false)
+                    .transition(.opacity)
             }
+            }.animation(.snappy(duration: 0.15), value: fileDropTargeted)
         }
         .modifier(DropTargetRecovery(targeted: $fileDropTargeted, watchdog: dropWatchdog) { model.focusComposer() })
         .toolbar {
@@ -1074,11 +1149,15 @@ struct ChatView: View {
             }
         }
         .overlay {
-            if preview.expanded, let current = preview.current {
-                DocumentPreviewView(session: preview, model: current, onQuote: quoteIntoDraft)
-                    .id(current.id)
-                    .background(DeskPalette.canvas)
-            }
+            ZStack {
+                if preview.expanded, let current = preview.current {
+                    // Grows out of the inspector's side and returns there; only scale and opacity animate, never the frame.
+                    DocumentPreviewView(session: preview, model: current, onQuote: quoteIntoDraft)
+                        .id(current.id)
+                        .background(DeskPalette.canvas)
+                        .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.98, anchor: .trailing)))
+                }
+            }.animation(DeskMotion.standard(reduceMotion, response: 0.28) ?? .easeOut(duration: 0.12), value: preview.expanded)
         }
         .onChange(of: preview.expanded) { _, expanded in model.documentExpanded = expanded }
         .onDisappear { model.documentExpanded = false }

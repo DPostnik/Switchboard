@@ -67,6 +67,9 @@ public struct NativeTranscript: NSViewRepresentable {
     public var documentURL: URL?
     private var copyFeedbackTask: Task<Void, Never>?
     private var needsEndScroll = false
+    /// The reader was at the end at the last user scroll; a viewport height change then keeps the end in view.
+    private var pinnedToEnd = false
+    private var lastViewportHeight: CGFloat = 0
     private let positions: TranscriptReadingPositions
     private var pendingPosition: TranscriptReadingPositions.Position?
     private var changingLayout = false
@@ -195,6 +198,9 @@ public struct NativeTranscript: NSViewRepresentable {
         if !switched && !finished && !projectChanged {
             while common < min(previous.count, items.count), previous[common] == items[common] { common += 1 }
         }
+        // A message the user just sent is brought into view even if they had scrolled up to re-read.
+        let knownIDs = Set(previous.map(\.id))
+        let sentMessage = followOutput && !switched && items.dropFirst(common).contains { $0.kind == "user" && !knownIDs.contains($0.id) }
         let start = common < ranges.count ? ranges[common].location : storage.length
         storage.beginEditing()
         storage.deleteCharacters(in: NSRange(location: start, length: storage.length - start))
@@ -211,7 +217,7 @@ public struct NativeTranscript: NSViewRepresentable {
             needsEndScroll = false
             pendingPosition = conversationID.flatMap { positions.values[$0] }
             if pendingPosition == nil { scrollToEnd() }
-        } else if followOutput && (wasAtEnd || resumeFollowing) { scrollToEnd() }
+        } else if followOutput && (wasAtEnd || resumeFollowing || sentMessage) { scrollToEnd() }
         else {
             if case .anchor = savedPosition { pendingPosition = savedPosition }
             contentView.scroll(to: oldOrigin); reflectScrolledClipView(contentView)
@@ -243,6 +249,17 @@ public struct NativeTranscript: NSViewRepresentable {
     private func scrollToEnd() {
         pendingPosition = nil
         needsEndScroll = true
+        pinnedToEnd = true
+        needsLayout = true
+    }
+
+    /// A reader at the end stays there when only the viewport's height changes (the composer grows, the window resizes).
+    /// Uses the flag cached at the last scroll; checking the end here would lay out the whole transcript every frame.
+    private func keepEndPinned() {
+        let height = contentView.bounds.height
+        defer { lastViewportHeight = height }
+        guard pinnedToEnd, lastViewportHeight > 0, abs(height - lastViewportHeight) > 0.5, pendingPosition == nil else { return }
+        needsEndScroll = true
         needsLayout = true
     }
 
@@ -268,6 +285,7 @@ public struct NativeTranscript: NSViewRepresentable {
         positionWorkingIndicator()
         defer { scheduleReadCheck() }
         guard contentSize.width > 0, contentSize.height > 0, !previous.isEmpty else { return }
+        keepEndPinned()
         if let position = pendingPosition {
             pendingPosition = nil
             restorePosition(position)
@@ -280,6 +298,7 @@ public struct NativeTranscript: NSViewRepresentable {
 
     @objc private func viewportChanged() {
         workingIndicator.refreshAnimation()
+        keepEndPinned()
         rememberPosition()
         scheduleReadCheck()
     }
@@ -288,6 +307,7 @@ public struct NativeTranscript: NSViewRepresentable {
         guard !changingLayout, pendingPosition == nil, !needsEndScroll,
               let id = conversationID, let position = capturePosition() else { return }
         positions.values[id] = position
+        if case .end = position { pinnedToEnd = true } else { pinnedToEnd = false }
     }
 
     private func capturePosition() -> TranscriptReadingPositions.Position? {
