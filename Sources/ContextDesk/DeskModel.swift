@@ -249,8 +249,9 @@ private struct ChatRunState {
         refreshPlugins()
     }
 
-    var selectedProject: Project? { state.projects.first { $0.id == projectID } }
-    var selectedChat: Chat? { state.chats.first { $0.id == chatID } }
+    // Read the published IDs once: inside the predicate the @Published getter ran for every chat on every render.
+    var selectedProject: Project? { guard let id = projectID else { return nil }; return state.projects.first { $0.id == id } }
+    var selectedChat: Chat? { guard let id = chatID else { return nil }; return state.chats.first { $0.id == id } }
     var chats: [Chat] { projectID.map { state.orderedChats(projectID: $0, archived: false) } ?? [] }
     var currentAction: PendingAction? { pending.first { $0.threadID == chatID } }
     var currentUsage: UsageSnapshot? { chatID.flatMap { usage[$0] } }
