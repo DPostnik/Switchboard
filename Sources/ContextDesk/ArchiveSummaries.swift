@@ -3,13 +3,22 @@ import ContextCore
 
 extension DeskModel {
     func supportsSummaries(_ id: String) -> Bool {
-        state.chats.first { $0.id == id }?.isScheduledRecord != true &&
-            [.originalCodex, .appClaude].contains(state.chats.first { $0.id == id }?.nativeSession?.connection)
+        state.chats.first { $0.id == id }.map(supportsSummaries) ?? false
+    }
+
+    /// Takes the chat itself so list views avoid a linear lookup per row.
+    func supportsSummaries(_ chat: Chat) -> Bool {
+        !chat.isScheduledRecord && [.originalCodex, .appClaude].contains(chat.nativeSession?.connection)
     }
 
     /// Generation for a chat runs on its own agent connection, never on another agent's account.
     func canGenerateSummary(_ id: String) -> Bool {
-        supportsSummaries(id) && chatConnected(id) && chatAuthenticated(id)
+        state.chats.first { $0.id == id }.map(canGenerateSummary) ?? false
+    }
+
+    func canGenerateSummary(_ chat: Chat) -> Bool {
+        guard supportsSummaries(chat) else { return false }
+        return chat.nativeSession?.connection == .appClaude ? claudeConnected && claudeAuthenticated : connected && authenticated
     }
 
     func generationRunner(for id: String) -> AgentGenerationRunner {

@@ -256,6 +256,14 @@ public actor AppStore {
             return snapshot
         }
     }
+    /// Undecoded transcript blobs for the chat search index, which checks identity itself; one database open per batch.
+    public func transcriptBlobs(conversationIDs: [String]) throws -> [String: Data] {
+        try withDatabase { db in
+            var result: [String: Data] = [:]
+            for id in conversationIDs { result[id] = try bytes(db: db, key: "transcript:" + id) }
+            return result
+        }
+    }
     public func recordTranscriptItem(_ item: TranscriptItem, conversationID: String, source: AgentSessionReference) throws {
         let previous = try loadTranscript(conversationID: conversationID)
         var items = previous.map(LocalHistory.items) ?? []

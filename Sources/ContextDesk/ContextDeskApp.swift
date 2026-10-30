@@ -132,6 +132,7 @@ struct ContextDeskApp: App {
                 .modifier(MainWindowOpener(delegate: delegate))
                 .task {
                     delegate.model = model
+                    TranscriptLinks.openChat = { [weak model] id in model?.openChatLink(id) }
                     NotchIslandController.start(model: model, showMainWindow: { [weak delegate] in delegate?.showMainWindow() })
                     FringeLinkServer.start(model: model, showMainWindow: { [weak delegate] in delegate?.showMainWindow() })
                     await model.boot()

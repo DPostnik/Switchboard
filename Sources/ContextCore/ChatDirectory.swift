@@ -67,8 +67,9 @@ public enum ChatDirectory {
         }
     }
 
-    /// The MCP server's command line for one chat.
-    public static func serverArguments(script: String, snapshot: String, chat: String) -> [String] {
-        [script, "--snapshot", snapshot, "--chat", chat]
+    /// The MCP server's command line for one chat. `index` adds the full-text search tools;
+    /// `recipe` makes the server hand its search instructions to a chat-search chat.
+    public static func serverArguments(script: String, snapshot: String, chat: String, index: String? = nil, recipe: String? = nil) -> [String] {
+        [script, "--snapshot", snapshot, "--chat", chat] + (index.map { ["--index", $0] } ?? []) + (recipe.map { ["--recipe", $0] } ?? [])
     }
 }

@@ -92,6 +92,9 @@ private struct ChatRunState {
     @Published var archiveSummaries: [String: ArchiveSummaryRecord] = [:]
     @Published var summaryActiveThread: String?
     var summaryTask: Task<Void, Never>?
+    /// Full-text index of chat dialogue for the archive search and the chat-search tools (`ChatSearch.swift`).
+    let chatSearchIndex: ChatSearchIndex
+    var chatIndexTask: Task<Void, Never>?
     let summaryRunner: AgentGenerationRunner
     let claudeSummaryRunner: AgentGenerationRunner
     var titleTasks: [String: Task<Void, Never>] = [:]
@@ -211,7 +214,7 @@ private struct ChatRunState {
     @Published private(set) var refreshingClaudeLimits = false
     private var claudeLimitsRequestID: UUID?
     @Published var notificationStatus = L10n.text("Уведомления не включены", "Notifications are off")
-    private var loadedThreads: Set<String> = []
+    var loadedThreads: Set<String> = []
     private var eventTask: Task<Void, Never>?
     private var selectionGeneration = UUID()
     private var booted = false
@@ -233,6 +236,7 @@ private struct ChatRunState {
          jobStore: JobStore = JobStore(file: Locations.root.appendingPathComponent("scheduled-jobs.json"))) {
         self.jobStore = jobStore
         self.attentionStore = AttentionStore(file: jobStore.file.deletingLastPathComponent().appendingPathComponent("attention.json"))
+        self.chatSearchIndex = ChatSearchIndex(file: jobStore.file.deletingLastPathComponent().appendingPathComponent(ChatSearchIndex.fileName))
         self.connection = AgentClient(integration: connection)
         self.claudeConnection = AgentClient(integration: claudeIntegration)
         self.summaryRunner = AgentGenerationRunner(integration: connection)
@@ -1109,7 +1113,9 @@ private struct ChatRunState {
               chat.nativeSession?.connection == .appClaude,
               let script = Bundle.main.resourceURL?.appendingPathComponent("ChatDirectoryRuntime/server.py"),
               FileManager.default.fileExists(atPath: script.path) else { return nil }
-        return ChatDirectory.serverArguments(script: script.path, snapshot: chatDirectoryFile.path, chat: id)
+        // Every chat with access can search the index; only a chat-search chat gets the search recipe as instructions.
+        return ChatDirectory.serverArguments(script: script.path, snapshot: chatDirectoryFile.path, chat: id, index: chatSearchIndexFile.path,
+                                             recipe: chat.chatSearch == true ? chatSearchRecipe.path : nil)
     }
     var chatDirectoryFile: URL { Locations.root.appendingPathComponent(ChatDirectory.fileName) }
     /// Gives or takes a chat's access to the other chats; it applies from the chat's next message.
@@ -1276,7 +1282,7 @@ private struct ChatRunState {
         await deliver(text: text, project: project, threadID: chatID, localID: localID,
                       selectedModel: currentModel, selectedEffort: currentAgent == .appClaude ? claudeEffort : effort)
     }
-    private func deliver(text: String, project: Project, threadID: String?, localID: String,
+    func deliver(text: String, project: Project, threadID: String?, localID: String,
                          selectedModel: String, selectedEffort: String, scheduledRun: UUID? = nil, scheduledRoute: RequestRoute? = nil, scheduledBrowserImport: ChromeSessionImportPolicy? = nil,
                          scheduledAgent: AgentConnectionID = .originalCodex, scheduledRole: AgentRole? = nil, afterInterrupt: Bool = false) async {
         let selection = selectionGeneration

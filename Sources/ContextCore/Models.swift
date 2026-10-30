@@ -45,6 +45,8 @@ public struct Chat: Identifiable, Codable, Hashable, Sendable {
     public var lastTurnFailed: Bool?
     /// The user let this chat read the other chats through the chat directory tools.
     public var chatDirectoryAccess: Bool?
+    /// A chat the archive opened to find other chats: its chat tools carry the search recipe.
+    public var chatSearch: Bool?
     public var sidebarOrder: Int?
     public var pinned: Bool?
     public var isPinned: Bool { pinned == true }

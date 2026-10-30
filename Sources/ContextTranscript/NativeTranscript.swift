@@ -891,6 +891,10 @@ public struct NativeTranscript: NSViewRepresentable {
             needsLayout = true
             return true
         }
+        if value.hasPrefix(TranscriptLinks.chatScheme + ":") {
+            TranscriptLinks.openChat?(String(value.dropFirst(TranscriptLinks.chatScheme.count + 1)))
+            return true
+        }
         guard let url = TranscriptLinks.destination(value) else { return true }
         if url.isFileURL {
             let line = transcript.textStorage.flatMap { storage in

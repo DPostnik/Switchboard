@@ -14,6 +14,11 @@ extension NSAttributedString.Key {
 @MainActor public enum TranscriptLinks {
     enum Chip: Int { case code, file, web }
 
+    /// `switchboard-chat:<chat id>` links, written by the chat-search agent, open that chat in the app.
+    public static let chatScheme = "switchboard-chat"
+    /// Set by the app; without it chat links stay plain text.
+    public static var openChat: ((String) -> Void)?
+
     /// How agent text is decorated in the transcript. Defaults keep the literal text.
     public struct Options {
         /// File links get an icon and a compact name; long bare URLs are shortened to their host.
@@ -46,6 +51,7 @@ extension NSAttributedString.Key {
         switch scheme {
         case "http", "https": return url.host?.isEmpty == false ? url : nil
         case "mailto": return url
+        case chatScheme: return openChat != nil && !(url.absoluteString.dropFirst(chatScheme.count + 1)).isEmpty ? url : nil
         case "file": return url.host == nil || url.host == "" || url.host == "localhost" ? url : nil
         default: return nil
         }
@@ -218,7 +224,7 @@ extension NSAttributedString.Key {
                              options: Options, keepText: Bool = false) -> NSAttributedString {
         var style = style
         style[.link] = url
-        style[.toolTip] = url.isFileURL ? url.path + (line ?? "") : url.absoluteString
+        style[.toolTip] = url.isFileURL ? url.path + (line ?? "") : url.scheme == chatScheme ? L10n.text("Открыть чат", "Open the chat") : url.absoluteString
         style[.foregroundColor] = NSColor.linkColor
         guard options.chips else {
             style[.underlineStyle] = NSUnderlineStyle.single.rawValue
