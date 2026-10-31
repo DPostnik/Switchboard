@@ -55,6 +55,47 @@ private func temporaryDirectory() throws -> URL {
     #expect(fallback.kind == .quickLook || fallback.text != nil)
 }
 
+@Test @MainActor func documentPreviewModelFollowsFileWithoutPolling() async throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let file = directory.appendingPathComponent("WATCHED.md")
+    try "# First".write(to: file, atomically: true, encoding: .utf8)
+    let model = DocumentPreviewModel(url: file)
+    #expect(model.text == "# First")
+    #expect(model.isWatching)
+    func settle(until condition: @escaping @MainActor () -> Bool) async throws {
+        // Changes are coalesced for 250 ms and read off the main thread; nobody calls checkForChanges here.
+        for _ in 0..<60 where !condition() { try await Task.sleep(for: .milliseconds(50)) }
+    }
+    // An atomic save replaces the inode; the watcher follows the path again afterwards.
+    try "# Second\n\nBody".write(to: file, atomically: true, encoding: .utf8)
+    try await settle { model.text == "# Second\n\nBody" }
+    #expect(model.text == "# Second\n\nBody")
+    #expect(model.isWatching)
+    // A write in place (same inode) is picked up too.
+    try Data("# Third".utf8).write(to: file, options: [])
+    try await settle { model.text == "# Third" }
+    #expect(model.text == "# Third")
+    // Several quick edits produce one coalesced reload with the final content.
+    let revision = model.revision
+    for step in 1...5 { try Data("# Burst \(step)".utf8).write(to: file, options: []) }
+    try await settle { model.text == "# Burst 5" }
+    #expect(model.text == "# Burst 5")
+    #expect(model.revision == revision + 1)
+    // Deleting the file drops the watcher; the fallback poll re-arms it once the file is back.
+    try FileManager.default.removeItem(at: file)
+    try await settle { model.text == nil }
+    #expect(model.text == nil && model.failure != nil)
+    #expect(!model.isWatching)
+    try "back".write(to: file, atomically: true, encoding: .utf8)
+    await model.pollIfUnwatched()
+    #expect(model.text == "back" && model.failure == nil)
+    #expect(model.isWatching)
+    // Missing files give no watcher; the model still reports the failure.
+    let missing = DocumentPreviewModel(url: directory.appendingPathComponent("absent.md"))
+    #expect(!missing.isWatching && missing.failure != nil)
+}
+
 @Test @MainActor func documentModeShowsWholeCodeWithoutChatChrome() throws {
     let code = (1...60).map { "let value\($0) = \($0)" }.joined(separator: "\n")
     let view = TranscriptScrollView()

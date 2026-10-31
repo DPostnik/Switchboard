@@ -62,7 +62,7 @@ final class TableBox: NSObject {
                 result.addAttribute(.sectionKey, value: section, range: NSRange(location: start, length: result.length - start))
             }
         }
-        if !view.isDocument { appendSources(into: result) }
+        if !view.isDocument { appendSources(into: result, nodes: nodes, lines: lines) }
     }
 
     // MARK: Blocks
@@ -483,8 +483,8 @@ final class TableBox: NSObject {
     }
 
     /// A collapsed list of the web pages an answer links to.
-    private mutating func appendSources(into result: NSMutableAttributedString) {
-        let sources = Self.webSources(in: item.text)
+    private mutating func appendSources(into result: NSMutableAttributedString, nodes: [MarkdownNode], lines: [String]) {
+        let sources = Self.webSources(in: item.text, nodes: nodes, lines: lines)
         guard sources.count >= Self.sourcesThreshold else { return }
         let key = item.id + "#sources"
         let open = view.expandedBlocks.contains(key)
@@ -514,7 +514,18 @@ final class TableBox: NSObject {
         }
     }
 
+    /// Web pages the answer links to, in order of first appearance. Parses the Markdown once more;
+    /// the renderer passes its own nodes and lines to the other overload instead.
     nonisolated static func webSources(in text: String) -> [(url: URL, title: String?)] {
+        if let cached = WebSourceScan.cached(text) { return cached }
+        return webSources(in: text, nodes: MarkdownBlocks.nodes(text), lines: MarkdownBlocks.lines(text))
+    }
+
+    /// `nodes` and `lines` must come from `MarkdownBlocks.nodes(text)` and `MarkdownBlocks.lines(text)`.
+    /// The result is memoized by the exact text: a message re-renders many times (every streaming tick, each
+    /// toggle, the re-render when a turn finishes) and the link detector is the expensive part.
+    nonisolated static func webSources(in text: String, nodes: [MarkdownNode], lines: [String]) -> [(url: URL, title: String?)] {
+        if let cached = WebSourceScan.cached(text) { return cached }
         var result: [(url: URL, title: String?)] = []
         var seen = Set<String>()
         func add(_ url: URL, _ title: String?) {
@@ -524,24 +535,25 @@ final class TableBox: NSObject {
             if seen.insert(key).inserted { result.append((url, title)) }
         }
         // Code blocks are literal and are not sources.
-        let lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
-        let prose = MarkdownBlocks.nodes(text).compactMap { node -> String? in
+        let prose = nodes.compactMap { node -> String? in
             if case .code = node.block { return nil }
+            guard node.lines.lowerBound >= 0, node.lines.upperBound <= lines.count else { return nil }
             return lines[node.lines].joined(separator: "\n")
         }.joined(separator: "\n")
         let ns = prose as NSString
         var linked = Set<Int>()
-        if let markdownLink = try? NSRegularExpression(pattern: #"(?<!!)\[([^\]]+)\]\((https?://[^)\s]+)\)"#) {
+        if let markdownLink = WebSourceScan.markdownLink {
             for match in markdownLink.matches(in: prose, range: NSRange(location: 0, length: ns.length)) {
                 if let url = URL(string: ns.substring(with: match.range(at: 2))) { add(url, ns.substring(with: match.range(at: 1))) }
                 for offset in 0..<match.range.length { linked.insert(match.range.location + offset) }
             }
         }
-        if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) {
+        if let detector = WebSourceScan.detector {
             for match in detector.matches(in: prose, range: NSRange(location: 0, length: ns.length)) where !linked.contains(match.range.location) {
                 if let url = match.url { add(url, nil) }
             }
         }
+        WebSourceScan.remember(text, result)
         return result
     }
 
@@ -650,5 +662,36 @@ final class TableBox: NSObject {
               let image = NSImage(contentsOf: url), image.size.width > 0, image.size.height > 0 else { return nil }
         images.setObject(image, forKey: key)
         return image
+    }
+}
+
+/// Shared state of `TranscriptMarkdown.webSources`: the matchers are built once (creating an `NSDataDetector`
+/// per call dominated streaming re-renders) and the last results are kept by exact text. `webSources` is
+/// `nonisolated`, so the cache is guarded by a lock.
+private enum WebSourceScan {
+    typealias Sources = [(url: URL, title: String?)]
+
+    nonisolated(unsafe) static let markdownLink = try? NSRegularExpression(pattern: #"(?<!!)\[([^\]]+)\]\((https?://[^)\s]+)\)"#)
+    nonisolated(unsafe) static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
+    /// Most recent entry last. A streamed answer misses on every tick (its text grows), so the cache serves the
+    /// re-renders of unchanged messages: toggles, the finish re-render, scrolling.
+    static let capacity = 8
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var entries: [(text: String, sources: Sources)] = []
+
+    static func cached(_ text: String) -> Sources? {
+        lock.lock(); defer { lock.unlock() }
+        guard let index = entries.lastIndex(where: { $0.text == text }) else { return nil }
+        let entry = entries.remove(at: index)
+        entries.append(entry)
+        return entry.sources
+    }
+
+    static func remember(_ text: String, _ sources: Sources) {
+        lock.lock(); defer { lock.unlock() }
+        entries.removeAll { $0.text == text }
+        entries.append((text, sources))
+        if entries.count > capacity { entries.removeFirst(entries.count - capacity) }
     }
 }
