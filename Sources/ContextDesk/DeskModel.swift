@@ -3,7 +3,21 @@ import Foundation
 import SwiftUI
 import UserNotifications
 import ContextCore
+import ContextTranscript
 import AgentContract
+
+/// What the app menu reads from the model. The App body holds the model without observing it, so the
+/// menu commands observe this object instead; it publishes only when an item's enabled state flips.
+@MainActor final class AppMenuState: ObservableObject {
+    /// The model finished booting: Open Project is available.
+    @Published private(set) var ready = false
+    /// A project is selected: New Chat is available.
+    @Published private(set) var hasProject = false
+    func update(ready: Bool, hasProject: Bool) {
+        if self.ready != ready { self.ready = ready }
+        if self.hasProject != hasProject { self.hasProject = hasProject }
+    }
+}
 
 struct PendingAction: Identifiable {
     let interaction: AgentInteraction
@@ -68,8 +82,11 @@ private struct ChatRunState: Equatable {
     private var directoryHistoryCache: [String: (updated: Date, messages: [TranscriptItem])] = [:]
     @Published var state = SavedState() {
         // Any state change may add, remove or re-key a chat; the next event rebuilds the map.
-        didSet { nativeSessionMap = nil }
+        didSet { nativeSessionMap = nil; syncMenu() }
     }
+    /// Observed by the app menu instead of the model (`ContextDeskApp`).
+    let menu = AppMenuState()
+    private func syncMenu() { menu.update(ready: !isBootstrapping, hasProject: selectedProject != nil) }
     /// (connection, native ID) -> chat ID for `receive`, built on demand after a state change instead of
     /// filtering every chat for every streamed delta.
     private var nativeSessionMap: NativeSessionMap?
@@ -77,7 +94,9 @@ private struct ChatRunState: Equatable {
         if nativeSessionMap == nil { nativeSessionMap = NativeSessionMap(chats: state.chats) }
         return nativeSessionMap?.appID(for: session)
     }
-    @Published var projectID: UUID?
+    @Published var projectID: UUID? {
+        didSet { syncMenu() }
+    }
     @Published var chatID: String? {
         didSet { if chatID != oldValue { transcript.cancelPending() } }
     }
@@ -152,20 +171,29 @@ private struct ChatRunState: Equatable {
     }
     private var newChatDrafts: [UUID: String] = [:]
     private var chatDrafts: [String: String] = [:]
-    @Published var draft = "" {
-        didSet {
-            if let chatID {
-                chatDrafts[chatID] = draft.isEmpty ? nil : draft
-            } else if let projectID {
-                newChatDrafts[projectID] = draft.isEmpty ? nil : draft
-            }
+    /// The composer's live text. It is not part of the model's publication: the editor writes it on every
+    /// keystroke, and only the views bound to it (editor, placeholder, send and restore buttons) follow it.
+    let composer = ComposerState()
+    /// The composer text as the model and its callers see it; a write reaches the editor through `composer`.
+    var draft: String {
+        get { composer.text }
+        set { composer.text = newValue }
+    }
+    /// Every change, typed or set, is kept for the chat (or the project's new chat) it belongs to.
+    private func storeDraft(_ draft: String) {
+        if let chatID {
+            chatDrafts[chatID] = draft.isEmpty ? nil : draft
+        } else if let projectID {
+            newChatDrafts[projectID] = draft.isEmpty ? nil : draft
         }
     }
     @Published var agentDescriptor: AgentDescriptor?
     @Published var connected = false
     @Published var authenticated = false
     @Published var connecting = false
-    @Published private(set) var isBootstrapping = true
+    @Published private(set) var isBootstrapping = true {
+        didSet { syncMenu() }
+    }
     @Published private var runs: [String: ChatRunState] = [:]
     /// Idle chats whose agent still runs background tasks and will resume on its own; thread ID -> task count.
     @Published private(set) var backgroundWaits: [String: Int] = [:]
@@ -258,6 +286,7 @@ private struct ChatRunState: Equatable {
         self.capabilityLedger = capabilityLedger
         self.pluginDirectory = pluginDirectory
         self.summaryResources = summaryResources; self.summaryExecutable = summaryExecutable; self.summaryHome = summaryHome
+        composer.onChange = { [weak self] text in self?.storeDraft(text) }
         refreshPlugins()
     }
 
@@ -267,7 +296,7 @@ private struct ChatRunState: Equatable {
     var chats: [Chat] { projectID.map { state.orderedChats(projectID: $0, archived: false) } ?? [] }
     var currentAction: PendingAction? { pending.first { $0.threadID == chatID } }
     var currentUsage: UsageSnapshot? { chatID.flatMap { usage[$0] } }
-    var canSend: Bool { (selectedChat?.isScheduledRecord != true || !busy) && !creatingHandoff && (chatID.map { chatIsAvailable($0) } ?? ([.originalCodex, .appClaude].contains(currentAgent))) && !selectedChatIsArchived && !isChangingChat(currentRunKey) && routeIsAvailable(currentRoute) && currentAgentConnected && currentAgentAuthenticated && selectedProject != nil && !sending && !loadingChat && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    var canSend: Bool { (selectedChat?.isScheduledRecord != true || !busy) && !creatingHandoff && (chatID.map { chatIsAvailable($0) } ?? ([.originalCodex, .appClaude].contains(currentAgent))) && !selectedChatIsArchived && !isChangingChat(currentRunKey) && routeIsAvailable(currentRoute) && currentAgentConnected && currentAgentAuthenticated && selectedProject != nil && !sending && !loadingChat && composer.hasMessage }
     var supportedEfforts: [String] {
         models.first { $0.id == currentModel }?.efforts ?? []
     }
@@ -654,7 +683,7 @@ private struct ChatRunState: Equatable {
     func newChat() {
         showingArchive = false
         selectionGeneration = UUID(); chatID = nil; items = []; localHistoryNotice = nil
-        draft = projectID.flatMap { newChatDrafts[$0] } ?? ""
+        composer.text = projectID.flatMap { newChatDrafts[$0] } ?? ""
         showingJobs = false; showingAttention = false; loadingChat = false
         composerFocusRequest = UUID()
     }
@@ -665,9 +694,9 @@ private struct ChatRunState: Equatable {
     /// Returns keyboard focus to the composer, e.g. after a drag that ended without a drop.
     func focusComposer() { composerFocusRequest = UUID() }
     func addDroppedFiles(_ urls: [URL]) {
-        let updated = DroppedFiles.appending(DroppedFiles.preserving(urls, in: DroppedFiles.directory), to: draft)
-        guard updated != draft else { return }
-        draft = updated
+        let updated = DroppedFiles.appending(DroppedFiles.preserving(urls, in: DroppedFiles.directory), to: composer.text)
+        guard updated != composer.text else { return }
+        composer.text = updated
         composerFocusRequest = UUID()
     }
     func openChat(_ chat: Chat) async {
@@ -676,7 +705,7 @@ private struct ChatRunState: Equatable {
         showingArchive = isArchived(chat.id)
         archiveViewingChat = showingArchive
         showingJobs = false; showingAttention = false; projectID = chat.projectID; chatID = chat.id; composerFocusRequest = nil
-        draft = chatDrafts[chat.id] ?? ""
+        composer.text = chatDrafts[chat.id] ?? ""
         let generation = UUID(); selectionGeneration = generation
         defer { if selectionGeneration == generation { loadingChat = false } }
         loadingChat = true; items = []; localHistoryNotice = nil
@@ -847,12 +876,12 @@ private struct ChatRunState: Equatable {
         do { routines = try await store.loadRoutines() } catch { self.error = error.localizedDescription }
     }
     func restoreHandoffDraft() async {
-        guard let chat = selectedChat, let origin = chat.handoffOrigin, draft.isEmpty else { return }
+        guard let chat = selectedChat, let origin = chat.handoffOrigin, !composer.hasText else { return }
         do {
             guard let saved = try await store.loadHandoff(origin.id), saved.origin == origin else { throw ConversationIdentity.invalidStorage }
             let prompt = try saved.prompt()
-            guard chatID == chat.id, draft.isEmpty else { return }
-            draft = prompt
+            guard chatID == chat.id, !composer.hasText else { return }
+            composer.text = prompt
         } catch { self.error = error.localizedDescription }
     }
     func saveRoutine(_ routine: PortableRoutine) async -> Bool {
@@ -1287,9 +1316,9 @@ private struct ChatRunState: Equatable {
     func send() async {
         guard canSend, let project = selectedProject else { return }
         if let record = selectedChat, record.isScheduledRecord {
-            await followUpScheduledRecord(record, text: draft, project: project); return
+            await followUpScheduledRecord(record, text: composer.text, project: project); return
         }
-        let text = draft; draft = ""
+        let text = composer.text; composer.text = ""
         let localID = "local-user:" + UUID().uuidString
         if let thread = chatID, busy || !visibleQueue.isEmpty {
             if visibleQueue.isEmpty { runs[thread, default: ChatRunState()].queuePaused = false }
@@ -1361,7 +1390,7 @@ private struct ChatRunState: Equatable {
                 runKey = created
                 if visible && selectionGeneration == selection {
                     chatID = created
-                    chatDrafts[created] = draft.isEmpty ? nil : draft
+                    chatDrafts[created] = composer.hasText ? composer.text : nil
                     newChatDrafts.removeValue(forKey: project.id)
                 }
                 loadedThreads.insert(created)
@@ -1450,7 +1479,7 @@ private struct ChatRunState: Equatable {
                 runs[runKey, default: ChatRunState()].running = false
                 runs[runKey, default: ChatRunState()].turnID = nil
             }
-            if visible && selectionGeneration == selection && draft.isEmpty { draft = text }
+            if visible && selectionGeneration == selection && !composer.hasText { composer.text = text }
         }
     }
     func scheduledAgentReady(_ agent: AgentConnectionID) -> Bool {

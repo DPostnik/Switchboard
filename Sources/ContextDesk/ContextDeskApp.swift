@@ -114,37 +114,20 @@ import UserNotifications
 
 struct ContextDeskApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @StateObject private var model = DeskModel()
+    /// Held for the app's lifetime but not observed: the App body, and with it every menu command, no longer
+    /// re-evaluates on model changes. The window, the settings scene and the menus observe what they need.
+    @State private var model: DeskModel
     init() {
         // Establish the app-scoped language before SwiftUI constructs native menus.
         L10n.language.save()
         // Keep native controls and TextKit consistent with the white workspace.
         NSApplication.shared.appearance = NSAppearance(named: .aqua)
+        _model = State(initialValue: DeskModel())
     }
 
     var body: some Scene {
         Window("Switchboard", id: "main") {
-            Group {
-                if model.isBootstrapping {
-                    StartupLoadingView()
-                } else {
-                    DeskView(model: model)
-                }
-            }
-                .buttonStyle(PointerButtonStyle(base: .automatic))
-                .modifier(InterfaceZoomed())
-                .preferredColorScheme(.light)
-                .environment(\.locale, L10n.locale)
-                .frame(minWidth: 900, minHeight: 620)
-                .background(MainWindowPlacer())
-                .modifier(MainWindowOpener(delegate: delegate))
-                .task {
-                    delegate.model = model
-                    TranscriptLinks.openChat = { [weak model] id in model?.openChatLink(id) }
-                    NotchIslandController.start(model: model, showMainWindow: { [weak delegate] in delegate?.showMainWindow() })
-                    FringeLinkServer.start(model: model, showMainWindow: { [weak delegate] in delegate?.showMainWindow() })
-                    await model.boot()
-                }
+            MainWindowContent(model: model, delegate: delegate)
         }
         .defaultSize(width: 1120, height: 760)
         .commands {
@@ -167,21 +150,67 @@ struct ContextDeskApp: App {
                 SettingsLink { Text("Язык / Language…") }
             }
             CommandGroup(after: .newItem) {
-                Button(L10n.text("Открыть проект…", "Open Project…")) { model.openProject() }.keyboardShortcut("o")
-                    .disabled(model.isBootstrapping)
-                Button(L10n.text("Новый чат", "New chat")) { model.newChat() }.keyboardShortcut("n")
-                    .disabled(model.isBootstrapping || model.selectedProject == nil)
+                ChatCommands(model: model, menu: model.menu)
             }
         }
         Settings {
-            Group {
-                if model.isBootstrapping { StartupLoadingView() }
-                else { SettingsView(model: model, keepAwake: delegate.keepAwake) }
-            }.buttonStyle(PointerButtonStyle(base: .automatic))
-                .modifier(InterfaceZoomed())
-                .preferredColorScheme(.light)
-                .environment(\.locale, L10n.locale).frame(width: 720).padding(20)
+            SettingsContent(model: model, keepAwake: delegate.keepAwake)
         }
+    }
+}
+
+/// The main window's root; observes the model so the loading screen gives way to the desk.
+private struct MainWindowContent: View {
+    @ObservedObject var model: DeskModel
+    let delegate: AppDelegate
+    var body: some View {
+        Group {
+            if model.isBootstrapping {
+                StartupLoadingView()
+            } else {
+                DeskView(model: model)
+            }
+        }
+            .buttonStyle(PointerButtonStyle(base: .automatic))
+            .modifier(InterfaceZoomed())
+            .preferredColorScheme(.light)
+            .environment(\.locale, L10n.locale)
+            .frame(minWidth: 900, minHeight: 620)
+            .background(MainWindowPlacer())
+            .modifier(MainWindowOpener(delegate: delegate))
+            .task {
+                delegate.model = model
+                TranscriptLinks.openChat = { [weak model] id in model?.openChatLink(id) }
+                NotchIslandController.start(model: model, showMainWindow: { [weak delegate] in delegate?.showMainWindow() })
+                FringeLinkServer.start(model: model, showMainWindow: { [weak delegate] in delegate?.showMainWindow() })
+                await model.boot()
+            }
+    }
+}
+
+private struct SettingsContent: View {
+    @ObservedObject var model: DeskModel
+    let keepAwake: KeepAwake
+    var body: some View {
+        Group {
+            if model.isBootstrapping { StartupLoadingView() }
+            else { SettingsView(model: model, keepAwake: keepAwake) }
+        }.buttonStyle(PointerButtonStyle(base: .automatic))
+            .modifier(InterfaceZoomed())
+            .preferredColorScheme(.light)
+            .environment(\.locale, L10n.locale).frame(width: 720).padding(20)
+    }
+}
+
+/// File menu items that depend on the model; they observe `AppMenuState`, which publishes only when they flip.
+private struct ChatCommands: View {
+    let model: DeskModel
+    @ObservedObject var menu: AppMenuState
+    var body: some View {
+        Button(L10n.text("Открыть проект…", "Open Project…")) { model.openProject() }.keyboardShortcut("o")
+            .disabled(!menu.ready)
+        Button(L10n.text("Новый чат", "New chat")) { model.newChat() }.keyboardShortcut("n")
+            .disabled(!menu.ready || !menu.hasProject)
     }
 }
 

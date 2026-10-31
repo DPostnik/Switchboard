@@ -922,7 +922,7 @@ struct ChatView: View {
                 HStack {
                     Text(L10n.text("Контекст из чата", "Context from chat") + ": " + origin.conversation.value)
                         .font(.ui(.caption)).foregroundStyle(.secondary).textSelection(.enabled)
-                    Button(L10n.text("Вернуть исходный контекст в черновик", "Restore initial context to draft")) { Task { await model.restoreHandoffDraft() } }.disabled(!model.draft.isEmpty)
+                    HandoffRestoreButton(model: model, composer: model.composer)
                 }.padding(.horizontal, .ui(24))
             }
             ChatHistoryView(model: model, transcript: model.transcript, followOutput: followOutput, onOpenFile: openPreview)
@@ -1001,12 +1001,10 @@ struct ChatView: View {
             }
             if !model.selectedChatIsArchived {
             VStack(spacing: 4) {
-                ZStack(alignment: .topLeading) {
-                    if model.draft.isEmpty { Text(model.selectedChat?.isScheduledRecord == true ? L10n.text("Ответить в новом чате…", "Reply in a new chat…") : L10n.text("Напиши сообщение…", "Write a message…")).font(.ui(size: 14)).foregroundStyle(.secondary).padding(.horizontal, 21).padding(.top, 16).allowsHitTesting(false) }
-                    MessageComposer(text: $model.draft, focused: $composerFocused, focusRequest: model.composerFocusRequest,
-                                    onContentHeight: resizeComposer) { Task { await model.send() } }
-                        .frame(height: min(max(composerHeight, 40), 220)).padding(.horizontal, 16).padding(.top, 14).accessibilityLabel(L10n.text("Сообщение", "Message"))
-                }
+                ComposerEditor(composer: model.composer,
+                               placeholder: model.selectedChat?.isScheduledRecord == true ? L10n.text("Ответить в новом чате…", "Reply in a new chat…") : L10n.text("Напиши сообщение…", "Write a message…"),
+                               focused: $composerFocused, focusRequest: model.composerFocusRequest,
+                               height: min(max(composerHeight, 40), 220), onContentHeight: resizeComposer) { Task { await model.send() } }
                 if !model.roleApproximations.isEmpty {
                     // No vertical fixedSize here: during the window's minimum-size pass it wrapped the notice one
                     // character per line, so both columns got a ~1500 pt minimum height and overflowed the window.
@@ -1064,23 +1062,7 @@ struct ChatView: View {
                             }.disabled(model.busy)
                         }
                     }
-                    // One round control: stop while a response runs and nothing is typed, otherwise send or queue.
-                    // A single button, so the symbol morphs in place instead of one control replacing another.
-                    let stops = model.busy && model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    Button { Task { if stops { await model.interrupt() } else { await model.send() } } } label: {
-                        Image(systemName: stops ? "stop.fill" : "arrow.up")
-                            .font(stops ? .ui(size: 11) : .ui(size: 14, weight: .semibold))
-                            .contentTransition(.symbolEffect(.replace))
-                            .frame(width: .ui(32), height: .ui(32))
-                            .foregroundStyle(.white)
-                            .background(DeskPalette.ink.opacity(stops || model.canSend ? 1 : 0.2), in: Circle())
-                    }.buttonStyle(RoundControlStyle())
-                        .keyboardShortcut(stops ? nil : KeyboardShortcut(.return, modifiers: .command))
-                        .disabled(!stops && !model.canSend).padding(.leading, .ui(6))
-                        .animation(reduceMotion ? nil : .snappy(duration: 0.18), value: stops)
-                        .animation(.easeOut(duration: 0.12), value: model.canSend)
-                        .help(stops ? L10n.text("Остановить ответ", "Stop response") : model.busy ? L10n.text("Добавить в очередь · Enter. Shift+Enter — новая строка", "Add to queue · Enter. Shift+Enter for a new line") : L10n.text("Отправить · Enter. Shift+Enter — новая строка", "Send · Enter. Shift+Enter for a new line"))
-                        .accessibilityLabel(stops ? L10n.text("Остановить ответ", "Stop response") : L10n.text("Отправить сообщение", "Send message"))
+                    SendControl(model: model, composer: model.composer, reduceMotion: reduceMotion)
                 }.padding(.horizontal, .ui(8)).padding(.bottom, .ui(8))
             }.background(DeskPalette.canvas, in: RoundedRectangle(cornerRadius: 20))
                 .overlay(RoundedRectangle(cornerRadius: 20).stroke(composerFocused ? DeskPalette.focusBorder : DeskPalette.border, lineWidth: 1)
@@ -1194,7 +1176,7 @@ struct ChatView: View {
     /// A fragment selected in the preview goes into the draft with its file and lines; nothing is sent.
     private func quoteIntoDraft(_ url: URL, text: String, lines: ClosedRange<Int>?) {
         let path = TranscriptScrollView.relativePath(url.path, project: model.selectedProject?.path) ?? url.path
-        model.draft = DocumentQuote.draft(path: path, lines: lines, text: text, appendingTo: model.draft)
+        model.composer.text = DocumentQuote.draft(path: path, lines: lines, text: text, appendingTo: model.composer.text)
         // The composer is hidden behind an expanded preview.
         preview.expanded = false
         model.focusComposer()
@@ -1234,7 +1216,64 @@ struct ChatHistoryView: View {
         }
     }
     private func suggestion(_ title: String, prompt: String) -> some View {
-        Button(title) { model.draft = prompt }.buttonStyle(DeskButtonStyle())
+        Button(title) { model.composer.text = prompt }.buttonStyle(DeskButtonStyle())
+    }
+}
+
+/// The editor with its placeholder. Only this view and the two buttons below follow the composer's
+/// state; the chat view itself does not, so a keystroke renders nothing above the composer.
+private struct ComposerEditor: View {
+    @ObservedObject var composer: ComposerState
+    let placeholder: String
+    @Binding var focused: Bool
+    let focusRequest: UUID?
+    let height: CGFloat
+    let onContentHeight: (CGFloat) -> Void
+    let onSubmit: () -> Void
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if !composer.hasText {
+                Text(placeholder).font(.ui(size: 14)).foregroundStyle(.secondary).padding(.horizontal, 21).padding(.top, 16).allowsHitTesting(false)
+            }
+            MessageComposer(state: composer, focused: $focused, focusRequest: focusRequest, onContentHeight: onContentHeight, onSubmit: onSubmit)
+                .frame(height: height).padding(.horizontal, 16).padding(.top, 14).accessibilityLabel(L10n.text("Сообщение", "Message"))
+        }
+    }
+}
+
+/// One round control: stop while a response runs and nothing is typed, otherwise send or queue.
+/// A single button, so the symbol morphs in place instead of one control replacing another.
+/// It observes the composer's flags, not its text: only the first typed character and a cleared draft render it.
+private struct SendControl: View {
+    @ObservedObject var model: DeskModel
+    @ObservedObject var composer: ComposerState
+    let reduceMotion: Bool
+    var body: some View {
+        let stops = model.busy && !composer.hasMessage
+        Button { Task { if stops { await model.interrupt() } else { await model.send() } } } label: {
+            Image(systemName: stops ? "stop.fill" : "arrow.up")
+                .font(stops ? .ui(size: 11) : .ui(size: 14, weight: .semibold))
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: .ui(32), height: .ui(32))
+                .foregroundStyle(.white)
+                .background(DeskPalette.ink.opacity(stops || model.canSend ? 1 : 0.2), in: Circle())
+        }.buttonStyle(RoundControlStyle())
+            .keyboardShortcut(stops ? nil : KeyboardShortcut(.return, modifiers: .command))
+            .disabled(!stops && !model.canSend).padding(.leading, .ui(6))
+            .animation(reduceMotion ? nil : .snappy(duration: 0.18), value: stops)
+            .animation(.easeOut(duration: 0.12), value: model.canSend)
+            .help(stops ? L10n.text("Остановить ответ", "Stop response") : model.busy ? L10n.text("Добавить в очередь · Enter. Shift+Enter — новая строка", "Add to queue · Enter. Shift+Enter for a new line") : L10n.text("Отправить · Enter. Shift+Enter — новая строка", "Send · Enter. Shift+Enter for a new line"))
+            .accessibilityLabel(stops ? L10n.text("Остановить ответ", "Stop response") : L10n.text("Отправить сообщение", "Send message"))
+    }
+}
+
+/// Enabled only while the composer is empty, so the restored context never replaces typed text.
+private struct HandoffRestoreButton: View {
+    let model: DeskModel
+    @ObservedObject var composer: ComposerState
+    var body: some View {
+        Button(L10n.text("Вернуть исходный контекст в черновик", "Restore initial context to draft")) { Task { await model.restoreHandoffDraft() } }
+            .disabled(composer.hasText)
     }
 }
 
