@@ -34,11 +34,12 @@ import ContextCore
 @Test @MainActor func hostedChatTextWrapsInsideViewportAfterResize() throws {
     let longText = String(repeating: "Длинное сообщение без обрезания справа. ", count: 40)
         + String(repeating: "x", count: 2_000)
+    let composer = ComposerState(); composer.text = longText
     let host = NSHostingView(rootView: VStack(spacing: 0) {
         NativeTranscript(items: [TranscriptItem(id: "u", kind: "user", text: longText),
                                  TranscriptItem(id: "a", kind: "assistant", text: longText)],
                          conversationID: "width", followOutput: false, isWorking: true)
-        MessageComposer(text: .constant(longText), focused: .constant(false), onSubmit: {})
+        MessageComposer(state: composer, focused: .constant(false), onSubmit: {})
             .frame(height: 84).padding(16)
     })
     func scrollViews(in view: NSView) -> [NSScrollView] {

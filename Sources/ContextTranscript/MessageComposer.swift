@@ -2,8 +2,44 @@ import ContextCore
 import AppKit
 import SwiftUI
 
+/// The composer's live text, kept outside the chat model so a keystroke never publishes the model.
+/// `text` itself is not published: the editor is the source of typed text and needs no render for it.
+/// `hasText` and `hasMessage` publish only when they flip (placeholder, send and restore buttons), and
+/// `revision` publishes every write that did not come from the editor, so the editor replaces its contents.
+@MainActor public final class ComposerState: ObservableObject {
+    public var text: String {
+        get { storage }
+        set { apply(newValue, fromEditor: false) }
+    }
+    private var storage = ""
+    /// The text is not empty.
+    @Published public private(set) var hasText = false
+    /// The text has more than whitespace: what can be sent.
+    @Published public private(set) var hasMessage = false
+    /// Counts writes that did not come from the editor.
+    @Published public private(set) var revision = 0
+    /// Runs after every change, typed or set, with the new text; the owner stores drafts through it.
+    public var onChange: ((String) -> Void)?
+    public init() {}
+    /// The editor reports what the user typed; nothing publishes unless `hasText` or `hasMessage` flips.
+    public func editorChanged(_ text: String) { apply(text, fromEditor: true) }
+    private func apply(_ text: String, fromEditor: Bool) {
+        if text != storage {
+            storage = text
+            if !fromEditor { revision &+= 1 }
+            let nonEmpty = !text.isEmpty
+            if hasText != nonEmpty { hasText = nonEmpty }
+            let message = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if hasMessage != message { hasMessage = message }
+        }
+        onChange?(text)
+    }
+}
+
 public struct MessageComposer: NSViewRepresentable {
-    @Binding var text: String
+    let state: ComposerState
+    /// Read at render time so a write from the owner makes this value differ and the editor updates.
+    let revision: Int
     @Binding var focused: Bool
     /// Each new value moves keyboard focus into the editor once.
     let focusRequest: UUID?
@@ -12,9 +48,9 @@ public struct MessageComposer: NSViewRepresentable {
     let onContentHeight: ((CGFloat) -> Void)?
     /// Read while the parent renders, so a zoom change updates the editor font.
     let fontSize = InterfaceZoom.shared.scaled(14)
-    public init(text: Binding<String>, focused: Binding<Bool>, focusRequest: UUID? = nil,
+    public init(state: ComposerState, focused: Binding<Bool>, focusRequest: UUID? = nil,
                 onContentHeight: ((CGFloat) -> Void)? = nil, onSubmit: @escaping () -> Void) {
-        _text = text; _focused = focused; self.focusRequest = focusRequest; self.onSubmit = onSubmit
+        self.state = state; revision = state.revision; _focused = focused; self.focusRequest = focusRequest; self.onSubmit = onSubmit
         self.onContentHeight = onContentHeight
     }
     public func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -50,7 +86,7 @@ public struct MessageComposer: NSViewRepresentable {
         editor.onSubmit = onSubmit
         editor.onContentHeight = onContentHeight
         if editor.font?.pointSize != fontSize { editor.font = .systemFont(ofSize: fontSize); editor.reportContentHeight() }
-        if editor.string != text { editor.string = text; editor.reportContentHeight() }
+        if editor.string != state.text { editor.string = state.text; editor.reportContentHeight() }
         if focusRequest != context.coordinator.focusRequest {
             context.coordinator.focusRequest = focusRequest
             // A freshly made editor is not in a window yet; focus after SwiftUI attaches it.
@@ -62,7 +98,7 @@ public struct MessageComposer: NSViewRepresentable {
         var focusRequest: UUID?
         init(_ parent: MessageComposer) { self.parent = parent }
         public func textDidChange(_ notification: Notification) {
-            if let editor = notification.object as? NSTextView { parent.text = editor.string }
+            if let editor = notification.object as? NSTextView { parent.state.editorChanged(editor.string) }
         }
         public func textDidBeginEditing(_ notification: Notification) { parent.focused = true }
         public func textDidEndEditing(_ notification: Notification) { parent.focused = false }
