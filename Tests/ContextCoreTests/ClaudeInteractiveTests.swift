@@ -493,6 +493,98 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     await adapter.disconnect()
 }
 
+@Test func claudeHistoryOfAnIdleSessionIsNotKeptResident() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let first = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let session = try await adapter.prepare(interactiveRequest(context: first.context, root: root)).value()
+    _ = try await adapter.submit(interactiveRequest(context: first.context, root: root, session: session)).value()
+    try await waitFor { await events.completionCount() == 1 }
+    // After a reconnect nothing is in memory; the chat's history and summary source are read from its saved record
+    // without keeping it, like the chat open and the connect-time backfill do for every chat.
+    await adapter.disconnect()
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    #expect(await adapter.residentSessionCount == 0)
+    let history = try await adapter.history(session, context: descriptor.context).value()
+    #expect(history.count == 1 && history[0].items.map(\.kind) == ["user", "assistant"])
+    #expect(await adapter.residentSessionCount == 0)
+    _ = try await adapter.summarySource(session, context: descriptor.context).value()
+    #expect(await adapter.residentSessionCount == 0)
+    // The chat still continues: the next turn reads the record again and resumes native history.
+    _ = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root, session: session)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session)).value()
+    try await waitFor { await events.completionCount() == 2 }
+    #expect(try await adapter.history(session, context: descriptor.context).value().count == 2)
+    #expect(await adapter.residentSessionCount == 1)
+    let sent = try String(contentsOf: home.appendingPathComponent("submitted"), encoding: .utf8).split(separator: "\n")
+    #expect(sent.count == 2 && sent[1].contains("--resume"))
+    await adapter.disconnect()
+}
+
+@Test func claudeSessionWithALiveProcessStaysResidentAcrossHistoryReads() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session)).value()
+    try await waitFor { await events.completionCount() == 1 }
+    // The process is warm after a clean turn: history and summary reads leave the session in memory.
+    #expect(await adapter.residentSessionCount == 1)
+    #expect(try await adapter.history(session, context: descriptor.context).value().count == 1)
+    _ = try await adapter.summarySource(session, context: descriptor.context).value()
+    #expect(await adapter.residentSessionCount == 1)
+    // During an active turn the read returns the open turn and the session stays.
+    let handle = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "wait")).value()
+    try await waitFor { await events.startedCount() == 2 }
+    let open = try await adapter.history(session, context: descriptor.context).value()
+    #expect(open.count == 2 && open.last?.id == handle.turnID)
+    #expect(await adapter.residentSessionCount == 1)
+    _ = try await adapter.cancel(handle).value()
+    try await waitFor { await events.completionCount() == 2 }
+    #expect(await adapter.residentSessionCount == 1)
+    let sent = try String(contentsOf: home.appendingPathComponent("submitted"), encoding: .utf8).split(separator: "\n")
+        .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+    // Both turns were written to the same warm process: the reads did not disturb it.
+    try #require(sent.count == 2)
+    #expect(sent[0]["pid"] == sent[1]["pid"])
+    await adapter.disconnect()
+    #expect(await adapter.residentSessionCount == 0)
+}
+
+@Test func claudeHistoryReadsTheSavedRecordOnEveryCall() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let first = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let session = try await adapter.prepare(interactiveRequest(context: first.context, root: root)).value()
+    _ = try await adapter.submit(interactiveRequest(context: first.context, root: root, session: session)).value()
+    try await waitFor { await events.completionCount() == 1 }
+    await adapter.disconnect()
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    #expect(try await adapter.history(session, context: descriptor.context).value().count == 1)
+    // The saved file is the source of truth: a record edited between two reads is observed by the second one.
+    let file = home.appendingPathComponent("contextdesk-sessions").appendingPathComponent(session.nativeID + ".json")
+    var record = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+    var turns = try #require(record["turns"] as? [[String: Any]])
+    var copy = turns[0]; copy["id"] = "edited"; turns.append(copy); record["turns"] = turns
+    try JSONSerialization.data(withJSONObject: record).write(to: file, options: .atomic)
+    let edited = try await adapter.history(session, context: descriptor.context).value()
+    #expect(edited.count == 2 && edited.last?.id == "edited" && edited.last?.items.map(\.kind) == ["user", "assistant"])
+    #expect(await adapter.residentSessionCount == 0)
+    await adapter.disconnect()
+}
+
 @Test(arguments: ["approval", "question", "outside"]) func claudeInteractivePermissionRoundTrip(_ prompt: String) async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
