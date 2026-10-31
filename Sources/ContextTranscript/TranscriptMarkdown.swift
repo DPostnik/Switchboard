@@ -45,9 +45,12 @@ final class TableBox: NSObject {
         self.view = view; self.item = item; self.options = options; self.width = width
     }
 
+    /// Top-level blocks come from the view's render cache when nothing they depend on changed; a streamed
+    /// answer then renders only its growing last block and new blocks on every tick.
     mutating func render(into result: NSMutableAttributedString) {
         let nodes = MarkdownBlocks.nodes(item.text)
         let lines = MarkdownBlocks.lines(item.text)
+        let cache = view.renderCache
         var section: String?
         for (index, node) in nodes.enumerated() {
             let start = result.length
@@ -57,12 +60,58 @@ final class TableBox: NSObject {
                 sectionCopy = (section!, MarkdownBlocks.section(of: nodes, at: index, lines: lines))
             }
             let next = index + 1 < nodes.count ? nodes[index + 1].block : nil
-            renderBlock(node.block, next: next, into: result, indent: 0, tail: -4, sectionCopy: sectionCopy)
+            let nextIsListItem: Bool = { if case .listItem = next { return true }; return false }()
+            let dependencies = TranscriptRenderCache.Dependencies(
+                block: node.block, first: isAtBodyStart(result), nextIsListItem: nextIsListItem, width: width,
+                copyIndex: copyIndex, blockCounter: blockCounter, sectionSource: sectionCopy?.1,
+                baseDirectory: options.baseDirectory?.path, source: options.source?.path)
+            if let entry = cache.entry(item: item.id, block: index, dependencies: dependencies),
+               entry.expanded == expandedKeys(from: blockCounter, count: entry.blockCount),
+               entry.feedback == copyFeedback(from: copyIndex, count: entry.copyCount) {
+                result.append(entry.text)
+                copyIndex += entry.copyCount; blockCounter += entry.blockCount
+                cache.hits += 1
+            } else {
+                let copyStart = copyIndex, blockStart = blockCounter
+                renderBlock(node.block, next: next, into: result, indent: 0, tail: -4, sectionCopy: sectionCopy)
+                cache.misses += 1
+                if cache.isEnabled, Self.isCacheable(node.block) {
+                    let text = result.attributedSubstring(from: NSRange(location: start, length: result.length - start))
+                    cache.store(TranscriptRenderCache.Entry(
+                        dependencies: dependencies, text: text, copyCount: copyIndex - copyStart, blockCount: blockCounter - blockStart,
+                        expanded: expandedKeys(from: blockStart, count: blockCounter - blockStart),
+                        feedback: copyFeedback(from: copyStart, count: copyIndex - copyStart)), item: item.id, block: index)
+                }
+            }
             if let section, result.length > start {
                 result.addAttribute(.sectionKey, value: section, range: NSRange(location: start, length: result.length - start))
             }
         }
+        cache.trim(item: item.id, blockCount: nodes.count)
         if !view.isDocument { appendSources(into: result, nodes: nodes, lines: lines) }
+    }
+
+    /// Images are looked up on disk at render time (the file may appear or change later), so they are always rendered.
+    private static func isCacheable(_ block: MarkdownBlock) -> Bool {
+        if case .image = block { return false }
+        return true
+    }
+
+    /// The open blocks of this item whose keys were numbered from `start`; nested blocks consume numbers too.
+    private func expandedKeys(from start: Int, count: Int) -> Set<String> {
+        guard count > 0 else { return [] }
+        let prefix = item.id + "#"
+        return view.expandedBlocks.filter { key in
+            guard key.hasPrefix(prefix), let number = Int(key.dropFirst(prefix.count).dropFirst()) else { return false }
+            return number >= start && number < start + count
+        }
+    }
+
+    /// Copy feedback shown on one of the `count` controls numbered from `start`.
+    private func copyFeedback(from start: Int, count: Int) -> Bool? {
+        guard count > 0, let feedback = view.copyFeedback, feedback.id == item.id, let block = feedback.block,
+              block >= start, block < start + count else { return nil }
+        return feedback.succeeded
     }
 
     // MARK: Blocks
@@ -693,5 +742,92 @@ private enum WebSourceScan {
         entries.removeAll { $0.text == text }
         entries.append((text, sources))
         if entries.count > capacity { entries.removeFirst(entries.count - capacity) }
+    }
+}
+
+/// Rendered top-level blocks of answers, owned by a transcript view. A streaming update re-renders the whole
+/// last message every 75 ms; with the cache only the block that grew and the blocks after it are rendered again.
+/// An entry is reused when the parsed block and everything else its rendering read are unchanged: its position
+/// in the answer (the counters that number controls and toggles), the column width, the link options, the
+/// section it opens, the open state of its toggles and the copy feedback on its controls. The view drops the
+/// cache when the conversation switches, a turn finishes or a style change (zoom, appearance) arrives.
+@MainActor final class TranscriptRenderCache {
+    struct Dependencies: Equatable {
+        var block: MarkdownBlock
+        /// First block of the body: a heading there gets no space above.
+        var first: Bool
+        /// A list item knows whether it closes its list.
+        var nextIsListItem: Bool
+        var width: CGFloat
+        var copyIndex: Int
+        var blockCounter: Int
+        /// Markdown of the section a heading opens, placed on its copy control.
+        var sectionSource: String?
+        var baseDirectory: String?
+        var source: String?
+    }
+
+    struct Entry {
+        var dependencies: Dependencies
+        var text: NSAttributedString
+        /// Copy controls and toggle keys the block consumed, including those of nested blocks.
+        var copyCount: Int
+        var blockCount: Int
+        /// Open toggles of this block at render time.
+        var expanded: Set<String>
+        /// Copy feedback shown on one of this block's controls at render time.
+        var feedback: Bool?
+    }
+
+    /// Items kept, least recently rendered first out.
+    static let itemLimit = 64
+    var isEnabled = true
+    var hits = 0
+    var misses = 0
+    /// Bumped by every style invalidation; tests check that zoom and appearance changes drop the cache.
+    private(set) var styleGeneration = 0
+    private var items: [String: [Int: Entry]] = [:]
+    private var order: [String] = []
+
+    var itemCount: Int { items.count }
+
+    func entry(item: String, block index: Int, dependencies: Dependencies) -> Entry? {
+        guard isEnabled, let entry = items[item]?[index], entry.dependencies == dependencies else { return nil }
+        return entry
+    }
+
+    func store(_ entry: Entry, item: String, block index: Int) {
+        guard isEnabled else { return }
+        items[item, default: [:]][index] = entry
+        touch(item)
+    }
+
+    /// Drops the entries past the current block count of an item (a block merged into its predecessor).
+    func trim(item: String, blockCount: Int) {
+        guard var entries = items[item] else { return }
+        let stale = entries.keys.filter { $0 >= blockCount }
+        guard !stale.isEmpty else { return }
+        for key in stale { entries.removeValue(forKey: key) }
+        if entries.isEmpty { items.removeValue(forKey: item); order.removeAll { $0 == item } } else { items[item] = entries }
+    }
+
+    func removeAll() {
+        items.removeAll(); order.removeAll()
+    }
+
+    /// Fonts, colors blended at render time and tab stops depend on the style; every entry is stale.
+    func invalidateStyles() {
+        styleGeneration += 1
+        removeAll()
+    }
+
+    private func touch(_ item: String) {
+        if order.last == item { return }
+        order.removeAll { $0 == item }
+        order.append(item)
+        while order.count > Self.itemLimit, let oldest = order.first {
+            order.removeFirst()
+            items.removeValue(forKey: oldest)
+        }
     }
 }

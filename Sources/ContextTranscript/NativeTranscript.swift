@@ -59,6 +59,8 @@ public struct NativeTranscript: NSViewRepresentable {
     private var headlineMemo: (id: String, length: Int, headline: String)?
     /// Number of `render` calls so far; tests check that unchanged messages are not rendered again.
     public private(set) var renderCount = 0
+    /// Rendered answer blocks reused across the re-renders of a streamed message.
+    let renderCache = TranscriptRenderCache()
     private struct GroupingKey: Equatable {
         var conversationID: String?
         var count: Int
@@ -121,8 +123,15 @@ public struct NativeTranscript: NSViewRepresentable {
         didSet {
             guard abs(zoom - oldValue) > 0.001 else { return }
             magnification = zoom
+            renderCache.invalidateStyles()
             needsLayout = true
         }
+    }
+
+    public override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        // Diff line colors are blended at render time, so cached blocks belong to the old appearance.
+        renderCache.invalidateStyles()
     }
 
     public init(pasteboard: NSPasteboard = .general, positions: TranscriptReadingPositions = TranscriptReadingPositions()) {
@@ -209,6 +218,8 @@ public struct NativeTranscript: NSViewRepresentable {
         let closing = finished && !switched ? expandedActions : []
         if switched || finished { expandedActions.removeAll() }
         if switched { expandedMetrics.removeAll(); expandedBlocks.removeAll() }
+        // A finished answer is rendered once more from scratch: file chips and images it mentioned may exist by now.
+        if switched || finished || projectChanged { renderCache.removeAll() }
         if let feedback = copyFeedback,
            switched || previous.first(where: { $0.id == feedback.id })?.text != items.first(where: { $0.id == feedback.id })?.text {
             copyFeedbackTask?.cancel()
