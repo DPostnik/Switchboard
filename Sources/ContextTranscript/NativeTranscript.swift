@@ -51,6 +51,22 @@ public struct NativeTranscript: NSViewRepresentable {
     private var wasWorking = false
     private var expandedActions: Set<String> = []
     private var expandedMetrics: Set<String> = []
+    /// The tool calls behind each activity summary row, keyed by the row's id; their bodies are rendered only when the row is open.
+    private var actionGroups: [String: [TranscriptItem]] = [:]
+    /// The last grouping and the cheap key it was computed for; a streaming update mostly changes only the last item.
+    private var groupingMemo: (key: GroupingKey, items: [TranscriptItem], groups: [String: [TranscriptItem]])?
+    /// The headline of the running tool call, keyed by item id and text length; parsing its JSON input is not free.
+    private var headlineMemo: (id: String, length: Int, headline: String)?
+    /// Number of `render` calls so far; tests check that unchanged messages are not rendered again.
+    public private(set) var renderCount = 0
+    private struct GroupingKey: Equatable {
+        var conversationID: String?
+        var count: Int
+        var lastID: String?
+        var lastLength: Int
+        var totalLength: Int
+        var isWorking: Bool
+    }
     private(set) var copyFeedback: (id: String, succeeded: Bool, block: Int?)?
     /// Collapsible code, `<details>` and source lists the user opened, keyed by item and block.
     private(set) var expandedBlocks: Set<String> = []
@@ -177,8 +193,8 @@ public struct NativeTranscript: NSViewRepresentable {
         self.projectPath = projectPath
         self.unreadResponseItemID = unreadResponseItemID
         self.unreadCompletionID = unreadCompletionID
-        let workingStatus = isWorking ? Self.currentActivity(items).map { Self.activityHeadline($0.text) } ?? workingStatus : workingStatus
-        var items = isDocument ? items : Self.groupActivities(items, isWorking: isWorking)
+        let workingStatus = isWorking ? Self.currentActivity(items).map { headline(of: $0) } ?? workingStatus : workingStatus
+        var items = isDocument ? items : groupedItems(items, conversationID: conversationID, isWorking: isWorking)
         if isWorking {
             items.append(Self.workingRow(status: workingStatus, since: workingSince))
         }
@@ -189,6 +205,8 @@ public struct NativeTranscript: NSViewRepresentable {
         let finished = wasWorking && !isWorking
         wasWorking = isWorking
         let switched = self.conversationID != conversationID
+        // Rows opened during the turn close when it finishes; they are re-rendered in place below.
+        let closing = finished && !switched ? expandedActions : []
         if switched || finished { expandedActions.removeAll() }
         if switched { expandedMetrics.removeAll(); expandedBlocks.removeAll() }
         if let feedback = copyFeedback,
@@ -213,10 +231,13 @@ public struct NativeTranscript: NSViewRepresentable {
         // Clamped: past the end the rubber band stretches the viewport beyond the document.
         let oldBottom = min(contentView.bounds.maxY, transcript.frame.maxY)
         let stretched = liveScrolling && contentView.bounds.maxY > oldBottom + 0.5
+        // A finished turn changes the items it affects (copy control, compaction state, the working row), so the
+        // prefix is computed as usual; only the rows that were open and now close are re-rendered above it.
         var common = 0
-        if !switched && !finished && !projectChanged {
+        if !switched && !projectChanged {
             while common < min(previous.count, items.count), previous[common] == items[common] { common += 1 }
         }
+        let closingRows = closing.isEmpty ? [] : (0..<common).filter { closing.contains(previous[$0].id) }
         // A message the user just sent is brought into view even if they had scrolled up to re-read.
         // Only items after the last known one count: prepended older history also contains user messages.
         let knownIDs = Set(previous.map(\.id))
@@ -224,11 +245,18 @@ public struct NativeTranscript: NSViewRepresentable {
         let sentMessage = followOutput && !switched && lastKnown != nil
             && items[(lastKnown! + 1)...].contains { $0.kind == "user" }
         // Streaming rewrites only the last message or appends; text above the viewport keeps its place.
-        let tailOnly = !switched && !finished && !projectChanged && common + 1 >= previous.count
+        let tailOnly = !switched && !projectChanged && closingRows.isEmpty && common + 1 >= previous.count
         // Re-rendering the last message briefly shortens the document and clamps the viewport; an anchor survives that.
         let gestureAnchor = liveScrolling && tailOnly && wasAtEnd && !stretched ? capturePosition(anchorAtEnd: true) : nil
-        let start = common < ranges.count ? ranges[common].location : storage.length
         storage.beginEditing()
+        for index in closingRows {
+            let rendered = render(previous[index], expanded: false)
+            let delta = rendered.length - ranges[index].length
+            storage.replaceCharacters(in: ranges[index], with: rendered)
+            ranges[index].length = rendered.length
+            for next in (index + 1)..<ranges.count { ranges[next].location += delta }
+        }
+        let start = common < ranges.count ? ranges[common].location : storage.length
         storage.deleteCharacters(in: NSRange(location: start, length: storage.length - start))
         ranges = Array(ranges.prefix(common))
         for item in items.dropFirst(common) {
@@ -427,12 +455,15 @@ public struct NativeTranscript: NSViewRepresentable {
         }
     }
 
-    /// Non-contiguous TextKit layout can place the final glyph at an estimated
-    /// position. Lay out the container before deciding that the end is visible.
+    /// Non-contiguous TextKit layout can place the final glyph at an estimated position. Lay out the container
+    /// before deciding that the end is visible, but only when the viewport is within one viewport height of the
+    /// document's end: farther up, the frame alone shows that the end is out of view, and no layout is forced.
     public var isAtTranscriptEnd: Bool {
         guard contentSize.width > 0, contentSize.height > 0,
               let storage = transcript.textStorage, storage.length > 0,
               let manager = transcript.layoutManager, let container = transcript.textContainer else { return false }
+        let viewport = contentView.bounds
+        guard viewport.height > 0, viewport.maxY >= transcript.frame.maxY - viewport.height else { return false }
         let lastCharacter = NSRange(location: storage.length - 1, length: 1)
         manager.ensureLayout(for: container)
         let glyphs = manager.glyphRange(forCharacterRange: lastCharacter, actualCharacterRange: nil)
@@ -585,8 +616,37 @@ public struct NativeTranscript: NSViewRepresentable {
         return line.count > limit ? String(line.prefix(limit - 1)) + "…" : line
     }
 
-    private static func groupActivities(_ items: [TranscriptItem], isWorking: Bool) -> [TranscriptItem] {
+    private func headline(of activity: TranscriptItem) -> String {
+        let length = activity.text.utf8.count
+        if let memo = headlineMemo, memo.id == activity.id, memo.length == length { return memo.headline }
+        let line = Self.activityHeadline(activity.text)
+        headlineMemo = (activity.id, length, line)
+        return line
+    }
+
+    /// Groups once per (conversation, item count, last item id and length, total text length, working) key: a
+    /// streaming delta changes the last item's length, an appended item the count, a finished turn the flag. A
+    /// middle item that changes without changing the total length keeps the previous grouping until the next change.
+    private func groupedItems(_ items: [TranscriptItem], conversationID: String?, isWorking: Bool) -> [TranscriptItem] {
+        let key = GroupingKey(conversationID: conversationID, count: items.count, lastID: items.last?.id,
+                              lastLength: items.last?.text.utf8.count ?? 0,
+                              totalLength: items.reduce(0) { $0 + $1.text.utf8.count }, isWorking: isWorking)
+        if let memo = groupingMemo, memo.key == key {
+            actionGroups = memo.groups
+            return memo.items
+        }
+        let grouped = Self.groupActivities(items, isWorking: isWorking)
+        groupingMemo = (key, grouped.items, grouped.groups)
+        actionGroups = grouped.groups
+        return grouped.items
+    }
+
+    /// Groups each request's tool calls behind one summary row. The row's text names the calls by id and text
+    /// length only, so building and comparing it stays cheap on every update; their bodies come from `groups`
+    /// (keyed by the row's id) through `actionDetails` when the row is open.
+    static func groupActivities(_ items: [TranscriptItem], isWorking: Bool) -> (items: [TranscriptItem], groups: [String: [TranscriptItem]]) {
         var result: [TranscriptItem] = []
+        var groups: [String: [TranscriptItem]] = [:]
         var segment: [TranscriptItem] = []
         func appendSegment(active: Bool) {
             let actions = segment.filter { $0.kind == "activity" }
@@ -612,9 +672,9 @@ public struct NativeTranscript: NSViewRepresentable {
                 guard !inserted, let first = actions.first else { continue }
                 inserted = true
                 let summary = L10n.text("Действия \(first.agentName ?? "Codex") · \(actions.count)", "\(first.agentName ?? "Codex") actions · \(actions.count)")
-                result.append(TranscriptItem(id: first.id, kind: "activity", text: actions.enumerated().map {
-                    "\($0.offset + 1). \($0.element.text)"
-                }.joined(separator: "\n"), phase: summary))
+                groups[first.id] = actions
+                result.append(TranscriptItem(id: first.id, kind: "activity",
+                                             text: actions.map { "\($0.id) \($0.text.utf8.count)" }.joined(separator: "\n"), phase: summary))
             }
             segment.removeAll()
         }
@@ -623,10 +683,16 @@ public struct NativeTranscript: NSViewRepresentable {
             segment.append(item)
         }
         appendSegment(active: isWorking)
-        return result
+        return (result, groups)
+    }
+
+    /// The numbered tool calls shown by an open summary row.
+    static func actionDetails(_ actions: [TranscriptItem]) -> String {
+        actions.enumerated().map { "\($0.offset + 1). \($0.element.text)" }.joined(separator: "\n")
     }
 
     private func render(_ item: TranscriptItem, expanded: Bool) -> NSAttributedString {
+        renderCount += 1
         let result = NSMutableAttributedString()
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = item.kind == "activity" ? 1 : 4; paragraph.paragraphSpacing = item.kind == "activity" ? 2 : 0
@@ -714,7 +780,9 @@ public struct NativeTranscript: NSViewRepresentable {
                                               width: transcript.textContainer?.containerSize.width ?? 600)
             markdown.render(into: result)
         } else {
-            for (index, block) in item.text.components(separatedBy: "```").enumerated() {
+            // An open summary row shows its tool calls; a document's own activity item keeps its text.
+            let body = item.kind == "activity" ? actionGroups[item.id].map(Self.actionDetails) ?? item.text : item.text
+            for (index, block) in body.components(separatedBy: "```").enumerated() {
                 let isCode = index % 2 == 1 || item.kind == "activity"
                 let font = isCode ? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular) : NSFont.systemFont(ofSize: 14)
                 let attributes: [NSAttributedString.Key: Any] = [
