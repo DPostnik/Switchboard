@@ -1471,6 +1471,7 @@ struct SettingsView: View {
             KeepAwakeSettings(controller: keepAwake)
             OrphanProcessSettings(controller: model.orphanProcesses)
             NotchIslandSettings()
+            AboutSettings()
         }.formStyle(.grouped)
     }
 

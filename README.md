@@ -2,7 +2,7 @@
 
 A native macOS workspace for working with AI agents across local projects, conversations, and recurring tasks. Built with SwiftUI and AppKit around the Codex App Server and the Claude Code CLI.
 
-**Early preview, built from source.** Start with either agent in Direct mode; each new chat names its agent. This is an independent personal project, not an official OpenAI or Anthropic application.
+**Version 1.0.0, built from source** ([changelog](CHANGELOG.md)). Start with either agent in Direct mode; each new chat names its agent. This is an independent personal project, not an official OpenAI or Anthropic application.
 
 ![Switchboard code conversation](media/code-workspace.png)
 
@@ -68,7 +68,7 @@ Verified engine versions: Codex `0.158.0-alpha.2.1`, `0.159.0`, `0.159.2` and `0
 | Codex | Local engine, separate app home, streaming chat, tools and approval UI. Available models come from the engine/account. |
 | Claude Code | Interactive chats and scheduled runs in a separate app profile with subscription sign-in. Standard projects get project-file tools only; full access runs the CLI without prompts and adds claude.ai connectors (writing actions still ask), the Switchboard browser and optional Claude in Chrome. Context usage and plan limits are shown where the CLI reports them. Permission semantics differ from Codex's sandbox. |
 | [Browser](BrowserRuntime/README.md) | Opt-in. Pinned Chrome for Testing 154 and Chrome DevTools MCP 1.10.1 with the app's own page tools; requires Node.js 22.12+. The app launches it with `/usr/bin/python3` (tested: 3.9.6). Install the pinned runtime, then enable Settings → Browser. Each chat gets its own profile and tab; a chat's idle browser quits after its last task tab closes. |
-| [Scheduled jobs](SCHEDULED_JOBS.md) | App-owned Codex and Claude Code schedules, run chats and run history. The app must stay open and the Mac awake. Imports start paused; do not enable a copy while its original still runs. |
+| [Scheduled jobs](design/SCHEDULED_JOBS.md) | App-owned Codex and Claude Code schedules, run chats and run history. The app must stay open and the Mac awake. Imports start paused; do not enable a copy while its original still runs. |
 | [Headroom plugin](plugins/headroom/README.md) | Separately installed experimental proxy integration. Not needed for the main demo. This preparation did not verify live routing, quality or resource savings. |
 | [Mobile companion](Mobile/README.md) | Experimental native iPhone app synced through your own Supabase project: read and continue chats, answer questions and approvals, start Codex or Claude chats. Needs Xcode signing and extra setup; not needed for the Mac quick start. |
 
@@ -99,6 +99,6 @@ This source preview includes screenshots and written examples. A recorded walkth
 
 ---
 
-[Build guide](guides/building.md) · [Examples](guides/examples.md) · [Screenshot notes](guides/demo.md#captures-and-provenance) · [Checks and limitations](guides/validation.md) · [Project direction](VISION.md)
+[Build guide](guides/building.md) · [Examples](guides/examples.md) · [Screenshot notes](guides/demo.md#captures-and-provenance) · [Checks and limitations](guides/validation.md) · [Project direction](design/VISION.md)
 
-Public reader documentation lives in `guides/`. The ignored `docs/` directory contains local development notes and is not required to build or try these examples.
+Public reader documentation lives in `guides/`, design notes in `design/`, the version in `VERSION` and user-visible changes in `CHANGELOG.md`. The ignored `docs/` directory contains local development notes and is not required to build or try these examples.

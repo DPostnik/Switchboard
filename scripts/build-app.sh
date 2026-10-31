@@ -2,20 +2,32 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 python3 scripts/swift-task.py build "$@"
+# Release identity: VERSION is the semantic version, the commit count is the build number.
+version="$(tr -d '[:space:]' < VERSION)"
+build="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
+commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+dirty=false
+if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then dirty=true; fi
 zsh scripts/build-icon.sh
 staging="$(mktemp -d "$PWD/build/app-stage.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT
 app="$staging/Switchboard.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp .build/local-build/ContextDesk "$app/Contents/MacOS/Switchboard"
-cp .build/local-build/build-info.json "$app/Contents/Resources/build-info.json"
+python3 - .build/local-build/build-info.json "$app/Contents/Resources/build-info.json" "$version" "$build" "$commit" "$dirty" <<'PY'
+import json, sys
+source, target, version, build, commit, dirty = sys.argv[1:]
+record = json.load(open(source))
+record.update(version=version, build=int(build), commit=commit, dirty=dirty == 'true')
+json.dump(record, open(target, 'w'), indent=2)
+PY
 cp Assets/AppIcon/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 mkdir -p "$app/Contents/Resources/ChatDirectoryRuntime"
 cp ChatDirectoryRuntime/server.py "$app/Contents/Resources/ChatDirectoryRuntime/"
 mkdir -p "$app/Contents/Resources/BrowserRuntime"
 cp BrowserRuntime/{server.py,broker.py,transport.py,chrome_host.py,profiles.py,cdp.py,page_input.py,install.py,cards.js,page_read.js,page_tree.js,runtime.lock.json,README.md} "$app/Contents/Resources/BrowserRuntime/"
 cp -R Skills "$app/Contents/Resources/Skills"
-cat > "$app/Contents/Info.plist" <<'PLIST'
+cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -25,8 +37,9 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>Switchboard</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.2.1</string>
-<key>CFBundleVersion</key><string>3</string>
+<key>CFBundleShortVersionString</key><string>$version</string>
+<key>CFBundleVersion</key><string>$build</string>
+<key>NSHumanReadableCopyright</key><string>© 2026 Daniil Postnik. MIT License.</string>
 <key>CFBundleDevelopmentRegion</key><string>ru</string>
 <key>CFBundleLocalizations</key><array><string>ru</string><string>en</string></array>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
@@ -55,7 +68,7 @@ else
   codesign --force --sign - "$app"
 fi
 codesign --verify --deep --strict "$app"
-python3 - "$app" <<'PY'
+python3 - "$app" "$version ($build, $commit)" <<'PY'
 from pathlib import Path
 import ctypes
 import os
@@ -98,6 +111,6 @@ if replaced.exists():
         prefix = os.path.realpath(bundle) + os.sep
         if not any(path.startswith(prefix) for path in in_use):
             shutil.rmtree(bundle, ignore_errors=True)
-print(f'Updated: {destination.resolve()}')
+print(f'Updated: {destination.resolve()} (version {sys.argv[2]})')
 print('Quit the running app with Cmd+Q and reopen it to load this build.')
 PY
