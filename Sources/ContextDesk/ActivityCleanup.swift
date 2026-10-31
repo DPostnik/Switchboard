@@ -14,13 +14,15 @@ extension DeskModel {
 
     /// What may be reduced for a chat right now. The app's transcript blob feeds only the transcript view, so it is
     /// reduced as soon as the chat is archived and idle. The Claude session file is also the archive summary's source
-    /// (up to 3 000 characters per action), so it waits until the summary is ready or summaries are unsupported for the
-    /// chat. Codex keeps its history in its own thread store, which the app never rewrites.
+    /// (up to 3 000 characters per action), so it waits only while a summary is queued or being generated; a chat
+    /// that never got a summary is reduced too (user decision 2026-10-31: a later summary sees the dialogue in full and
+    /// the actions as headline and metadata). Codex keeps its history in its own thread store, which the app never rewrites.
     func activityReductionTargets(_ id: String) -> (transcript: Bool, session: AgentSessionReference?) {
         guard let chat = state.chats.first(where: { $0.id == id }), chat.isArchived, !isBusy(threadID: id), !isSending(threadID: id),
               !isChangingChat(id), summaryActiveThread != id else { return (false, nil) }
-        let summarySettled = !supportsSummaries(chat) || archiveSummaries[id]?.status == .ready
-        let session = chat.nativeSession?.connection == .appClaude && summarySettled && claudeConnected ? chat.nativeSession : nil
+        let summaryInProgress = supportsSummaries(chat)
+            && [.queued, .reading, .generating].contains(archiveSummaries[id]?.status ?? .stale)
+        let session = chat.nativeSession?.connection == .appClaude && !summaryInProgress && claudeConnected ? chat.nativeSession : nil
         return (true, session)
     }
 

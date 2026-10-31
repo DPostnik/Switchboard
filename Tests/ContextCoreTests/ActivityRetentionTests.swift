@@ -225,15 +225,20 @@ private let sampleItems = [
     model.state.chats[2].archived = false
     #expect(try await storedIsReduced(store, active.id))
     #expect(await model.reduceArchivedActivity(active.id) == DeskModel.ActivityReduction())
-    // The Claude session file is reduced only once its summary is ready (or summaries are unsupported) and Claude is connected.
-    #expect(model.activityReductionTargets(claude.id).session == nil)
-    var record = ArchiveSummaryRecord(threadID: claude.id, projectID: project.id); record.status = .ready
-    model.archiveSummaries[claude.id] = record
+    // The Claude session file is reduced while Claude is connected, unless a summary is queued or being generated;
+    // a chat without any summary record is reduced too.
     #expect(model.activityReductionTargets(claude.id).session == nil)
     model.claudeConnected = true
     #expect(model.activityReductionTargets(claude.id).session == claude.nativeSession)
-    record.status = .failed; model.archiveSummaries[claude.id] = record
+    var record = ArchiveSummaryRecord(threadID: claude.id, projectID: project.id); record.status = .queued
+    model.archiveSummaries[claude.id] = record
     #expect(model.activityReductionTargets(claude.id).session == nil)
+    record.status = .generating; model.archiveSummaries[claude.id] = record
+    #expect(model.activityReductionTargets(claude.id).session == nil)
+    for settled in [ArchiveSummaryStatus.ready, .failed, .uncertain, .stale] {
+        record.status = settled; model.archiveSummaries[claude.id] = record
+        #expect(model.activityReductionTargets(claude.id).session == claude.nativeSession)
+    }
     #expect(model.activityReductionTargets(busy.id) == (false, nil))
     // The launch task ends with VACUUM only while no chat is busy; the reduced bodies left most of this small file free.
     model.startActivityCleanup()
