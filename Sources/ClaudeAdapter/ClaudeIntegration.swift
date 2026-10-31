@@ -899,9 +899,10 @@ public actor ClaudeIntegration: AgentIntegration {
         guard let category, !category.isEmpty else { return text }
         return text + " " + L10n.text("Категория: \(category).", "Category: \(category).")
     }
+    /// Tool bodies are capped here, so the session record, the app store and the live transcript all hold the same text.
     private func emit(_ value: TranscriptItem, session id: String) {
         guard let turn = sessions[id]?.active else { return }
-        let item = Self.decorated(value, turn: turn)
+        let item = Self.decorated(ActivityRetention.cap(value), turn: turn)
         TranscriptItem.merge(item, into: &sessions[id]!.current)
         scheduleSave(id)
         sink.yield(.init(session: reference(id), payload: .item(item)))
@@ -1007,7 +1008,8 @@ public actor ClaudeIntegration: AgentIntegration {
     }
     private func finish(_ id: String, outcome: AgentExecutionOutcome) {
         guard let turn = sessions[id]?.active else { return }
-        let history = AgentHistoryTurn(id: turn, items: sessions[id]?.current ?? [], startedAt: nil, completedAt: Date(), duration: nil, isComplete: false)
+        // Items were capped when emitted; the map keeps the record capped if an item reached `current` another way.
+        let history = AgentHistoryTurn(id: turn, items: (sessions[id]?.current ?? []).map(ActivityRetention.cap), startedAt: nil, completedAt: Date(), duration: nil, isComplete: false)
         sessions[id]?.turns.append(history); sessions[id]?.active = nil; sessions[id]?.current = []
         summaries.removeValue(forKey: id); pendingSaves.remove(id)
         if var meter = meters.removeValue(forKey: id) {
@@ -1084,6 +1086,31 @@ public actor ClaudeIntegration: AgentIntegration {
                 throw ClientFailure(L10n.text("История содержит незавершённый или неполный запрос", "History contains an active or incomplete turn"))
             }
             return .success(try ClaudeGenerationRunner.summarySource(turns: value.turns))
+        } catch { return failed(error) }
+    }
+    /// Rewrites `contextdesk-sessions/<id>.json` with the tool bodies of its turns reduced (`ActivityRetention.reduce`).
+    /// The file is the app's only reader of this history (chat display and the archive summary source), so the caller
+    /// reduces it only once the chat is archived and its summary is settled. Refused while the session has a live or
+    /// warm process, an active turn or a pending save; nil when every body is already reduced.
+    public func reduceHistory(_ session: AgentSessionReference, context: AgentContext) async -> AgentResult<AgentHistoryReduction?> {
+        guard checked(session, context: context) else { return .rejected(.wrongConnection) }
+        let id = session.nativeID
+        guard wires[id] == nil, warm[id] == nil, waiting[id] == nil, !pendingSaves.contains(id), sessions[id]?.active == nil else {
+            return failed(ClientFailure(L10n.text("Чат ещё работает; история не сокращена", "The chat is still working; history was not reduced")))
+        }
+        do {
+            let path = try file(id)
+            let before = try Data(contentsOf: path)
+            var value = try JSONDecoder().decode(Session.self, from: before)
+            guard value.version == 1, value.id == id, value.active == nil else { throw ConversationIdentity.invalidStorage }
+            guard !ActivityRetention.isReduced(value.turns.flatMap(\.items)) else { return .success(nil) }
+            value.turns = ActivityRetention.reduce(value.turns)
+            let after = try JSONEncoder().encode(value)
+            try after.write(to: path, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+            // A resident copy (none is expected for an idle session) must not write the old bodies back.
+            sessions.removeValue(forKey: id)
+            return .success(.init(bytesBefore: before.count, bytesAfter: after.count))
         } catch { return failed(error) }
     }
     public func generate(_ request: AgentGenerationRequest, environment: AgentGenerationEnvironment,

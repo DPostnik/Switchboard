@@ -43,8 +43,11 @@ public actor AppStore {
         var revision: String
         var completeness: AgentTranscriptSnapshot.Completeness
         var capturedAt: Date
+        /// True when no activity in the blob still carries a body (`ActivityRetention`); nil on stamps written before the rule.
+        var reduced: Bool?
         init(_ snapshot: AgentTranscriptSnapshot) {
             revision = snapshot.revision; completeness = snapshot.completeness; capturedAt = snapshot.capturedAt
+            reduced = ActivityRetention.isReduced(snapshot)
         }
         func matches(_ snapshot: AgentTranscriptSnapshot) -> Bool {
             revision == snapshot.revision && completeness == snapshot.completeness
@@ -367,6 +370,8 @@ public actor AppStore {
 
     /// A late backfill must not overwrite a newer captured revision. Identical content (same revision and
     /// completeness as the stored stamp) is not rewritten; a full snapshot replaces pending recorded items.
+    /// An archived chat whose stored transcript was reduced stays reduced: a history refresh (opening the archived
+    /// chat) brings the engine's full bodies back, and they are reduced again before the write.
     public func saveTranscript(_ snapshot: AgentTranscriptSnapshot) throws {
         guard snapshot.version == AgentTranscriptSnapshot.schemaVersion else { throw ConversationIdentity.invalidStorage }
         let id = snapshot.conversation.value
@@ -382,6 +387,8 @@ public actor AppStore {
                 guard previous.snapshot.source == snapshot.source else { throw ConversationIdentity.invalidStorage }
                 if previous.capturedAt > snapshot.capturedAt { return }
             }
+            var snapshot = snapshot
+            if try storedStamp(db, id)?.reduced == true, try isArchived(db, id) { snapshot = try ActivityRetention.reduce(snapshot) }
             _ = try writeTranscript(db, snapshot)
             cancelFlush(id)
             try insertEntry(db, id, TranscriptEntry(snapshot: snapshot, capturedAt: snapshot.capturedAt))
@@ -415,7 +422,7 @@ public actor AppStore {
             let now = Date()
             if entry.capturedAt > now { return }
             var items = entry.items ?? LocalHistory.items(entry.snapshot)
-            TranscriptItem.merge(item, into: &items)
+            TranscriptItem.merge(ActivityRetention.cap(item), into: &items)
             entry.items = items; entry.snapshotStale = true; entry.dirty = true; entry.capturedAt = now
             try insertEntry(db, conversationID, entry)
             transcriptRevisions[conversationID, default: 0] += 1
@@ -478,17 +485,19 @@ public actor AppStore {
         _ = try writeTranscript(db, snapshot)
         transcripts[id]?.dirty = false
     }
-    /// Blob and stamp commit together. Returns false when the stored content already matches.
-    private func writeTranscript(_ db: OpaquePointer, _ snapshot: AgentTranscriptSnapshot) throws -> Bool {
+    /// Blob and stamp commit together. Returns the blob size, or nil when the stored content already matches.
+    @discardableResult
+    private func writeTranscript(_ db: OpaquePointer, _ snapshot: AgentTranscriptSnapshot) throws -> Int? {
         let id = snapshot.conversation.value
         let stamp = TranscriptStamp(snapshot)
         if let stored = try storedStamp(db, id), stored.matches(snapshot) {
             // Keep the capturedAt rule exact: a newer capture of the same content still wins over a later backfill.
-            if snapshot.capturedAt > stored.capturedAt {
+            // A stamp from before the retention rule learns whether the content is reduced.
+            if snapshot.capturedAt > stored.capturedAt || stored.reduced != stamp.reduced {
                 try putRaw(db, key: "transcript-revision:" + id, bytes: JSONEncoder().encode(stamp))
                 stamps[id] = stamp
             }
-            return false
+            return nil
         }
         let bytes = try JSONEncoder().encode(snapshot)
         let stampBytes = try JSONEncoder().encode(stamp)
@@ -498,7 +507,62 @@ public actor AppStore {
         }
         stamps[id] = stamp
         transcriptWriteCount += 1
+        return bytes.count
+    }
+    private func isArchived(_ db: OpaquePointer, _ id: String) throws -> Bool {
+        try cachedApp(db).state?.chats.first { $0.id == id }?.isArchived == true
+    }
+
+    // MARK: Retention
+
+    /// Rewrites an archived chat's stored transcript with its tool bodies reduced to headline and metadata
+    /// (`ActivityRetention.reduce`). Returns the blob size before and after, or nil when nothing is stored or the stored
+    /// stamp already says the blob is reduced (the cheap check the launch cleanup relies on). A blob without bodies
+    /// only gets its stamp updated, so the next pass skips the decode.
+    public func reduceTranscript(conversationID id: String) throws -> (before: Int, after: Int)? {
+        try withDatabase { db in
+            if try storedStamp(db, id)?.reduced == true { return nil }
+            guard let entry = try transcriptEntry(db, id) else { return nil }
+            try checkIdentity(db, conversationID: id, source: entry.snapshot.source)
+            if entry.dirty { try flushEntry(db, id); cancelFlush(id) }
+            let snapshot = try materialized(id)
+            let before = try bytes(db: db, key: "transcript:" + id)?.count ?? 0
+            let reduced = try ActivityRetention.reduce(snapshot)
+            // Same revision: no bodies to drop; the stamp alone was refreshed.
+            guard let after = try writeTranscript(db, reduced) else { return nil }
+            try insertEntry(db, id, TranscriptEntry(snapshot: reduced, capturedAt: reduced.capturedAt))
+            transcriptRevisions[id, default: 0] += 1
+            return (before, after)
+        }
+    }
+
+    /// Share of the file held by free pages (`PRAGMA freelist_count` over `PRAGMA page_count`).
+    public func freeSpaceFraction() throws -> Double {
+        try withDatabase { db in
+            let free = try Self.pragma(db, "freelist_count"), pages = try Self.pragma(db, "page_count")
+            return pages > 0 ? Double(free) / Double(pages) : 0
+        }
+    }
+
+    /// `VACUUM` when more than `threshold` of the file is free, then truncates the write-ahead log. The caller decides
+    /// when the app is idle; the work runs on this actor, off the main actor. Returns true when the file was rebuilt.
+    public func vacuumIfFragmented(threshold: Double = 0.25) throws -> Bool {
+        guard try freeSpaceFraction() > threshold else { return false }
+        try withDatabase { db in
+            guard sqlite3_exec(db, "VACUUM", nil, nil, nil) == SQLITE_OK else {
+                throw ClientFailure(L10n.text("Не удалось сжать хранилище", "Could not compact storage"))
+            }
+            sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, nil)
+        }
         return true
+    }
+
+    private static func pragma(_ db: OpaquePointer, _ name: String) throws -> Int64 {
+        var statement: OpaquePointer?; defer { sqlite3_finalize(statement) }
+        guard sqlite3_prepare_v2(db, "PRAGMA " + name, -1, &statement, nil) == SQLITE_OK, sqlite3_step(statement) == SQLITE_ROW else {
+            throw ClientFailure(L10n.text("Ошибка чтения", "Could not read data"))
+        }
+        return sqlite3_column_int64(statement, 0)
     }
     private func storedStamp(_ db: OpaquePointer, _ id: String) throws -> TranscriptStamp? {
         if let stamp = stamps[id] { return stamp }

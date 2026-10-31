@@ -41,6 +41,10 @@ public struct TranscriptItem: Identifiable, Codable, Sendable, Equatable {
     public var showsCopyControl = true
     public var timing: ResponseTiming?
     public var agentName: String?
+    /// UTF-8 size of a tool body before it was capped at record time or reduced after archiving; nil while intact.
+    public var fullLength: Int?
+    /// Set once the body was replaced by its headline and a metadata line after archiving; never undone.
+    public var reduced: Bool?
     public init(id: String, kind: String, text: String, phase: String? = nil, timing: ResponseTiming? = nil) {
         self.id = id; self.kind = kind; self.phase = phase; self.timing = timing
         self.text = kind == "user" ? InterruptedTurnNote.stripped(text) : text

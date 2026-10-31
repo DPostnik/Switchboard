@@ -585,6 +585,46 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     await adapter.disconnect()
 }
 
+@Test func claudeReducesSavedHistoryOfIdleSessionsOnly() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let first = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let session = try await adapter.prepare(interactiveRequest(context: first.context, root: root)).value()
+    _ = try await adapter.submit(interactiveRequest(context: first.context, root: root, session: session)).value()
+    try await waitFor { await events.completionCount() == 1 }
+    await adapter.disconnect()
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    // A tool call with a long result, as a turn would have recorded it.
+    let file = home.appendingPathComponent("contextdesk-sessions").appendingPathComponent(session.nativeID + ".json")
+    var record = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+    var turns = try #require(record["turns"] as? [[String: Any]])
+    var items = try #require(turns[0]["items"] as? [[String: Any]])
+    items.append(["id": "t1", "kind": "activity", "text": "Bash\n{\"command\" : \"ls\"}", "showsAuthor": true, "showsCopyControl": true])
+    items.append(["id": "t1:result", "kind": "activity", "text": String(repeating: "r", count: 30_000), "showsAuthor": true, "showsCopyControl": true])
+    turns[0]["items"] = items; record["turns"] = turns
+    try JSONSerialization.data(withJSONObject: record).write(to: file, options: .atomic)
+    let before = try #require((try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.intValue)
+    let reduction = try #require(try await adapter.reduceHistory(session, context: descriptor.context).value())
+    #expect(reduction.bytesBefore == before && reduction.bytesAfter < before / 4)
+    let history = try await adapter.history(session, context: descriptor.context).value()
+    #expect(history[0].items.map(\.kind) == ["user", "assistant", "activity", "activity"])
+    #expect(history[0].items[2].text == "Bash · ls\n#activity tool=Bash target=\"ls\" input=\("Bash\n{\"command\" : \"ls\"}".utf8.count) output=30000")
+    #expect(history[0].items[3].reduced == true && history[0].items[3].fullLength == 30_000)
+    #expect(history[0].items[0].text == "hello")
+    // Already reduced: nothing changes; the read-only call leaves nothing resident.
+    #expect(try await adapter.reduceHistory(session, context: descriptor.context).value() == nil)
+    #expect(await adapter.residentSessionCount == 0)
+    #expect(try #require((try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.intValue) == reduction.bytesAfter)
+    // A session with a live process is refused.
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "wait")).value()
+    guard case .failed = await adapter.reduceHistory(session, context: descriptor.context) else { Issue.record("Live session reduced"); return }
+    await adapter.disconnect()
+}
+
 @Test(arguments: ["approval", "question", "outside"]) func claudeInteractivePermissionRoundTrip(_ prompt: String) async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }

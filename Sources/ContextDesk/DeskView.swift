@@ -615,7 +615,7 @@ struct DeskView: View {
             Button { archiveSelection() } label: {
                 Label(L10n.text("В архив", "Archive"), systemImage: "archivebox")
             }.buttonStyle(DeskButtonStyle()).disabled(!canArchiveSelection)
-                .help(canArchiveSelection ? L10n.text("Архивировать выбранные чаты", "Archive the selected chats") : L10n.text("Дождись завершения работы в выбранных чатах", "Wait until the selected chats are idle"))
+                .help(canArchiveSelection ? L10n.text("Архивировать выбранные чаты. Полный вывод инструментов в архиве сокращается до кратких строк и при восстановлении чата не возвращается.", "Archive the selected chats. Full tool output is reduced to one-line summaries in the archive and is not restored when a chat is restored.") : L10n.text("Дождись завершения работы в выбранных чатах", "Wait until the selected chats are idle"))
             Button { selection.clear() } label: { Image(systemName: "xmark") }
                 .buttonStyle(PointerButtonStyle(base: .plain)).keyboardShortcut(.cancelAction).disabled(archivingSelection)
                 .help(L10n.text("Снять выделение (Esc)", "Deselect all (Esc)"))
@@ -962,7 +962,7 @@ struct ChatView: View {
             }
             if model.selectedChatIsArchived, let chat = model.selectedChat {
                 HStack {
-                    Label(L10n.text("Чат в архиве.", "This chat is archived."), systemImage: "archivebox")
+                    Label(L10n.text("Чат в архиве. Полный вывод инструментов сокращён до кратких строк и после восстановления не возвращается.", "This chat is archived. Full tool output was reduced to one-line summaries and does not come back when the chat is restored."), systemImage: "archivebox")
                     Spacer()
                     Button(L10n.text("Восстановить", "Restore")) { Task { await model.setChatArchived(chat.id, archived: false) } }
                         .disabled(!model.canDeleteChat(chat.id))

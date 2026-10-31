@@ -194,6 +194,9 @@ public protocol AgentIntegration: Sendable {
     func rejectInteraction(_ id: UUID) async
     func history(_ session: AgentSessionReference, context: AgentContext) async -> AgentResult<[AgentHistoryTurn]>
     func summarySource(_ session: AgentSessionReference, context: AgentContext) async -> AgentResult<AgentSummarySource>
+    /// Replaces the tool bodies in the adapter's own stored history of an idle, archived session with headlines and
+    /// metadata. Returns nil when the history is already reduced. Adapters whose history lives with the engine do not support it.
+    func reduceHistory(_ session: AgentSessionReference, context: AgentContext) async -> AgentResult<AgentHistoryReduction?>
     func rename(_ session: AgentSessionReference, title: String, context: AgentContext) async -> AgentResult<Void>
     func setArchived(_ archived: Bool, session: AgentSessionReference, context: AgentContext) async -> AgentResult<Void>
     func delete(_ session: AgentSessionReference, context: AgentContext) async -> AgentResult<Void>
@@ -205,5 +208,8 @@ public protocol AgentIntegration: Sendable {
 extension AgentIntegration {
     public func stopTasks(_ task: String?, session: AgentSessionReference, context: AgentContext) async -> AgentResult<Void> {
         .rejected(.unsupported(.interruption))
+    }
+    public func reduceHistory(_ session: AgentSessionReference, context: AgentContext) async -> AgentResult<AgentHistoryReduction?> {
+        .rejected(.unsupported(.history))
     }
 }

@@ -127,6 +127,10 @@ public actor AgentClient {
         let source = try await integration.summarySource(session, context: descriptor().context).value()
         return try SummarySource(digest: source.digest, fragments: source.fragments.map { .init(reference: $0.reference, kind: $0.kind, text: $0.text) }, turnDates: source.turnDates, omittedDetails: source.omittedDetails)
     }
+    /// Sizes before and after the adapter reduced its stored history; nil when it was already reduced.
+    public func reduceHistory(_ session: AgentSessionReference) async throws -> AgentHistoryReduction? {
+        try await integration.reduceHistory(session, context: descriptor().context).value()
+    }
     public func rename(_ session: AgentSessionReference, title: String) async throws { try await integration.rename(session, title: title, context: descriptor().context).value() }
     public func setArchived(_ archived: Bool, session: AgentSessionReference) async throws { try await integration.setArchived(archived, session: session, context: descriptor().context).value() }
     public func delete(_ session: AgentSessionReference) async throws { try await integration.delete(session, context: descriptor().context).value() }
