@@ -43,6 +43,8 @@ import UserNotifications
         if !restarting && restart.requested { restart.cancel() }
         restart.terminating = true
         AppLog.lifecycle.notice("Quit started (restart: \(restarting, privacy: .public))")
+        // The window stays responsive for the seconds the shutdown takes; a message sent now is held for the next launch.
+        model?.shuttingDown = true
         armShutdownDeadline()
         Task {
             if restarting {
@@ -55,6 +57,8 @@ import UserNotifications
                     // Saving suspends; work may have arrived in the meantime.
                     guard model.readyForRestart else {
                         restart.terminating = false
+                        model.shuttingDown = false
+                        model.releaseQueueHeldForRestart()
                         disarmShutdownDeadline("work arrived while saving")
                         sender.reply(toApplicationShouldTerminate: false)
                         return
@@ -66,6 +70,8 @@ import UserNotifications
                     restart.cancel()
                     try? FileManager.default.removeItem(at: RestartContinuation.file)
                     disarmShutdownDeadline("restart preparation failed")
+                    model?.shuttingDown = false
+                    model?.releaseQueueHeldForRestart()
                     model?.error = L10n.text("Не удалось подготовить перезапуск: ", "Could not prepare restart: ") + error.localizedDescription
                     sender.reply(toApplicationShouldTerminate: false)
                     return

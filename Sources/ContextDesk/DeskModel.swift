@@ -151,6 +151,13 @@ private struct ChatRunState: Equatable {
     private var claudeHistoryBackfillTask: Task<Void, Never>?
     /// One-time launch pass that reduces the tool bodies of archived chats (`ActivityCleanup.swift`).
     var activityCleanupTask: Task<Void, Never>?
+    /// The launch pass starts after this delay and, while any chat runs or sends, pauses before each chat so live turns
+    /// keep most of the store and adapter actors; tests shorten both.
+    var activityCleanupLaunchDelay: Duration = .seconds(60)
+    var activityCleanupBusyPause: Duration = .seconds(1)
+    /// Set by the app delegate once a quit or restart has started. Connections close in the next seconds, so a send
+    /// in this window cannot be confirmed: `send` and a failing `deliver` keep the message in the persisted queue instead.
+    var shuttingDown = false
     private var historyRefreshTasks: [String: Task<Void, Never>] = [:]
     private var historyEventRevisions: [String: Int] = [:]
     @Published var pending: [PendingAction] = []
@@ -211,6 +218,8 @@ private struct ChatRunState: Equatable {
     private var completedTurns: [String: (status: AgentExecutionOutcome, hasError: Bool)] = [:]
     private var currentRunKey: String { chatID ?? "new:" + selectionGeneration.uuidString }
     var sending: Bool { runs[currentRunKey]?.sending == true }
+    /// Any chat with a running turn or a send in flight; background passes yield to them.
+    var anyChatRunsOrSends: Bool { runs.values.contains { $0.running || $0.sending } }
     var busy: Bool { runs[currentRunKey]?.running == true }
     var workingStatus: String? { busy ? runs[currentRunKey]?.status : nil }
     var workingSince: Date? { busy ? runs[currentRunKey]?.turnID.flatMap { turnStarts[currentRunKey + ":" + $0] } : nil }
@@ -361,6 +370,7 @@ private struct ChatRunState: Equatable {
         startActivityCleanup()
         Task { await mobileRemote.restoreOnLaunch(model: self) } // Network sign-in must not hold up boot.
         continueAfterRestart(RestartContinuation.take())
+        releaseQueueHeldForRestart()
         let settings = await UNUserNotificationCenter.current().notificationSettings()
         notificationStatus = settings.authorizationStatus == .authorized ? L10n.text("Уведомления включены", "Notifications are on") : L10n.text("Уведомления не включены", "Notifications are off")
     }
@@ -980,6 +990,8 @@ private struct ChatRunState: Equatable {
         for id in ids {
             guard let index = state.chats.firstIndex(where: { $0.id == id }) else { continue }
             state.chats[index].archived = archived
+            // Further turns add bodies to the history file; the next archive pass reads it again.
+            if !archived { state.chats[index].historyReduced = nil }
             if chatID == id {
                 if !archived { archiveViewingChat = false }
                 else if revealArchive { openArchive() }
@@ -1145,6 +1157,34 @@ private struct ChatRunState: Equatable {
     }
     /// Queues the fixed continuation message for chats that requested the restart; it is
     /// delivered like any queued message, with the chat's own model, route and failure handling.
+    /// Keeps a message that arrived while the app was quitting. Nothing was delivered; the entry is marked so the next
+    /// launch sends it (`releaseQueueHeldForRestart`). The queue stays paused: the quit was judged idle already.
+    private func holdForRestart(_ message: QueuedMessage, first: Bool) {
+        var held = message; held.heldForRestart = true
+        items.removeAll { $0.id == message.id }
+        let others = queuedMessages.filter { $0.id != message.id }
+        state.queuedMessages = first ? [held] + others : others + [held]
+        runs[message.threadID, default: ChatRunState()].queuePaused = true
+        AppLog.delivery.notice("Message for chat \(message.threadID, privacy: .public) held for the next launch: the app is quitting; nothing was delivered")
+        persist()
+    }
+    /// Sends the messages held at the last quit in every chat whose agent is connected; the others stay in the
+    /// paused queue, visible in the chat, until the user resumes it.
+    func releaseQueueHeldForRestart() {
+        var released: Set<String> = [], cleared = false
+        for (index, message) in queuedMessages.enumerated() where message.heldForRestart == true {
+            state.queuedMessages?[index].heldForRestart = nil
+            cleared = true
+            let id = message.threadID
+            guard chatIsAvailable(id), chatConnected(id), chatAuthenticated(id), !isArchived(id), !isChangingChat(id) else { continue }
+            runs[id, default: ChatRunState()].queuePaused = false
+            released.insert(id)
+        }
+        guard cleared else { return }
+        AppLog.delivery.notice("Messages held at the last quit: queue released in \(released.count, privacy: .public) chat(s)")
+        persist()
+        for id in released { scheduleQueue(threadID: id) }
+    }
     func continueAfterRestart(_ chatIDs: [String]) {
         var queued: [String] = []
         for id in chatIDs {
@@ -1324,8 +1364,15 @@ private struct ChatRunState: Equatable {
         if let record = selectedChat, record.isScheduledRecord {
             await followUpScheduledRecord(record, text: composer.text, project: project); return
         }
+        // A quit is in progress: a new chat cannot be created any more, so its text stays in the composer.
+        if shuttingDown && chatID == nil { return }
         let text = composer.text; composer.text = ""
         let localID = "local-user:" + UUID().uuidString
+        if shuttingDown, let thread = chatID {
+            holdForRestart(QueuedMessage(id: localID, threadID: thread, projectID: project.id, text: text,
+                                         model: currentModel, effort: currentAgent == .appClaude ? claudeEffort : effort), first: false)
+            return
+        }
         if let thread = chatID, busy || !visibleQueue.isEmpty {
             if visibleQueue.isEmpty { runs[thread, default: ChatRunState()].queuePaused = false }
             state.queuedMessages = queuedMessages + [QueuedMessage(id: localID, threadID: thread,
@@ -1460,10 +1507,21 @@ private struct ChatRunState: Equatable {
             }
             if let i = state.chats.firstIndex(where: { $0.id == id }) { state.chats[i].updated = Date(); persist() }
         } catch {
+            let engineTurn = runs[runKey]?.turnID.flatMap { $0 == priorTurn ? nil : $0 }
+            // The app is quitting and closed its connections under this send: the message waits in the persisted
+            // queue and goes out on the next launch (the quit itself was judged idle before the send arrived).
+            if shuttingDown, let threadID, scheduledRun == nil, !localID.hasPrefix("local-user:remote:") {
+                holdForRestart(QueuedMessage(id: localID, threadID: threadID, projectID: project.id, text: text,
+                                             model: selectedModel, effort: selectedEffort), first: true)
+                if engineTurn == nil {
+                    runs[runKey, default: ChatRunState()].running = false
+                    runs[runKey, default: ChatRunState()].turnID = nil
+                }
+                return
+            }
             // The engine started a turn of its own while this send was in flight (Claude resuming after its background
             // tasks): that turn keeps the chat running. A definite rejection delivered nothing, so the message waits
             // in the queue for that turn to finish, exactly as if it had been sent while the chat was busy.
-            let engineTurn = runs[runKey]?.turnID.flatMap { $0 == priorTurn ? nil : $0 }
             if let engineTurn, let threadID, scheduledRun == nil, !localID.hasPrefix("local-user:remote:"),
                (error as? AgentOperationFailure)?.rejection != nil {
                 AppLog.delivery.notice("Engine turn \(engineTurn, privacy: .public) started in chat \(threadID, privacy: .public) during a send; message queued, nothing was delivered")
@@ -2013,7 +2071,7 @@ private struct ChatRunState: Equatable {
     /// Schedules a save of the latest state. One pending task per model: calls within `persistDelay` share one
     /// write, and a call during a running write queues exactly one follow-up. Every write takes `state` as it is
     /// at write time, so an older snapshot never overwrites a newer one. `flushPersist()` writes now (quit path).
-    private func persist() {
+    func persist() {
         persistDirty = true
         guard persistTask == nil else { return }
         persistTask = Task {

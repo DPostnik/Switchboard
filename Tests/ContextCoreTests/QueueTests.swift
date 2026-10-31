@@ -409,3 +409,115 @@ private func parallelChatFixture() throws -> (URL, URL) {
     #expect(requests.filter { $0["method"].string == "thread/archive" }.map { $0["params"]["threadId"].string } == ["a", "failed-archive", "c"])
     await connection.stop()
 }
+
+@Test @MainActor func messagesSentWhileTheAppQuitsAreHeldAndReleasedOnTheNextLaunch() async throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let executable = folder.appendingPathComponent("engine.py")
+    try Data(#"""
+    #!\#(fixturePython)
+    import sys, json, time
+    requests = []
+    turns = 0
+    fail_next = False
+    for line in sys.stdin:
+        m = json.loads(line)
+        if 'id' not in m: continue
+        method = m['method']
+        result = {'userAgent': 'codex/0.158.0-alpha.2.1 fixture'}
+        if method == 'test/fail':
+            fail_next = True
+        elif method == 'turn/start':
+            requests.append(m)
+            if fail_next:
+                fail_next = False
+                time.sleep(0.4)  # the app quits under this send
+                print(json.dumps({'id': m['id'], 'error': {'code': -32000, 'message': 'connection closed'}}), flush=True)
+                continue
+            turns += 1
+            result = {'turn': {'id': 'v' + str(turns)}}
+        if method == 'test/requests': result = requests
+        elif method != 'turn/start': requests.append(m)
+        print(json.dumps({'id': m['id'], 'result': result}), flush=True)
+    """#.utf8).write(to: executable)
+    try installFixtureExecutable(at: executable)
+    let connection = CodexConnection()
+    try await connection.start(executable: executable, home: folder)
+    let store = AppStore(file: folder.appendingPathComponent("state.sqlite"))
+    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, summaryExecutable: executable, summaryHome: folder)
+    model.state.defaultRoute = .direct
+    let project = Project(path: folder.path)
+    model.state.projects = [project]; model.projectID = project.id; model.chatID = "t"
+    model.state.chats = [Chat(id: "t", projectID: project.id, title: "Fixture", model: "")]
+    model.connected = true; model.authenticated = true
+    func turnStarts() async throws -> Int {
+        try await connection.request("test/requests").array.filter { $0["method"].string == "turn/start" }.count
+    }
+
+    // A send already in flight when the quit starts fails under the closing connection and is held: nothing was delivered.
+    _ = try await connection.request("test/fail")
+    model.draft = "In flight"
+    let inFlight = Task { await model.send() }
+    for _ in 0..<200 where !model.sending { await Task.yield() }
+    #expect(model.sending && model.busy)
+    model.shuttingDown = true
+    await inFlight.value
+    #expect(model.queuedMessages.map(\.text) == ["In flight"])
+    #expect(model.queuedMessages.first?.heldForRestart == true)
+    #expect(model.items.isEmpty && !model.busy && !model.sending && model.error == nil)
+    #expect(model.queuePaused && !model.hasDeliverableQueue)
+    #expect(try await turnStarts() == 1)
+
+    // A send after the quit started goes straight to the held queue, after the earlier one; nothing reaches the engine.
+    model.draft = "Typed during the quit"
+    await model.send()
+    #expect(model.items.isEmpty)
+    #expect(model.queuedMessages.map(\.text) == ["In flight", "Typed during the quit"])
+    #expect(model.queuedMessages.allSatisfy { $0.heldForRestart == true })
+    #expect(model.queuePaused && !model.hasDeliverableQueue)
+    #expect(try await turnStarts() == 1)
+    // A new chat cannot be created during the quit: the text stays in the composer.
+    model.chatID = nil
+    model.draft = "New chat"
+    await model.send()
+    #expect(model.draft == "New chat" && model.queuedMessages.count == 2)
+    model.chatID = "t"; model.draft = ""
+    await model.flushPersist()
+    #expect(try await store.load().queuedMessages?.map(\.text) == ["In flight", "Typed during the quit"])
+
+    // The next launch releases the held messages of connected chats; the queue then drains in order.
+    let relaunched = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, summaryExecutable: executable, summaryHome: folder)
+    relaunched.state = try await store.load()
+    relaunched.projectID = project.id; relaunched.chatID = "t"
+    relaunched.connected = true; relaunched.authenticated = true
+    relaunched.releaseQueueHeldForRestart()
+    #expect(relaunched.queuedMessages.allSatisfy { $0.heldForRestart == nil })
+    for _ in 0..<300 {
+        if relaunched.queuedMessages.count == 1, !relaunched.sending { break }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(relaunched.items.map(\.text) == ["In flight"])
+    #expect(relaunched.queuedMessages.map(\.text) == ["Typed during the quit"])
+    #expect(try await turnStarts() == 2)
+    relaunched.finishActiveTurn(threadID: "t", turnID: "v1", status: .completed, hasError: false)
+    for _ in 0..<300 {
+        if relaunched.queuedMessages.isEmpty, !relaunched.sending { break }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(relaunched.items.map(\.text) == ["In flight", "Typed during the quit"])
+    #expect(try await turnStarts() == 3)
+
+    // A disconnected chat keeps its held message in the paused queue, no longer marked.
+    var offline = try await store.load()
+    offline.queuedMessages = [QueuedMessage(id: "held", threadID: "t", projectID: project.id, text: "Later", model: "", effort: "")]
+    offline.queuedMessages?[0].heldForRestart = true
+    let disconnected = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, summaryExecutable: executable, summaryHome: folder)
+    disconnected.state = offline
+    disconnected.projectID = project.id; disconnected.chatID = "t"
+    disconnected.releaseQueueHeldForRestart()
+    #expect(disconnected.queuedMessages.map(\.text) == ["Later"] && disconnected.queuedMessages[0].heldForRestart == nil)
+    #expect(disconnected.queuePaused && !disconnected.hasDeliverableQueue)
+    #expect(try await turnStarts() == 3)
+    await connection.stop()
+}

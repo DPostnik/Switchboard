@@ -52,6 +52,9 @@ public struct Chat: Identifiable, Codable, Hashable, Sendable {
     public var isPinned: Bool { pinned == true }
     public var archived: Bool?
     public var isArchived: Bool { archived == true }
+    /// True once the agent's own history file was reduced to headlines and metadata (`ActivityRetention`), so the
+    /// launch cleanup skips the file without reading it; cleared when the chat leaves the archive.
+    public var historyReduced: Bool?
     public var route: RequestRoute?
     /// Read-only record of one Claude scheduled print run (the run ID). No engine session backs it:
     /// its transcript exists only in local history and it never dispatches or resumes work.
@@ -91,6 +94,8 @@ public struct QueuedMessage: Codable, Identifiable, Sendable, Equatable {
     public var text: String
     public var model: String
     public var effort: String
+    /// Sent while the app was quitting, so nothing reached the agent; the next launch delivers it once the chat's agent is connected.
+    public var heldForRestart: Bool?
     public init(id: String, threadID: String, projectID: UUID, text: String, model: String, effort: String) {
         self.id = id; self.threadID = threadID; self.projectID = projectID
         self.text = text; self.model = model; self.effort = effort

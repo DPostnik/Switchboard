@@ -240,7 +240,13 @@ private let sampleItems = [
         #expect(model.activityReductionTargets(claude.id).session == claude.nativeSession)
     }
     #expect(model.activityReductionTargets(busy.id) == (false, nil))
+    // A chat whose Claude history is marked reduced keeps its file unread; leaving the archive clears the mark.
+    model.state.chats[3].historyReduced = true
+    #expect(model.activityReductionTargets(claude.id).session == nil)
+    model.state.chats[3].historyReduced = nil
+    #expect(model.activityReductionTargets(claude.id).session == claude.nativeSession)
     // The launch task ends with VACUUM only while no chat is busy; the reduced bodies left most of this small file free.
+    model.activityCleanupLaunchDelay = .zero
     model.startActivityCleanup()
     await model.activityCleanupTask?.value
     #expect(try await store.freeSpaceFraction() > 0.25)
@@ -248,5 +254,47 @@ private let sampleItems = [
     idle.state = model.state
     await idle.vacuumStoreIfIdle()
     #expect(try await store.freeSpaceFraction() < 0.25)
+    await model.shutdown()
+}
+
+@Test @MainActor func launchCleanupWaitsWhileAChatRunsAndPersistsTheHistoryMarksOnce() async throws {
+    let root = temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = AppStore(file: root.appendingPathComponent("metadata.sqlite"))
+    let model = DeskModel(store: store, summaryResources: nil)
+    let project = Project(path: "/fixture")
+    var archived = Chat(id: "archived", projectID: project.id, title: "Archived", model: "model"); archived.archived = true
+    let live = Chat(id: "live", projectID: project.id, title: "Live", model: "model")
+    model.state.projects = [project]; model.state.chats = [archived, live]
+    try await store.save(model.state)
+    try await store.saveTranscript(LocalHistory.snapshot(conversation: archived.conversationID, source: try #require(archived.nativeSession), items: [
+        TranscriptItem(id: "u", kind: "user", text: "Hi"), TranscriptItem(id: "t", kind: "activity", text: "Read\n{\"file_path\" : \"/x\"}"),
+        TranscriptItem(id: "t:result", kind: "activity", text: String(repeating: "b", count: 20_000))]))
+    model.activityCleanupBusyPause = .milliseconds(400)
+    // Another chat runs a turn: the pass slows down (one pause per chat) instead of competing with it for the store
+    // and adapter actors, but it does not wait for a full stop.
+    await model.receive(.init(session: try #require(live.nativeSession), payload: .started(turn: "turn")))
+    #expect(model.isBusy(threadID: live.id))
+    let started = ContinuousClock.now
+    let pass = Task { await model.cleanUpArchivedActivity() }
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(try await storedIsReduced(store, archived.id) == false)
+    let result = await pass.value
+    #expect(ContinuousClock.now - started >= .milliseconds(400))
+    #expect(model.isBusy(threadID: live.id))
+    #expect(result.chats == 1 && result.historiesMarked == 0)
+    #expect(try await storedIsReduced(store, archived.id))
+    // Idle chats: no pause at all.
+    model.state.chats[1].archived = true
+    try await store.saveTranscript(LocalHistory.snapshot(conversation: live.conversationID, source: try #require(live.nativeSession), items: [
+        TranscriptItem(id: "t", kind: "activity", text: "Read\n{\"file_path\" : \"/y\"}"), TranscriptItem(id: "t:result", kind: "activity", text: String(repeating: "c", count: 20_000))]))
+    let idle = DeskModel(store: store, summaryResources: nil)
+    idle.state = model.state
+    idle.activityCleanupBusyPause = .seconds(30)
+    let quick = ContinuousClock.now
+    #expect(await idle.cleanUpArchivedActivity().chats == 1)
+    #expect(ContinuousClock.now - quick < .seconds(5))
+    // A Codex chat never gets a history mark: its thread store is not the app's to rewrite.
+    #expect(model.state.chats[0].historyReduced == nil)
     await model.shutdown()
 }
