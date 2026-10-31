@@ -1408,6 +1408,7 @@ struct SettingsView: View {
                 }
             }
             InterfaceZoomSettings()
+            MainWindowScreenSettings()
             Section(L10n.text("Уведомления", "Notifications")) {
                 Text(model.notificationStatus).font(.ui(.callout))
                 Button(L10n.text("Разрешить уведомления", "Allow notifications")) { Task { await model.enableNotifications() } }

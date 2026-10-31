@@ -136,6 +136,7 @@ struct ContextDeskApp: App {
                 .preferredColorScheme(.light)
                 .environment(\.locale, L10n.locale)
                 .frame(minWidth: 900, minHeight: 620)
+                .background(MainWindowPlacer())
                 .modifier(MainWindowOpener(delegate: delegate))
                 .task {
                     delegate.model = model
