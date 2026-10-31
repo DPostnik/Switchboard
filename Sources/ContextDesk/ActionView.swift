@@ -38,6 +38,10 @@ struct ActionView: View {
                 HStack {
                     declineButton
                     if canAllow {
+                        if action.interaction.canAllowTurn {
+                            Button(L10n.text("Разрешить до конца хода", "Allow for this turn")) { submit(.allowTurn) }
+                                .help(L10n.text("Этот и следующие запросы того же инструмента в этом ходе", "This and later requests of the same tool in this turn"))
+                        }
                         Button(L10n.text("Разрешить один раз", "Allow once")) { submit(.allowOnce) }
                             .buttonStyle(PointerButtonStyle(base: .borderedProminent))
                     }

@@ -68,8 +68,11 @@ public struct AgentInteraction: Identifiable, Sendable {
     public let reason: String?
     /// Literal diagnostic evidence for presentation, never a response template.
     public let details: String
-    public init(id: UUID, session: AgentSessionReference, turn: String?, kind: Kind, reason: String?, details: String) {
+    /// True when `.allowTurn` is accepted: the agent then allows repeats of the same tool for the rest of this turn.
+    public let canAllowTurn: Bool
+    public init(id: UUID, session: AgentSessionReference, turn: String?, kind: Kind, reason: String?, details: String, canAllowTurn: Bool = false) {
         self.id = id; self.session = session; self.turn = turn; self.kind = kind; self.reason = reason; self.details = details
+        self.canAllowTurn = canAllowTurn
     }
     public enum Kind: Sendable {
         case approval(canAllow: Bool)
@@ -104,6 +107,7 @@ public struct AgentInteraction: Identifiable, Sendable {
 }
 
 public enum AgentInteractionResponse: Sendable {
-    case allowOnce, deny, answers([String: String]), completed
+    /// `allowTurn` allows this request and every later request of the same tool until the turn ends.
+    case allowOnce, allowTurn, deny, answers([String: String]), completed
 }
 

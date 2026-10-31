@@ -31,7 +31,8 @@ enum FringeLinkMapping {
         case .link, .unsupported: kind = .other; canAllow = false
         }
         return FringeRequest(id: action.id, chatID: action.threadID, kind: kind, title: action.title, reason: interaction.reason,
-                             details: String(interaction.details.prefix(detailsLimit)), canAllow: canAllow)
+                             details: String(interaction.details.prefix(detailsLimit)), canAllow: canAllow,
+                             canAllowTurn: canAllow && interaction.canAllowTurn)
     }
 
     /// Sub-agents sent per chat: the panel is a glance, not the chat's sub-agent list.
@@ -68,6 +69,7 @@ enum FringeLinkMapping {
         switch answer {
         case .deny: return .deny
         case .allowOnce: return canAllow ? .allowOnce : nil
+        case .allowTurn: return canAllow && action.interaction.canAllowTurn ? .allowTurn : nil
         }
     }
 }
@@ -142,7 +144,9 @@ enum FringeLinkMapping {
         source.setCancelHandler { close(fd) }
         source.resume()
         acceptSource = source
-        Self.log.info("Listening for Fringe")
+        // Read now, while the bundle on disk is still the running one; a later rebuild would make the read fail.
+        if let team = FringePeer.currentTeamID() { Self.log.info("Listening for Fringe signed by team \(team, privacy: .public)") }
+        else { Self.log.error("Listening for Fringe, but this build has no Team ID; every peer will be rejected") }
         return true
     }
 
@@ -178,7 +182,7 @@ enum FringeLinkMapping {
         case .hello where !greeted:
             greeted = true
             let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
-            send(.hello(FringeHello(app: "Switchboard", appVersion: version, capabilities: [.answer])))
+            send(.hello(FringeHello(app: "Switchboard", appVersion: version, capabilities: [.answer, .allowTurn])))
             tracker = NotchTracker()
             lastSnapshot = nil
             answered = []

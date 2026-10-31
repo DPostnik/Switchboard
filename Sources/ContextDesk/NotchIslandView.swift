@@ -51,13 +51,21 @@ struct NotchIslandView: View {
         }
     }
     private var radius: CGFloat { state.mode == .expanded ? 22 : state.mode == .peek ? 16 : 10 }
+    /// The buddy's open size; at rest it shows at 17 points (17 / 20).
+    private static let buddySize: CGFloat = 20
+    private var buddyScale: CGFloat { state.mode == .expanded ? 1 : 0.85 }
 
     /// The band beside the cut-out; nothing is drawn under the notch itself.
     private var header: some View {
         HStack(spacing: 0) {
             HStack {
-                DeskBuddy(summary: state.summary, size: state.mode == .expanded ? 20 : 17, celebratedAt: state.celebratedAt,
+                // Built once at the open size and scaled down at rest, so opening rides the island's
+                // curve instead of rebuilding the buddy and restarting its loops. The frame keeps
+                // the resting footprint of a 17-point buddy.
+                DeskBuddy(summary: state.summary, size: Self.buddySize, celebratedAt: state.celebratedAt,
                           look: state.look, paused: state.mode == .hidden)
+                    .scaleEffect(buddyScale, anchor: .center)
+                    .frame(width: Self.buddySize * 1.4 * buddyScale, height: Self.buddySize * 1.4 * buddyScale)
             }
                 .frame(maxWidth: .infinity, alignment: state.mode == .expanded ? .leading : .center)
             Color.clear.frame(width: state.notch.width)
@@ -354,6 +362,11 @@ private struct NotchActionCard: View {
                     Button(L10n.text("Отклонить", "Decline")) { submit(.deny) }
                         .buttonStyle(NotchButtonStyle(prominent: false))
                     if canAllow {
+                        if action.interaction.canAllowTurn {
+                            Button(L10n.text("До конца хода", "For this turn")) { submit(.allowTurn) }
+                                .buttonStyle(NotchButtonStyle(prominent: false))
+                                .help(L10n.text("Разрешить этот и следующие запросы того же инструмента в этом ходе", "Allow this and later requests of the same tool in this turn"))
+                        }
                         Button(L10n.text("Разрешить один раз", "Allow once")) { submit(.allowOnce) }
                             .buttonStyle(NotchButtonStyle(prominent: true))
                     }

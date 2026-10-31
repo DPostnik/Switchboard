@@ -36,6 +36,9 @@ private actor ClaudeEvents {
         for event in values { if case .interaction(let request) = event.payload { return request } }
         return nil
     }
+    func interactions() -> [AgentInteraction] {
+        values.compactMap { if case .interaction(let request) = $0.payload { return request }; return nil }
+    }
     func capabilities() -> [AgentCapabilityRecord] {
         values.compactMap { if case .capability(let record) = $0.payload { return record }; return nil }
     }
@@ -80,6 +83,7 @@ private func interactiveFixture(_ root: URL) throws -> URL {
         print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':json.dumps(value),'structured_output':value,'usage':usage,'permission_denials':[]})); sys.exit(0)
     browser='--mcp-config' in sys.argv and 'switchboard_browser' in sys.argv[sys.argv.index('--mcp-config')+1]
     full=sys.argv[sys.argv.index('--permission-mode')+1]=='bypassPermissions'
+    twice=False
     editor='--restricted' in sys.argv and sys.argv[sys.argv.index('--tools')+1]=='Read,Glob,Grep,Write,Edit,AskUserQuestion'
     connectors='--strict-mcp-config' not in sys.argv
     assert ('--safe-mode' in sys.argv) == (not browser and not connectors) and '--setting-sources' in sys.argv
@@ -174,9 +178,10 @@ private func interactiveFixture(_ root: URL) throws -> URL {
                 out({'type':'assistant','session_id':sid,'message':{'id':'retry','stop_reason':'end_turn','content':[{'type':'text','text':'safe answer'}]}})
                 result()
                 continue
-            if prompt in ['approval','question','outside','connector']:
+            if prompt in ['approval','question','outside','connector','approval-twice']:
                 name='AskUserQuestion' if prompt=='question' else 'mcp__claude_ai_Gmail__send_message' if prompt=='connector' else 'Write'
                 args={'questions':[{'question':'Choose','options':[{'label':'Yes','description':'Go ahead','preview':'print(1)'},{'label':'No','description':' '}]}]} if prompt=='question' else {'file_path':'/outside-project/file' if prompt=='outside' else str(pathlib.Path.cwd()/'fixture.txt'),'content':'content'}
+                twice=prompt=='approval-twice'
                 out({'type':'control_request','request_id':'permission','request':{'subtype':'can_use_tool','tool_name':name,'input':args}})
                 continue
             usage={'input_tokens':10,'cache_creation_input_tokens':20,'cache_read_input_tokens':70,'output_tokens':1}
@@ -194,6 +199,14 @@ private func interactiveFixture(_ root: URL) throws -> URL {
             result()
         elif value['type']=='control_response':
             (home/'answer').write_text(json.dumps(value))
+            with (home/'answers').open('a') as f: f.write(json.dumps(value)+'\n')
+            if twice and value['response']['request_id']=='permission':
+                # Same tool again in the same turn: a Write to another file, then a Bash command that still asks.
+                out({'type':'control_request','request_id':'permission-2','request':{'subtype':'can_use_tool','tool_name':'Write','input':{'file_path':str(pathlib.Path.cwd()/'second.txt'),'content':'more'}}})
+                continue
+            if twice and value['response']['request_id']=='permission-2':
+                out({'type':'control_request','request_id':'permission-3','request':{'subtype':'can_use_tool','tool_name':'Bash','input':{'command':'echo hi'}}})
+                continue
             result()
     """#
     try Data(script.utf8).write(to: executable)
@@ -512,6 +525,36 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     let reply = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: home.appendingPathComponent("answer")))["response"]["response"]
     #expect(reply["behavior"].string == (prompt == "outside" ? "deny" : "allow"))
     if prompt == "question" { #expect(reply["updatedInput"]["answers"]["Choose"].string == "Yes") }
+    await adapter.disconnect()
+}
+
+@Test func claudeAllowForTurnCoversLaterRequestsOfTheSameToolOnly() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    var asking = AgentPermissionProfile.workspace(); asking.projectWrites = .ask; asking.shell = .on
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root, role: asking)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "approval-twice", role: asking)).value()
+    try await waitFor { await events.interaction() != nil }
+    let first = try #require(await events.interaction())
+    #expect(first.canAllowTurn)
+    _ = try await adapter.answer(first.id, session: session, context: descriptor.context, response: .allowTurn).value()
+    // The second Write is allowed without asking; the Bash request is a different tool and still asks.
+    try await waitFor { await events.interactions().count == 2 }
+    let second = await events.interactions()[1]
+    #expect(second.reason == "Bash")
+    let answers = try String(contentsOf: home.appendingPathComponent("answers"), encoding: .utf8).split(separator: "\n")
+        .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8))["response"] }
+    #expect(answers.map { $0["request_id"].string } == ["permission", "permission-2"])
+    #expect(answers.allSatisfy { $0["response"]["behavior"].string == "allow" })
+    let decisions = await events.capabilities().map { "\($0.tool):\($0.decision)" }
+    #expect(decisions == ["Write:asked", "Write:allowed", "Bash:asked"])
+    _ = try await adapter.answer(second.id, session: session, context: descriptor.context, response: .deny).value()
+    try await waitFor { await events.completion() != nil }
     await adapter.disconnect()
 }
 
@@ -1107,6 +1150,26 @@ private func completedClaudeSession(_ adapter: ClaudeIntegration, binary: URL, h
     await adapter.disconnect()
 }
 
+@Test func claudeOwnTurnDuringStartupDoesNotCloseTheNewProcess() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
+    try Data().write(to: home.appendingPathComponent("own-turn"))
+    // The CLI's own turn ends before `initialize` is answered; the user's message is still delivered to the same process.
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session)).value()
+    try await waitFor { await events.completionCount() == 1 }
+    let history = try await adapter.history(session, context: descriptor.context).value()
+    #expect(history.last?.items.map(\.text).last == "hello")
+    #expect(await events.startedCount() == 1)
+    #expect(try String(contentsOf: home.appendingPathComponent("launches"), encoding: .utf8).split(separator: "\n").count == 1)
+    await adapter.disconnect()
+}
+
 @Test func claudeStopsOneBackgroundTaskWithoutEndingTheChat() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -1148,26 +1211,6 @@ private func completedClaudeSession(_ adapter: ClaudeIntegration, binary: URL, h
     _ = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root, session: session)).value()
     _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session)).value()
     try await waitFor { await events.completionCount() == 2 }
-    #expect(try String(contentsOf: home.appendingPathComponent("launches"), encoding: .utf8).split(separator: "\n").count == 1)
-    await adapter.disconnect()
-}
-
-@Test func claudeOwnTurnDuringStartupDoesNotCloseTheNewProcess() async throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at: root) }
-    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
-    let adapter = ClaudeIntegration(), events = ClaudeEvents()
-    let reader = Task { for await event in adapter.events { await events.append(event) } }
-    defer { reader.cancel() }
-    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
-    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
-    try Data().write(to: home.appendingPathComponent("own-turn"))
-    // The CLI's own turn ends before `initialize` is answered; the user's message is still delivered to the same process.
-    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session)).value()
-    try await waitFor { await events.completionCount() == 1 }
-    let history = try await adapter.history(session, context: descriptor.context).value()
-    #expect(history.last?.items.map(\.text).last == "hello")
-    #expect(await events.startedCount() == 1)
     #expect(try String(contentsOf: home.appendingPathComponent("launches"), encoding: .utf8).split(separator: "\n").count == 1)
     await adapter.disconnect()
 }

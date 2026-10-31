@@ -5,9 +5,9 @@ import AgentContract
 @testable import ContextDesk
 import FringeProtocol
 
-private func action(_ kind: AgentInteraction.Kind, details: String = "ls") -> PendingAction {
+private func action(_ kind: AgentInteraction.Kind, details: String = "ls", turnOption: Bool = false) -> PendingAction {
     PendingAction(interaction: AgentInteraction(id: UUID(), session: AgentSessionReference(connection: .originalCodex, nativeID: "n"),
-                                                turn: nil, kind: kind, reason: "Run a command", details: details), threadID: "chat")
+                                                turn: nil, kind: kind, reason: "Run a command", details: details, canAllowTurn: turnOption), threadID: "chat")
 }
 
 @Test func fringeRequestsKeepOnlyWhatThePanelNeeds() {
@@ -17,6 +17,9 @@ private func action(_ kind: AgentInteraction.Kind, details: String = "ls") -> Pe
     #expect(request.chatID == "chat")
     #expect(request.kind == .approval)
     #expect(request.canAllow)
+    #expect(!request.canAllowTurn)
+    #expect(FringeLinkMapping.request(action(.approval(canAllow: true), turnOption: true)).canAllowTurn)
+    #expect(!FringeLinkMapping.request(action(.approval(canAllow: false), turnOption: true)).canAllowTurn)
     #expect(request.reason == "Run a command")
     #expect(request.details.count == FringeLinkMapping.detailsLimit)
     #expect(FringeLinkMapping.request(action(.questions([]))).kind == .question)
@@ -31,6 +34,10 @@ private func action(_ kind: AgentInteraction.Kind, details: String = "ls") -> Pe
     #expect(FringeLinkMapping.response(for: .deny, to: denyOnly).map { "\($0)" } == "deny")
     #expect(FringeLinkMapping.response(for: .allowOnce, to: denyOnly) == nil)
     #expect(FringeLinkMapping.response(for: .deny, to: question) == nil)
+    // "For this turn" needs the agent to offer it; Codex interactions never do.
+    #expect(FringeLinkMapping.response(for: .allowTurn, to: allowed) == nil)
+    #expect(FringeLinkMapping.response(for: .allowTurn, to: action(.approval(canAllow: true), turnOption: true)).map { "\($0)" } == "allowTurn")
+    #expect(FringeLinkMapping.response(for: .allowTurn, to: action(.approval(canAllow: false), turnOption: true)) == nil)
 }
 
 private func subagent(_ id: String, _ status: AgentSubagent.Status, background: Bool = false, started: TimeInterval, ended: TimeInterval? = nil) -> AgentSubagent {

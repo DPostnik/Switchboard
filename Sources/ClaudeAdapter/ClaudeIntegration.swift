@@ -55,11 +55,15 @@ public actor ClaudeIntegration: AgentIntegration {
     private struct Interaction {
         let session: String
         let requestID: String
+        let tool: String
+        let turn: String?
         let input: JSONValue
         let questions: Set<String>?
         let epoch: UUID
     }
     private var interactions: [UUID: Interaction] = [:]
+    /// Session -> tools the user allowed for the rest of the named turn ("allow for this turn"). Cleared when the turn ends.
+    private var turnGrants: [String: (turn: String, tools: Set<String>)] = [:]
     private var interrupted = Set<String>()
     /// Session -> the active turn's user message as seen in the CLI's `command_lifecycle` events. A resumed CLI may first
     /// run a turn of its own (a notification about a task of the previous process); its `result` must not end the user's turn.
@@ -521,7 +525,7 @@ public actor ClaudeIntegration: AgentIntegration {
         var result: JSONValue
         switch response {
         case .deny: result = .object(["behavior": .string("deny"), "message": .string(L10n.text("Отклонено пользователем", "Denied by user"))])
-        case .allowOnce:
+        case .allowOnce, .allowTurn:
             guard interaction.questions == nil else { return .rejected(.invalidResponse) }
             result = .object(["behavior": .string("allow"), "updatedInput": interaction.input])
         case .answers(let answers):
@@ -533,6 +537,11 @@ public actor ClaudeIntegration: AgentIntegration {
         interactions.removeValue(forKey: id)
         do {
             try await respond(wire, requestID: interaction.requestID, response: result)
+            if case .allowTurn = response, let turn = interaction.turn {
+                var grant = turnGrants[interaction.session].flatMap { $0.turn == turn ? $0 : nil } ?? (turn: turn, tools: [])
+                grant.tools.insert(interaction.tool)
+                turnGrants[interaction.session] = grant
+            }
             sink.yield(.init(session: session, payload: .resolved(id))); return .success(())
         } catch { await wire.close(); return failed(error, uncertain: true) }
     }
@@ -802,13 +811,16 @@ public actor ClaudeIntegration: AgentIntegration {
             }
             questions = Set(fields.map(\.id)); kind = .questions(fields)
         } else {
+            // "Allow for this turn" answered earlier in the same turn covers later requests of the same tool.
+            if let grant = turnGrants[id], grant.turn == turn, grant.tools.contains(name) { await allow(); return }
             kind = .approval(canAllow: true)
             record(.init(tool: name, capability: capability, target: target, decision: .asked, turn: turn), session: id)
         }
         let token = UUID()
-        interactions[token] = .init(session: id, requestID: requestID, input: input, questions: questions, epoch: context.accountRevision)
+        interactions[token] = .init(session: id, requestID: requestID, tool: name, turn: turn, input: input, questions: questions,
+                                    epoch: context.accountRevision)
         sink.yield(.init(session: reference(id), payload: .interaction(.init(id: token, session: reference(id), turn: turn,
-            kind: kind, reason: name, details: input.display))))
+            kind: kind, reason: name, details: input.display, canAllowTurn: questions == nil))))
     }
     /// Resolve existing ancestors through POSIX, including /var versus /private/var.
     /// Missing leaf components are allowed; inaccessible paths and dangling symlinks fail closed.
@@ -1002,7 +1014,7 @@ public actor ClaudeIntegration: AgentIntegration {
             meter.abandon() // No-op after a terminal result; otherwise observed calls still count.
             sessions[id]?.tokens = meter.base; sessions[id]?.contextWindow = meter.window; sessions[id]?.lastContext = meter.last
         }
-        interrupted.remove(id); commands.removeValue(forKey: id)
+        interrupted.remove(id); turnGrants.removeValue(forKey: id); commands.removeValue(forKey: id)
         for (token, value) in interactions where value.session == id {
             interactions.removeValue(forKey: token); sink.yield(.init(session: reference(id), payload: .resolved(token)))
         }

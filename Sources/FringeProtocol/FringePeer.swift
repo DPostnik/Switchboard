@@ -11,7 +11,11 @@ public enum FringePeer {
     }
 
     /// The Team ID of the running process; nil for ad-hoc or unsigned builds, which then accept no peer.
-    public static func currentTeamID() -> String? {
+    /// Read once: after the app's bundle on disk is replaced by a new build, `SecCodeCopySelf` no longer
+    /// identifies the running process, and a fresh read would reject every peer until relaunch.
+    public static func currentTeamID() -> String? { cachedTeamID }
+    private static let cachedTeamID: String? = readCurrentTeamID()
+    private static func readCurrentTeamID() -> String? {
         var code: SecCode?
         guard SecCodeCopySelf([], &code) == errSecSuccess, let code else { return nil }
         var staticCode: SecStaticCode?

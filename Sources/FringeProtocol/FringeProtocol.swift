@@ -26,6 +26,8 @@ public enum FringeProtocol {
 public enum FringeCapability: String, Codable, Sendable, CaseIterable {
     /// Answering approval requests from the panel (stage 2).
     case answer
+    /// Accepting `allowTurn` answers: the rest of the turn is allowed for the same tool.
+    case allowTurn
 }
 
 public struct FringeHello: Codable, Equatable, Sendable {
@@ -77,9 +79,24 @@ public struct FringeRequest: Codable, Equatable, Identifiable, Sendable {
     public var details: String
     /// False when the agent offers no "allow" for this approval.
     public var canAllow: Bool
-    public init(id: String, chatID: String, kind: Kind, title: String, reason: String? = nil, details: String = "", canAllow: Bool = false) {
+    /// True when the agent also accepts "allow for the rest of this turn"; absent from older peers.
+    public var canAllowTurn: Bool
+    public init(id: String, chatID: String, kind: Kind, title: String, reason: String? = nil, details: String = "", canAllow: Bool = false,
+                canAllowTurn: Bool = false) {
         self.id = id; self.chatID = chatID; self.kind = kind; self.title = title
-        self.reason = reason; self.details = details; self.canAllow = canAllow
+        self.reason = reason; self.details = details; self.canAllow = canAllow; self.canAllowTurn = canAllowTurn
+    }
+    private enum CodingKeys: String, CodingKey { case id, chatID, kind, title, reason, details, canAllow, canAllowTurn }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        chatID = try container.decode(String.self, forKey: .chatID)
+        kind = try container.decode(Kind.self, forKey: .kind)
+        title = try container.decode(String.self, forKey: .title)
+        reason = try container.decodeIfPresent(String.self, forKey: .reason)
+        details = try container.decode(String.self, forKey: .details)
+        canAllow = try container.decode(Bool.self, forKey: .canAllow)
+        canAllowTurn = try container.decodeIfPresent(Bool.self, forKey: .canAllowTurn) ?? false
     }
 }
 
@@ -136,7 +153,8 @@ public struct FringeAnnouncement: Codable, Equatable, Sendable {
     }
 }
 
-public enum FringeAnswer: String, Codable, Sendable { case allowOnce, deny }
+/// `allowTurn` is sent only when the peer announced the `allowTurn` capability and the request offers it.
+public enum FringeAnswer: String, Codable, Sendable { case allowOnce, allowTurn, deny }
 
 public struct FringeAnswerResult: Codable, Equatable, Sendable {
     public enum Outcome: String, Codable, Sendable {
