@@ -49,7 +49,8 @@ import UserNotifications
                 do {
                     guard let model else { throw RestartFailure.unavailable }
                     try await model.store.save(model.state)
-                    // Recorded items are written about a second after they arrive; the relaunch must not lose them.
+                    // Coalesced state saves and recorded items are written with a delay; the relaunch must not lose them.
+                    await model.flushPersist()
                     await model.store.flushTranscripts()
                     // Saving suspends; work may have arrived in the meantime.
                     guard model.readyForRestart else {
@@ -71,7 +72,8 @@ import UserNotifications
                 }
             }
             await model?.shutdown()
-            // Items that arrived while shutting down are still pending in the store.
+            // State changes and items that arrived while shutting down are still pending.
+            await model?.flushPersist()
             await model?.store.flushTranscripts()
             sender.reply(toApplicationShouldTerminate: true)
         }

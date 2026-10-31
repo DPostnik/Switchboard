@@ -48,3 +48,28 @@ public enum ConversationIdentity {
         return matches.count == 1 ? matches.first?.id : nil
     }
 }
+
+/// (connection, native ID) -> app chat ID for a fixed list of chats; the same answers as
+/// `ConversationIdentity.appID(for:in:connection:)` without filtering every chat per lookup.
+/// Build it once per change of the chat list; streamed events resolve their chat through it.
+public struct NativeSessionMap: Sendable, Equatable {
+    private var ids: [AgentSessionReference: String] = [:]
+    /// Sessions several chats claim; they resolve to nil, like the filter's `count == 1` rule.
+    private var shared: Set<AgentSessionReference> = []
+
+    public init(chats: [Chat]) {
+        ids.reserveCapacity(chats.count)
+        for chat in chats {
+            guard let session = chat.nativeSession else { continue }
+            if ids.updateValue(chat.id, forKey: session) != nil { shared.insert(session) }
+        }
+    }
+
+    public func appID(for nativeID: String, connection: AgentConnectionID = .originalCodex) -> String? {
+        appID(for: AgentSessionReference(connection: connection, nativeID: nativeID))
+    }
+
+    public func appID(for session: AgentSessionReference) -> String? {
+        shared.contains(session) ? nil : ids[session]
+    }
+}
