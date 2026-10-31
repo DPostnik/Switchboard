@@ -15,6 +15,7 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
     var rename: (() -> Void)? = nil
     var menuShown: (Bool) -> Void = { _ in }
     var hovered: (Bool) -> Void = { _ in }
+    var pressed: (Bool) -> Void = { _ in }
     @ViewBuilder var content: Content
 
     func makeNSView(context: Context) -> ProjectHeaderView {
@@ -45,6 +46,7 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
         view.rename = rename
         view.menuShown = menuShown
         view.hovered = hovered
+        view.pressed = pressed
         view.setAccessibilityElement(true)
         view.setAccessibilityRole(.button)
         view.setAccessibilityLabel(project.name)
@@ -69,10 +71,13 @@ class SidebarRowView: NSView, NSDraggingSource {
     var menuShown: (Bool) -> Void = { _ in }
     /// Reports when the pointer enters or leaves the row.
     var hovered: (Bool) -> Void = { _ in }
+    /// Reports mouse-down until release or drag start, so the row darkens at once, as Finder rows do.
+    var pressed: (Bool) -> Void = { _ in }
     var canDrag: Bool { true }
     private var pressedEvent: NSEvent?
     private var startedDrag = false
     private var isHovered = false
+    private var isPressed = false
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -100,12 +105,17 @@ class SidebarRowView: NSView, NSDraggingSource {
     // A row removed under the pointer gets no exit event.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil { setHovered(false) }
+        if window == nil { setHovered(false); setPressed(false) }
     }
     private func setHovered(_ value: Bool) {
         guard value != isHovered else { return }
         isHovered = value
         hovered(value)
+    }
+    private func setPressed(_ value: Bool) {
+        guard value != isPressed else { return }
+        isPressed = value
+        pressed(value)
     }
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
         super.willOpenMenu(menu, with: event)
@@ -120,6 +130,7 @@ class SidebarRowView: NSView, NSDraggingSource {
         guard isInteractionEnabled else { return }
         pressedEvent = event
         startedDrag = false
+        setPressed(true)
     }
     override func mouseDragged(with event: NSEvent) {
         guard isInteractionEnabled, canDrag, let pressedEvent, !startedDrag else { return }
@@ -127,10 +138,11 @@ class SidebarRowView: NSView, NSDraggingSource {
                             y: event.locationInWindow.y - pressedEvent.locationInWindow.y)
         guard hypot(delta.x, delta.y) >= 4 else { return }
         startedDrag = true
+        setPressed(false)
         startDrag(with: pressedEvent)
     }
     override func mouseUp(with event: NSEvent) {
-        defer { pressedEvent = nil; startedDrag = false }
+        defer { pressedEvent = nil; startedDrag = false; setPressed(false) }
         guard isInteractionEnabled, pressedEvent != nil, !startedDrag,
               bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
         click(modifiers: event.modifierFlags)

@@ -22,7 +22,7 @@ struct ChipLabel: View {
     var chevron = false
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: .ui(5)) {
             if let systemImage { Image(systemName: systemImage).font(.ui(size: 11, weight: .medium)) }
             Text(title).lineLimit(1)
             if chevron { Image(systemName: "chevron.down").font(.ui(size: 8, weight: .bold)).foregroundStyle(.tertiary) }
@@ -41,7 +41,7 @@ struct ChipButtonStyle: ButtonStyle {
         var body: some View {
             configuration.label
                 .font(.ui(.callout)).foregroundStyle(isEnabled ? .primary : .secondary)
-                .padding(.horizontal, 9).frame(height: 28)
+                .padding(.horizontal, .ui(9)).frame(height: .ui(28))
                 .background(configuration.isPressed ? DeskPalette.selection : hovering && isEnabled ? DeskPalette.subtle : .clear,
                             in: RoundedRectangle(cornerRadius: 8))
                 .contentShape(RoundedRectangle(cornerRadius: 8))

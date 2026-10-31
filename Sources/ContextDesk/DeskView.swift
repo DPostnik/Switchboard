@@ -19,6 +19,8 @@ struct DeskView: View {
     @State private var menuRowID: String?
     /// Hover sources per sidebar row: the native row itself, and `#tools` for a project's trailing buttons.
     @State private var rowHover = SidebarHover()
+    /// Sidebar row under a held mouse button; it shows the selection fill before the click completes.
+    @State private var pressedRowID: String?
     @State private var expandedProjects: Set<UUID> = []
     @State private var collapsedSearchProjects: Set<UUID> = []
     @State private var visibleChatCounts: [UUID: Int] = [:]
@@ -318,11 +320,13 @@ struct DeskView: View {
                 }, moveUp: adjacentProjectMove(project, offset: -1), moveDown: adjacentProjectMove(project, offset: 1),
                    remove: { Task { await model.hideProject(project.id) } },
                    rename: { startRenaming(project) }, menuShown: menuShown("project:\(project.id)"),
-                   hovered: hover("project:\(project.id)")) {
+                   hovered: hover("project:\(project.id)"), pressed: press("project:\(project.id)")) {
                     HStack(spacing: .ui(9)) {
                         Image(systemName: "chevron.right")
                             .font(.ui(.caption).weight(.semibold))
                             .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                            // This label lives in its own hosting view, so the outer withAnimation does not reach it.
+                            .animation(sidebarAnimation, value: isExpanded)
                             .frame(width: .ui(10), height: .ui(16))
                             .foregroundStyle(.secondary)
                         Image(systemName: model.projectID == project.id ? "folder.fill" : "folder")
@@ -407,7 +411,7 @@ struct DeskView: View {
             .padding(.trailing, .ui(4))
             .frame(height: .ui(32))
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(dropTargetProjectID == project.id || menuRowID == "project:\(project.id)" ? Color.accentColor : .clear, lineWidth: 2).allowsHitTesting(false))
-            .background(SidebarRowBackground(hover: rowHover, rowID: "project:\(project.id)", base: model.projectID == project.id && model.chatID == nil && !model.showingJobs && !model.showingAttention && !model.showingArchive ? DeskPalette.selection
+            .background(SidebarRowBackground(hover: rowHover, rowID: "project:\(project.id)", base: pressedRowID == "project:\(project.id)" || model.projectID == project.id && model.chatID == nil && !model.showingJobs && !model.showingAttention && !model.showingArchive ? DeskPalette.selection
                         : rowHighlighted("project:\(project.id)") ? DeskPalette.rowHover : Color.clear))
 
             SidebarDisclosure(isExpanded: isExpanded, animation: sidebarAnimation) {
@@ -533,7 +537,7 @@ struct DeskView: View {
                         ChatRow(chat: chat, enabled: !model.isChangingChat(chat.id), activate: {
                             Task { await model.openChat(chat) }
                         }, move: { _ in false }, targeted: { _ in },
-                           actions: chatActions(chat, reorder: false), favorite: true, menuShown: menuShown(rowID), hovered: hover(rowID))
+                           actions: chatActions(chat, reorder: false), favorite: true, menuShown: menuShown(rowID), hovered: hover(rowID), pressed: press(rowID))
                     }
             } else {
                 // Measure and render the same label; the native overlay only handles interaction.
@@ -551,13 +555,13 @@ struct DeskView: View {
                         }, move: { model.moveChat($0, to: chat.id) }, targeted: { targeted in
                             if targeted { dropTargetChatID = chat.id }
                             else if dropTargetChatID == chat.id { dropTargetChatID = nil }
-                        }, actions: chatActions(chat, reorder: true), menuShown: menuShown(rowID), hovered: hover(rowID))
+                        }, actions: chatActions(chat, reorder: true), menuShown: menuShown(rowID), hovered: hover(rowID), pressed: press(rowID))
                     }
             }
         }
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder((!favorite && dropTargetChatID == chat.id) || menuRowID == rowID ? Color.accentColor : .clear, lineWidth: 2).allowsHitTesting(false))
         .background(SidebarRowBackground(hover: rowHover, rowID: rowID,
-                                         base: chatBackground(chat, favorite: favorite, highlighted: rowHighlighted(rowID))))
+                                         base: pressedRowID == rowID ? DeskPalette.selection : chatBackground(chat, favorite: favorite, highlighted: rowHighlighted(rowID))))
         .disabled(model.isChangingChat(chat.id))
     }
 
@@ -580,6 +584,11 @@ struct DeskView: View {
     private func hover(_ source: String) -> (Bool) -> Void {
         { inside in
             rowHover.set(source, inside: inside)
+        }
+    }
+    private func press(_ rowID: String) -> (Bool) -> Void {
+        { down in
+            if down { pressedRowID = rowID } else if pressedRowID == rowID { pressedRowID = nil }
         }
     }
     /// Hover is drawn by `SidebarRowBackground`; reading it here would re-render the window on every hover change.
@@ -886,6 +895,12 @@ struct ChatView: View {
     @StateObject private var preview = DocumentPreviewSession()
     /// Composer column: the transcript's readable text width (magnified with the interface zoom) plus the composer's side insets.
     private var columnWidth: CGFloat { InterfaceZoom.shared.scaled(TranscriptScrollView.readableWidth) + 48 }
+    /// The composer grows and shrinks smoothly; past its cap the height no longer changes, so nothing animates.
+    private func resizeComposer(_ height: CGFloat) {
+        let visible = { (h: CGFloat) in min(max(h, 40), 220) }
+        guard !reduceMotion, visible(height) != visible(composerHeight) else { composerHeight = height; return }
+        withAnimation(.easeOut(duration: 0.16)) { composerHeight = height }
+    }
     var body: some View {
         VStack(spacing: 0) {
             if !model.currentAgentAuthenticated {
@@ -901,14 +916,14 @@ struct ChatView: View {
             }
             if let notice = model.localHistoryNotice {
                 Text(notice).font(.ui(.caption)).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 24).padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, .ui(24)).padding(.vertical, .ui(8))
             }
             if let origin = model.selectedChat?.handoffOrigin {
                 HStack {
                     Text(L10n.text("Контекст из чата", "Context from chat") + ": " + origin.conversation.value)
                         .font(.ui(.caption)).foregroundStyle(.secondary).textSelection(.enabled)
                     Button(L10n.text("Вернуть исходный контекст в черновик", "Restore initial context to draft")) { Task { await model.restoreHandoffDraft() } }.disabled(!model.draft.isEmpty)
-                }.padding(.horizontal, 24)
+                }.padding(.horizontal, .ui(24))
             }
             ChatHistoryView(model: model, transcript: model.transcript, followOutput: followOutput, onOpenFile: openPreview)
             if let action = model.currentAction {
@@ -921,17 +936,17 @@ struct ChatView: View {
                     }
                     .tint(.blue)
                     // Same column as the composer it sits on, and it arrives from the composer's side.
-                    .frame(maxWidth: columnWidth).padding(.horizontal, 24)
+                    .frame(maxWidth: columnWidth).padding(.horizontal, .ui(24))
                     .transition(DeskMotion.slide(from: .bottom, reduceMotion))
             }
             if let chat = model.selectedChat, chat.isScheduledRecord, !model.selectedChatIsArchived {
                 Label(DeskModel.scheduledRecordFollowUpNotice, systemImage: "clock.arrow.circlepath")
                     .font(.ui(.callout)).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 24).padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, .ui(24)).padding(.vertical, .ui(8))
             }
             if let chat = model.selectedChat { SubagentsBar(model: model, chatID: chat.id) }
             if let chat = model.selectedChat, let notice = model.backgroundWaitNotice(chat.id) {
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                HStack(alignment: .firstTextBaseline, spacing: .ui(12)) {
                     Label(notice, systemImage: "hourglass").foregroundStyle(.secondary)
                     Spacer(minLength: 0)
                     Button { Task { await model.stopBackgroundTasks(threadID: chat.id) } } label: {
@@ -943,7 +958,7 @@ struct ChatView: View {
                                     "Stop all background tasks and sub-agents of this chat. The chat stays open."))
                 }
                 .font(.ui(.callout))
-                .frame(maxWidth: columnWidth, alignment: .leading).padding(.horizontal, 24).padding(.vertical, 8)
+                .frame(maxWidth: columnWidth, alignment: .leading).padding(.horizontal, .ui(24)).padding(.vertical, .ui(8))
             }
             if model.selectedChatIsArchived, let chat = model.selectedChat {
                 HStack {
@@ -951,10 +966,10 @@ struct ChatView: View {
                     Spacer()
                     Button(L10n.text("Восстановить", "Restore")) { Task { await model.setChatArchived(chat.id, archived: false) } }
                         .disabled(!model.canDeleteChat(chat.id))
-                }.frame(maxWidth: columnWidth).padding(.horizontal, 24).padding(.vertical, 12)
+                }.frame(maxWidth: columnWidth).padding(.horizontal, .ui(24)).padding(.vertical, .ui(12))
             }
             if !model.visibleQueue.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: .ui(6)) {
                     HStack {
                         Text(model.queuePaused ? L10n.text("Очередь приостановлена", "Queue paused") : L10n.text("В очереди · \(model.visibleQueue.count)", "Queued · \(model.visibleQueue.count)"))
                             .foregroundStyle(.secondary)
@@ -964,9 +979,9 @@ struct ChatView: View {
                         }
                     }.font(.ui(.caption))
                     ScrollView {
-                        VStack(spacing: 6) {
+                        VStack(spacing: .ui(6)) {
                             ForEach(model.visibleQueue) { message in
-                                HStack(alignment: .center, spacing: 12) {
+                                HStack(alignment: .center, spacing: .ui(12)) {
                                     Text(message.text).font(.ui(.callout)).lineLimit(3)
                                         .frame(maxWidth: .infinity, alignment: .leading).help(message.text)
                                     Button {
@@ -977,19 +992,19 @@ struct ChatView: View {
                                     Button { model.removeQueuedMessage(message.id) } label: { Image(systemName: "xmark") }
                                         .buttonStyle(PointerButtonStyle(base: .plain)).help(L10n.text("Убрать из очереди", "Remove from queue"))
                                         .disabled(model.priorityMessageID == message.id)
-                                }.padding(10)
+                                }.padding(.ui(10))
                                     .background(DeskPalette.subtle, in: RoundedRectangle(cornerRadius: 12))
                             }
                         }
                     }.frame(maxHeight: min(CGFloat(model.visibleQueue.count) * 78, 180))
-                }.frame(maxWidth: columnWidth).padding(.horizontal, 24).padding(.top, 8)
+                }.frame(maxWidth: columnWidth).padding(.horizontal, .ui(24)).padding(.top, .ui(8))
             }
             if !model.selectedChatIsArchived {
             VStack(spacing: 4) {
                 ZStack(alignment: .topLeading) {
                     if model.draft.isEmpty { Text(model.selectedChat?.isScheduledRecord == true ? L10n.text("Ответить в новом чате…", "Reply in a new chat…") : L10n.text("Напиши сообщение…", "Write a message…")).font(.ui(size: 14)).foregroundStyle(.secondary).padding(.horizontal, 21).padding(.top, 16).allowsHitTesting(false) }
                     MessageComposer(text: $model.draft, focused: $composerFocused, focusRequest: model.composerFocusRequest,
-                                    onContentHeight: { composerHeight = $0 }) { Task { await model.send() } }
+                                    onContentHeight: resizeComposer) { Task { await model.send() } }
                         .frame(height: min(max(composerHeight, 40), 220)).padding(.horizontal, 16).padding(.top, 14).accessibilityLabel(L10n.text("Сообщение", "Message"))
                 }
                 if !model.roleApproximations.isEmpty {
@@ -1020,7 +1035,7 @@ struct ChatView: View {
                             .help(L10n.text("Провайдер нового чата", "Provider for the new chat"))
                     } else {
                         ChipLabel(title: model.currentAgentName, systemImage: "sparkle")
-                            .font(.ui(.callout)).foregroundStyle(.secondary).padding(.horizontal, 9)
+                            .font(.ui(.callout)).foregroundStyle(.secondary).padding(.horizontal, .ui(9))
                             .help(L10n.text("Провайдер этого чата", "Provider for this chat"))
                     }
                     if model.currentAgent == .appClaude {
@@ -1056,24 +1071,24 @@ struct ChatView: View {
                         Image(systemName: stops ? "stop.fill" : "arrow.up")
                             .font(stops ? .ui(size: 11) : .ui(size: 14, weight: .semibold))
                             .contentTransition(.symbolEffect(.replace))
-                            .frame(width: 32, height: 32)
+                            .frame(width: .ui(32), height: .ui(32))
                             .foregroundStyle(.white)
                             .background(DeskPalette.ink.opacity(stops || model.canSend ? 1 : 0.2), in: Circle())
                     }.buttonStyle(RoundControlStyle())
                         .keyboardShortcut(stops ? nil : KeyboardShortcut(.return, modifiers: .command))
-                        .disabled(!stops && !model.canSend).padding(.leading, 6)
+                        .disabled(!stops && !model.canSend).padding(.leading, .ui(6))
                         .animation(reduceMotion ? nil : .snappy(duration: 0.18), value: stops)
                         .animation(.easeOut(duration: 0.12), value: model.canSend)
                         .help(stops ? L10n.text("Остановить ответ", "Stop response") : model.busy ? L10n.text("Добавить в очередь · Enter. Shift+Enter — новая строка", "Add to queue · Enter. Shift+Enter for a new line") : L10n.text("Отправить · Enter. Shift+Enter — новая строка", "Send · Enter. Shift+Enter for a new line"))
                         .accessibilityLabel(stops ? L10n.text("Остановить ответ", "Stop response") : L10n.text("Отправить сообщение", "Send message"))
-                }.padding(.horizontal, 8).padding(.bottom, 8)
+                }.padding(.horizontal, .ui(8)).padding(.bottom, .ui(8))
             }.background(DeskPalette.canvas, in: RoundedRectangle(cornerRadius: 20))
                 .overlay(RoundedRectangle(cornerRadius: 20).stroke(composerFocused ? DeskPalette.focusBorder : DeskPalette.border, lineWidth: 1)
                 )
                 .shadow(color: .black.opacity(0.05), radius: 12, y: 3)
-                .frame(maxWidth: columnWidth).padding(.horizontal, 24).padding(.top, 10)
+                .frame(maxWidth: columnWidth).padding(.horizontal, .ui(24)).padding(.top, .ui(10))
             }
-            HStack(spacing: 12) {
+            HStack(spacing: .ui(12)) {
                 if model.currentRoute != .direct {
                     Text(model.routeTitle(model.currentRoute)).help(model.routeMessage(model.currentRoute))
                 }
@@ -1094,8 +1109,8 @@ struct ChatView: View {
                 }
                 Spacer()
                 Toggle(L10n.text("Следить за ответом", "Follow response"), isOn: $followOutput).toggleStyle(.checkbox).pointingHandCursor()
-            }.font(.ui(.caption2)).foregroundStyle(.secondary).padding(.horizontal, 12)
-                .frame(maxWidth: columnWidth).padding(.horizontal, 24).padding(.top, 8).padding(.bottom, 12)
+            }.font(.ui(.caption2)).foregroundStyle(.secondary).padding(.horizontal, .ui(12))
+                .frame(maxWidth: columnWidth).padding(.horizontal, .ui(24)).padding(.top, .ui(8)).padding(.bottom, .ui(12))
         }
         .animation(DeskMotion.standard(reduceMotion), value: model.currentAction?.id)
         .background(DeskPalette.canvas)

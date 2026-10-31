@@ -15,6 +15,7 @@ struct ChatRow: NSViewRepresentable {
     var favorite = false
     var menuShown: (Bool) -> Void = { _ in }
     var hovered: (Bool) -> Void = { _ in }
+    var pressed: (Bool) -> Void = { _ in }
 
     func makeNSView(context: Context) -> ChatRowView {
         ChatRowView()
@@ -34,6 +35,7 @@ struct ChatRow: NSViewRepresentable {
         view.favorite = favorite
         view.menuShown = menuShown
         view.hovered = hovered
+        view.pressed = pressed
         view.setAccessibilityElement(true)
         view.setAccessibilityRole(.button)
         view.setAccessibilityLabel(chat.title)

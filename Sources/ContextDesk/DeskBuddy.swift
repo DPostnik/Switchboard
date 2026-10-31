@@ -93,8 +93,11 @@ final class DeskBuddyView: NSView {
 
     func update(mood: DeskBuddy.Mood, size: CGFloat, celebratedAt: Date?, gaze: CGFloat, paused: Bool) {
         if mood != self.mood || size != self.size {
+            // Only a mood change on a visible buddy eases over; the first build, a new size
+            // and a frozen (hidden) buddy just set the new look.
+            let previous = size == self.size && layer?.speed != 0 ? self.mood : nil
             self.mood = mood; self.size = size
-            rebuild()
+            rebuild(from: previous)
         }
         if let celebratedAt, celebratedAt != self.celebratedAt, Date().timeIntervalSince(celebratedAt) < 1, !reduceMotion { celebrate() }
         self.celebratedAt = celebratedAt
@@ -103,11 +106,16 @@ final class DeskBuddyView: NSView {
         layer?.speed = paused ? 0 : 1
     }
 
-    private func rebuild() {
+    private func rebuild(from previous: DeskBuddy.Mood? = nil) {
         guard let mood else { return }
         let s = size, box = s * 1.4, side = s * 0.92
         CATransaction.begin(); CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
+        // Where the old mood's motion has the buddy right now (mid-wiggle, mid-bob), read before
+        // the loops go, so it settles from there instead of snapping back. Reduce Motion just snaps.
+        let moving = previous != nil && !reduceMotion ? [jump, motion, face] : []
+        let shown = moving.map { $0.presentation()?.transform ?? $0.transform }
+        let oldColors = body.presentation()?.colors ?? body.colors
         [glow, jump, motion, face, mouth].forEach { $0.removeAllAnimations() }
         (eyes + highlights + cheeks).forEach { $0.removeAllAnimations() }
 
@@ -122,6 +130,15 @@ final class DeskBuddyView: NSView {
         body.colors = waiting
             ? [NSColor(red: 1, green: 0.66, blue: 0.38, alpha: 1).cgColor, NSColor(red: 0.95, green: 0.45, blue: 0.2, alpha: 1).cgColor]
             : [NSColor(red: 0.96, green: 0.64, blue: 0.49, alpha: 1).cgColor, NSColor(red: 0.85, green: 0.46, blue: 0.32, alpha: 1).cgColor]
+        // The body only changes colour into and out of waiting; the glow appears and goes with it.
+        let recolored = previous.map { ($0 == .waiting) != waiting } ?? false
+        if recolored {
+            let tint = CABasicAnimation(keyPath: "colors")
+            tint.fromValue = oldColors; tint.toValue = body.colors
+            tint.duration = 0.2; tint.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            tint.preferredFrameRateRange = Self.frameRate
+            body.add(tint, forKey: "tint")
+        }
         face.frame = motion.bounds
 
         let radius = s * 0.6
@@ -129,6 +146,7 @@ final class DeskBuddyView: NSView {
         glow.path = CGPath(ellipseIn: glow.bounds, transform: nil)
         glow.fillColor = NSColor.orange.withAlphaComponent(0.45).cgColor
         glow.isHidden = !waiting
+        if recolored { glow.add(Self.fade(), forKey: kCATransition) }
 
         let ink = NSColor(white: 0.13, alpha: 1).cgColor
         let line = max(1.2, s * 0.07)
@@ -190,6 +208,24 @@ final class DeskBuddyView: NSView {
 
         addLoops(for: mood)
         applyGaze()
+        // The new face cross-fades over the old one (a fade, so Reduce Motion keeps it too).
+        if previous != nil { face.add(Self.fade(), forKey: kCATransition) }
+        for (layer, from) in zip(moving, shown) { settle(layer, from: from) }
+    }
+
+    /// Eases a layer from where it was drawn to its model transform. Additive, so the new mood's
+    /// loops start at once underneath and the two meet without a jump when the settle ends.
+    private func settle(_ layer: CALayer, from shown: CATransform3D) {
+        let offset = CATransform3DConcat(shown, CATransform3DInvert(layer.transform))
+        guard !CATransform3DIsIdentity(offset) else { return }
+        let animation = CABasicAnimation(keyPath: "transform")
+        animation.fromValue = NSValue(caTransform3D: offset)
+        animation.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+        animation.isAdditive = true
+        animation.duration = 0.22
+        animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        animation.preferredFrameRateRange = Self.frameRate
+        layer.add(animation, forKey: "settle")
     }
 
     private func addLoops(for mood: DeskBuddy.Mood) {
@@ -255,6 +291,15 @@ final class DeskBuddyView: NSView {
         animation.isRemovedOnCompletion = false
         animation.preferredFrameRateRange = frameRate
         return animation
+    }
+
+    private static func fade() -> CATransition {
+        let transition = CATransition()
+        transition.type = .fade
+        transition.duration = 0.2
+        transition.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        transition.preferredFrameRateRange = frameRate
+        return transition
     }
 
     private static func blink(every period: CFTimeInterval) -> CAKeyframeAnimation {
