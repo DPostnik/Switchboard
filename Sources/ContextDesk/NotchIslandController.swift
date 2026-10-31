@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import AgentContract
 import ContextCore
 
 /// What the island view renders; owned by the controller.
@@ -148,8 +149,17 @@ import ContextCore
         var ordered: [NotchChat]
         /// Pending requests of the ordered chats.
         var actions: [PendingAction]
+        /// Chats whose agent runs, including idle ones that wait for background tasks and resume on their own:
+        /// such a chat is not finished, so it must not be announced as done.
         var working: Set<String>
         var waitingChats: Set<String>
+        /// Sub-agents of the ordered chats, by chat ID, as the engine reported them.
+        var subagents: [String: [AgentSubagent]] = [:]
+    }
+
+    /// An idle chat whose agent waits for background tasks shows as working with this activity.
+    static func backgroundWaitActivity(tasks: Int) -> String {
+        L10n.text("Ждёт фоновые задачи (\(tasks))", "Waiting for background tasks (\(tasks))")
     }
 
     static func snapshot(model: DeskModel) -> Snapshot {
@@ -157,17 +167,24 @@ import ContextCore
         let waitingChats = Set(model.pending.map(\.threadID))
         var chats: [NotchChat] = [], working: Set<String> = []
         for chat in model.state.chats where !chat.isArchived && !chat.isScheduledRecord {
-            let running = model.isBusy(threadID: chat.id)
+            let busy = model.isBusy(threadID: chat.id)
+            let backgroundTasks = busy ? 0 : (model.backgroundWaits[chat.id] ?? 0)
+            let running = busy || backgroundTasks > 0
             if running { working.insert(chat.id) }
             guard let phase = NotchChat.phase(running: running, waiting: waitingChats.contains(chat.id), unread: chat.hasUnreadResponse) else { continue }
-            let activity = model.runActivity(threadID: chat.id)
+            var activity = model.runActivity(threadID: chat.id)
+            if backgroundTasks > 0 {
+                activity.status = backgroundWaitActivity(tasks: backgroundTasks)
+                activity.since = model.subagents[chat.id]?.filter { $0.status == .running }.map(\.startedAt).min()
+            }
             chats.append(NotchChat(id: chat.id, title: chat.title, project: projects[chat.projectID] ?? "",
                                    phase: phase, activity: activity.status, since: activity.since, updated: chat.updated))
         }
         let ordered = NotchChat.ordered(chats)
         let visible = Set(ordered.map(\.id))
+        let subagents = model.subagents.filter { visible.contains($0.key) }
         return Snapshot(chats: chats, ordered: ordered, actions: model.pending.filter { visible.contains($0.threadID) },
-                        working: working, waitingChats: waitingChats)
+                        working: working, waitingChats: waitingChats, subagents: subagents)
     }
 
     private func refresh() {

@@ -34,8 +34,32 @@ enum FringeLinkMapping {
                              details: String(interaction.details.prefix(detailsLimit)), canAllow: canAllow)
     }
 
+    /// Sub-agents sent per chat: the panel is a glance, not the chat's sub-agent list.
+    static let subagentsLimit = 6
+
+    static func subagent(_ agent: AgentSubagent, chatID: String) -> FringeSubagent {
+        let status: FringeSubagent.Status = switch agent.status {
+        case .running: .running
+        case .completed: .completed
+        case .failed: .failed
+        case .stopped: .stopped
+        }
+        return FringeSubagent(id: agent.id, chatID: chatID, title: agent.title, type: agent.type, background: agent.background,
+                              status: status, activity: agent.activity, since: agent.startedAt, ended: agent.endedAt)
+    }
+
+    /// Running sub-agents first, then the most recently started; cut at `subagentsLimit` per chat.
+    static func subagents(_ agents: [AgentSubagent], chatID: String, limit: Int = subagentsLimit) -> [FringeSubagent] {
+        let running = agents.filter { $0.status == .running }.sorted { $0.startedAt < $1.startedAt }
+        let done = agents.filter { $0.status != .running }.sorted { ($0.endedAt ?? $0.startedAt) > ($1.endedAt ?? $1.startedAt) }
+        return (running + done).prefix(limit).map { subagent($0, chatID: chatID) }
+    }
+
     static func snapshot(_ snapshot: NotchIslandController.Snapshot) -> FringeSnapshot {
-        FringeSnapshot(chats: snapshot.ordered.map(chat), requests: snapshot.actions.map(request))
+        let subagents = snapshot.ordered.flatMap { chat in
+            self.subagents(snapshot.subagents[chat.id] ?? [], chatID: chat.id)
+        }
+        return FringeSnapshot(chats: snapshot.ordered.map(chat), requests: snapshot.actions.map(request), subagents: subagents)
     }
 
     /// Only approvals are answered from the panel, and "allow" only when the agent offers it.

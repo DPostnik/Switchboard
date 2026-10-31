@@ -33,6 +33,32 @@ private func action(_ kind: AgentInteraction.Kind, details: String = "ls") -> Pe
     #expect(FringeLinkMapping.response(for: .deny, to: question) == nil)
 }
 
+private func subagent(_ id: String, _ status: AgentSubagent.Status, background: Bool = false, started: TimeInterval, ended: TimeInterval? = nil) -> AgentSubagent {
+    AgentSubagent(id: id, title: "Task \(id)", type: "Explore", prompt: "p", background: background, depth: 1, status: status,
+                  activity: status == .running ? "Reading" : nil, startedAt: Date(timeIntervalSince1970: started),
+                  endedAt: ended.map { Date(timeIntervalSince1970: $0) })
+}
+
+@Test func fringeSubagentsFollowTheirChatRunningFirst() {
+    let agents = [subagent("old", .completed, started: 10, ended: 20), subagent("bg", .running, background: true, started: 40),
+                  subagent("new", .failed, started: 30, ended: 50), subagent("fg", .running, started: 35)]
+    let sent = FringeLinkMapping.subagents(agents, chatID: "chat")
+    #expect(sent.map(\.id) == ["fg", "bg", "new", "old"])
+    #expect(sent.allSatisfy { $0.chatID == "chat" })
+    #expect(sent.map(\.status) == [.running, .running, .failed, .completed])
+    #expect(sent.map(\.background) == [false, true, false, false])
+    #expect(sent[0].activity == "Reading" && sent[0].type == "Explore" && sent[0].ended == nil)
+    #expect(sent[3].ended == Date(timeIntervalSince1970: 20))
+    #expect(FringeLinkMapping.subagents(agents, chatID: "chat", limit: 2).map(\.id) == ["fg", "bg"])
+    // Only sub-agents of the chats the panel shows travel with the snapshot.
+    let now = Date()
+    let chat = NotchChat(id: "chat", title: "T", project: "P", phase: .working, updated: now)
+    let hidden = NotchChat(id: "hidden", title: "H", project: "P", phase: .working, updated: now)
+    let snapshot = NotchIslandController.Snapshot(chats: [chat, hidden], ordered: [chat], actions: [], working: ["chat"], waitingChats: [],
+                                                  subagents: ["chat": [agents[1]], "hidden": [agents[3]]])
+    #expect(FringeLinkMapping.snapshot(snapshot).subagents.map(\.id) == ["bg"])
+}
+
 @Test func fringeChatsMapEveryPhase() {
     let now = Date()
     let chats = [NotchChat.Phase.waiting, .working, .finished].map {

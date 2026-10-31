@@ -83,11 +83,46 @@ public struct FringeRequest: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+/// A sub-agent one of the listed chats delegated work to. Not a chat of its own: opening it opens `chatID`.
+/// All text is engine output (data). Peers from before this field never send or show it.
+public struct FringeSubagent: Codable, Equatable, Identifiable, Sendable {
+    public enum Status: String, Codable, Sendable { case running, completed, failed, stopped }
+    public var id: String
+    /// The chat whose agent started it.
+    public var chatID: String
+    public var title: String
+    /// Engine agent type, e.g. `general-purpose`.
+    public var type: String?
+    /// Runs without blocking its chat's agent, which resumes on its own when it finishes.
+    public var background: Bool
+    public var status: Status
+    /// Latest one-line progress.
+    public var activity: String?
+    public var since: Date
+    public var ended: Date?
+    public init(id: String, chatID: String, title: String, type: String? = nil, background: Bool = false, status: Status,
+                activity: String? = nil, since: Date, ended: Date? = nil) {
+        self.id = id; self.chatID = chatID; self.title = title; self.type = type; self.background = background
+        self.status = status; self.activity = activity; self.since = since; self.ended = ended
+    }
+}
+
 public struct FringeSnapshot: Codable, Equatable, Sendable {
     /// At most 8, most urgent first.
     public var chats: [FringeChat]
     public var requests: [FringeRequest]
-    public init(chats: [FringeChat], requests: [FringeRequest]) { self.chats = chats; self.requests = requests }
+    /// Sub-agents of the listed chats, running ones first; absent from older peers.
+    public var subagents: [FringeSubagent]
+    public init(chats: [FringeChat], requests: [FringeRequest], subagents: [FringeSubagent] = []) {
+        self.chats = chats; self.requests = requests; self.subagents = subagents
+    }
+    private enum CodingKeys: String, CodingKey { case chats, requests, subagents }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        chats = try container.decode([FringeChat].self, forKey: .chats)
+        requests = try container.decode([FringeRequest].self, forKey: .requests)
+        subagents = try container.decodeIfPresent([FringeSubagent].self, forKey: .subagents) ?? []
+    }
 }
 
 public struct FringeAnnouncement: Codable, Equatable, Sendable {
