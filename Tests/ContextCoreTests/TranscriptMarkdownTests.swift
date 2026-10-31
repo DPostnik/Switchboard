@@ -287,6 +287,26 @@ $ swift test
     #expect(!renderedView("Одна [ссылка](https://a.example)").transcript.string.contains(title))
 }
 
+@Test func webSourcesReuseParsedBlocksAndRepeatTheSameAnswer() {
+    // CRLF text, a code block, a trailing slash, a bare URL and a non-web scheme.
+    let text = "Intro [doc](https://docs.example/guide/) and https://docs.example/guide again.\r\n\r\n" +
+        "[ftp](ftp://files.example/x) [same](https://docs.example/guide)\r\n" +
+        "```\nhttps://code.example/literal\n```\r\nTail https://tail.example/path?q=1."
+    let direct = TranscriptMarkdown.webSources(in: text)
+    #expect(direct.map(\.url.absoluteString) == ["https://docs.example/guide/", "https://tail.example/path?q=1"])
+    #expect(direct.map(\.title) == ["doc", nil])
+    // The renderer passes its own nodes and lines; the answer is the same, also when served from the cache.
+    let shared = TranscriptMarkdown.webSources(in: text, nodes: MarkdownBlocks.nodes(text), lines: MarkdownBlocks.lines(text))
+    #expect(shared.map(\.url) == direct.map(\.url) && shared.map(\.title) == direct.map(\.title))
+    let again = TranscriptMarkdown.webSources(in: text)
+    #expect(again.map(\.url) == direct.map(\.url) && again.map(\.title) == direct.map(\.title))
+    // A different text (the next streaming tick) is not confused with the cached one.
+    let grown = TranscriptMarkdown.webSources(in: text + " https://more.example")
+    #expect(grown.map(\.url.host) == ["docs.example", "tail.example", "more.example"])
+    #expect(TranscriptMarkdown.webSources(in: "").isEmpty)
+    #expect(TranscriptMarkdown.webSources(in: "```\nhttps://only.example\n```").isEmpty)
+}
+
 @Test @MainActor func localImagesEmbedAndRemoteImagesStayLinks() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("md-image-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

@@ -93,48 +93,113 @@ public enum DocumentPreview {
     var hasBeenShown = false
     private var stamp: [String]?
     private var splitting: Task<Void, Never>?
+    /// Follows the file with a vnode source; nil when the file could not be opened (missing), then the
+    /// view's 1 s poll re-arms it.
+    private var watcher: FileChangeWatcher?
+    /// Bumped by every read so a slower background read never overwrites a newer result.
+    private var readGeneration = 0
 
     public init(url: URL, line: Int? = nil) {
         self.url = URL(fileURLWithPath: url.standardizedFileURL.path)
         self.line = line
         anchor = url.fragment.flatMap { $0.removingPercentEncoding ?? $0 }
         kind = DocumentPreview.kind(for: self.url)
+        // The first read is synchronous so the pane opens with content; later reads leave the main thread.
         checkForChanges()
+        startWatching()
     }
 
     func focus(line: Int?, anchor: String?) {
         self.line = line; self.anchor = anchor; focusToken += 1
     }
 
-    /// Re-reads the file when its modification date, size or identity changed (atomic saves replace the file).
+    /// True while a vnode source follows the file.
+    var isWatching: Bool { watcher != nil }
+
+    /// Nothing has been read yet (neither content nor a failure).
+    private var isUnread: Bool { stamp == nil && failure == nil && text == nil }
+
+    /// Re-reads the file on the calling thread when its modification date, size or identity changed
+    /// (atomic saves replace the file). Used for the first read; later changes go through `refresh()`.
     public func checkForChanges() {
+        readGeneration += 1
+        if let reading = Self.read(url, since: stamp, force: isUnread) { apply(reading) }
+    }
+
+    /// Reads the file off the main thread and applies the result on the main actor.
+    public func refresh() async {
+        readGeneration += 1
+        let generation = readGeneration
+        let url = url, stamp = stamp, force = isUnread
+        let reading = await Task.detached(priority: .userInitiated) { Self.read(url, since: stamp, force: force) }.value
+        // A newer read is in flight, or the same state was already applied by a synchronous check.
+        guard let reading, generation == readGeneration, reading.stamp != self.stamp || isUnread else { return }
+        apply(reading)
+    }
+
+    /// Fallback for a file the watcher could not follow: re-read it and try to arm the watcher again.
+    public func pollIfUnwatched() async {
+        guard watcher == nil else { return }
+        await refresh()
+        startWatching()
+    }
+
+    private func startWatching() {
+        watcher = FileChangeWatcher(path: url.path) { [weak self] events in self?.fileChanged(events) }
+    }
+
+    private func fileChanged(_ events: DispatchSource.FileSystemEvent) {
+        // After an atomic save or a delete the watched inode gets no more events: follow the path again.
+        let lost = !events.isDisjoint(with: [.rename, .delete, .revoke])
+        Task { @MainActor [weak self] in
+            await self?.refresh()
+            if lost { self?.startWatching() }
+        }
+    }
+
+    /// One look at the file; `kind` is nil when it should stay as it is (the file is missing).
+    struct Reading: Sendable {
+        enum Content: Sendable { case missing, unreadable, quickLook, text(String) }
+        var stamp: [String]?
+        var kind: DocumentPreviewKind?
+        var content: Content
+    }
+
+    /// Nil when the file's modification date, size and identity are unchanged since `stamp` (unless `force`).
+    nonisolated static func read(_ url: URL, since stamp: [String]?, force: Bool) -> Reading? {
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         let current = attributes.map { [
             String(describing: $0[.modificationDate] ?? ""), String(describing: $0[.size] ?? ""),
             String(describing: $0[.systemFileNumber] ?? "")
         ] }
-        guard current != stamp || (stamp == nil && failure == nil && text == nil) else { return }
-        stamp = current
-        guard current != nil else {
+        guard current != stamp || force else { return nil }
+        guard current != nil else { return Reading(stamp: nil, kind: nil, content: .missing) }
+        let kind = DocumentPreview.kind(for: url)
+        if kind == .quickLook { return Reading(stamp: current, kind: kind, content: .quickLook) }
+        guard let data = try? Data(contentsOf: url) else { return Reading(stamp: current, kind: kind, content: .unreadable) }
+        if let content = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) {
+            return Reading(stamp: current, kind: kind, content: .text(DocumentPreview.transcriptText(content, kind: kind)))
+        }
+        // Not text after all: let Quick Look decide how to show it.
+        return Reading(stamp: current, kind: .quickLook, content: .quickLook)
+    }
+
+    private func apply(_ reading: Reading) {
+        stamp = reading.stamp
+        if let kind = reading.kind { self.kind = kind }
+        switch reading.content {
+        case .missing:
             setText(nil)
             failure = L10n.text("Файл не найден или недоступен.", "The file is missing or not readable.")
-            revision += 1
-            return
-        }
-        kind = DocumentPreview.kind(for: url)
-        failure = nil
-        if kind == .quickLook {
-            setText(nil)
-        } else if let data = try? Data(contentsOf: url) {
-            if let content = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) {
-                setText(DocumentPreview.transcriptText(content, kind: kind))
-            } else {
-                // Not text after all: let Quick Look decide how to show it.
-                kind = .quickLook; setText(nil)
-            }
-        } else {
+        case .unreadable:
             setText(nil)
             failure = L10n.text("Не удалось прочитать файл.", "Could not read the file.")
+        case .quickLook:
+            failure = nil
+            setText(nil)
+        case .text(let value):
+            failure = nil
+            setText(value)
         }
         revision += 1
     }
@@ -160,6 +225,46 @@ public enum DocumentPreview {
         let item = NSMenuItem()
         item.tag = NSTextFinder.Action.showFindInterface.rawValue
         view.transcript.performTextFinderAction(item)
+    }
+}
+
+/// Follows one path with a vnode dispatch source. Events are coalesced: the handler runs on the main actor
+/// once `delay` after the last event, with the union of the events seen meanwhile. Nil when the file cannot
+/// be opened. All mutable state is touched on the main queue only, the source's target queue.
+final class FileChangeWatcher: @unchecked Sendable {
+    static let defaultDelay: DispatchTimeInterval = .milliseconds(250)
+
+    private let source: DispatchSourceFileSystemObject
+    private var events: DispatchSource.FileSystemEvent = []
+    private var pending: DispatchWorkItem?
+
+    init?(path: String, delay: DispatchTimeInterval = FileChangeWatcher.defaultDelay,
+          handler: @escaping @Sendable @MainActor (DispatchSource.FileSystemEvent) -> Void) {
+        let descriptor = open(path, O_EVTONLY)
+        guard descriptor >= 0 else { return nil }
+        source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor,
+                                                           eventMask: [.write, .extend, .attrib, .rename, .delete, .revoke],
+                                                           queue: .main)
+        source.setCancelHandler { close(descriptor) }
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            events.formUnion(source.data)
+            pending?.cancel()
+            let item = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                let seen = events
+                events = []; pending = nil
+                MainActor.assumeIsolated { handler(seen) }
+            }
+            pending = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+        }
+        source.resume()
+    }
+
+    deinit {
+        pending?.cancel()
+        source.cancel()
     }
 }
 
@@ -301,11 +406,12 @@ public struct DocumentPreviewView: View {
         }
         .accessibilityLabel(L10n.text("Предпросмотр документа", "Document preview"))
         .task(id: model.url) {
-            // Follow edits by the agent or the user while the pane is open.
+            // The model follows edits through its vnode watcher. This poll is the fallback for a file it
+            // could not open (missing or replaced while unwatched): it re-reads and re-arms the watcher.
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 if Task.isCancelled { break }
-                model.checkForChanges()
+                await model.pollIfUnwatched()
             }
         }
     }
