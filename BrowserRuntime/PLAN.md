@@ -106,9 +106,9 @@ this change safely invalidates the token and allows a fresh explicit task.
 
 ## Workflow optimization — 2026-09-27
 
-See [the staged workflow plan](WORKFLOW_PLAN.md) for the current audit,
-compact metadata/pagination implementation, opt-in static traversal, matched
-fixtures and pending workflow adoption. Scheduled jobs remain read-only.
+Compact metadata/pagination and opt-in static traversal shipped in the runtime; the
+staged workflow plan from 2026-09-27 was retired with release 1.0.0 (its measurements
+live in the local development notes). Scheduled jobs remain read-only.
 
 
 ## Independent chat browsers — 2026-10-01

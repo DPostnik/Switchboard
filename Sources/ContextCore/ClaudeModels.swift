@@ -56,7 +56,7 @@ public enum ClaudeEffort: String, CaseIterable, Hashable, Sendable {
 
 /// App-owned catalog of selectable Claude models.
 ///
-/// The installed CLI exposes no model discovery (see `AGENT_CONTRACT.md`), so these entries
+/// The installed CLI exposes no model discovery (see `design/AGENT_CONTRACT.md`), so these entries
 /// are suggestions for the single configured model string the adapter passes to `--model`.
 /// An identifier outside the catalog stays valid and is preserved as typed; the catalog never
 /// rewrites a configured value.

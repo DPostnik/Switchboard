@@ -218,7 +218,10 @@ private func quoted(_ value: String) -> String { "'" + value.replacingOccurrence
         try JSONDecoder().decode([String: String].self, from: Data(contentsOf: root.appendingPathComponent(name)))
     }
     let probe = try decode("version-labels"), run = try decode("run-labels")
-    #expect(probe[ProcessLabels.instanceKey] == ProcessLabels.instance && probe[ProcessLabels.chatKey] == nil)
+    // The probe inherits the environment unchanged: no chat label of its own (a test run inside a
+    // Switchboard chat already carries SWITCHBOARD_CHAT_ID, which the probe must pass through, not add to).
+    #expect(probe[ProcessLabels.instanceKey] == ProcessLabels.instance)
+    #expect(probe[ProcessLabels.chatKey] == ProcessInfo.processInfo.environment[ProcessLabels.chatKey])
     #expect(run[ProcessLabels.chatKey] == "scheduled-" + runID.uuidString.lowercased())
     #expect(run[ProcessLabels.instanceKey] == ProcessLabels.instance)
     #expect(!ProcessSweeper.shared.active.contains("scheduled-" + runID.uuidString.lowercased()))

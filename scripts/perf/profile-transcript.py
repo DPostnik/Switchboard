@@ -13,7 +13,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def run(command, **kwargs):
@@ -53,7 +53,7 @@ def main():
         for include in includes:
             command += ['-I', include]
         command += ['-Xcc', '-fmodule-map-file=' + str(ROOT / 'Sources/CSQLite/module.modulemap'),
-                    ROOT / 'scripts/TranscriptCPUProbe.swift', *objects, '-lsqlite3', '-o', executable]
+                    ROOT / 'scripts/perf/TranscriptCPUProbe.swift', *objects, '-lsqlite3', '-o', executable]
         run(command)
         output = args.output.resolve()
         run([executable], env={**os.environ, 'SWITCHBOARD_CPU_REPORT': str(output)})

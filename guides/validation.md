@@ -1,5 +1,7 @@
 # Public preview validation — 2026-09-28
 
+Historical record of the source-preview check before the first numbered release (1.0.0, 2026-10-31; see [CHANGELOG.md](../CHANGELOG.md)). Versions, counts and commit IDs below describe that day, not the current tree.
+
 This record describes local preparation of the working tree based on commit `9945050`, including pre-existing uncommitted work. Nothing was committed, pushed or released by this task. It is not a statement that the remote repository already contains these changes.
 
 ## License follow-up — 2026-09-28

@@ -244,8 +244,7 @@ This does not change scheduled jobs or establish model-token savings.
 модельных токенов пока не измерена.
 
 Development: `python3 -B BrowserRuntime/workflow_smoke.py` compares generic and
-static traversal against an isolated two-page local fixture. See
-`BrowserRuntime/WORKFLOW_PLAN.md` in the repository for staged rollout and measurement limits.
+static traversal against an isolated two-page local fixture.
 
 ## Parallel chat browsers / Параллельные браузеры чатов
 
