@@ -8,7 +8,7 @@ import AgentContract
 public actor ChatSearchIndex {
     public static let fileName = "chat-index.sqlite"
     /// Bump to rebuild every chat after a schema or extraction change.
-    static let schemaVersion = "1"
+    static let schemaVersion = "2"
     /// Longer messages (pasted logs) are cut; the start carries the meaning.
     public static let messageLimit = 20_000
 
@@ -45,24 +45,35 @@ public actor ChatSearchIndex {
         public var isEmpty: Bool { content.isEmpty && metadata.isEmpty && removed.isEmpty }
     }
 
+    /// Owns one SQLite handle and closes it when released, so the actor needs no deinit of its own.
+    private final class Connection {
+        let db: OpaquePointer
+        init(db: OpaquePointer) { self.db = db }
+        deinit { sqlite3_close(db) }
+    }
+
     private let file: URL
+    /// Opened on first use and kept for the actor's lifetime; dropped after a failed call so the next call reopens.
+    private var connection: Connection?
     public init(file: URL) { self.file = file }
 
     public func plan(_ chats: [ChatInfo]) throws -> Plan {
         try withDatabase { db in
-            var stored: [String: (content: Double, info: ChatInfo)] = [:]
+            var stored: [String: (content: Double, updated: Double, info: ChatInfo)] = [:]
             try Self.query(db, "SELECT id, project_id, project, project_path, title, agent, archived, updated, summary, content_updated FROM chats") { row in
                 let info = ChatInfo(id: row.text(0), projectID: row.text(1), project: row.text(2), projectPath: row.text(3), title: row.text(4),
                                     agent: row.text(5), archived: row.int(6) != 0, updated: Date(timeIntervalSince1970: row.double(7)),
                                     summary: row.text(8), session: nil)
-                stored[info.id] = (row.double(9), info)
+                stored[info.id] = (row.double(9), row.double(7), info)
             }
             var plan = Plan()
             for chat in chats {
                 guard let old = stored.removeValue(forKey: chat.id) else { plan.content.append(chat.id); continue }
-                var comparable = chat; comparable.session = nil
-                if old.content != chat.updated.timeIntervalSince1970 { plan.content.append(chat.id) }
-                else if old.info != comparable { plan.metadata.append(chat.id) }
+                // Times are compared as the stored seconds: `Date(timeIntervalSince1970:)` does not round-trip about half of all values.
+                let updated = chat.updated.timeIntervalSince1970
+                var comparable = chat; comparable.session = nil; comparable.updated = old.info.updated
+                if old.content != updated { plan.content.append(chat.id) }
+                else if old.updated != updated || old.info != comparable { plan.metadata.append(chat.id) }
             }
             plan.removed = stored.keys.sorted()
             return plan
@@ -90,8 +101,8 @@ public actor ChatSearchIndex {
                     try Self.run(db, "UPDATE chats SET project_id=?, project=?, project_path=?, title=?, agent=?, archived=?, updated=?, summary=? WHERE id=?",
                                  [info.projectID, info.project, info.projectPath, info.title, info.agent, info.archived ? 1 : 0,
                                   info.updated.timeIntervalSince1970, info.summary, info.id])
-                    try Self.run(db, "DELETE FROM messages WHERE chat_id=? AND position<0", [info.id])
-                    try Self.insertHeader(db, info)
+                    try Self.deleteMessages(db, id: info.id, below: 0)
+                    try Self.insertMessages(db, chatID: info.id, Self.headerRows(info))
                 }
             }
         }
@@ -113,6 +124,15 @@ public actor ChatSearchIndex {
                 hits.append(Hit(chatID: id, snippet: row.text(1).replacingOccurrences(of: "\n", with: " ")))
             }
             return hits
+        }
+    }
+
+    /// Text columns of every row of `sql`; tests read query plans, pragmas and counts through it.
+    func rows(_ sql: String) throws -> [[String]] {
+        try withDatabase { db in
+            var rows: [[String]] = []
+            try Self.query(db, sql) { row in rows.append((0..<row.count).map(row.text)) }
+            return rows
         }
     }
 
@@ -156,6 +176,14 @@ public actor ChatSearchIndex {
 
     // MARK: Storage
 
+    /// One searchable row of `messages`; header rows carry negative positions.
+    private struct MessageRow { var position: Int; var role: String; var date: Double?; var text: String }
+
+    /// `chat_id` is unindexed in the FTS5 table, so deletes go through the rowids recorded in `message_rows`
+    /// instead of scanning every message. Positions below `?` select the rows: 0 for the header only.
+    static let deleteMessagesSQL = "DELETE FROM messages WHERE rowid IN (SELECT row FROM message_rows WHERE chat_id=? AND position<?)"
+    private static let deleteRecordsSQL = "DELETE FROM message_rows WHERE chat_id=? AND position<?"
+
     private static func insertChat(_ db: OpaquePointer, _ info: ChatInfo, messages: [Message]) throws {
         let first = messages.first { $0.role == "user" }.map { String($0.text.prefix(300)) } ?? ""
         // 0 when no message carries a time; date filters then rely on the last activity alone.
@@ -165,48 +193,75 @@ public actor ChatSearchIndex {
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, [info.id, info.projectID, info.project, info.projectPath, info.title, info.agent, info.archived ? 1 : 0,
                   info.updated.timeIntervalSince1970, info.summary, info.updated.timeIntervalSince1970, started, messages.count, first])
-        try insertHeader(db, info)
-        try prepare(db, "INSERT INTO messages (chat_id, position, role, date, text) VALUES (?,?,?,?,?)") { statement in
-            for (position, message) in messages.enumerated() {
-                try step(statement, [info.id, position, message.role, message.date?.timeIntervalSince1970, message.text])
+        let rows = messages.enumerated().map { position, message in
+            MessageRow(position: position, role: message.role, date: message.date?.timeIntervalSince1970, text: message.text)
+        }
+        try insertMessages(db, chatID: info.id, headerRows(info) + rows)
+    }
+
+    /// Title and summary are searchable rows with negative positions, so a title match ranks with the text.
+    private static func headerRows(_ info: ChatInfo) -> [MessageRow] {
+        var rows = [MessageRow(position: -1, role: "title", date: nil, text: info.title)]
+        if !info.summary.isEmpty { rows.append(MessageRow(position: -2, role: "summary", date: nil, text: info.summary)) }
+        return rows
+    }
+
+    /// Every inserted message records its rowid, which later deletes look up by chat.
+    private static func insertMessages(_ db: OpaquePointer, chatID: String, _ rows: [MessageRow]) throws {
+        try prepare(db, "INSERT INTO messages (chat_id, position, role, date, text) VALUES (?,?,?,?,?)") { insert in
+            try prepare(db, "INSERT INTO message_rows (chat_id, row, position) VALUES (?,?,?)") { record in
+                for row in rows {
+                    try step(insert, [chatID, row.position, row.role, row.date, row.text])
+                    try step(record, [chatID, Int(sqlite3_last_insert_rowid(db)), row.position])
+                }
             }
         }
     }
 
-    /// Title and summary are searchable rows with negative positions, so a title match ranks with the text.
-    private static func insertHeader(_ db: OpaquePointer, _ info: ChatInfo) throws {
-        try run(db, "INSERT INTO messages (chat_id, position, role, date, text) VALUES (?,?,?,?,?)", [info.id, -1, "title", nil, info.title])
-        if !info.summary.isEmpty {
-            try run(db, "INSERT INTO messages (chat_id, position, role, date, text) VALUES (?,?,?,?,?)", [info.id, -2, "summary", nil, info.summary])
-        }
+    private static func deleteMessages(_ db: OpaquePointer, id: String, below position: Int) throws {
+        try run(db, deleteMessagesSQL, [id, position])
+        try run(db, deleteRecordsSQL, [id, position])
     }
 
     private static func removeRows(_ db: OpaquePointer, id: String) throws {
-        try run(db, "DELETE FROM messages WHERE chat_id=?", [id])
+        try deleteMessages(db, id: id, below: Int.max)
         try run(db, "DELETE FROM chats WHERE id=?", [id])
     }
 
+    /// Runs `operation` on the actor's connection, opening it on the first call. A failed call drops the handle,
+    /// so a broken connection is replaced on the next call instead of being reused.
     private func withDatabase<T>(_ operation: (OpaquePointer) throws -> T) throws -> T {
+        let connection = try connection ?? open()
+        do { return try operation(connection.db) }
+        catch { self.connection = nil; throw error }
+    }
+
+    private func open() throws -> Connection {
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         var db: OpaquePointer?
         guard sqlite3_open(file.path, &db) == SQLITE_OK, let db else { if let db { sqlite3_close(db) }; throw Self.failure }
-        defer { sqlite3_close(db) }
+        let connection = Connection(db: db)
         sqlite3_busy_timeout(db, 5000)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        // Readers in other processes (the chat tools) keep working while this process writes.
+        try Self.exec(db, "PRAGMA journal_mode=WAL")
         var version: String?
         if (try? Self.query(db, "SELECT value FROM meta WHERE key='schema'", [], { version = $0.text(0) })) == nil || version != Self.schemaVersion {
             try Self.exec(db, """
-                DROP TABLE IF EXISTS messages; DROP TABLE IF EXISTS chats; DROP TABLE IF EXISTS meta;
+                DROP TABLE IF EXISTS message_rows; DROP TABLE IF EXISTS messages; DROP TABLE IF EXISTS chats; DROP TABLE IF EXISTS meta;
                 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE chats (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, project TEXT NOT NULL, project_path TEXT NOT NULL,
                     title TEXT NOT NULL, agent TEXT NOT NULL, archived INTEGER NOT NULL, updated REAL NOT NULL, summary TEXT NOT NULL,
                     content_updated REAL NOT NULL, started REAL NOT NULL, message_count INTEGER NOT NULL, first_request TEXT NOT NULL);
                 CREATE VIRTUAL TABLE messages USING fts5(chat_id UNINDEXED, position UNINDEXED, role UNINDEXED, date UNINDEXED, text,
                     tokenize='unicode61 remove_diacritics 2');
+                CREATE TABLE message_rows (chat_id TEXT NOT NULL, row INTEGER NOT NULL, position INTEGER NOT NULL);
+                CREATE INDEX message_rows_chat ON message_rows (chat_id);
                 INSERT INTO meta (key, value) VALUES ('schema', '\(Self.schemaVersion)');
                 """)
         }
-        return try operation(db)
+        self.connection = connection
+        return connection
     }
 
     static let failure = ClientFailure(L10n.text("Не удалось открыть индекс поиска по чатам", "Could not open the chat search index"))
@@ -222,6 +277,7 @@ public actor ChatSearchIndex {
 
     private struct Row {
         let statement: OpaquePointer
+        var count: Int32 { sqlite3_column_count(statement) }
         func text(_ column: Int32) -> String { sqlite3_column_text(statement, column).map { String(cString: $0) } ?? "" }
         func double(_ column: Int32) -> Double { sqlite3_column_double(statement, column) }
         func int(_ column: Int32) -> Int { Int(sqlite3_column_int64(statement, column)) }

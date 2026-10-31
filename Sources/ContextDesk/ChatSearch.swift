@@ -23,11 +23,15 @@ extension DeskModel {
         }
     }
 
-    /// Brings the index up to date in the background; a run already in progress is left alone.
+    /// Brings the index up to date in the background; a run already in progress is left alone, and nothing runs while
+    /// the chats still match the last completed run (the scheduler calls this every 15 s).
     func refreshChatSearchIndex() {
         guard chatIndexTask == nil else { return }
-        let infos = chatSearchInfos(), index = chatSearchIndex, store = store
+        let infos = chatSearchInfos()
+        guard infos != chatIndexedInfos else { return }
+        let index = chatSearchIndex, store = store
         chatIndexTask = Task.detached(priority: .utility) { [weak self] in
+            var completed = false
             do {
                 let plan = try await index.plan(infos)
                 if !plan.isEmpty {
@@ -43,11 +47,13 @@ extension DeskModel {
                     }
                     AppLog.lifecycle.notice("Chat index updated: \(plan.content.count, privacy: .public) read, \(plan.metadata.count, privacy: .public) renamed, \(plan.removed.count, privacy: .public) removed")
                 }
+                completed = true
             } catch is CancellationError {
             } catch {
                 AppLog.lifecycle.error("Chat index update failed: \(error.localizedDescription, privacy: .public)")
             }
-            await MainActor.run { self?.chatIndexTask = nil }
+            // A failed or cancelled run leaves no memo, so the next tick tries again.
+            await MainActor.run { self?.chatIndexTask = nil; self?.chatIndexedInfos = completed ? infos : nil }
         }
     }
 

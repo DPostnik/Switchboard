@@ -2,6 +2,7 @@ import AgentContract
 import Foundation
 import Testing
 @testable import ContextCore
+@testable import ContextDesk
 @testable import ContextTranscript
 
 private let directoryServer = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -76,6 +77,100 @@ private func blob(_ chat: ChatSearchIndex.ChatInfo, _ messages: [(String, String
     try await index.index([(chat, blob(foreign, [("user", "foreign words")]))])
     #expect(try await index.search("foreign").isEmpty)
     #expect(try await index.search("Visible").map(\.chatID) == ["chat"])
+}
+
+/// A time whose seconds since 1970 do not restore the same `Date`: the reference-date seconds keep one bit more than
+/// the 1970 value can hold. About half of all clock readings are like this.
+private func fragileDate() -> Date {
+    while true {
+        let date = Date(timeIntervalSinceReferenceDate: Double.random(in: 800_000_000..<830_000_000))
+        if Date(timeIntervalSince1970: date.timeIntervalSince1970) != date { return date }
+    }
+}
+
+@Test func chatIndexPlanIsEmptyForATimeThatDoesNotRoundTrip() async throws {
+    let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let index = ChatSearchIndex(file: root.appendingPathComponent(ChatSearchIndex.fileName))
+    let date = fragileDate()
+    #expect(Date(timeIntervalSince1970: date.timeIntervalSince1970) != date)
+    let chat = info("chat", title: "Fragile time", updated: date)
+    try await index.index([(chat, blob(chat, [("user", "hello")]))])
+    #expect(try await index.plan([chat]).isEmpty)
+    var renamed = chat; renamed.title = "Renamed"
+    #expect(try await index.plan([renamed]) == .init(content: [], metadata: ["chat"], removed: []))
+    try await index.updateMetadata([renamed])
+    #expect(try await index.plan([renamed]).isEmpty)
+    var later = renamed; later.updated = date.addingTimeInterval(1)
+    #expect(try await index.plan([later]).content == ["chat"])
+}
+
+@Test func chatIndexDeletesMessagesByRowidInsteadOfScanning() async throws {
+    let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let index = ChatSearchIndex(file: root.appendingPathComponent(ChatSearchIndex.fileName))
+    let a = info("a", title: "Alpha chat"), b = info("b", title: "Beta chat")
+    try await index.index([(a, blob(a, [("user", "alpha words"), ("assistant", "alpha reply")])), (b, blob(b, [("user", "beta words")]))])
+    let plan = try await index.rows("EXPLAIN QUERY PLAN " + ChatSearchIndex.deleteMessagesSQL).map { $0[3] }
+    let scan = try #require(plan.first { $0.contains("messages VIRTUAL TABLE") })
+    // FTS5 reports every access as SCAN; an empty index string after `INDEX 0:` is the full scan, `=` the rowid lookup.
+    #expect(!scan.hasSuffix("INDEX 0:") && scan.contains("INDEX 0:="))
+    #expect(plan.contains { $0.contains("message_rows USING INDEX") })
+
+    func counts() async throws -> [String?] {
+        [try await index.rows("SELECT count(*) FROM messages").first?.first, try await index.rows("SELECT count(*) FROM message_rows").first?.first]
+    }
+    // Header updates, reindexing and removal keep one mapping row per message and leave other chats intact.
+    var summarized = a; summarized.summary = "Overview of alpha"
+    try await index.updateMetadata([summarized])
+    #expect(try await counts() == ["6", "6"])
+    #expect(try await index.search("Overview").map(\.chatID) == ["a"])
+    #expect(try await index.search("reply").map(\.chatID) == ["a"])
+    try await index.index([(a, blob(a, [("user", "gamma words")]))])
+    #expect(try await counts() == ["4", "4"])
+    #expect(try await index.search("reply").isEmpty)
+    #expect(try await index.search("gamma").map(\.chatID) == ["a"])
+    try await index.remove(["a"])
+    #expect(try await counts() == ["2", "2"])
+    #expect(try await index.search("beta").map(\.chatID) == ["b"])
+}
+
+@Test func chatIndexUsesWalAndServesASecondConnection() async throws {
+    let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent(ChatSearchIndex.fileName)
+    let writer = ChatSearchIndex(file: file), reader = ChatSearchIndex(file: file)
+    let chat = info("chat", title: "Shared index")
+    try await writer.index([(chat, blob(chat, [("user", "words for the reader")]))])
+    #expect(try await writer.rows("PRAGMA journal_mode").first?.first == "wal")
+    #expect(FileManager.default.fileExists(atPath: file.path + "-wal"))
+    #expect(try await reader.search("reader").map(\.chatID) == ["chat"])
+    // Both connections stay open; a later write on one is visible to the other.
+    var renamed = chat; renamed.title = "Renamed index"
+    try await writer.updateMetadata([renamed])
+    #expect(try await reader.search("Renamed").map(\.chatID) == ["chat"])
+    #expect(try await reader.plan([renamed]).isEmpty)
+    // A failed call drops the connection; the next call opens a new one.
+    await #expect(throws: (any Error).self) { try await writer.rows("SELECT * FROM missing_table") }
+    #expect(try await writer.search("Renamed").map(\.chatID) == ["chat"])
+}
+
+@Test @MainActor func chatIndexRefreshSkipsUnchangedChats() async throws {
+    let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let model = DeskModel(store: AppStore(file: root.appendingPathComponent("store.sqlite")), pluginDirectory: root.appendingPathComponent("plugins"),
+                          summaryResources: nil, jobStore: JobStore(file: root.appendingPathComponent("scheduled-jobs.json")))
+    let project = Project(path: root.path)
+    model.state.projects = [project]
+    model.state.chats = [Chat(session: .init(connection: .appClaude, nativeID: "m"), projectID: project.id, title: "First title", model: "claude")]
+    model.refreshChatSearchIndex()
+    await try #require(model.chatIndexTask).value
+    #expect(model.chatIndexTask == nil && model.chatIndexedInfos == model.chatSearchInfos())
+    #expect(try await model.chatSearchIndex.search("First").count == 1)
+    // The same chats again: no run. A changed title: a run that updates the memo.
+    model.refreshChatSearchIndex()
+    #expect(model.chatIndexTask == nil)
+    model.state.chats[0].title = "Second title"
+    model.refreshChatSearchIndex()
+    await try #require(model.chatIndexTask).value
+    #expect(try await model.chatSearchIndex.search("Second").count == 1)
+    #expect(model.chatIndexedInfos?.first?.title == "Second title")
 }
 
 @Test func chatIndexMatchQueryQuotesEveryWord() {

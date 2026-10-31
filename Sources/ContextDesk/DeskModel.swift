@@ -95,6 +95,8 @@ private struct ChatRunState {
     /// Full-text index of chat dialogue for the archive search and the chat-search tools (`ChatSearch.swift`).
     let chatSearchIndex: ChatSearchIndex
     var chatIndexTask: Task<Void, Never>?
+    /// The chats as the last completed index run saw them; an unchanged list skips the run.
+    var chatIndexedInfos: [ChatSearchIndex.ChatInfo]?
     let summaryRunner: AgentGenerationRunner
     let claudeSummaryRunner: AgentGenerationRunner
     var titleTasks: [String: Task<Void, Never>] = [:]
@@ -707,10 +709,13 @@ private struct ChatRunState {
     }
 
     /// Read-only backfill: never resumes sessions, dispatches work or changes the selected chat.
+    /// Archived chats are skipped: reading every one at connect loaded hundreds of megabytes of agent history
+    /// into memory and rewrote every stored transcript (performance audit 2026-10-31, item 3). An archived chat
+    /// is refreshed when it is opened; archive summaries read the stored transcript.
     func backfillHistory(_ chats: [Chat]) async {
         for chat in chats {
             guard !Task.isCancelled else { return }
-            guard !chat.isScheduledRecord, chatConnected(chat.id) else { continue }
+            guard !chat.isScheduledRecord, !chat.isArchived, chatConnected(chat.id) else { continue }
             guard chatIsAvailable(chat.id), !isBusy(threadID: chat.id),
                   state.chats.contains(where: { $0.id == chat.id }), !isChangingChat(chat.id) else { continue }
             do {

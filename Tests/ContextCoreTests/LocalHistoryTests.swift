@@ -111,12 +111,16 @@ import ContextCore
     model.connected = true
     let project = Project(path: root.path)
     let chat = Chat(id: "old", projectID: project.id, title: "Saved", model: "fixture")
-    model.state.projects = [project]; model.state.chats = [chat]
+    var archived = Chat(id: "archived", projectID: project.id, title: "Archived", model: "fixture")
+    archived.archived = true
+    model.state.projects = [project]; model.state.chats = [chat, archived]
     try await store.save(model.state)
-    await model.backfillHistory([chat])
+    await model.backfillHistory([chat, archived])
     #expect(model.chatID == nil && model.items.isEmpty)
     let snapshot = try #require(try await store.loadTranscript(conversationID: chat.id))
     #expect(snapshot.completeness == .complete && snapshot.items.map(\.text) == ["Saved by backfill"])
+    // Archived chats are not read at connect: one history read, and no stored transcript for the archived one.
+    #expect(try await store.loadTranscript(conversationID: archived.id) == nil)
     let calls = try await wire.request("test/calls").array.compactMap(\.string)
     #expect(calls == ["initialize", "thread/read"])
     await model.connection.stop(); model.connected = false
