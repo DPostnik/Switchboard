@@ -1033,6 +1033,22 @@ public actor ClaudeIntegration: AgentIntegration {
         guard value.version == 1, value.id == id else { throw ConversationIdentity.invalidStorage }
         sessions[id] = value; return value
     }
+    /// Reads a session for a read-only accessor. A record decoded only for this call is dropped again: chat open and
+    /// the connect-time backfill read every chat's history, and keeping each one resident held hundreds of megabytes
+    /// of transcript text. A session that was already resident stays, as does one with a live or warm process,
+    /// an active turn or a pending save; `load` keeps the record for callers that go on to mutate it.
+    private func peek(_ id: String) throws -> Session {
+        let resident = sessions[id] != nil
+        let value = try load(id)
+        if !resident { release(id) }
+        return value
+    }
+    private func release(_ id: String) {
+        guard wires[id] == nil, warm[id] == nil, waiting[id] == nil, !pendingSaves.contains(id), sessions[id]?.active == nil else { return }
+        sessions.removeValue(forKey: id)
+    }
+    /// Test seam: session records held in memory.
+    var residentSessionCount: Int { sessions.count }
     private func save(_ id: String) throws {
         let path = try file(id)
         try FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -1045,7 +1061,7 @@ public actor ClaudeIntegration: AgentIntegration {
     public func history(_ session: AgentSessionReference, context: AgentContext) -> AgentResult<[AgentHistoryTurn]> {
         guard checked(session, context: context) else { return .rejected(.wrongConnection) }
         do {
-            let value = try load(session.nativeID)
+            let value = try peek(session.nativeID)
             return .success(value.turns + (value.active.map { [.init(id: $0, items: value.current, startedAt: nil, completedAt: nil, duration: nil)] } ?? []))
         } catch { return failed(error) }
     }
@@ -1062,7 +1078,7 @@ public actor ClaudeIntegration: AgentIntegration {
     public func summarySource(_ session: AgentSessionReference, context: AgentContext) -> AgentResult<AgentSummarySource> {
         guard checked(session, context: context) else { return .rejected(.wrongConnection) }
         do {
-            let value = try load(session.nativeID)
+            let value = try peek(session.nativeID)
             // A warm process is idle after a clean turn; one waiting for background tasks may still add to history.
             guard value.active == nil, wires[session.nativeID] == nil || waiting[session.nativeID] == nil && warm[session.nativeID] != nil else {
                 throw ClientFailure(L10n.text("История содержит незавершённый или неполный запрос", "History contains an active or incomplete turn"))
@@ -1103,7 +1119,7 @@ public actor ClaudeIntegration: AgentIntegration {
             }
             // Re-read the account so a changed login never receives another account's history.
             guard try await account().value().authenticated, request.model.context == context else { return .rejected(.staleContext) }
-            _ = try load(request.source.nativeID)
+            _ = try peek(request.source.nativeID) // The source must exist and be valid; its record is not needed afterwards.
         } catch { return failed(error) }
         let runner = ClaudeGenerationRunner()
         generations[request.id] = runner
