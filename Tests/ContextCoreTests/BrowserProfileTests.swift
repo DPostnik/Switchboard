@@ -165,3 +165,26 @@ private struct ProfileFixture {
     #expect(f.store.runningBrowsers { _ in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" }.isEmpty)
     #expect(BrowserProfileStore.executablePath(getpid()) != nil)
 }
+
+@Test func catalogIsReusedWhileProfilesFileKeepsItsModificationTimeAndSize() throws {
+    let f = ProfileFixture(); defer { f.cleanup() }
+    _ = try f.start(f.a)
+    try f.store.rename(session: f.a, name: "Work")
+    let file = f.root.appendingPathComponent("profiles.json")
+    let fixed = Date(timeIntervalSince1970: 1_700_000_000)
+    try FileManager.default.setAttributes([.modificationDate: fixed], ofItemAtPath: file.path)
+    #expect(try f.store.current(session: f.a)?.name == "Work")
+    // Same size and mtime: the parsed catalog is reused and a byte-level edit stays invisible.
+    let bytes = try Data(contentsOf: file)
+    let edited = Data(String(decoding: bytes, as: UTF8.self).replacingOccurrences(of: "\"Work\"", with: "\"Wonk\"").utf8)
+    #expect(edited.count == bytes.count && edited != bytes)
+    try edited.write(to: file)
+    try FileManager.default.setAttributes([.modificationDate: fixed], ofItemAtPath: file.path)
+    #expect(try f.store.current(session: f.a)?.name == "Work")
+    // A new mtime is read again; a change through the store is visible at once.
+    try FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: file.path)
+    #expect(try f.store.current(session: f.a)?.name == "Wonk")
+    try f.store.rename(session: f.a, name: "Home")
+    #expect(try f.store.current(session: f.a)?.name == "Home")
+    #expect(try BrowserProfileStore(root: f.root).current(session: f.a)?.name == "Home")
+}

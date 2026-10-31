@@ -120,6 +120,19 @@ public enum ScheduleControl {
         return job
     }
 
+    /// Claimed/response pairs are kept this long. A request expires within 10 minutes, so after a day
+    /// no tool can still be waiting for the reply; the claim stays a receipt until then.
+    public static let receiptRetention: TimeInterval = 24 * 3600
+    /// Receipt files removed per pass at most, so a backlog never stalls the request loop.
+    public static let pruneLimit = 64
+    /// A directory whose mtime is unchanged since a completed pass holds no new request and no newly old receipt
+    /// pair worth a listing; it is listed again after this interval anyway, so retention does not depend on traffic.
+    static let relistInterval: TimeInterval = 3600
+    /// An entry written within this margin of a pass could share the directory's recorded mtime; such a pass is not trusted.
+    private static let stampMargin: TimeInterval = 2
+    private struct Listing: Equatable { var seconds: Int; var nanoseconds: Int; var listed: Date }
+    @MainActor private static var listings: [String: Listing] = [:]
+
     /// Transport consumes bounded JSON, never commands or executable text.
     @MainActor public static func drain(directory: URL, now: Date = Date(),
         catalog: () throws -> ScheduleCatalog = { ScheduleCatalog() },
@@ -130,8 +143,14 @@ public enum ScheduleControl {
         guard folderAttributes[.type] as? FileAttributeType == .typeDirectory,
               (folderAttributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
               ((folderAttributes[.posixPermissions] as? NSNumber)?.intValue ?? 0o777) & 0o077 == 0 else { throw invalid }
-        let files = try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-            .filter { $0.lastPathComponent.hasSuffix(".request.json") }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        var info = stat()
+        guard stat(directory.path, &info) == 0 else { throw invalid }
+        let stamp = Listing(seconds: Int(info.st_mtimespec.tv_sec), nanoseconds: Int(info.st_mtimespec.tv_nsec), listed: now)
+        let modified = Date(timeIntervalSince1970: TimeInterval(stamp.seconds) + TimeInterval(stamp.nanoseconds) / 1e9)
+        if let previous = listings[directory.path], previous.seconds == stamp.seconds, previous.nanoseconds == stamp.nanoseconds,
+           previous.listed.timeIntervalSince(modified) >= stampMargin, now.timeIntervalSince(previous.listed) < relistInterval { return }
+        let entries = try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        let files = entries.filter { $0.lastPathComponent.hasSuffix(".request.json") }.sorted { $0.lastPathComponent < $1.lastPathComponent }
         for file in files.prefix(8) {
             let stem = String(file.lastPathComponent.dropLast(".request.json".count))
             guard let id = UUID(uuidString: stem), id.uuidString == stem else { continue }
@@ -188,6 +207,30 @@ public enum ScheduleControl {
             }
             try JSONEncoder().encode(reply).write(to: response, options: .atomic)
             try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: response.path)
+        }
+        pruneReceipts(entries, directory: directory, now: now)
+        listings[directory.path] = stamp // Recorded only after a completed pass; a failed pass lists again.
+    }
+    /// Removes complete claimed/response pairs with canonical UUID names whose both files are older than the
+    /// retention. Lone claims (interrupted commands), young pairs and foreign names stay untouched.
+    private static func pruneReceipts(_ entries: [URL], directory: URL, now: Date) {
+        let fm = FileManager.default, cutoff = now.addingTimeInterval(-receiptRetention)
+        func modified(_ url: URL) -> Date? {
+            guard let attributes = try? fm.attributesOfItem(atPath: url.path),
+                  attributes[.type] as? FileAttributeType == .typeRegular else { return nil }
+            return attributes[.modificationDate] as? Date
+        }
+        var deletions = 0
+        for claim in entries where claim.lastPathComponent.hasSuffix(".claimed.json") {
+            guard deletions < pruneLimit else { return }
+            let stem = String(claim.lastPathComponent.dropLast(".claimed.json".count))
+            guard let id = UUID(uuidString: stem), id.uuidString == stem else { continue }
+            let response = directory.appendingPathComponent(stem + ".response.json")
+            guard let claimed = modified(claim), let replied = modified(response), claimed < cutoff, replied < cutoff else { continue }
+            // Claim first: a leftover response is inert, a leftover claim would read as an interrupted command.
+            try? fm.removeItem(at: claim)
+            try? fm.removeItem(at: response)
+            deletions += 2
         }
     }
 }

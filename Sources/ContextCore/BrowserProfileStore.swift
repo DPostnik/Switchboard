@@ -42,10 +42,18 @@ public enum BrowserProfileError: Error, LocalizedError, CaseIterable, Equatable 
 public struct BrowserProfileStore: Sendable {
     public let root: URL
     public init(root: URL = BrowserEnvironmentStore.directory) { self.root = root.standardizedFileURL }
-    private struct Catalog: Codable {
+    private struct Catalog: Codable, Sendable {
         var schema = 1
         var profiles: [String: BrowserProfile] = [:]
         var bindings: [String: BrowserProfileGrant] = [:]
+    }
+    /// The browser monitor and every profile view re-read `profiles.json` (hundreds of KB). The parsed catalog is
+    /// reused while the file's mtime and size are unchanged; `save` drops the entry, external writers change the stamp.
+    private struct CatalogStamp: Equatable { var seconds: Int; var nanoseconds: Int; var size: Int }
+    private static let catalogLock = NSLock()
+    nonisolated(unsafe) private static var catalogCache: [String: (stamp: CatalogStamp, catalog: Catalog)] = [:]
+    private static func stamp(_ info: stat) -> CatalogStamp {
+        CatalogStamp(seconds: Int(info.st_mtimespec.tv_sec), nanoseconds: Int(info.st_mtimespec.tv_nsec), size: Int(info.st_size))
     }
     /// Views and the browser monitor hash every chat's session; memoizing keeps that off the hot render path.
     private static let keyLock = NSLock()
@@ -66,15 +74,21 @@ public struct BrowserProfileStore: Sendable {
     private func read() throws -> Catalog {
         let path = root.appendingPathComponent("profiles.json")
         guard path.resolvingSymlinksInPath().path == path.path else { throw BrowserProfileError.storage }
-        guard FileManager.default.fileExists(atPath: path.path) else {
-            guard !FileManager.default.fileExists(atPath: root.appendingPathComponent("profiles-required").path) else { throw BrowserProfileError.storage }
+        var info = stat()
+        guard stat(path.path, &info) == 0 else {
+            guard errno == ENOENT,
+                  !FileManager.default.fileExists(atPath: root.appendingPathComponent("profiles-required").path) else { throw BrowserProfileError.storage }
             return Catalog()
         }
+        guard info.st_mode & S_IFMT == S_IFREG else { throw BrowserProfileError.storage }
+        let stamp = Self.stamp(info)
+        if let cached = Self.catalogLock.withLock({ Self.catalogCache[path.path] }), cached.stamp == stamp { return cached.catalog }
         guard path.resolvingSymlinksInPath().path == path.path,
               let bytes = try? Data(contentsOf: path), bytes.count <= 8 * 1024 * 1024,
               let value = try? JSONDecoder().decode(Catalog.self, from: bytes), value.schema == 1,
               value.profiles.allSatisfy({ $0.key == $0.value.id.uuidString.lowercased() }),
               value.bindings.allSatisfy({ value.profiles[$0.value.environment.uuidString.lowercased()] != nil }) else { throw BrowserProfileError.storage }
+        Self.catalogLock.withLock { Self.catalogCache[path.path] = (stamp, value) }
         return value
     }
     private func save(_ value: Catalog) throws {
@@ -84,6 +98,7 @@ public struct BrowserProfileStore: Sendable {
         let path = root.appendingPathComponent("profiles.json")
         let marker = root.appendingPathComponent("profiles-required")
         if !FileManager.default.fileExists(atPath: marker.path) { try Data("1\n".utf8).write(to: marker, options: .atomic) }
+        Self.catalogLock.withLock { _ = Self.catalogCache.removeValue(forKey: path.path) }
         try bytes.write(to: path, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
         let fd = open(path.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
@@ -127,7 +142,10 @@ public struct BrowserProfileStore: Sendable {
         var result: [String: Int32] = [:]
         for (key, binding) in catalog.bindings {
             let record = environment(binding.environment).appendingPathComponent("testing-chrome-owner.json")
-            guard let bytes = try? Data(contentsOf: record), bytes.count <= 65_536,
+            // Most bound profiles have no live Chrome: one stat decides before any file is opened or an error is built.
+            var info = stat()
+            guard stat(record.path, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_size <= 65_536,
+                  let bytes = try? Data(contentsOf: record), bytes.count <= 65_536,
                   let owner = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
                   let pid = (owner["pid"] as? NSNumber)?.int32Value, pid > 0,
                   let executable = owner["executable"] as? String,

@@ -121,7 +121,7 @@ import IOKit.ps
                 if value == .failed || value == .authenticationRequired { statusFailed = true }
                 AppLog.remote.notice("Remote connection: \(String(describing: value), privacy: .public)")
                 if value == .connecting { publication.cancel() }
-                if value == .connected { requestPublication(); requestCommands() }
+                if value == .connected { requestPublication(immediate: true); requestCommands() }
             }
             channel.onError = { [weak self] error in
                 AppLog.remote.error("Remote channel error: \(error.localizedDescription, privacy: .public)")
@@ -133,7 +133,7 @@ import IOKit.ps
                 requestCommands()
             }
             channel.onPresence = { [weak self] peers in
-                if !peers.phones.isEmpty { self?.requestPublication() }
+                if !peers.phones.isEmpty { self?.requestPublication(immediate: true) }
             }
             modelChanges = model.objectWillChange.merge(with: model.transcript.objectWillChange).sink { [weak self] _ in self?.requestPublication() }
             observePowerAndSleep()
@@ -168,9 +168,13 @@ import IOKit.ps
         try Task.checkCancellation()
         lastPublished = snapshot
     }
-    func requestPublication() {
+    /// Model changes arrive at delta rate while a chat streams; the phone receives at most one snapshot per second.
+    static let publicationInterval: Duration = .seconds(1)
+    /// `immediate` publishes without the coalescing delay: a new connection, a phone that just appeared,
+    /// or the outcome of a command the phone sent.
+    func requestPublication(immediate: Bool = false) {
         guard enabled, !sleeping, connectionState == .connected else { return }
-        publication.enqueue(delay: .milliseconds(350), operation: { [weak self] in
+        publication.enqueue(delay: immediate ? .zero : Self.publicationInterval, operation: { [weak self] in
             try await self?.publishCurrent()
         }, failure: { [weak self] error in self?.realtime?.recover(from: error) })
     }
@@ -229,7 +233,7 @@ import IOKit.ps
                     }
                     AppLog.remote.notice("Remote command \(command.id, privacy: .public) (\(command.kind, privacy: .public)): \(result, privacy: .public)")
                     try await api.finish(id: command.id, status: result)
-                    requestPublication()
+                    requestPublication(immediate: true)
                 }
             }
         }, failure: { [weak self] error in
