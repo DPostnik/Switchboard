@@ -37,6 +37,43 @@ import ContextCore
     #expect(MobileRemoteHost.publicationInterval == .seconds(1))
 }
 
+@Test @MainActor func remoteHostPublishesRarelyUntilAPhoneAppearsAndForAnHourAfterIt() throws {
+    let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: file) }
+    let host = MobileRemoteHost(setupFile: file)
+    let start = Date()
+    // Defaults: quiet publishing on, 30 minutes between updates while no phone was seen.
+    #expect(host.quietPublishing && host.quietIntervalMinutes == 30)
+    #expect(host.publicationDelay(now: start) == .seconds(1800))
+    host.quietIntervalMinutes = 10
+    #expect(host.publicationDelay(now: start) == .seconds(600))
+    // A phone in the channel: one-second cadence, and for an hour after it leaves.
+    host.notePhonePresence(true, now: start)
+    #expect(host.publicationDelay(now: start.addingTimeInterval(5 * 3600)) == .seconds(1))
+    host.notePhonePresence(false, now: start)
+    #expect(host.publicationDelay(now: start.addingTimeInterval(3599)) == .seconds(1))
+    #expect(host.publicationDelay(now: start.addingTimeInterval(3601)) == .seconds(600))
+    // A command from the phone opens the window again; a presence report without phones does not.
+    host.notePhoneActivity(now: start.addingTimeInterval(7200))
+    #expect(host.publicationDelay(now: start.addingTimeInterval(7200 + 3599)) == .seconds(1))
+    host.notePhonePresence(false, now: start.addingTimeInterval(4 * 3600))
+    #expect(host.publicationDelay(now: start.addingTimeInterval(4 * 3600 + 1)) == .seconds(600))
+    // Quiet publishing off: always one second.
+    host.quietPublishing = false
+    #expect(host.publicationDelay(now: start.addingTimeInterval(9 * 3600)) == .seconds(1))
+    // Settings persist in the host's configuration and reload; unknown intervals fall back to the default.
+    let reloaded = MobileRemoteHost(setupFile: file)
+    #expect(!reloaded.quietPublishing && reloaded.quietIntervalMinutes == 10)
+    reloaded.quietPublishing = true
+    let config = Locations.root.appendingPathComponent("mobile-remote.json")
+    var json = try JSONSerialization.jsonObject(with: Data(contentsOf: config)) as! [String: Any]
+    json["quietIntervalMinutes"] = 7
+    try JSONSerialization.data(withJSONObject: json).write(to: config)
+    let fallback = MobileRemoteHost(setupFile: file)
+    #expect(fallback.quietPublishing && fallback.quietIntervalMinutes == 30)
+    fallback.quietIntervalMinutes = 30; fallback.quietPublishing = true
+}
+
 @Test @MainActor func remoteHostLeavesInstallerHandoffUntilSettingsAreOpened() throws {
     let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: file) }

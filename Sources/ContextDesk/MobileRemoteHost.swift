@@ -14,6 +14,12 @@ import IOKit.ps
     @Published var password = ""
     @Published var projects: Set<String> = []
     @Published var autoEnable = true { didSet { if autoEnable != oldValue { saveConfig() } } }
+    /// Without a phone around, model changes reach the cloud at most once per `quietIntervalMinutes`; a phone that
+    /// appears (or a command it sends) opens an active window with the usual one-second cadence.
+    @Published var quietPublishing = true { didSet { if quietPublishing != oldValue { saveConfig() } } }
+    @Published var quietIntervalMinutes = MobileRemoteHost.defaultQuietIntervalMinutes {
+        didSet { if quietIntervalMinutes != oldValue { saveConfig() } }
+    }
     @Published private(set) var enabled = false
     @Published private(set) var transitioning = false
     /// Any new status clears the failure mark; `fail` sets it again.
@@ -46,9 +52,14 @@ import IOKit.ps
     private var device = UUID().uuidString.lowercased()
     /// Whether access should come back on the next launch: set by enabling, cleared only when the user turns it off.
     private var active = false
+    /// A phone is tracked in the channel right now.
+    private(set) var phonePresent = false
+    /// End of the active window opened by the last phone presence or command; nil when none was seen.
+    private(set) var phoneActiveUntil: Date?
     private struct Config: Codable {
         var url: String; var key: String; var device: String; var projects: Set<String>
         var autoEnable: Bool?; var active: Bool?
+        var quietPublishing: Bool?; var quietIntervalMinutes: Int?
     }
     init(setupFile: URL = Locations.root.appendingPathComponent("mobile-setup.json"),
          makeClient: @escaping (String, String) throws -> RemoteAPI = { try RemoteAPI(url: $0, key: $1) }) {
@@ -57,14 +68,20 @@ import IOKit.ps
         if let data = try? Data(contentsOf: configFile), let config = try? JSONDecoder().decode(Config.self, from: data) {
             url = config.url; key = config.key; device = config.device; projects = config.projects
             autoEnable = config.autoEnable ?? true; active = config.active ?? true
+            quietPublishing = config.quietPublishing ?? true
+            quietIntervalMinutes = Self.quietIntervalChoices.contains(config.quietIntervalMinutes ?? 0)
+                ? config.quietIntervalMinutes! : Self.defaultQuietIntervalMinutes
         }
     }
     private func saveConfig() {
         do {
             try FileManager.default.createDirectory(at: configFile.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try JSONEncoder().encode(Config(url: url, key: key, device: device, projects: projects, autoEnable: autoEnable, active: active))
-                .write(to: configFile, options: .atomic)
+            try JSONEncoder().encode(currentConfig()).write(to: configFile, options: .atomic)
         } catch { fail(error.localizedDescription) }
+    }
+    private func currentConfig() -> Config {
+        Config(url: url, key: key, device: device, projects: projects, autoEnable: autoEnable, active: active,
+               quietPublishing: quietPublishing, quietIntervalMinutes: quietIntervalMinutes)
     }
     private func fail(_ message: String) {
         status = message; statusFailed = true
@@ -104,8 +121,7 @@ import IOKit.ps
             _ = try await client.owner()
             active = true
             try FileManager.default.createDirectory(at: configFile.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try JSONEncoder().encode(Config(url: url, key: key, device: device, projects: projects, autoEnable: autoEnable, active: active))
-                .write(to: configFile, options: .atomic)
+            try JSONEncoder().encode(currentConfig()).write(to: configFile, options: .atomic)
             api = client; self.model = model; enabled = true; lastPublished = nil
             let channel = RemoteRealtime(role: "mac", device: device, credentials: { try await client.realtimeCredentials() }) { [weak self] in
                 try await client.checkRealtimeSchema()
@@ -133,7 +149,9 @@ import IOKit.ps
                 requestCommands()
             }
             channel.onPresence = { [weak self] peers in
-                if !peers.phones.isEmpty { self?.requestPublication(immediate: true) }
+                guard let self else { return }
+                notePhonePresence(!peers.phones.isEmpty)
+                if phonePresent { requestPublication(immediate: true) }
             }
             modelChanges = model.objectWillChange.merge(with: model.transcript.objectWillChange).sink { [weak self] _ in self?.requestPublication() }
             observePowerAndSleep()
@@ -170,11 +188,32 @@ import IOKit.ps
     }
     /// Model changes arrive at delta rate while a chat streams; the phone receives at most one snapshot per second.
     static let publicationInterval: Duration = .seconds(1)
+    /// How long the one-second cadence stays on after the phone was last seen or last sent a command.
+    static let activeWindow: TimeInterval = 60 * 60
+    static let quietIntervalChoices = [10, 30, 60]
+    static let defaultQuietIntervalMinutes = 30
+    /// A phone in the channel, or one seen within the active window, keeps the one-second cadence.
+    func phoneActive(now: Date = Date()) -> Bool {
+        phonePresent || phoneActiveUntil.map { now < $0 } == true
+    }
+    /// Coalescing delay for a model-change publication: one second while a phone is active (or quiet publishing
+    /// is off), otherwise the quiet interval. The cloud copy still receives every change, just later.
+    func publicationDelay(now: Date = Date()) -> Duration {
+        guard quietPublishing, !phoneActive(now: now) else { return Self.publicationInterval }
+        return .seconds(60 * quietIntervalMinutes)
+    }
+    func notePhonePresence(_ present: Bool, now: Date = Date()) {
+        if phonePresent || present { phoneActiveUntil = now.addingTimeInterval(Self.activeWindow) }
+        phonePresent = present
+    }
+    func notePhoneActivity(now: Date = Date()) {
+        phoneActiveUntil = now.addingTimeInterval(Self.activeWindow)
+    }
     /// `immediate` publishes without the coalescing delay: a new connection, a phone that just appeared,
-    /// or the outcome of a command the phone sent.
+    /// or the outcome of a command the phone sent. A pending quiet-interval wait is cut short by it.
     func requestPublication(immediate: Bool = false) {
         guard enabled, !sleeping, connectionState == .connected else { return }
-        publication.enqueue(delay: immediate ? .zero : Self.publicationInterval, operation: { [weak self] in
+        publication.enqueue(delay: immediate ? .zero : publicationDelay(), operation: { [weak self] in
             try await self?.publishCurrent()
         }, failure: { [weak self] error in self?.realtime?.recover(from: error) })
     }
@@ -233,6 +272,7 @@ import IOKit.ps
                     }
                     AppLog.remote.notice("Remote command \(command.id, privacy: .public) (\(command.kind, privacy: .public)): \(result, privacy: .public)")
                     try await api.finish(id: command.id, status: result)
+                    notePhoneActivity()
                     requestPublication(immediate: true)
                 }
             }
@@ -264,6 +304,7 @@ import IOKit.ps
         workspaceObservers = []
         if let powerSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), powerSource, .commonModes) }
         powerSource = nil; liveMessages = [:]; liveActivity = [:]; lastPublished = nil
+        phonePresent = false; phoneActiveUntil = nil
         releaseSleepAssertion()
         status = L10n.text("Удалённый доступ выключен. Очередь в облаке сохранена.", "Remote access disabled. Cloud queue retained.")
     }
@@ -337,6 +378,17 @@ struct MobileRemoteSettings: View {
             Text(L10n.text("На питании от сети Mac не засыпает автоматически. Закрытая крышка, принудительный сон и Cmd+Q могут прервать доступ.", "On external power, the Mac stays awake during idle time. Closing the lid, forced sleep and Cmd+Q can interrupt access."))
                 .font(.ui(.caption)).foregroundStyle(.secondary)
             Toggle(L10n.text("Включать доступ при запуске приложения", "Enable access when the app launches"), isOn: $host.autoEnable)
+            Toggle(L10n.text("Редкие обновления, пока телефон не используется", "Infrequent updates while the phone is not in use"), isOn: $host.quietPublishing)
+            if host.quietPublishing {
+                Picker(L10n.text("Интервал без телефона", "Interval without the phone"), selection: $host.quietIntervalMinutes) {
+                    ForEach(MobileRemoteHost.quietIntervalChoices, id: \.self) { minutes in
+                        Text(L10n.text("\(minutes) мин", "\(minutes) min")).tag(minutes)
+                    }
+                }
+            }
+            Text(L10n.text("Пока телефон подключён и ещё час после этого изменения уходят в облако не реже раза в секунду. В остальное время накопленные изменения отправляются одним обновлением раз в выбранный интервал. Появление телефона или команда с него отправляют обновление сразу.",
+                           "While the phone is connected, and for an hour afterwards, changes reach the cloud at least once a second. The rest of the time the accumulated changes go out as one update per chosen interval. A phone that appears, or a command it sends, triggers an update at once."))
+                .font(.ui(.caption)).foregroundStyle(.secondary)
             Text(L10n.text("Если доступ был включён, он восстановится после запуска или перезапуска приложения, и сохранённые команды будут обработаны. Кнопка «Выключить доступ» отменяет это до следующего ручного включения.", "If access was on, it comes back after the app launches or restarts, and saved commands are processed. Disable access keeps it off until you enable it again."))
                 .font(.ui(.caption)).foregroundStyle(.secondary)
             if host.enabled {
