@@ -24,7 +24,7 @@ struct DeskNotice: Identifiable {
     var actionID: String? = nil
 }
 
-private struct ChatRunState {
+private struct ChatRunState: Equatable {
     var running = false
     var sending = false
     var stopRequested = false
@@ -66,7 +66,17 @@ private struct ChatRunState {
     let telegram = TelegramBridge()
     /// Latest messages per chat for the chat directory, reloaded when the chat changes.
     private var directoryHistoryCache: [String: (updated: Date, messages: [TranscriptItem])] = [:]
-    @Published var state = SavedState()
+    @Published var state = SavedState() {
+        // Any state change may add, remove or re-key a chat; the next event rebuilds the map.
+        didSet { nativeSessionMap = nil }
+    }
+    /// (connection, native ID) -> chat ID for `receive`, built on demand after a state change instead of
+    /// filtering every chat for every streamed delta.
+    private var nativeSessionMap: NativeSessionMap?
+    private func appID(for session: AgentSessionReference) -> String? {
+        if nativeSessionMap == nil { nativeSessionMap = NativeSessionMap(chats: state.chats) }
+        return nativeSessionMap?.appID(for: session)
+    }
     @Published var projectID: UUID?
     @Published var chatID: String? {
         didSet { if chatID != oldValue { transcript.cancelPending() } }
@@ -438,10 +448,11 @@ private struct ChatRunState {
                             do {
                                 let status = try await runtime.status()
                                 guard !Task.isCancelled else { return }
-                                self.pluginStatuses[id] = status
+                                // Every 5 s for every plugin; an unchanged status must not redraw the window.
+                                if self.pluginStatuses[id] != status { self.pluginStatuses[id] = status }
                             } catch {
                                 guard !Task.isCancelled else { return }
-                                self.pluginStatuses[id] = nil
+                                if self.pluginStatuses[id] != nil { self.pluginStatuses[id] = nil }
                                 self.pluginMessages[id] = error.localizedDescription
                                 await runtime.stop()
                                 self.pluginRuntimes[id] = nil
@@ -1665,6 +1676,8 @@ private struct ChatRunState {
         await task?.value
     }
 
+    /// Shared by every `remoteSnapshot` call: the publication runs on every model change, once per running chat.
+    static let remoteTimestampFormatter = ISO8601DateFormatter()
     func remoteSnapshot(projects: Set<String>) async -> RemoteSnapshot {
         let selected = state.projects.filter { projects.contains($0.id.uuidString) }
         var chats: [RemoteChat] = []
@@ -1697,7 +1710,7 @@ private struct ChatRunState {
             if remote.running, let run = runs[chat.id] {
                 // The host replaces this with the current tool call when it saw one.
                 remote.activity = run.status.map { String($0.prefix(RemoteChat.activityLimit)) }
-                remote.runningSince = run.turnID.flatMap { turnStarts[chat.id + ":" + $0] }.map { ISO8601DateFormatter().string(from: $0) }
+                remote.runningSince = run.turnID.flatMap { turnStarts[chat.id + ":" + $0] }.map { Self.remoteTimestampFormatter.string(from: $0) }
             }
             if chat.isScheduledRecord { remote.readOnly = true; remote.supportsPhotos = false }
             if let project = selected.first(where: { $0.id == chat.projectID }), chat.nativeSession?.connection == .originalCodex {
@@ -1951,10 +1964,50 @@ private struct ChatRunState {
         default: await receive(event)
         }
     }
-    private func persist() { let snapshot = state; Task { do { try await store.save(snapshot) } catch { self.error = error.localizedDescription } } }
+    // MARK: State persistence
+    /// `persist()` calls within this delay share one write (a turn makes 2-3 of them).
+    static let persistDelay: Duration = .milliseconds(200)
+    private var persistTask: Task<Void, Never>?
+    private var persistWriting = false
+    private var persistDirty = false
+    /// Writes the coalesced persistence issued; tests count them.
+    private(set) var persistWrites = 0
+    /// Replaces `store.save` for coalesced writes; tests slow it down or record the written snapshots.
+    var persistWriter: (@MainActor (SavedState) async throws -> Void)?
+
+    /// Schedules a save of the latest state. One pending task per model: calls within `persistDelay` share one
+    /// write, and a call during a running write queues exactly one follow-up. Every write takes `state` as it is
+    /// at write time, so an older snapshot never overwrites a newer one. `flushPersist()` writes now (quit path).
+    private func persist() {
+        persistDirty = true
+        guard persistTask == nil else { return }
+        persistTask = Task {
+            // flushPersist cancels only this delay; the write itself never checks for cancellation.
+            try? await Task.sleep(for: Self.persistDelay)
+            await writePendingState()
+        }
+    }
+    private func writePendingState() async {
+        persistWriting = true
+        defer { persistWriting = false; persistTask = nil }
+        while persistDirty {
+            persistDirty = false
+            let snapshot = state
+            persistWrites += 1
+            do {
+                if let persistWriter { try await persistWriter(snapshot) } else { try await store.save(snapshot) }
+            } catch { self.error = error.localizedDescription }
+        }
+    }
+    /// Writes the pending state now and returns after the write (and its follow-up, if one was requested meanwhile).
+    func flushPersist() async {
+        guard let task = persistTask else { return }
+        if !persistWriting { task.cancel() }
+        await task.value
+    }
 
     func receive(_ event: AgentEvent) async {
-        let thread = event.session.flatMap { ConversationIdentity.appID(for: $0.nativeID, in: state, connection: $0.connection) }
+        let thread = event.session.flatMap { appID(for: $0) }
         if event.session != nil && thread == nil {
             if case .interaction(let request) = event.payload { await (request.session.connection == .appClaude ? claudeConnection : connection).rejectInteraction(request.id) }
             return
@@ -2033,7 +2086,8 @@ private struct ChatRunState {
                     snapshot.lastRequestAt = previous.lastRequestAt
                     snapshot.cacheTTL = snapshot.cacheTTL ?? previous.cacheTTL
                 }
-                usage[id] = snapshot
+                // Message deltas often repeat the previous values; an identical snapshot must not redraw the window.
+                if usage[id] != snapshot { usage[id] = snapshot }
                 try? await store.saveUsage(threadID: id, snapshot: snapshot)
             }
         case .started(let turn):
@@ -2043,10 +2097,11 @@ private struct ChatRunState {
                 if turnTokens[thread + ":" + turn] == nil {
                     turnTokens[thread + ":" + turn] = ResponseTokenTracker(baseline: tokenTotals[thread])
                 }
-                runs[thread, default: ChatRunState()].running = true
-                runs[thread, default: ChatRunState()].turnID = turn
-                runs[thread, default: ChatRunState()].status = nil
-                backgroundWaits[thread] = nil
+                // One publication for the whole change, and none when nothing changed.
+                var run = runs[thread] ?? ChatRunState()
+                run.running = true; run.turnID = turn; run.status = nil
+                if runs[thread] != run { runs[thread] = run }
+                if backgroundWaits[thread] != nil { backgroundWaits[thread] = nil }
             }
         case .completed(let completion):
             flushDeltas()
@@ -2090,12 +2145,17 @@ private struct ChatRunState {
             let agent = event.session?.connection == .appClaude ? "Claude" : "Codex"
             transcript.enqueue(id: id, text: text, turn: turn) { $0.agentName = agent }
         case .status(let turn, let text):
-            guard let thread, runs[thread]?.running == true, turn == nil || runs[thread]?.turnID == turn else { return }
-            runs[thread]?.status = text
+            guard let thread, let run = runs[thread], run.running, turn == nil || run.turnID == turn else { return }
+            // Claude repeats the status on every content block; identical text must not publish.
+            if run.status != text { runs[thread]?.status = text }
         case .background(let tasks):
-            if let thread { backgroundWaits[thread] = tasks > 0 ? tasks : nil }
+            guard let thread else { return }
+            let count = tasks > 0 ? tasks : nil
+            if backgroundWaits[thread] != count { backgroundWaits[thread] = count }
         case .subagents(let list):
-            if let thread { subagents[thread] = list.isEmpty ? nil : list }
+            guard let thread else { return }
+            let agents = list.isEmpty ? nil : list
+            if subagents[thread] != agents { subagents[thread] = agents }
         }
     }
     private func flushDeltas() { transcript.flush() }
