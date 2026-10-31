@@ -3,7 +3,7 @@ import AppKit
 import Testing
 import SwiftUI
 import ContextCore
-import ContextTranscript
+@testable import ContextTranscript
 @testable import ContextDesk
 
 @Test @MainActor func chatControlsDoNotPushTextOutsideNarrowDetail() throws {
@@ -200,6 +200,63 @@ import ContextTranscript
     #expect(view.transcript.string.contains("Третья команда"))
     view.update(items: items, conversationID: "other", followOutput: false)
     #expect(!view.transcript.string.contains("Первая команда"))
+}
+
+@Test @MainActor func finishedTurnRerendersOnlyClosingRowsAndTheChangedTail() {
+    let view = TranscriptScrollView()
+    view.frame = NSRect(x: 0, y: 0, width: 700, height: 500)
+    let items = [
+        TranscriptItem(id: "user", kind: "user", text: "Проверь проект"),
+        TranscriptItem(id: "a", kind: "activity", text: "Первая команда"),
+        TranscriptItem(id: "comment", kind: "assistant", text: "Проверяю файлы", phase: "commentary"),
+        TranscriptItem(id: "b", kind: "activity", text: "Вторая команда"),
+        TranscriptItem(id: "final", kind: "assistant", text: "Готово", phase: "final_answer")
+    ]
+    view.update(items: items, conversationID: "t", followOutput: false, isWorking: true)
+    view.layoutSubtreeIfNeeded()
+    _ = view.textView(view.transcript, clickedOnLink: "contextdesk-action:a", at: 0)
+    #expect(view.transcript.string.contains("1. Первая команда"))
+    let renders = view.renderCount
+    view.update(items: items, conversationID: "t", followOutput: false, isWorking: false)
+    // The open row closes and the final answer gains its copy control; the user message and the commentary keep their rendering.
+    #expect(view.renderCount - renders == 2)
+    #expect(!view.transcript.string.contains("Первая команда"))
+    #expect(view.transcript.string.contains("Действия Codex · 2"))
+    #expect(view.transcript.string.contains("Проверяю файлы"))
+    #expect(view.transcript.string.contains("Готово"))
+    let next = items + [TranscriptItem(id: "user2", kind: "user", text: "Ещё"),
+                        TranscriptItem(id: "final2", kind: "assistant", text: "Второй итог", phase: "final_answer")]
+    view.update(items: next, conversationID: "t", followOutput: false, isWorking: true)
+    let before = view.renderCount
+    view.update(items: next, conversationID: "t", followOutput: false, isWorking: false)
+    // Nothing was open: only the final answer, whose copy control appears, is rendered again.
+    #expect(view.renderCount - before == 1)
+    #expect(view.transcript.string.contains("Второй итог"))
+}
+
+@Test @MainActor func activitySummaryRowKeepsToolBodiesOutOfTheTextUntilOpened() throws {
+    let body = String(repeating: "{\"output\": \"очень длинный вывод инструмента\"}\n", count: 2_000)
+    let items = [TranscriptItem(id: "u", kind: "user", text: "Запусти"),
+                 TranscriptItem(id: "t1", kind: "activity", text: "Bash\n" + body),
+                 TranscriptItem(id: "t2", kind: "activity", text: "Read\n" + body),
+                 TranscriptItem(id: "a", kind: "assistant", text: "Готово")]
+    let grouped = TranscriptScrollView.groupActivities(items, isWorking: false)
+    let summary = try #require(grouped.items.first { $0.kind == "activity" })
+    #expect(summary.phase == "Действия Codex · 2")
+    #expect(!summary.text.contains("длинный вывод"))
+    #expect(summary.text.utf8.count < 100)
+    #expect(grouped.groups["t1"]?.map(\.id) == ["t1", "t2"])
+    let view = TranscriptScrollView()
+    view.frame = NSRect(x: 0, y: 0, width: 700, height: 500)
+    view.update(items: items, conversationID: "t", followOutput: false)
+    #expect(view.transcript.string.contains("Действия Codex · 2"))
+    #expect(!view.transcript.string.contains("длинный вывод"))
+    #expect(view.transcript.string.utf8.count < 200)
+    _ = view.textView(view.transcript, clickedOnLink: "contextdesk-action:t1", at: 0)
+    #expect(view.transcript.string.contains("1. Bash\n" + body))
+    #expect(view.transcript.string.contains("2. Read\n" + body))
+    _ = view.textView(view.transcript, clickedOnLink: "contextdesk-action:t1", at: 0)
+    #expect(!view.transcript.string.contains("длинный вывод"))
 }
 
 @Test @MainActor func composerReturnSubmitsAndShiftReturnInsertsNewline() throws {
