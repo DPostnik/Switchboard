@@ -307,6 +307,152 @@ $ swift test
     #expect(TranscriptMarkdown.webSources(in: "```\nhttps://only.example\n```").isEmpty)
 }
 
+/// Headings, code, tables, lists, links, images and enough web links for a sources list.
+private let cacheFixture = sampleAnswer + """
+
+
+### Иллюстрации
+
+![Удалённая схема](https://example.com/diagram.png)
+
+![Локальный файл](missing-chart.png)
+
+См. [один](https://a.example/1), [два](https://b.example/2) и https://c.example/3 для деталей.
+
+| Колонка A | Колонка B |
+| --- | --- |
+| https://d.example/4 | `код` |
+
+Заключительный абзац с [ссылкой](https://e.example/5).
+"""
+
+/// Text and attributes of every run; attachments, tables and object addresses are normalized because a
+/// fresh render creates new attachment, cell and style objects.
+@MainActor private func renderSignature(_ view: TranscriptScrollView) -> [String] {
+    let storage = view.transcript.textStorage!
+    var runs: [String] = []
+    storage.enumerateAttributes(in: NSRange(location: 0, length: storage.length)) { attributes, range, _ in
+        let text = (storage.string as NSString).substring(with: range)
+        let described = attributes.keys.sorted { $0.rawValue < $1.rawValue }.map { key -> String in
+            let value: String
+            switch attributes[key]! {
+            case let attachment as NSTextAttachment:
+                value = "attachment(\(attachment.bounds), \(attachment.image?.size ?? .zero), cell: \(attachment.attachmentCell != nil))"
+            case let box as TableBox:
+                value = "table(\(box.table.rows))"
+            default:
+                value = String(describing: attributes[key]!)
+            }
+            return key.rawValue + "=" + value.replacingOccurrences(of: #"0x[0-9a-fA-F]+"#, with: "0x", options: .regularExpression)
+        }
+        runs.append(text + "|" + described.joined(separator: ";"))
+    }
+    return runs
+}
+
+/// Feeds the fixture as a growing answer, the way a streamed reply arrives, and returns the view.
+@MainActor private func streamedView(_ text: String, cached: Bool, step: Int = 3) -> TranscriptScrollView {
+    let view = TranscriptScrollView()
+    view.renderCache.isEnabled = cached
+    view.frame = NSRect(x: 0, y: 0, width: 760, height: 900)
+    // The column width settles before the first tick, as in a window.
+    view.layoutSubtreeIfNeeded()
+    let lines = text.components(separatedBy: "\n")
+    var cut = step
+    while cut < lines.count {
+        view.update(items: [TranscriptItem(id: "answer", kind: "assistant", text: lines.prefix(cut).joined(separator: "\n"))],
+                    conversationID: "markdown", followOutput: false)
+        cut += step
+    }
+    view.update(items: [TranscriptItem(id: "answer", kind: "assistant", text: text)], conversationID: "markdown", followOutput: false)
+    view.layoutSubtreeIfNeeded()
+    return view
+}
+
+@Test @MainActor func streamedAnswerRendersTheSameWithAndWithoutTheBlockCache() throws {
+    let cached = streamedView(cacheFixture, cached: true)
+    let uncached = streamedView(cacheFixture, cached: false)
+    let oneShot = renderedView(cacheFixture)
+    #expect(cached.renderCache.hits > 0)
+    #expect(uncached.renderCache.hits == 0)
+    let sources = TranscriptMarkdown.webSources(in: cacheFixture).count
+    #expect(sources >= TranscriptMarkdown.sourcesThreshold)
+    #expect(cached.transcript.string.contains(L10n.text("Источники · \(sources)", "Sources · \(sources)")))
+    #expect(renderSignature(cached) == renderSignature(uncached))
+    #expect(renderSignature(cached) == renderSignature(oneShot))
+    // Toggles and copy feedback change one block; the others come from the cache and still match a fresh render.
+    for view in [cached, uncached] {
+        for toggle in links(in: view, prefix: "contextdesk-toggle:") {
+            _ = view.textView(view.transcript, clickedOnLink: toggle.1, at: toggle.0)
+        }
+    }
+    #expect(cached.transcript.string.contains("Скрытый текст."))
+    #expect(cached.transcript.string.contains("b.example — два"))
+    #expect(renderSignature(cached) == renderSignature(uncached))
+    let pasteboard = NSPasteboard.withUniqueName()
+    defer { pasteboard.releaseGlobally() }
+    let copying = streamedView(cacheFixture, cached: true)
+    let plain = streamedView(cacheFixture, cached: false)
+    for view in [copying, plain] {
+        let control = try #require(links(in: view, prefix: "contextdesk-table:tsv").first)
+        _ = view.textView(view.transcript, clickedOnLink: control.1, at: control.0)
+    }
+    #expect(copying.transcript.string.contains(L10n.text("Скопировано", "Copied")))
+    #expect(renderSignature(copying) == renderSignature(plain))
+}
+
+@Test @MainActor func blockCacheServesUnchangedBlocksAndIsDroppedOnSwitchFinishAndStyleChanges() throws {
+    let view = streamedView(cacheFixture, cached: true)
+    let blocks = MarkdownBlocks.nodes(cacheFixture)
+    let images = blocks.filter { if case .image = $0.block { return true }; return false }.count
+    #expect(view.renderCache.itemCount == 1)
+    // The scroller that appeared during streaming narrowed the column; one re-render settles the entries at that width.
+    let details = try #require(links(in: view, prefix: "contextdesk-toggle:answer#d").first)
+    _ = view.textView(view.transcript, clickedOnLink: details.1, at: details.0)
+    // Closing the details block renders that block again; every other block but the images is a hit.
+    let hits = view.renderCache.hits, misses = view.renderCache.misses
+    _ = view.textView(view.transcript, clickedOnLink: details.1, at: details.0)
+    #expect(view.renderCache.hits - hits == blocks.count - 1 - images)
+    #expect(view.renderCache.misses - misses == 1 + images)
+    // A finished turn renders the (changed) answer from scratch instead of serving its blocks from the cache.
+    let item = TranscriptItem(id: "answer", kind: "assistant", text: cacheFixture)
+    view.update(items: [item], conversationID: "markdown", followOutput: false, isWorking: true)
+    let before = view.renderCache.misses
+    view.update(items: [TranscriptItem(id: "answer", kind: "assistant", text: cacheFixture, phase: "final_answer")],
+                conversationID: "markdown", followOutput: false, isWorking: false)
+    #expect(view.renderCache.misses - before == blocks.count)
+    #expect(view.renderCache.itemCount == 1)
+    // Zoom and appearance changes invalidate the styles; a conversation switch drops the items.
+    let generation = view.renderCache.styleGeneration
+    view.zoom = 1.25
+    #expect(view.renderCache.styleGeneration == generation + 1)
+    #expect(view.renderCache.itemCount == 0)
+    _ = view.textView(view.transcript, clickedOnLink: details.1, at: details.0)
+    #expect(view.renderCache.itemCount == 1)
+    view.viewDidChangeEffectiveAppearance()
+    #expect(view.renderCache.styleGeneration == generation + 2)
+    #expect(view.renderCache.itemCount == 0)
+    _ = view.textView(view.transcript, clickedOnLink: details.1, at: details.0)
+    #expect(view.renderCache.itemCount == 1)
+    view.update(items: [TranscriptItem(id: "u", kind: "user", text: "Привет")], conversationID: "other", followOutput: false)
+    #expect(view.renderCache.itemCount == 0)
+}
+
+@Test @MainActor func blockCacheKeepsAtMostSixtyFourItems() {
+    let view = TranscriptScrollView()
+    view.frame = NSRect(x: 0, y: 0, width: 760, height: 900)
+    // No headings: a heading's entry also depends on the section it opens, which grows with the text.
+    let items = (0..<70).map { TranscriptItem(id: "m\($0)", kind: "assistant", text: "Абзац \($0).\n\n- пункт \($0)") }
+    view.update(items: items, conversationID: "many", followOutput: false)
+    #expect(view.renderCache.itemCount == TranscriptRenderCache.itemLimit)
+    // The oldest items were evicted; the two unchanged blocks of the grown newest one are served from the cache.
+    let hits = view.renderCache.hits
+    view.update(items: items.dropLast() + [TranscriptItem(id: "m69", kind: "assistant", text: "Абзац 69.\n\n- пункт 69\n\nЕщё.")],
+                conversationID: "many", followOutput: false)
+    #expect(view.renderCache.hits - hits == 2)
+    #expect(view.renderCache.itemCount == TranscriptRenderCache.itemLimit)
+}
+
 @Test @MainActor func localImagesEmbedAndRemoteImagesStayLinks() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("md-image-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
