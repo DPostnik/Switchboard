@@ -19,9 +19,11 @@ public enum LocalHistory {
     public static func snapshot(conversation: ConversationID, source: AgentSessionReference,
                                 items: [TranscriptItem], completeness: AgentTranscriptSnapshot.Completeness = .partial,
                                 capturedAt: Date = Date()) throws -> AgentTranscriptSnapshot {
-        let normalized = items.map { item in
-            AgentTranscriptItem(id: item.id, kind: .init(rawValue: item.kind) ?? .activity,
-                                text: item.text, presentation: item)
+        // Tool bodies enter the store capped (`ActivityRetention`), whichever path recorded them.
+        let normalized = items.map { entry in
+            let item = ActivityRetention.cap(entry)
+            return AgentTranscriptItem(id: item.id, kind: .init(rawValue: item.kind) ?? .activity,
+                                       text: item.text, presentation: item)
         }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         let revision = SHA256.hash(data: try encoder.encode(normalized)).map { String(format: "%02x", $0) }.joined()

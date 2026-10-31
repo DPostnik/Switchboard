@@ -612,19 +612,9 @@ public struct NativeTranscript: NSViewRepresentable {
     // visible; all tool entries for that request share one disclosure row.
     /// One readable line for the running action. A Claude tool call arrives as its name
     /// and JSON input; show the name and its most telling field instead of raw JSON.
+    /// The rule lives in `ActivityRetention`, next to the cap and the archive reduction it must keep working on.
     nonisolated public static func activityHeadline(_ text: String, limit: Int = 120) -> String {
-        var line = text
-        let parts = text.split(separator: "\n", maxSplits: 1).map(String.init)
-        if parts.count == 2, !parts[0].contains(" "),
-           let data = parts[1].data(using: .utf8),
-           let input = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], !input.isEmpty {
-            let keys = ["description", "command", "file_path", "path", "pattern", "url", "query", "prompt", "expression"]
-            let value = keys.lazy.compactMap { input[$0] as? String }.first { !$0.isEmpty }
-            line = value.map { parts[0] + " · " + $0 } ?? parts[0]
-        }
-        line = line.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }.joined(separator: " ")
-        return line.count > limit ? String(line.prefix(limit - 1)) + "…" : line
+        ActivityRetention.headline(text, limit: limit)
     }
 
     private func headline(of activity: TranscriptItem) -> String {

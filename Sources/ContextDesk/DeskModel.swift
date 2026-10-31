@@ -149,6 +149,8 @@ private struct ChatRunState: Equatable {
     var handoffCancelled = false
     private var historyBackfillTask: Task<Void, Never>?
     private var claudeHistoryBackfillTask: Task<Void, Never>?
+    /// One-time launch pass that reduces the tool bodies of archived chats (`ActivityCleanup.swift`).
+    var activityCleanupTask: Task<Void, Never>?
     private var historyRefreshTasks: [String: Task<Void, Never>] = [:]
     private var historyEventRevisions: [String: Int] = [:]
     @Published var pending: [PendingAction] = []
@@ -216,6 +218,7 @@ private struct ChatRunState: Equatable {
     var priorityMessageID: String? { runs[currentRunKey]?.priorityMessageID }
     var anyBusy: Bool { preparingHandoff || creatingHandoff || jobLedger.runs.contains { $0.status.active } || summaryTask != nil || !deletingChatIDs.isEmpty || !archivingChatIDs.isEmpty || runs.values.contains { $0.running || $0.sending } }
     func isBusy(threadID: String) -> Bool { runs[threadID]?.running == true }
+    func isSending(threadID: String) -> Bool { runs[threadID]?.sending == true }
     /// Live activity label and start of a chat's running turn, for the notch island.
     func runActivity(threadID: String) -> (status: String?, since: Date?) {
         guard let run = runs[threadID], run.running else { return (nil, nil) }
@@ -355,6 +358,7 @@ private struct ChatRunState: Equatable {
         let claudeJobs = (try? await jobStore.load())?.jobs.contains { $0.engine == .claude && $0.enabled } == true
         if state.defaultConnection == .appClaude || claudeJobs || state.chats.contains(where: { $0.nativeSession?.connection == .appClaude }) { await connectClaude() }
         step("Claude"); await startScheduler(); step("scheduler")
+        startActivityCleanup()
         Task { await mobileRemote.restoreOnLaunch(model: self) } // Network sign-in must not hold up boot.
         continueAfterRestart(RestartContinuation.take())
         let settings = await UNUserNotificationCenter.current().notificationSettings()
@@ -994,6 +998,8 @@ private struct ChatRunState: Equatable {
         guard !ids.isEmpty else { return }
         do { try await store.saveArchivingChats(state, summaries: ids.compactMap { archiveSummaries[$0] }) }
         catch { self.error = L10n.text("Статус чата изменён у агента, но не удалось сохранить его в приложении: ", "The chat status changed in the agent, but could not be saved in the app: ") + error.localizedDescription }
+        // Tool bodies of the newly archived chats go after the archive flag is durable; restoring a chat keeps them reduced.
+        Task { [weak self] in for id in ids { await self?.reduceArchivedActivity(id) } }
     }
     func deleteChat(_ id: String) async {
         guard canDeleteChat(id) else { return }
@@ -1904,7 +1910,7 @@ private struct ChatRunState: Equatable {
         flushDeltas()
         photoCleanupTask?.cancel(); photoCleanupTask = nil
         step("mobile remote"); await mobileRemote.disable()
-        historyBackfillTask?.cancel(); claudeHistoryBackfillTask?.cancel()
+        historyBackfillTask?.cancel(); claudeHistoryBackfillTask?.cancel(); activityCleanupTask?.cancel()
         for task in historyRefreshTasks.values { task.cancel() }
         step("chat titles (\(titleTasks.count))")
         for id in Array(titleTasks.keys) { await cancelChatTitle(id) }

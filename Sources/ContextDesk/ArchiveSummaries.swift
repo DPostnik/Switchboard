@@ -179,6 +179,8 @@ extension DeskModel {
             }
             record.status = .ready; record.updatedAt = Date()
             try await saveSummaryProgress(record)
+            // The summary no longer needs the tool bodies of the Claude session file.
+            await reduceArchivedActivity(record.threadID)
         } catch {
             record.status = (error as? AgentOperationFailure)?.uncertain == true || archiveSummaries[record.threadID]?.status == .generating ? .uncertain : .failed
             // A completed, rejected result has a known outcome and can be explicitly regenerated.

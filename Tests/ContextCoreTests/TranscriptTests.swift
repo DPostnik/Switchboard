@@ -537,6 +537,14 @@ import ContextCore
     #expect(TranscriptScrollView.activityHeadline("TodoWrite\n{\"todos\": []}") == "TodoWrite")
     #expect(TranscriptScrollView.activityHeadline("Вторая команда\nвывод") == "Вторая команда вывод")
     #expect(TranscriptScrollView.activityHeadline(String(repeating: "x", count: 200)).count == 120)
+    // Capped (record time) and reduced (archive time) bodies keep the same headline.
+    let call = TranscriptItem(id: "w", kind: "activity", text: "Write\n{\"content\": \"\(String(repeating: "x", count: 40_000))\", \"file_path\": \"/a/b.swift\"}")
+    let capped = ActivityRetention.cap(call)
+    #expect(capped.text.utf8.count < call.text.utf8.count && TranscriptScrollView.activityHeadline(capped.text) == "Write · /a/b.swift")
+    let reduced = ActivityRetention.reduce([capped, TranscriptItem(id: "w:result", kind: "activity", text: "File written\nok")])
+    #expect(TranscriptScrollView.activityHeadline(reduced[0].text) == "Write · /a/b.swift")
+    #expect(TranscriptScrollView.activityHeadline(reduced[1].text) == "File written ok")
+    #expect(reduced[1].text == "File written ok\n#activity tool=Write output=15")
 }
 
 @Test @MainActor func agentMessagesInOneTurnAreSeparatedByOneBlankLine() {

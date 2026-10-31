@@ -20,6 +20,13 @@ public struct AgentModelInfo: Hashable, Sendable {
 
 }
 
+/// Sizes of an adapter's stored history before and after its tool bodies were reduced.
+public struct AgentHistoryReduction: Equatable, Sendable {
+    public let bytesBefore: Int
+    public let bytesAfter: Int
+    public init(bytesBefore: Int, bytesAfter: Int) { self.bytesBefore = bytesBefore; self.bytesAfter = bytesAfter }
+}
+
 public struct AgentHistoryTurn: Codable, Sendable {
     public let id: String?
     public let items: [TranscriptItem]
@@ -31,6 +38,10 @@ public struct AgentHistoryTurn: Codable, Sendable {
     public init(id: String?, items: [TranscriptItem], startedAt: Date?, completedAt: Date?, duration: Double?, isComplete: Bool = false) {
         self.id = id; self.items = items; self.startedAt = startedAt; self.completedAt = completedAt; self.duration = duration
         self.isComplete = isComplete
+    }
+    /// The same turn with other items; timing and completeness stay.
+    public func replacingItems(_ items: [TranscriptItem]) -> Self {
+        Self(id: id, items: items, startedAt: startedAt, completedAt: completedAt, duration: duration, isComplete: isComplete)
     }
     public func timing(fallback: ResponseTiming?) -> ResponseTiming? {
         guard let completedAt = completedAt ?? fallback?.completedAt else { return nil }
