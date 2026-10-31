@@ -131,6 +131,7 @@ private struct NotchLoopMark: NSViewRepresentable {
             let spin = CABasicAnimation(keyPath: "transform.rotation.z")
             spin.fromValue = 0; spin.toValue = -2 * Double.pi
             spin.duration = 0.9; spin.repeatCount = .infinity; spin.isRemovedOnCompletion = false
+            spin.preferredFrameRateRange = Self.frameRate
             ring.add(spin, forKey: "spin")
             root.addSublayer(ring)
         case .pulse, .dot:
@@ -146,6 +147,7 @@ private struct NotchLoopMark: NSViewRepresentable {
             let group = CAAnimationGroup()
             group.animations = [grow, fade]; group.duration = 1.1; group.repeatCount = .infinity
             group.timingFunction = CAMediaTimingFunction(name: .easeOut); group.isRemovedOnCompletion = false
+            group.preferredFrameRateRange = Self.frameRate
             let dot = CAShapeLayer()
             dot.frame = box
             dot.path = CGPath(ellipseIn: dotBox, transform: nil)
@@ -160,6 +162,8 @@ private struct NotchLoopMark: NSViewRepresentable {
     }
     func updateNSView(_ view: NSView, context: Context) {}
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSView, context: Context) -> CGSize? { CGSize(width: 14, height: 14) }
+    /// A 14-point mark reads as smooth at 24 fps; without a cap the loops drive ProMotion displays at 120 Hz.
+    private static let frameRate = CAFrameRateRange(minimum: 8, maximum: 30, preferred: 24)
 }
 
 private struct NotchCountLabel: View {

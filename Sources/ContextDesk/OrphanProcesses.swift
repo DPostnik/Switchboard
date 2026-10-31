@@ -32,12 +32,17 @@ import SwiftUI
         let found = await Task.detached(priority: .utility) { [sweeper] in sweeper.orphans().count }.value
         count = found; checkedAt = Date()
     }
-    /// The Settings button and the periodic pass.
+    /// The Settings button and the periodic pass. The sweep's own process scan also yields the counter:
+    /// what is still alive afterwards is what survived the sweep, so no second scan of the process table runs.
     func sweepNow() async {
         guard !sweeping else { return }
         sweeping = true; defer { sweeping = false }
-        if let task = sweeper.sweepInactive() { _ = await task.value }
-        await refresh()
+        if let task = sweeper.sweepInactive() {
+            let outcomes = await task.value
+            count = outcomes.filter { $0.result == "survived" }.count; checkedAt = Date()
+        } else {
+            await refresh()
+        }
     }
     func shutdown() async {
         loop?.cancel(); loop = nil
