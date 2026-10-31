@@ -34,7 +34,7 @@ def main():
     objects = list(intermediate.glob('ContextDesk--*-testable-t.build/Objects-normal/*/*.o'))
     if objects:
         objects += [release / (name + '.o') for name in
-                    ['AgentContract', 'ContextCore', 'ContextTranscript', 'ClaudeAdapter', 'CodexAdapter', 'TOMLDecoder']]
+                    ['AgentContract', 'ContextCore', 'ContextTranscript', 'ClaudeAdapter', 'CodexAdapter', 'FringeProtocol', 'TOMLDecoder']]
         includes = [release]
     else:
         # Standard SwiftPM backend.
@@ -42,7 +42,7 @@ def main():
                                            cwd=ROOT, text=True).strip()
         release = Path(bin_path)
         objects = [p for name in ['ContextDesk', 'AgentContract', 'ContextCore', 'ContextTranscript',
-                                 'ClaudeAdapter', 'CodexAdapter', 'TOMLDecoder']
+                                 'ClaudeAdapter', 'CodexAdapter', 'FringeProtocol', 'TOMLDecoder']
                    for p in (release / (name + '.build')).glob('*.o')]
         includes = [release / 'Modules']
     if not objects or not all(p.is_file() for p in objects):
