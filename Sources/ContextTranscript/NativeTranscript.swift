@@ -78,6 +78,11 @@ public struct NativeTranscript: NSViewRepresentable {
     private var readCheckScheduled = false
     public var onReadToEnd: ((String, String) -> Void)?
     private var styledWidth: CGFloat = 0
+    /// Message styles depend on the column width; during a live window resize they are applied once, at its end.
+    private var restyleAfterLiveResize = false
+    /// Shown while newer text lies below the viewport; one click returns to the end.
+    private let jumpToLatest = JumpToLatestButton()
+    private var jumpToLatestShown = false
     /// True from a trackpad gesture's start through its momentum. Moving the clip view meanwhile fought the
     /// rubber band at the end, so streamed text waits; `deferredEndScroll` is the end the reader was at.
     private var liveScrolling = false
@@ -149,6 +154,9 @@ public struct NativeTranscript: NSViewRepresentable {
         workingIndicator.isHidden = true
         workingIndicator.setAccessibilityLabel(L10n.text("Агент работает", "Agent is working"))
         transcript.addSubview(workingIndicator)
+        jumpToLatest.target = self; jumpToLatest.action = #selector(jumpToEnd)
+        jumpToLatest.alphaValue = 0
+        addSubview(jumpToLatest, positioned: .above, relativeTo: nil)
         (transcript as? TranscriptTextView)?.didDrawText = { [weak self] in self?.positionWorkingIndicator() }
         (transcript as? TranscriptTextView)?.hoverChanged = { [weak self] point in self?.updateHover(at: point) }
         (transcript as? TranscriptTextView)?.trackClick = { [weak self] click in
@@ -210,8 +218,11 @@ public struct NativeTranscript: NSViewRepresentable {
             while common < min(previous.count, items.count), previous[common] == items[common] { common += 1 }
         }
         // A message the user just sent is brought into view even if they had scrolled up to re-read.
+        // Only items after the last known one count: prepended older history also contains user messages.
         let knownIDs = Set(previous.map(\.id))
-        let sentMessage = followOutput && !switched && items.dropFirst(common).contains { $0.kind == "user" && !knownIDs.contains($0.id) }
+        let lastKnown = items.lastIndex { knownIDs.contains($0.id) }
+        let sentMessage = followOutput && !switched && lastKnown != nil
+            && items[(lastKnown! + 1)...].contains { $0.kind == "user" }
         // Streaming rewrites only the last message or appends; text above the viewport keeps its place.
         let tailOnly = !switched && !finished && !projectChanged && common + 1 >= previous.count
         // Re-rendering the last message briefly shortens the document and clamps the viewport; an anchor survives that.
@@ -293,7 +304,10 @@ public struct NativeTranscript: NSViewRepresentable {
         }
         super.layout()
         let width = transcript.textContainer?.containerSize.width ?? 0
-        if width > 0, abs(width - styledWidth) > 0.5 {
+        if width > 0, abs(width - styledWidth) > 0.5, inLiveResize {
+            // Text still rewraps every frame; restyling every message every frame made window resizing stutter.
+            restyleAfterLiveResize = true
+        } else if width > 0, abs(width - styledWidth) > 0.5 {
             styledWidth = width
             if let storage = transcript.textStorage {
                 storage.beginEditing()
@@ -304,7 +318,10 @@ public struct NativeTranscript: NSViewRepresentable {
             }
         }
         positionWorkingIndicator()
-        defer { scheduleReadCheck() }
+        let jumpSize = (30 * zoom).rounded()
+        jumpToLatest.frame = NSRect(x: ((bounds.width - jumpSize) / 2).rounded(), y: isFlipped ? bounds.height - jumpSize - 16 : 16,
+                                    width: jumpSize, height: jumpSize)
+        defer { scheduleReadCheck(); updateJumpToLatest() }
         guard contentSize.width > 0, contentSize.height > 0, !previous.isEmpty else { return }
         keepEndPinned()
         if let position = pendingPosition {
@@ -315,6 +332,31 @@ public struct NativeTranscript: NSViewRepresentable {
             if let container = transcript.textContainer { transcript.layoutManager?.ensureLayout(for: container) }
             transcript.scrollRangeToVisible(NSRange(location: transcript.textStorage?.length ?? 0, length: 0))
         }
+    }
+
+    public override func viewDidEndLiveResize() {
+        super.viewDidEndLiveResize()
+        guard restyleAfterLiveResize else { return }
+        restyleAfterLiveResize = false
+        needsLayout = true
+    }
+
+    /// Geometry only (document height against the viewport), so it is cheap enough for every scroll and update.
+    private func updateJumpToLatest() {
+        let below = transcript.frame.maxY - contentView.bounds.maxY
+        let show = !isDocument && !previous.isEmpty && !needsEndScroll && pendingPosition == nil && below > 120
+        guard show != jumpToLatestShown else { return }
+        jumpToLatestShown = show
+        jumpToLatest.setAccessibilityElement(show)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            jumpToLatest.animator().alphaValue = show ? 1 : 0
+        }
+    }
+
+    @objc private func jumpToEnd() {
+        scrollToEnd()
+        updateJumpToLatest()
     }
 
     @objc private func liveScrollStarted() { liveScrolling = true }
@@ -330,6 +372,7 @@ public struct NativeTranscript: NSViewRepresentable {
     @objc private func viewportChanged() {
         workingIndicator.refreshAnimation()
         keepEndPinned()
+        updateJumpToLatest()
         rememberPosition()
         scheduleReadCheck()
     }
@@ -1325,4 +1368,32 @@ private final class BubbleLayoutManager: NSLayoutManager {
         }
         super.drawBackground(forGlyphRange: glyphsToShow, at: origin)
     }
+}
+
+/// Round "jump to latest" control over the transcript's bottom edge.
+@MainActor final class JumpToLatestButton: NSButton {
+    init() {
+        super.init(frame: .zero)
+        isBordered = false; title = ""; imagePosition = .imageOnly
+        image = NSImage(systemSymbolName: "arrow.down", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
+        contentTintColor = NSColor(white: 0.12, alpha: 1)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.white.cgColor
+        layer?.borderColor = NSColor(white: 0.89, alpha: 1).cgColor
+        layer?.borderWidth = 1
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = 0.08; layer?.shadowRadius = 6; layer?.shadowOffset = CGSize(width: 0, height: -2)
+        toolTip = L10n.text("К последнему сообщению", "Jump to latest")
+        setAccessibilityLabel(L10n.text("К последнему сообщению", "Jump to latest"))
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func layout() {
+        super.layout()
+        layer?.cornerRadius = bounds.height / 2
+    }
+    /// Faded out, it must not catch clicks meant for the text beneath it.
+    override func hitTest(_ point: NSPoint) -> NSView? { alphaValue > 0.01 ? super.hitTest(point) : nil }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 }

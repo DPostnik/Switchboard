@@ -77,6 +77,20 @@ import ContextCore
     #expect(view.isAtTranscriptEnd)
 }
 
+@Test @MainActor func sentMessageScrollsIntoViewAfterReadingUp() {
+    let positions = TranscriptReadingPositions()
+    let items = readingItems()
+    let view = readingView(positions)
+    view.update(items: items, conversationID: "a", followOutput: true)
+    view.layoutSubtreeIfNeeded()
+    view.contentView.scroll(to: NSPoint(x: 0, y: 900))
+    view.reflectScrolledClipView(view.contentView)
+    #expect(!view.isAtTranscriptEnd)
+    view.update(items: items + [TranscriptItem(id: "sent", kind: "user", text: "A new question")], conversationID: "a", followOutput: true)
+    view.layoutSubtreeIfNeeded()
+    #expect(view.isAtTranscriptEnd)
+}
+
 @Test @MainActor func streamedTextWaitsForTheScrollGestureToEnd() {
     let positions = TranscriptReadingPositions()
     let items = readingItems()
@@ -103,4 +117,16 @@ import ContextCore
     view.layoutSubtreeIfNeeded()
     #expect(!view.isAtTranscriptEnd)
     #expect(abs(view.contentView.bounds.origin.y - 900) < 2)
+}
+
+@Test @MainActor func endStaysInViewWhenTheViewportShrinks() {
+    let positions = TranscriptReadingPositions()
+    let view = readingView(positions)
+    view.update(items: readingItems(), conversationID: "a", followOutput: false)
+    view.layoutSubtreeIfNeeded()
+    #expect(view.isAtTranscriptEnd)
+    // The composer grows: the transcript loses height at the bottom.
+    view.frame = NSRect(x: 0, y: 0, width: 700, height: 260)
+    view.layoutSubtreeIfNeeded()
+    #expect(view.isAtTranscriptEnd)
 }
