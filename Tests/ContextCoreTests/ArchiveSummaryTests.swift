@@ -324,9 +324,17 @@ func summaryRunnerRoutesAndFailsClosed(mode: String, version: String) async thro
     #expect(try ChatTitle.validate(#"{"title":" Краткие названия чатов "}"#) == "Краткие названия чатов")
     #expect(try ChatTitle.validate(#"{"title":"Weekly sales report"}"#) == "Weekly sales report")
     for output in [#"{"title":""}"#, #"{"title":"line\nbreak"}"#, "{}", "plain text",
-                   "{\"title\":\"" + String(repeating: "a", count: 61) + "\"}"] {
+                   "{\"title\":\"" + String(repeating: "a", count: 201) + "\"}"] {
         #expect(throws: (any Error).self) { try ChatTitle.validate(output) }
     }
+    // A model answer a few characters over the limit (observed for chat 5BB5631E on 2026-10-31) is shortened
+    // at a word boundary instead of leaving the placeholder; a single oversized word is cut hard.
+    let overshoot = "Очистка переполненного iCloud и отключение синхронизации фото"
+    #expect(overshoot.count == 61)
+    #expect(try ChatTitle.validate(#"{"title":"\#(overshoot)"}"#) == "Очистка переполненного iCloud и отключение синхронизации")
+    #expect(try ChatTitle.validate(#"{"title":"\#(String(repeating: "a", count: 60))"}"#).count == 60)
+    #expect(try ChatTitle.validate(#"{"title":"\#(String(repeating: "a", count: 61))"}"#).count == 60)
+    #expect(ChatTitle.shortened("Weekly report, " + String(repeating: "x", count: 50)) == "Weekly report")
     #expect(ChatTitle.placeholder(language: .russian) == "Новый чат")
     #expect(ChatTitle.placeholder(language: .english) == "New chat")
 }
