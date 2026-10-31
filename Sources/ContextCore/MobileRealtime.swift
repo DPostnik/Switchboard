@@ -98,23 +98,33 @@ public struct RemotePresence: Equatable, Sendable {
 /// Coalesces work caused by events, including events received during an await.
 /// No timer exists when clean. Cancellation/generation guards prevent stale workers
 /// from clearing or applying work belonging to a newer connection.
+/// Requests made while a delay is pending are merged into that run; a request with a
+/// shorter delay cuts the pending wait short, so an immediate request never waits.
 @MainActor public final class RemoteEventWork {
     private var task: Task<Void, Never>?
     private var generation = UUID()
     private var dirty = false
+    /// Delay before the next run, nil when none is pending.
+    private var pendingDelay: Duration?
+    private var timer: Task<Void, Error>?
     public init() {}
-    public func cancel() { generation = UUID(); task?.cancel(); task = nil; dirty = false }
+    public func cancel() {
+        generation = UUID(); task?.cancel(); task = nil; timer?.cancel(); timer = nil; dirty = false; pendingDelay = nil
+    }
     public func enqueue(delay: Duration = .zero, operation: @escaping @MainActor () async throws -> Void,
                         failure: @escaping @MainActor (Error) -> Void) {
         dirty = true
+        if let pending = pendingDelay {
+            if delay < pending { pendingDelay = delay; timer?.cancel() }
+        } else { pendingDelay = delay }
         guard task == nil else { return }
         let ticket = generation
         task = Task { [weak self] in
             guard let self else { return }
-            defer { if generation == ticket { task = nil } }
+            defer { if generation == ticket { task = nil; pendingDelay = nil } }
             do {
                 while dirty, generation == ticket {
-                    if delay != .zero { try await Task.sleep(for: delay) }
+                    try await wait(ticket)
                     try Task.checkCancellation()
                     dirty = false
                     try await operation()
@@ -124,6 +134,15 @@ public struct RemotePresence: Equatable, Sendable {
                 failure(error)
             }
         }
+    }
+    private func wait(_ ticket: UUID) async throws {
+        while generation == ticket, let delay = pendingDelay, delay > .zero {
+            let sleep = Task { try await Task.sleep(for: delay) }
+            timer = sleep
+            do { try await sleep.value; break } catch { try Task.checkCancellation() }
+            // The timer was cut short by a sooner request: wait out the shorter delay, if any.
+        }
+        if generation == ticket { pendingDelay = nil; timer = nil }
     }
 }
 

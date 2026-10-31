@@ -33,6 +33,10 @@ import ContextCore
     #expect(constructions == 5)
 }
 
+@Test @MainActor func remoteHostPublishesAtMostOncePerSecondWhileStreaming() {
+    #expect(MobileRemoteHost.publicationInterval == .seconds(1))
+}
+
 @Test @MainActor func remoteHostLeavesInstallerHandoffUntilSettingsAreOpened() throws {
     let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: file) }

@@ -212,6 +212,36 @@ private let remoteTestDevice = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
     #expect(runs == 2)
 }
 
+@Test @MainActor func eventWorkCoalescesRequestsForTheDelayAndASoonerRequestCutsTheWaitShort() async throws {
+    let work = RemoteEventWork()
+    var runs = 0
+    let operation: @MainActor () async throws -> Void = { runs += 1 }
+    let failure: @MainActor (Error) -> Void = { _ in Issue.record("Unexpected work failure") }
+    let clock = ContinuousClock(), start = clock.now
+    for _ in 0..<5 {
+        work.enqueue(delay: .seconds(1), operation: operation, failure: failure)
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    try await Task.sleep(for: .milliseconds(500))
+    #expect(runs == 0)
+    for _ in 0..<120 where runs == 0 { try await Task.sleep(for: .milliseconds(10)) }
+    #expect(runs == 1)
+    #expect(clock.now - start >= .seconds(1))
+    try await Task.sleep(for: .milliseconds(50))
+    #expect(runs == 1)
+
+    work.enqueue(delay: .seconds(1), operation: operation, failure: failure)
+    try await Task.sleep(for: .milliseconds(50))
+    #expect(runs == 1)
+    let urgent = clock.now
+    work.enqueue(delay: .zero, operation: operation, failure: failure)
+    for _ in 0..<120 where runs == 1 { try await Task.sleep(for: .milliseconds(5)) }
+    #expect(runs == 2)
+    #expect(clock.now - urgent < .milliseconds(700))
+    try await Task.sleep(for: .milliseconds(30))
+    #expect(runs == 2)
+}
+
 @Test func snapshotPatchAndDeltaPreserveUnchangedChatsAndRejectStaleRevisions() throws {
     let a = RemoteChat(id: "a", project: "p", title: "A", running: false, messages: [], approvals: [])
     let b = RemoteChat(id: "b", project: "p", title: "B", running: false, messages: [], approvals: [])

@@ -4,6 +4,7 @@ import ContextCore
 
 extension DeskModel {
     /// Polls which chats have a live browser so the sidebar and the Browsers menu can name its owner.
+    /// Every 10 s: the catalog decode is cached by the store and each binding costs one stat.
     func startBrowserActivityMonitor() {
         Task { [weak self] in
             while !Task.isCancelled {
@@ -14,7 +15,7 @@ extension DeskModel {
                     ? await Task.detached { BrowserProfileStore().runningBrowsers() }.value : [:]
                 let chats = Dictionary(running.compactMap { key, pid in keys[key].map { ($0, pid) } }, uniquingKeysWith: { first, _ in first })
                 if chats != runningBrowserChats { runningBrowserChats = chats }
-                do { try await Task.sleep(for: .seconds(3)) } catch { return }
+                do { try await Task.sleep(for: .seconds(10)) } catch { return }
             }
         }
     }

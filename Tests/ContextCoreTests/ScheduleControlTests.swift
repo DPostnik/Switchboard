@@ -77,6 +77,55 @@ private func controlRequest(job: ManagedJob? = nil) throws -> ScheduleControlReq
     #expect(reply.status == "rejected" && count == 1)
 }
 
+@Test @MainActor func scheduleControlPrunesOldReceiptPairsBoundedAndKeepsYoungOnes() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    defer { try? FileManager.default.removeItem(at: root) }
+    func receipt(age: TimeInterval, stem: String = UUID().uuidString, response: Bool = true) throws {
+        for suffix in response ? [".claimed.json", ".response.json"] : [".claimed.json"] {
+            let file = root.appendingPathComponent(stem + suffix)
+            try Data("{}".utf8).write(to: file)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600, .modificationDate: Date().addingTimeInterval(-age)], ofItemAtPath: file.path)
+        }
+    }
+    for _ in 0..<40 { try receipt(age: 25 * 3600) }
+    try receipt(age: 3600, stem: "0F0F0F0F-0000-4000-8000-00000000000A")
+    try receipt(age: 25 * 3600, stem: "0F0F0F0F-0000-4000-8000-00000000000B", response: false)
+    try receipt(age: 25 * 3600, stem: "not-a-uuid")
+    try receipt(age: 25 * 3600, stem: "0f0f0f0f-0000-4000-8000-00000000000c")
+    func names() throws -> Set<String> { Set(try FileManager.default.contentsOfDirectory(atPath: root.path)) }
+    try await ScheduleControl.drain(directory: root) { _ in Issue.record("No request was written"); return [] }
+    // 64 deletions: 32 of the 40 old pairs; the rest waits for the next pass.
+    #expect(try names().count == 16 + 7)
+    try await ScheduleControl.drain(directory: root) { _ in Issue.record("No request was written"); return [] }
+    #expect(try names() == ["0F0F0F0F-0000-4000-8000-00000000000A.claimed.json", "0F0F0F0F-0000-4000-8000-00000000000A.response.json",
+                            "0F0F0F0F-0000-4000-8000-00000000000B.claimed.json",
+                            "not-a-uuid.claimed.json", "not-a-uuid.response.json",
+                            "0f0f0f0f-0000-4000-8000-00000000000c.claimed.json", "0f0f0f0f-0000-4000-8000-00000000000c.response.json"])
+}
+
+@Test @MainActor func scheduleControlSkipsListingWhileDirectoryModificationTimeIsUnchanged() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    defer { try? FileManager.default.removeItem(at: root) }
+    var count = 0
+    // A directory that settled before the pass is trusted; one written during the pass is listed again.
+    let settled = Date().addingTimeInterval(-10)
+    try FileManager.default.setAttributes([.modificationDate: settled], ofItemAtPath: root.path)
+    try await ScheduleControl.drain(directory: root) { _ in count += 1; return [] }
+    let request = try controlRequest()
+    let file = root.appendingPathComponent(request.id.uuidString + ".request.json")
+    try JSONEncoder().encode(request).write(to: file)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    try FileManager.default.setAttributes([.modificationDate: settled], ofItemAtPath: root.path)
+    try await ScheduleControl.drain(directory: root) { _ in count += 1; return [] }
+    #expect(count == 0 && FileManager.default.fileExists(atPath: file.path))
+    try FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: root.path)
+    try await ScheduleControl.drain(directory: root) { _ in count += 1; return [] }
+    #expect(count == 1 && !FileManager.default.fileExists(atPath: file.path))
+    #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent(request.id.uuidString + ".response.json").path))
+}
+
 @Test @MainActor func scheduleControlUpdatesLiveModelAndPersistsWithoutDispatch() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     let inbox = root.appendingPathComponent("control"), originals = root.appendingPathComponent("originals")
