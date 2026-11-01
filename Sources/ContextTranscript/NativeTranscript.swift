@@ -805,6 +805,14 @@ public struct NativeTranscript: NSViewRepresentable {
                 ]
                 var pill = attributes; pill[.metricsPill] = true
                 result.append(NSAttributedString(string: (open ? "▾ " : "▸ ") + timing.label() + " · " + L10n.date(timing.completedAt), attributes: pill))
+                if let changes = timing.changes, changes.files > 0, TranscriptLinks.openTurnChanges != nil {
+                    // Its own pill on the same line; the gap is wider than both pills' padding.
+                    result.append(NSAttributedString(string: "\u{2003}\u{2003}", attributes: [.font: NSFont.systemFont(ofSize: 11.5), .responseHeader: true]))
+                    result.append(NSAttributedString(string: "± " + changes.label(), attributes: [
+                        .font: NSFont.systemFont(ofSize: 11.5), .foregroundColor: DeskPalette.ns.accentDeep,
+                        .link: "contextdesk-changes:" + item.id, .responseHeader: true, .changesPill: true
+                    ]))
+                }
                 result.append(NSAttributedString(string: "\n", attributes: attributes))
                 if open {
                     let detail = timing.tokens?.detail() ?? L10n.text("Данные о токенах для этого запроса недоступны.", "Token data is unavailable for this request.")
@@ -1140,6 +1148,13 @@ public struct NativeTranscript: NSViewRepresentable {
             needsLayout = true
             return true
         }
+        if value.hasPrefix("contextdesk-changes:") {
+            let id = String(value.dropFirst("contextdesk-changes:".count))
+            if let changes = previous.first(where: { $0.id == id })?.timing?.changes {
+                TranscriptLinks.openTurnChanges?(conversationID, changes)
+            }
+            return true
+        }
         if value.hasPrefix("contextdesk-action:") {
             let id = String(value.dropFirst("contextdesk-action:".count))
             guard let index = previous.firstIndex(where: { $0.id == id && $0.kind == "activity" }),
@@ -1336,6 +1351,8 @@ extension NSAttributedString.Key {
     static let badgeTint = NSAttributedString.Key("ContextDeskBadgeTint")
     /// The "worked for" line of an answer, drawn as a capsule.
     static let metricsPill = NSAttributedString.Key("ContextDeskMetricsPill")
+    /// The turn's changed-files row next to the metrics pill; opens the diff viewer.
+    static let changesPill = NSAttributedString.Key("ContextDeskChangesPill")
     /// A tool-call group drawn as a card; `activityStep` marks the first character of each listed call.
     static let activityCard = NSAttributedString.Key("ContextDeskActivityCard")
     static let activityStep = NSAttributedString.Key("ContextDeskActivityStep")
@@ -1507,6 +1524,11 @@ private final class BubbleLayoutManager: NSLayoutManager {
         storage.enumerateAttribute(.metricsPill, in: characters) { value, range, _ in
             guard value != nil else { return }
             DeskPalette.ns.subtle.setFill()
+            fillRuns(range, in: storage, container: container, origin: origin, pad: 8, rise: 3, radius: nil)
+        }
+        storage.enumerateAttribute(.changesPill, in: characters) { value, range, _ in
+            guard value != nil else { return }
+            DeskPalette.ns.accentWash.setFill()
             fillRuns(range, in: storage, container: container, origin: origin, pad: 8, rise: 3, radius: nil)
         }
         let whole = NSRange(location: 0, length: storage.length)

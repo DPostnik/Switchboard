@@ -18,6 +18,8 @@ extension NSAttributedString.Key {
     public static let chatScheme = "switchboard-chat"
     /// Set by the app; without it chat links stay plain text.
     public static var openChat: ((String) -> Void)?
+    /// Set by the app: opens the diff viewer for a turn's changes (chat ID, changes); without it the row is hidden.
+    public static var openTurnChanges: ((String?, TurnChanges) -> Void)?
 
     /// How agent text is decorated in the transcript. Defaults keep the literal text.
     public struct Options {

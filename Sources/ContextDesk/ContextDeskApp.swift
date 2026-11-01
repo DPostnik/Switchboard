@@ -194,6 +194,9 @@ private struct MainWindowContent: View {
             .task {
                 delegate.model = model
                 TranscriptLinks.openChat = { [weak model] id in model?.openChatLink(id) }
+                TranscriptLinks.openTurnChanges = { [weak model] chatID, changes in
+                    if let model { TurnChangesWindow.show(changes, chatID: chatID, model: model) }
+                }
                 NotchIslandController.start(model: model, showMainWindow: { [weak delegate] in delegate?.showMainWindow() })
                 FringeLinkServer.start(model: model, showMainWindow: { [weak delegate] in delegate?.showMainWindow() })
                 await model.boot()

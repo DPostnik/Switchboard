@@ -145,6 +145,8 @@ private struct ChatRunState: Equatable {
     let summaryHome: URL
     let claudeHome: URL
     let transcript = TranscriptPresentation()
+    /// Git checkpoints at turn start and end (`TurnCheckpointing.swift`).
+    let turnCheckpoints = TurnCheckpointCoordinator()
     var items: [TranscriptItem] {
         get { transcript.items }
         set { transcript.replace(newValue) }
@@ -1043,6 +1045,7 @@ private struct ChatRunState: Equatable {
                 (wasPaused ? "" : L10n.text(" Очередь этого чата приостановлена.", " This chat’s queue is paused."))
             return
         }
+        forgetTurnCheckpoints(chatID: id)
         state.chats.removeAll { $0.id == id }
         state.queuedMessages = queuedMessages.filter { $0.threadID != id }
         usage.removeValue(forKey: id)
@@ -1512,6 +1515,7 @@ private struct ChatRunState: Equatable {
                     outgoing = ScheduledBrowserImport.applying(preflight, policy: scheduledBrowserImport, to: text, tool: tool)
                 }
             }
+            await prepareTurnCheckpoint(chatID: id, projectPath: project.path)
             let submittedTurn = try await client.send(outgoing, to: sessionForChat(id), projectPath: project.path,
                                                           permissions: access, model: selectedModel, effort: selectedEffort,
                                                           advisor: ClaudeAdvisor.attached(state.claudeAdvisor, mainModel: selectedModel),
@@ -1540,6 +1544,7 @@ private struct ChatRunState: Equatable {
             }
             if let i = state.chats.firstIndex(where: { $0.id == id }) { state.chats[i].updated = Date(); persist() }
         } catch {
+            turnCheckpoints.discardPending(chatID: runKey)
             let engineTurn = runs[runKey]?.turnID.flatMap { $0 == priorTurn ? nil : $0 }
             // The app is quitting and closed its connections under this send: the message waits in the persisted
             // queue and goes out on the next launch (the quit itself was judged idle before the send arrived).
@@ -2232,6 +2237,7 @@ private struct ChatRunState: Equatable {
                 run.running = true; run.turnID = turn; run.status = nil
                 if runs[thread] != run { runs[thread] = run }
                 if backgroundWaits[thread] != nil { backgroundWaits[thread] = nil }
+                noteTurnStarted(chatID: thread, turnID: turn)
             }
         case .completed(let completion):
             flushDeltas()
@@ -2243,6 +2249,7 @@ private struct ChatRunState: Equatable {
                 let timing = completion.timing(fallback: observed)
                 if threadID == chatID, let index = items.lastIndex(where: { $0.kind == "assistant" && $0.turnID == turnID }) { items[index].timing = timing }
                 try? await store.saveTiming(threadID: threadID, turnID: turnID, timing: timing)
+                recordTurnChanges(chatID: threadID, turnID: turnID)
                 let status = completion.status
                 let title = completion.hasError || (status != .completed && status != .cancelled) ? L10n.text("Ошибка в разговоре", "Conversation error") : status == .cancelled ? L10n.text("Ответ остановлен", "Response stopped") : L10n.text("Ответ готов", "Response ready")
                 let completionID = "turn:" + threadID + ":" + turnID

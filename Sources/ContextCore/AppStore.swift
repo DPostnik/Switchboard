@@ -275,7 +275,7 @@ public actor AppStore {
                 try putApp(db, bytes: bytes, state: migrated)
                 var statement: OpaquePointer?
                 defer { sqlite3_finalize(statement) }
-                guard sqlite3_prepare_v2(db, "DELETE FROM state WHERE key=? OR key=? OR key=? OR key=? OR key=?", -1, &statement, nil) == SQLITE_OK else {
+                guard sqlite3_prepare_v2(db, "DELETE FROM state WHERE key=? OR key=? OR key=? OR key=? OR key=? OR key=?", -1, &statement, nil) == SQLITE_OK else {
                     throw ClientFailure(L10n.text("Не удалось удалить метрики чата", "Could not delete chat metrics"))
                 }
                 let key = "usage:" + threadID
@@ -285,6 +285,7 @@ public actor AppStore {
                 _ = ("archiveSummary:" + threadID).withCString { sqlite3_bind_text(statement, 3, $0, -1, transient) }
                 _ = ("transcript:" + threadID).withCString { sqlite3_bind_text(statement, 4, $0, -1, transient) }
                 _ = ("transcript-revision:" + threadID).withCString { sqlite3_bind_text(statement, 5, $0, -1, transient) }
+                _ = ("turnChanges:" + threadID).withCString { sqlite3_bind_text(statement, 6, $0, -1, transient) }
                 guard sqlite3_step(statement) == SQLITE_DONE,
                       sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK else {
                     throw ClientFailure(L10n.text("Не удалось сохранить удаление чата", "Could not save the chat deletion"))
@@ -359,11 +360,26 @@ public actor AppStore {
         timings[turnID] = timing
         try put(key: "timing:" + threadID, bytes: JSONEncoder().encode(timings))
     }
+    /// Timings with each turn's checkpoint changes attached; a turn with changes but no timing gets none.
     public func loadTimings(threadID: String) throws -> [String: ResponseTiming] {
         try withDatabase { db in
             guard let data = try bytes(db: db, key: "timing:" + threadID) else { return [:] }
-            return try JSONDecoder().decode([String: ResponseTiming].self, from: data)
+            var timings = try JSONDecoder().decode([String: ResponseTiming].self, from: data)
+            for (turn, changes) in try turnChanges(db, threadID) where timings[turn] != nil { timings[turn]?.changes = changes }
+            return timings
         }
+    }
+    /// Kept apart from timings: the checkpoint finishes after the turn, and a late token update rewrites the timing.
+    public func saveTurnChanges(threadID: String, turnID: String, changes: TurnChanges) throws {
+        try withDatabase { db in
+            var all = try turnChanges(db, threadID)
+            all[turnID] = changes
+            try putRaw(db, key: "turnChanges:" + threadID, bytes: JSONEncoder().encode(all))
+        }
+    }
+    private func turnChanges(_ db: OpaquePointer, _ threadID: String) throws -> [String: TurnChanges] {
+        guard let data = try bytes(db: db, key: "turnChanges:" + threadID) else { return [:] }
+        return (try? JSONDecoder().decode([String: TurnChanges].self, from: data)) ?? [:]
     }
 
     // MARK: Transcripts
