@@ -50,16 +50,19 @@ public struct NativeTranscript: NSViewRepresentable {
 
 @MainActor public final class TranscriptScrollView: WidthBoundTextScrollView, NSTextViewDelegate {
     public let transcript: NSTextView
-    private let pasteboard: NSPasteboard
-    private var previous: [TranscriptItem] = []
+    let pasteboard: NSPasteboard
+    private(set) var previous: [TranscriptItem] = []
     private var ranges: [NSRange] = []
     private var conversationID: String?
     private var followed = false
     private var wasWorking = false
     private var expandedActions: Set<String> = []
     private var expandedMetrics: Set<String> = []
-    /// The tool calls behind each activity summary row, keyed by the row's id; their bodies are rendered only when the row is open.
-    private var actionGroups: [String: [TranscriptItem]] = [:]
+    /// The tool calls behind each activity summary row and the thinking items behind each thinking row, keyed by the
+    /// row's id; their bodies are rendered only when the row is open.
+    var actionGroups: [String: [TranscriptItem]] = [:]
+    /// Open thinking rows and command outputs (`TranscriptActivityDetail`).
+    var expandedDetails: Set<String> = []
     /// The last grouping and the cheap key it was computed for; a streaming update mostly changes only the last item.
     private var groupingMemo: (key: GroupingKey, items: [TranscriptItem], groups: [String: [TranscriptItem]])?
     /// The headline of the running tool call, keyed by item id and text length; parsing its JSON input is not free.
@@ -73,6 +76,8 @@ public struct NativeTranscript: NSViewRepresentable {
         var count: Int
         var lastID: String?
         var lastLength: Int
+        /// A thinking block's stop adds its duration without changing its text.
+        var lastSeconds: Double?
         var totalLength: Int
         var isWorking: Bool
     }
@@ -250,7 +255,7 @@ public struct NativeTranscript: NSViewRepresentable {
         // Rows opened during the turn close when it finishes; they are re-rendered in place below.
         let closing = finished && !switched ? expandedActions : []
         if switched || finished { expandedActions.removeAll() }
-        if switched { expandedMetrics.removeAll(); expandedBlocks.removeAll() }
+        if switched { expandedMetrics.removeAll(); expandedBlocks.removeAll(); expandedDetails.removeAll() }
         // A finished answer is rendered once more from scratch: file chips and images it mentioned may exist by now.
         if switched || finished || projectChanged { renderCache.removeAll() }
         if let feedback = copyFeedback,
@@ -663,7 +668,7 @@ public struct NativeTranscript: NSViewRepresentable {
     /// middle item that changes without changing the total length keeps the previous grouping until the next change.
     private func groupedItems(_ items: [TranscriptItem], conversationID: String?, isWorking: Bool) -> [TranscriptItem] {
         let key = GroupingKey(conversationID: conversationID, count: items.count, lastID: items.last?.id,
-                              lastLength: items.last?.text.utf8.count ?? 0,
+                              lastLength: items.last?.text.utf8.count ?? 0, lastSeconds: items.last?.seconds,
                               totalLength: items.reduce(0) { $0 + $1.text.utf8.count }, isWorking: isWorking)
         if let memo = groupingMemo, memo.key == key {
             actionGroups = memo.groups
@@ -702,13 +707,16 @@ public struct NativeTranscript: NSViewRepresentable {
                     item.showsCopyControl = item.id == finalAnswer?.id
                     showedAuthor = true
                 }
+                if item.kind == ActivityDetail.thinkingKind { appendThinking(item, to: &result, groups: &groups); continue }
                 guard item.kind == "activity" else { result.append(item); continue }
                 guard !inserted, let first = actions.first else { continue }
                 inserted = true
-                let summary = L10n.text("Действия \(first.agentName ?? "Codex") · \(actions.count)", "\(first.agentName ?? "Codex") actions · \(actions.count)")
+                // A command and its result share one row.
+                let count = activitySteps(actions).count
+                let summary = L10n.text("Действия \(first.agentName ?? "Codex") · \(count)", "\(first.agentName ?? "Codex") actions · \(count)")
                 groups[first.id] = actions
                 result.append(TranscriptItem(id: first.id, kind: "activity",
-                                             text: actions.map { "\($0.id) \($0.text.utf8.count)" }.joined(separator: "\n"), phase: summary))
+                                             text: actions.map(activityKey).joined(separator: "\n"), phase: summary))
             }
             segment.removeAll()
         }
@@ -771,6 +779,8 @@ public struct NativeTranscript: NSViewRepresentable {
         }
         if item.kind == "activity" {
             renderActivity(item, expanded: expanded, into: result)
+        } else if item.kind == ActivityDetail.thinkingKind {
+            renderThinking(item, into: result)
         } else {
             if (item.kind == "user" && item.phase != nil) || (item.kind != "user" && item.showsAuthor) {
                 let user = item.kind == "user"
@@ -818,7 +828,7 @@ public struct NativeTranscript: NSViewRepresentable {
             var markdown = TranscriptMarkdown(view: self, item: item, options: linkOptions,
                                               width: transcript.textContainer?.containerSize.width ?? 600)
             markdown.render(into: result)
-        } else if item.kind != "activity" {
+        } else if item.kind != "activity" && item.kind != ActivityDetail.thinkingKind {
             for (index, block) in item.text.components(separatedBy: "```").enumerated() {
                 let isCode = index % 2 == 1
                 let font = isCode ? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular) : NSFont.systemFont(ofSize: 14)
@@ -868,22 +878,8 @@ public struct NativeTranscript: NSViewRepresentable {
         header.addAttribute(.paragraphStyle, value: style(before: 9, after: expanded ? 2 : 9), range: NSRange(location: 0, length: header.length))
         result.append(header)
         if expanded {
-            // An open summary row shows its tool calls; a document's own activity item keeps its text.
-            let steps = actionGroups[item.id].map { $0.enumerated().map { ("\($0.offset + 1). ", $0.element.text) } } ?? [("", item.text)]
-            let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-            let row = style(before: 0, after: 2), first = style(before: 7, after: 2)
-            for (index, (number, text)) in steps.enumerated() {
-                // Tool output stays literal, including link-like text.
-                let step = NSMutableAttributedString(string: number, attributes: [.font: mono, .foregroundColor: DeskPalette.ns.accent])
-                step.append(NSAttributedString(string: text.replacingOccurrences(of: "```", with: ""),
-                                               attributes: [.font: mono, .foregroundColor: DeskPalette.ns.inkSoft]))
-                if index < steps.count - 1 { step.append(NSAttributedString(string: "\n", attributes: [.font: mono])) }
-                guard step.length > 0 else { continue }
-                step.addAttribute(.paragraphStyle, value: row, range: NSRange(location: 0, length: step.length))
-                step.addAttribute(.paragraphStyle, value: first, range: (step.string as NSString).paragraphRange(for: NSRange(location: 0, length: 0)))
-                step.addAttribute(.activityStep, value: index, range: NSRange(location: 0, length: 1))
-                result.append(step)
-            }
+            // An open summary row shows its tool calls (`TranscriptActivityDetail`); a document's own activity item keeps its text.
+            appendActivitySteps(of: item, into: result, row: style(before: 0, after: 2), first: style(before: 7, after: 2))
             let last = (result.string as NSString).paragraphRange(for: NSRange(location: result.length - 1, length: 0))
             if last.location > start, let style = (result.attribute(.paragraphStyle, at: last.location, effectiveRange: nil) as? NSParagraphStyle)?
                 .mutableCopy() as? NSMutableParagraphStyle {
@@ -1037,7 +1033,7 @@ public struct NativeTranscript: NSViewRepresentable {
         return max(0, width - textWidth - 32)
     }
 
-    private func rerenderItem(id: String) {
+    func rerenderItem(id: String) {
         guard let index = previous.firstIndex(where: { $0.id == id }), ranges.indices.contains(index),
               let storage = transcript.textStorage else { return }
         let origin = contentView.bounds.origin
@@ -1052,7 +1048,7 @@ public struct NativeTranscript: NSViewRepresentable {
         reflectScrolledClipView(contentView)
     }
 
-    private func showCopyFeedback(id: String, succeeded: Bool, block: Int?) {
+    func showCopyFeedback(id: String, succeeded: Bool, block: Int?) {
         let previousID = copyFeedback?.id
         copyFeedbackTask?.cancel()
         copyFeedback = (id, succeeded, block)
@@ -1095,6 +1091,7 @@ public struct NativeTranscript: NSViewRepresentable {
             showCopyFeedback(id: previous[index].id, succeeded: pasteboard.setString(body, forType: .string), block: block)
             return true
         }
+        if value.hasPrefix(Self.detailLinkPrefix) { handleDetailLink(value); return true }
         if value.hasPrefix("contextdesk-anchor:") {
             scroll(toAnchor: String(value.dropFirst("contextdesk-anchor:".count)))
             return true

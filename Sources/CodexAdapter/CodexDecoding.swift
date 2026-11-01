@@ -61,11 +61,51 @@ enum CodexDecoding {
             return TranscriptItem(id: id, kind: "user", text: raw["content"].array.compactMap { $0["text"].string }.joined(separator: "\n"))
         case "agentMessage": return TranscriptItem(id: id, kind: "assistant", text: raw["text"].string ?? "", phase: raw["phase"].string)
         case "contextCompaction": return TranscriptItem(id: id, kind: "compaction", text: L10n.text("Контекст разговора сжат", "Conversation context compacted"), phase: "completed")
-        case "commandExecution": return TranscriptItem(id: id, kind: "activity", text: raw["command"].string ?? L10n.text("Выполнение команды", "Running command"))
+        case "commandExecution":
+            var item = TranscriptItem(id: id, kind: "activity", text: raw["command"].string ?? L10n.text("Выполнение команды", "Running command"))
+            item.tool = ActivityDetail.codexCommandTool
+            return item
+        case "reasoning":
+            let text = reasoningText(summary: raw["summary"].array.compactMap(\.string), content: raw["content"].array.compactMap(\.string))
+            return text.isEmpty ? nil : TranscriptItem(id: id, kind: ActivityDetail.thinkingKind, text: text)
         case "fileChange": return TranscriptItem(id: id, kind: "activity", text: L10n.text("Изменение файлов · \(raw["status"].string ?? "")", "File changes · \(raw["status"].string ?? "")"))
         case "mcpToolCall": return TranscriptItem(id: id, kind: "activity", text: raw["tool"].string ?? L10n.text("Вызов инструмента", "Calling tool"))
         default: return nil
         }
+    }
+
+    /// A native item as transcript items: `transcriptItem` plus, for a finished command, its result item.
+    static func transcriptItems(_ raw: JSONValue) -> [TranscriptItem] {
+        guard let item = transcriptItem(raw) else { return [] }
+        return [item] + (commandResult(raw).map { [$0] } ?? [])
+    }
+
+    /// Codex 0.160.0 `ThreadItem` "commandExecution" once finished (`status` "completed", "failed" or "declined"): its
+    /// `aggregatedOutput` (stdout and stderr), `exitCode` and `durationMs` as the result item `<id>:result`, paired with
+    /// the call item like a Claude tool result. Nil while it runs or when its status is unknown.
+    static func commandResult(_ raw: JSONValue) -> TranscriptItem? {
+        guard raw["type"].string == "commandExecution", let id = raw["id"].string else { return nil }
+        let status = raw["status"].string
+        var item = TranscriptItem(id: ActivityDetail.resultID(of: id), kind: "activity", text: raw["aggregatedOutput"].string ?? "")
+        switch status {
+        case "declined":
+            if item.text.isEmpty { item.text = L10n.text("Команда отклонена", "Command declined") }
+            item.failed = true
+        case "completed", "failed":
+            if let code = raw["exitCode"].int { item.exitCode = code } else if status == "failed" { item.failed = true }
+        default: return nil
+        }
+        item.seconds = raw["durationMs"].int.flatMap { $0 >= 0 ? Double($0) / 1_000 : nil }
+        return item
+    }
+
+    /// Reasoning as shown: the summary parts, or the raw reasoning parts when there is no summary; blank parts dropped.
+    static func reasoningText(summary: [String], content: [String]) -> String {
+        func joined(_ parts: [String]) -> String {
+            parts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.joined(separator: "\n\n")
+        }
+        let text = joined(summary)
+        return text.isEmpty ? joined(content) : text
     }
 
     static func usageSnapshot(event: JSONValue, date: Date = Date()) -> UsageSnapshot {

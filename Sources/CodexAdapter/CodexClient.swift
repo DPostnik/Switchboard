@@ -16,6 +16,7 @@ public actor CodexClient {
     private var browserRoot = BrowserConfiguration.directory
     var interactions: [UUID: (pending: CodexPendingInteraction, generation: UUID, token: UUID)] = [:]
     var compactions = CodexCompactionMeter()
+    var reasoning = CodexReasoningStream()
 
     public init() {
         let transport = CodexConnection()
@@ -194,7 +195,7 @@ extension AgentHistoryTurn {
                 return false
             }
         } else { complete = false }
-        self.init(id: turn["id"].string, items: turn["items"].array.compactMap(CodexDecoding.transcriptItem),
+        self.init(id: turn["id"].string, items: turn["items"].array.flatMap(CodexDecoding.transcriptItems),
                   startedAt: turn["startedAt"].int.map { Date(timeIntervalSince1970: Double($0)) },
                   completedAt: turn["completedAt"].int.map { Date(timeIntervalSince1970: Double($0)) },
                   duration: turn["durationMs"].int.flatMap { $0 >= 0 ? Double($0) / 1_000 : nil }, isComplete: complete)

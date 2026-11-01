@@ -106,7 +106,8 @@ actor ClaudeGenerationRunner {
         for (index, turn) in turns.enumerated() {
             let turnID = turn.id ?? "turn-\(index)"
             if let completed = turn.timing(fallback: nil)?.completedAt { turnDates[turnID] = completed.timeIntervalSince1970 }
-            for item in turn.items {
+            // Thinking is not needed to infer the user's repeated activities (as Codex reasoning is skipped).
+            for item in turn.items where item.kind != ActivityDetail.thinkingKind {
                 let kind: String, text: String
                 switch item.kind {
                 case "user": kind = "userMessage"; text = item.text

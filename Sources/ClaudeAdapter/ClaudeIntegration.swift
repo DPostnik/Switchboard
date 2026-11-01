@@ -69,6 +69,8 @@ public actor ClaudeIntegration: AgentIntegration {
     /// run a turn of its own (a notification about a task of the previous process); its `result` must not end the user's turn.
     private var commands: [String: (uuid: String, queued: Bool, started: Bool)] = [:]
     private var messageIDs: [String: String] = [:]
+    /// Session -> thinking text of its active turn, collected from the stream.
+    private var thinking: [String: ClaudeThinkingCapture] = [:]
     /// Session -> the CLI's latest progress summary for its active turn.
     private var summaries: [String: (turn: String, text: String)] = [:]
     /// Session -> plan-limit signals seen during its active turn.
@@ -585,6 +587,7 @@ public actor ClaudeIntegration: AgentIntegration {
                 default: break
                 }
             }
+            if main { streamThinking(event, session: id, turn: turn) }
             if event["type"].string == "message_delta", main, let message = meters[id]?.current {
                 observeUsage(event["usage"], message: message, session: id, turn: turn)
             }
@@ -599,6 +602,12 @@ public actor ClaudeIntegration: AgentIntegration {
             guard let turn = sessions[id]?.active, value["parent_tool_use_id"].string == nil else { return }
             let message = value["message"], parts = message["content"].array
             if let key = message["id"].string { observeUsage(message["usage"], message: key, session: id, turn: turn) }
+            if let key = message["id"].string {
+                for part in parts where part["type"].string == "thinking" {
+                    if thinking[id]?.turn != turn { thinking[id] = ClaudeThinkingCapture(turn: turn) }
+                    if let item = thinking[id]?.message(key, thinking: part["thinking"].string ?? "") { emit(item, session: id) }
+                }
+            }
             let text = parts.filter { $0["type"].string == "text" }.compactMap { $0["text"].string }.joined(separator: "\n")
             if !text.isEmpty, let key = message["id"].string { emit(.init(id: key, kind: "assistant", text: text), session: id) }
             for part in parts where part["type"].string == "tool_use" {
@@ -614,7 +623,11 @@ public actor ClaudeIntegration: AgentIntegration {
             // The CLI's note to the model after a refusal names the stopped message; the stream may not have shown its stop.
             if let refused = value["refused_message_id"].string { refusal(refused, category: nil, session: id) }
             for part in value["message"]["content"].array where part["type"].string == "tool_result" {
-                if let key = part["tool_use_id"].string { emit(.init(id: key + ":result", kind: "activity", text: Self.toolResultText(part["content"])), session: id) }
+                guard let key = part["tool_use_id"].string else { continue }
+                var result = TranscriptItem(id: ActivityDetail.resultID(of: key), kind: "activity", text: Self.toolResultText(part["content"]))
+                (result.exitCode, result.failed) = ActivityDetail.claudeOutcome(call: sessions[id]?.current.first { $0.id == key },
+                                                                                result: result.text, isError: part["is_error"].bool == true)
+                emit(result, session: id)
             }
         case "command_lifecycle":
             guard let command = commands[id], value["command_uuid"].string?.lowercased() == command.uuid else { return }
@@ -905,6 +918,24 @@ public actor ClaudeIntegration: AgentIntegration {
     static var thinkingLabel: String { L10n.text("Думает…", "Thinking…") }
     static func toolLabel(_ name: String, main: Bool) -> String {
         main ? L10n.text("Запускает \(name)…", "Running \(name)…") : L10n.text("Подагент запускает \(name)…", "Sub-agent running \(name)…")
+    }
+    /// Main-turn thinking blocks of the streamed message (`ClaudeThinkingCapture`).
+    private func streamThinking(_ event: JSONValue, session id: String, turn: String) {
+        guard let message = messageIDs[id] else { return }
+        let index = event["index"].int ?? 0, now = Date()
+        if thinking[id]?.turn != turn { thinking[id] = ClaudeThinkingCapture(turn: turn) }
+        let update: TranscriptItem?
+        switch event["type"].string {
+        case "content_block_start" where event["content_block"]["type"].string == "thinking":
+            thinking[id]?.start(message: message, index: index, at: now)
+            update = thinking[id]?.delta(event["content_block"]["thinking"].string ?? "", index: index, at: now)
+        case "content_block_delta" where event["delta"]["type"].string == "thinking_delta":
+            update = thinking[id]?.delta(event["delta"]["thinking"].string ?? "", index: index, at: now)
+        case "content_block_stop":
+            update = thinking[id]?.stop(index: index, at: now)
+        default: return
+        }
+        if let update { emit(update, session: id) }
     }
     private func status(_ text: String?, session id: String, turn: String) {
         sink.yield(.init(session: reference(id), payload: .status(turn: turn, text: text)))

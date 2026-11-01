@@ -201,4 +201,12 @@ enum CodexEventDecoder {
         }
         return CodexEvent(session: session, payload: payload)
     }
+    /// The result item of a command `item/completed` reports finished; sent after `notification`'s call item.
+    static func commandResult(_ raw: JSONValue) -> CodexEvent? {
+        let p = raw["params"]
+        guard raw["method"].string == "item/completed", let native = p["threadId"].string, !native.isEmpty,
+              var item = CodexDecoding.commandResult(p["item"]) else { return nil }
+        item.turnID = p["turnId"].string
+        return CodexEvent(session: .init(connection: .originalCodex, nativeID: native), payload: .item(item))
+    }
 }

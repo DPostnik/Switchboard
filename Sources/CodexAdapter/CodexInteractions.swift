@@ -52,6 +52,8 @@ extension CodexClient {
         if let event = CodexEventDecoder.notification(raw) {
             for event in compactions.observe(event) { eventSink.yield(event) }
         }
+        if let event = CodexEventDecoder.commandResult(raw) { eventSink.yield(event) }
+        if let event = reasoning.receive(raw, at: Date()) { eventSink.yield(event) }
         if method == "item/started", let native = p["threadId"].string, !native.isEmpty,
            let record = CodexEventDecoder.capability(p["item"], turn: p["turnId"].string) {
             eventSink.yield(.init(session: .init(connection: .originalCodex, nativeID: native), payload: .capability(record)))
