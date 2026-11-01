@@ -46,6 +46,7 @@ public struct AgentHistoryTurn: Codable, Sendable {
     public func timing(fallback: ResponseTiming?) -> ResponseTiming? {
         guard let completedAt = completedAt ?? fallback?.completedAt else { return nil }
         return ResponseTiming(startedAt: startedAt ?? fallback?.startedAt, completedAt: completedAt,
-                              durationSeconds: duration ?? fallback?.durationSeconds, tokens: fallback?.tokens)
+                              durationSeconds: duration ?? fallback?.durationSeconds, tokens: fallback?.tokens,
+                              changes: fallback?.changes)
     }
 }

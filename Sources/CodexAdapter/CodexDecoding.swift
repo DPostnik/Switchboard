@@ -44,7 +44,7 @@ enum CodexDecoding {
         let startedAt = turn["startedAt"].int.map { Date(timeIntervalSince1970: Double($0)) } ?? fallback?.startedAt
         let duration = turn["durationMs"].int.flatMap { $0 >= 0 ? Double($0) / 1_000 : nil }
         return ResponseTiming(startedAt: startedAt, completedAt: completedAt,
-                    durationSeconds: duration ?? fallback?.durationSeconds, tokens: fallback?.tokens)
+                    durationSeconds: duration ?? fallback?.durationSeconds, tokens: fallback?.tokens, changes: fallback?.changes)
     }
 
     static func transcriptItem(_ raw: JSONValue) -> TranscriptItem? {

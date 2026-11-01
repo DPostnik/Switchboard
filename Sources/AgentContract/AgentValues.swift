@@ -5,14 +5,34 @@ public struct ResponseTiming: Codable, Sendable, Equatable {
     public var completedAt: Date
     public var durationSeconds: Double?
     public var tokens: ResponseTokens?
-    public init(startedAt: Date?, completedAt: Date, durationSeconds: Double? = nil, tokens: ResponseTokens? = nil) {
+    /// Files the turn changed in the project's git repository, from its start and end checkpoints.
+    public var changes: TurnChanges?
+    public init(startedAt: Date?, completedAt: Date, durationSeconds: Double? = nil, tokens: ResponseTokens? = nil, changes: TurnChanges? = nil) {
         self.startedAt = startedAt; self.completedAt = completedAt
-        self.durationSeconds = durationSeconds; self.tokens = tokens
+        self.durationSeconds = durationSeconds; self.tokens = tokens; self.changes = changes
     }
 
     public static func apply(_ timing: Self?, to items: inout [TranscriptItem]) {
         guard let timing, let index = items.lastIndex(where: { $0.kind == "assistant" }) else { return }
         items[index].timing = timing
+    }
+}
+
+/// A turn's working-tree checkpoints (commits under `refs/switchboard/checkpoints/` in the project's own repository)
+/// and the size of the change between them. Counts are stored so the transcript never runs git to draw them.
+public struct TurnChanges: Codable, Sendable, Equatable {
+    /// Top level of the repository the checkpoints live in.
+    public var repository: String
+    public var start: String
+    public var end: String
+    public var files: Int
+    public var added: Int
+    public var removed: Int
+    /// Another chat in the same project folder was running during the turn; its edits may be counted here.
+    public var otherChats: Bool?
+    public init(repository: String, start: String, end: String, files: Int, added: Int, removed: Int, otherChats: Bool? = nil) {
+        self.repository = repository; self.start = start; self.end = end
+        self.files = files; self.added = added; self.removed = removed; self.otherChats = otherChats
     }
 }
 

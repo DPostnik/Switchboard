@@ -62,7 +62,9 @@ public struct GitRunner: Sendable {
             }
             try? await Task.sleep(for: .milliseconds(15))
         }
-        child.waitUntilExit()
+        // Not `waitUntilExit()`: on the main thread it waits for a run-loop callback that never comes while the
+        // main queue is busy, and hung forever after the process had already exited.
+        while child.isRunning { try? await Task.sleep(for: .milliseconds(10)) }
         if expired { throw Failure.timedOut }
         let data = await outputs.finish(), message = await errors.finish()
         return Result(status: child.terminationStatus, output: data,
