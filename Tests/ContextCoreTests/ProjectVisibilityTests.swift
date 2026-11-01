@@ -113,10 +113,15 @@ import Testing
     #expect(model.draft == "Keep project draft")
 }
 
+@MainActor private func projectMenuActions(rename: @escaping () -> Void = {}, remove: @escaping () -> Void = {}) -> [SidebarMenuAction] {
+    ProjectMenu.actions(path: "/tmp/ExampleProject", hasChats: false, settings: {}, newChat: {}, rename: rename,
+                        selectAllChats: {}, remove: remove)
+}
+
 @Test @MainActor func projectContextMenuRemovesThroughItsCallback() throws {
     let view = ProjectHeaderView()
     var removed = false
-    view.remove = { removed = true }
+    view.actions = projectMenuActions(remove: { removed = true })
     let event = try #require(NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [],
         timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
     let menu = try #require(view.menu(for: event))
@@ -127,6 +132,40 @@ import Testing
     #expect(item.toolTip == L10n.text("Файлы и чаты сохранятся. Вернуть проект можно через «Добавить проект».", "Files and chats are kept. Restore it with Add project."))
     menu.performActionForItem(at: index)
     #expect(removed)
+}
+
+/// The "…" button and the right-click menu render the same list; reordering is by drag, not by menu items.
+@Test @MainActor func projectMenuListsSettingsFirstAndRemoveLast() throws {
+    let view = ProjectHeaderView()
+    view.actions = projectMenuActions()
+    let event = try #require(NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [],
+        timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+    let menu = try #require(view.menu(for: event))
+    #expect(menu.items.filter { !$0.isSeparatorItem }.map(\.title) == [
+        L10n.text("Настройки проекта…", "Project settings…"), L10n.text("Новый чат", "New chat"),
+        L10n.text("Открыть в Finder", "Open in Finder"), L10n.text("Скопировать путь", "Copy path"),
+        L10n.text("Переименовать…", "Rename…"), L10n.text("Выделить все чаты", "Select all chats"),
+        L10n.text("Убрать проект из списка", "Remove project from list"),
+    ])
+    #expect(menu.items.first { $0.title == L10n.text("Выделить все чаты", "Select all chats") }?.isEnabled == false)
+    #expect(!menu.items.contains { $0.title == L10n.text("Переместить выше", "Move up") })
+}
+
+@Test @MainActor func chatRowMenuNestsAgentToolsInASubmenu() throws {
+    let view = ChatRowView()
+    var copied = 0
+    view.actions = [
+        SidebarMenuAction(title: "Pin") {}, .separator,
+        .submenu(L10n.text("Для агентов", "For agents"), [SidebarMenuAction(title: "Copy chat ID") { copied += 1 }]),
+    ]
+    let event = try #require(NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [],
+        timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+    let menu = try #require(view.menu(for: event))
+    #expect(menu.items.map(\.isSeparatorItem) == [false, true, false])
+    let submenu = try #require(menu.items.last?.submenu)
+    #expect(menu.items.last?.title == L10n.text("Для агентов", "For agents"))
+    submenu.performActionForItem(at: 0)
+    #expect(copied == 1)
 }
 
 @Test func renamingAProjectChangesOnlyItsDisplayName() {
@@ -154,12 +193,11 @@ import Testing
 @Test @MainActor func projectHeaderMenuOffersRename() throws {
     let view = ProjectHeaderView(frame: NSRect(x: 0, y: 0, width: 260, height: 32))
     var renamed = 0
-    view.rename = { renamed += 1 }
+    view.actions = projectMenuActions(rename: { renamed += 1 })
     let event = try #require(NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
                                                 windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
     let menu = try #require(view.menu(for: event))
-    let item = try #require(menu.items.first)
-    #expect(item.title == L10n.text("Переименовать…", "Rename…"))
+    let item = try #require(menu.items.first { $0.title == L10n.text("Переименовать…", "Rename…") })
     #expect(item.isEnabled)
     _ = (item.target as? NSObject)?.perform(item.action)
     #expect(renamed == 1)

@@ -266,6 +266,8 @@ private struct ChatRunState: Equatable {
     @Published private(set) var refreshingClaudeLimits = false
     private var claudeLimitsRequestID: UUID?
     @Published var notificationStatus = L10n.text("Уведомления не включены", "Notifications are off")
+    /// macOS allows the app's notifications; the "Needs you" page offers to enable them otherwise.
+    @Published var notificationsAllowed = false
     var loadedThreads: Set<String> = []
     private var eventTask: Task<Void, Never>?
     private var selectionGeneration = UUID()
@@ -372,6 +374,7 @@ private struct ChatRunState: Equatable {
         continueAfterRestart(RestartContinuation.take())
         releaseQueueHeldForRestart()
         let settings = await UNUserNotificationCenter.current().notificationSettings()
+        notificationsAllowed = settings.authorizationStatus == .authorized
         notificationStatus = settings.authorizationStatus == .authorized ? L10n.text("Уведомления включены", "Notifications are on") : L10n.text("Уведомления не включены", "Notifications are off")
     }
     var defaultRoute: RequestRoute { state.defaultRoute ?? .direct }
@@ -1608,6 +1611,7 @@ private struct ChatRunState: Equatable {
     func enableNotifications() async {
         do {
             let allowed = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
+            notificationsAllowed = allowed
             notificationStatus = allowed ? L10n.text("Уведомления включены", "Notifications are on") : L10n.text("Уведомления запрещены в настройках macOS", "Notifications are disabled in macOS Settings")
         } catch { self.error = error.localizedDescription }
     }

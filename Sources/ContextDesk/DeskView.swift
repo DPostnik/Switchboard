@@ -29,7 +29,6 @@ struct DeskView: View {
     private let chatPageSize = 5
     private var sidebarAnimation: Animation? { DeskMotion.standard(reduceMotion) }
     @State private var newTitle = ""
-    @State private var showingNotifications = false
     @State private var showingLimits = false
     @State private var limitsPlacement = PopoverPlacement.fallback
     @State private var limitsAnchor = ScreenFrameProbe()
@@ -111,33 +110,12 @@ struct DeskView: View {
                 HStack {
                     Text("Switchboard").font(.ui(.headline))
                     Spacer()
-                    Button { showingNotifications.toggle() } label: {
-                        Image(systemName: (model.notices.isEmpty && !model.state.chats.contains(where: \.hasUnreadResponse)) ? "bell" : "bell.badge.fill")
-                            .foregroundStyle((model.notices.isEmpty && !model.state.chats.contains(where: \.hasUnreadResponse)) ? Color.primary : DeskPalette.accent)
-                    }.buttonStyle(PointerButtonStyle(base: .plain)).help(L10n.text("Уведомления", "Notifications"))
-                        // Anchored to the bell, so the panel visibly comes from the control that opened it.
-                        .popover(isPresented: $showingNotifications, arrowEdge: .bottom) { notificationsPanel }
                 }.padding(.horizontal, .ui(16)).padding(.top, .ui(16))
-                if showAttentionBanner {
-                    AttentionBanner(model: model).padding(.horizontal, .ui(12))
-                        .transition(DeskMotion.slide(from: .top, reduceMotion))
-                }
-                Button { model.newChat() } label: {
-                    Label(L10n.text("Новый чат", "New chat"), systemImage: "square.and.pencil").frame(maxWidth: .infinity, alignment: .leading)
-                }.buttonStyle(DeskButtonStyle(kind: .wash)).disabled(model.selectedProject == nil).padding(.horizontal, .ui(12))
                 DeskSearchField(prompt: L10n.text("Найти проект или чат", "Find a project or chat"), text: $search, clearable: true)
                     .padding(.horizontal, .ui(12))
+                needsYouRow.padding(.horizontal, .ui(12))
                 ScrollView {
                     VStack(alignment: .leading, spacing: .ui(4)) {
-                        let waiting = search.isEmpty ? Array(model.attentionChats.prefix(8)) : []
-                        if !waiting.isEmpty {
-                            Text(L10n.text("Ждёт тебя", "Needs you"))
-                                .sidebarSectionHeader()
-                            ForEach(waiting, id: \.chat.id) { entry in
-                                chatEntry(entry.chat, waiting: true)
-                            }
-                            Divider().padding(.vertical, .ui(6))
-                        }
                         if !model.state.visiblePinnedChats.isEmpty {
                             Text(L10n.text("Избранное", "Favorites"))
                                 .sidebarSectionHeader()
@@ -149,37 +127,12 @@ struct DeskView: View {
                             }
                             Divider().padding(.vertical, .ui(6))
                         }
-                        Text(L10n.text("Проекты", "Projects"))
-                            .sidebarSectionHeader()
+                        projectsHeader
                         ForEach(model.state.visibleProjects.filter { project in
                             search.isEmpty || project.name.localizedCaseInsensitiveContains(search) || project.path.localizedCaseInsensitiveContains(search) || model.state.chats.contains { $0.projectID == project.id && !$0.isArchived && $0.title.localizedCaseInsensitiveContains(search) }
                         }) { project in
                             projectEntries(project)
                         }
-                        Button { model.openProject() } label: {
-                            Label(L10n.text("Добавить проект…", "Add project…"), systemImage: "folder.badge.plus")
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }.buttonStyle(SidebarItemStyle())
-                        Divider().padding(.vertical, .ui(6))
-                        Button { model.showingArchive = false; model.showingAttention = false; model.showingJobs = true; Task { await model.refreshJobs() } } label: {
-                            Label(L10n.text("По расписанию", "Scheduled jobs"), systemImage: "calendar")
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }.buttonStyle(SidebarItemStyle(selected: model.showingJobs))
-                        Button { model.openAttention() } label: {
-                            HStack {
-                                Label {
-                                    Text(L10n.text("Важное", "Important"))
-                                } icon: {
-                                    Image(systemName: model.openAttentionCount > 0 ? "exclamationmark.triangle.fill" : "exclamationmark.triangle")
-                                        .foregroundStyle(model.openAttentionCount > 0 ? AttentionPalette.accent : Color.primary)
-                                }
-                                Spacer()
-                                if model.openAttentionCount > 0 {
-                                    Text("\(model.openAttentionCount)").font(.ui(.caption).weight(.bold)).foregroundStyle(.white)
-                                        .padding(.horizontal, .ui(7)).padding(.vertical, .ui(2)).background(AttentionPalette.accent, in: Capsule())
-                                }
-                            }
-                        }.buttonStyle(SidebarItemStyle(selected: model.showingAttention))
                     }.padding(.horizontal, .ui(12)).padding(.bottom, .ui(8))
                         // Legacy scrollers take layout width only while the list overflows; reserve it otherwise so rows keep their width.
                         .padding(.trailing, sidebarScrollerReserve)
@@ -192,26 +145,102 @@ struct DeskView: View {
                 // The edge line only marks where the list scrolls under the controls below it.
                 DeskPalette.border.frame(height: 0.5).opacity(sidebarContentHeight > sidebarViewportHeight ? 1 : 0)
                 if !selection.isEmpty { selectionBar.transition(DeskMotion.slide(from: .bottom, reduceMotion)) }
-                Button { limitsPlacement = limitsAnchor.placement; showingLimits = true } label: {
-                    Label(L10n.text("Usage и лимиты", "Usage and limits"), systemImage: "chart.bar")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }.buttonStyle(DeskButtonStyle()).background(ScreenFrameReader(probe: limitsAnchor)).padding(.horizontal, .ui(12)).padding(.top, .ui(10))
-                    .popover(isPresented: $showingLimits, arrowEdge: limitsPlacement.edge) {
-                        AccountLimitsView(model: model, maxListHeight: limitsPlacement.listHeight)
-                    }
-                HStack {
-                    Circle().fill(model.currentAgentConnected ? Color.primary : .secondary).frame(width: .ui(6), height: .ui(6))
-                    Text(model.currentAgent == .appClaude ? (model.claudeAuthenticated ? L10n.text("Claude · подключён", "Claude · connected") : L10n.text("Claude · вход не выполнен", "Claude · not signed in")) : (model.connecting ? L10n.text("Подключение…", "Connecting…") : model.accountLabel)).font(.ui(.caption)).lineLimit(1)
-                    Spacer()
-                    SettingsLink { Image(systemName: "gearshape") }.buttonStyle(PointerButtonStyle(base: .plain))
-                }.padding(.ui(14))
+                sidebarDock
             }.background(DeskPalette.sidebar)
-                .animation(sidebarAnimation, value: showAttentionBanner)
                 .animation(sidebarAnimation, value: selection.isEmpty)
                 .navigationSplitViewColumnWidth(min: .ui(240), ideal: .ui(285), max: .ui(380))
                 .background(SidebarWidthLimits(min: .ui(240), ideal: .ui(285), max: .ui(380)))
     }
-    private var showAttentionBanner: Bool { model.openAttentionCount > 0 && !model.showingAttention }
+    /// Everything that waits for the user: waiting chats, unresolved important messages and notifications.
+    private var needsYouCount: Int { model.attentionChats.count + model.openAttentionCount + model.notices.count }
+    /// The one place for what needs the user; it opens the "Needs you" page. Amber while anything waits.
+    private var needsYouRow: some View {
+        let count = needsYouCount
+        let title = L10n.text("Ждёт тебя", "Needs you")
+        return Button { model.openAttention() } label: {
+            HStack(spacing: .ui(8)) {
+                Image(systemName: count > 0 ? "tray.full.fill" : "tray")
+                    .foregroundStyle(count > 0 ? DeskPalette.attention : Color.secondary)
+                    .frame(width: .ui(18))
+                Text(title).fontWeight(.medium)
+                Spacer(minLength: 0)
+                if count > 0 {
+                    Text("\(count)").font(.ui(.caption).weight(.semibold)).monospacedDigit().foregroundStyle(.white)
+                        .padding(.horizontal, .ui(7)).padding(.vertical, .ui(1))
+                        .background(DeskPalette.attention, in: Capsule())
+                        .contentTransition(.numericText())
+                }
+            }
+            .font(.ui(.callout))
+            .foregroundStyle(count > 0 ? DeskPalette.attentionInk : DeskPalette.ink)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(NeedsYouRowStyle(active: count > 0, selected: model.showingAttention && !model.showingArchive))
+        .animation(sidebarAnimation, value: count)
+        .help(L10n.text("Чаты, которые ждут тебя, важные сообщения и уведомления", "Chats waiting for you, important messages and notifications"))
+        .accessibilityLabel(count > 0 ? "\(title): \(count)" : title)
+        .accessibilityAddTraits(model.showingAttention && !model.showingArchive ? .isSelected : [])
+    }
+    /// "Projects" with the add button at its trailing edge.
+    private var projectsHeader: some View {
+        HStack(spacing: 0) {
+            Text(L10n.text("Проекты", "Projects")).font(.ui(.caption).weight(.semibold)).foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            Button { model.openProject() } label: {
+                Image(systemName: "plus").font(.ui(.caption).weight(.semibold))
+            }
+            .buttonStyle(SidebarIconButtonStyle(width: .ui(24), height: .ui(22)))
+            .help(L10n.text("Добавить проект…", "Add project…"))
+            .accessibilityLabel(L10n.text("Добавить проект…", "Add project…"))
+        }
+        .padding(.leading, .ui(8)).padding(.trailing, .ui(2)).padding(.top, .ui(4)).padding(.bottom, .ui(2))
+    }
+    /// Pages and status in one row: schedule, archive, usage, settings, then the account.
+    private var sidebarDock: some View {
+        let jobs = model.showingJobs && !model.showingArchive && !model.showingAttention
+        let account = model.currentAgent == .appClaude ? (model.claudeAuthenticated ? L10n.text("Claude · подключён", "Claude · connected") : L10n.text("Claude · вход не выполнен", "Claude · not signed in")) : (model.connecting ? L10n.text("Подключение…", "Connecting…") : model.accountLabel)
+        return HStack(spacing: .ui(2)) {
+            Button { model.showingArchive = false; model.showingAttention = false; model.showingJobs = true; Task { await model.refreshJobs() } } label: {
+                Image(systemName: "calendar")
+            }
+            .buttonStyle(SidebarIconButtonStyle(selected: jobs))
+            .help(L10n.text("По расписанию", "Scheduled jobs"))
+            .accessibilityLabel(L10n.text("По расписанию", "Scheduled jobs"))
+            .accessibilityAddTraits(jobs ? .isSelected : [])
+            Button { model.openArchive() } label: {
+                Image(systemName: "archivebox")
+            }
+            .buttonStyle(SidebarIconButtonStyle(selected: model.showingArchive))
+            .help(L10n.text("Архив", "Archive"))
+            .accessibilityLabel(L10n.text("Архив", "Archive"))
+            .accessibilityAddTraits(model.showingArchive ? .isSelected : [])
+            Button { limitsPlacement = limitsAnchor.placement; showingLimits = true } label: {
+                Image(systemName: "chart.bar")
+            }
+            .buttonStyle(SidebarIconButtonStyle(selected: showingLimits))
+            .background(ScreenFrameReader(probe: limitsAnchor))
+            .help(L10n.text("Usage и лимиты", "Usage and limits"))
+            .accessibilityLabel(L10n.text("Usage и лимиты", "Usage and limits"))
+            .popover(isPresented: $showingLimits, arrowEdge: limitsPlacement.edge) {
+                AccountLimitsView(model: model, maxListHeight: limitsPlacement.listHeight)
+            }
+            SettingsLink { Image(systemName: "gearshape") }
+                .buttonStyle(SidebarIconButtonStyle())
+                .help(L10n.text("Настройки", "Settings"))
+                .accessibilityLabel(L10n.text("Настройки", "Settings"))
+            Spacer(minLength: .ui(4))
+            HStack(spacing: .ui(5)) {
+                Circle().fill(!model.currentAgentConnected ? DeskPalette.muted : model.currentAgentAuthenticated ? DeskPalette.accent : DeskPalette.attention)
+                    .frame(width: .ui(6), height: .ui(6))
+                Text(model.currentAgentName).font(.ui(.caption)).foregroundStyle(.secondary).lineLimit(1)
+            }
+            .padding(.horizontal, .ui(6))
+            .help(account)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(account)
+        }
+        .padding(.horizontal, .ui(10)).padding(.bottom, .ui(10))
+    }
     private var sidebarScrollerReserve: CGFloat {
         guard scrollerStyle == .legacy, sidebarContentHeight <= sidebarViewportHeight else { return 0 }
         return NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
@@ -245,41 +274,10 @@ struct DeskView: View {
                 .modifier(ZoomedWindowTitle(title: detailTitle, subtitle: detailSubtitle))
     }
     private var detailTitle: String {
-        model.showingArchive ? L10n.text("Архив", "Archive") : model.showingAttention ? L10n.text("Важное", "Important") : model.showingJobs ? L10n.text("Расписание", "Schedule") : (model.selectedChat?.title ?? L10n.text("Новый чат", "New chat"))
+        model.showingArchive ? L10n.text("Архив", "Archive") : model.showingAttention ? L10n.text("Ждёт тебя", "Needs you") : model.showingJobs ? L10n.text("Расписание", "Schedule") : (model.selectedChat?.title ?? L10n.text("Новый чат", "New chat"))
     }
     private var detailSubtitle: String {
         model.showingArchive || model.showingJobs || model.showingAttention ? "" : model.selectedProject?.name ?? ""
-    }
-    private var notificationsPanel: some View {
-            VStack(alignment: .leading, spacing: .ui(16)) {
-                HStack {
-                    Label(L10n.text("Уведомления", "Notifications"), systemImage: "bell.fill").font(.ui(.headline)).foregroundStyle(DeskPalette.ink)
-                    Spacer()
-                    Button(L10n.text("Очистить", "Clear")) { model.notices.removeAll() }.disabled(model.notices.isEmpty)
-                }
-                Button(L10n.text("Включить уведомления macOS", "Enable macOS notifications")) { Task { await model.enableNotifications() } }
-                Text(model.notificationStatus).font(.ui(.caption)).foregroundStyle(.secondary)
-                if model.notices.isEmpty { Text(L10n.text("Новых уведомлений нет", "No new notifications")).foregroundStyle(.secondary).padding(.vertical) }
-                ScrollView {
-                    VStack(spacing: .ui(8)) {
-                        ForEach(model.notices) { notice in
-                            Button {
-                                showingNotifications = false
-                                Task { await model.focusAction(threadID: notice.threadID) }
-                            } label: {
-                                HStack(alignment: .top) {
-                                    Image(systemName: "bubble.left.fill").foregroundStyle(DeskPalette.accent)
-                                    VStack(alignment: .leading, spacing: .ui(5)) {
-                                        Text(notice.title).fontWeight(.medium)
-                                        Text(notice.detail).font(.ui(.caption)).foregroundStyle(.secondary).lineLimit(2)
-                                    }
-                                    Spacer()
-                                }.padding(.ui(12)).background(DeskPalette.accentWash, in: RoundedRectangle(cornerRadius: 12))
-                            }.buttonStyle(PointerButtonStyle(base: .plain))
-                        }
-                    }
-                }.frame(maxHeight: 320)
-            }.padding(.ui(20)).frame(width: .ui(350))
     }
     private func adjacentProjectMove(_ project: Project, offset: Int) -> (() -> Void)? {
         let projects = model.state.visibleProjects
@@ -287,6 +285,20 @@ struct DeskView: View {
               projects.indices.contains(index + offset) else { return nil }
         let targetID = projects[index + offset].id
         return { _ = model.moveProject(project.id, to: targetID) }
+    }
+    /// The "…" menu and the right-click menu of a project row; one list keeps them identical.
+    private func projectActions(_ project: Project) -> [SidebarMenuAction] {
+        ProjectMenu.actions(path: project.path, hasChats: model.state.chats.contains { $0.projectID == project.id && !$0.isArchived },
+                            settings: { permissionsProject = project }, newChat: { startChat(in: project) },
+                            rename: { startRenaming(project) },
+                            selectAllChats: { selection.select(model.state.orderedChats(projectID: project.id, archived: false).map(\.id)) },
+                            remove: { Task { await model.hideProject(project.id) } })
+    }
+    /// Projects reorder by dragging; VoiceOver gets the same moves as custom actions.
+    private func projectReorderActions(_ project: Project) -> [SidebarMenuAction] {
+        [(-1, L10n.text("Переместить выше", "Move up")), (1, L10n.text("Переместить ниже", "Move down"))].compactMap { offset, title in
+            adjacentProjectMove(project, offset: offset).map { SidebarMenuAction(title: title, perform: $0) }
+        }
     }
 
     @ViewBuilder private func projectEntries(_ project: Project) -> some View {
@@ -312,9 +324,8 @@ struct DeskView: View {
                 }, targeted: { targeted in
                     if targeted { dropTargetProjectID = project.id }
                     else if dropTargetProjectID == project.id { dropTargetProjectID = nil }
-                }, moveUp: adjacentProjectMove(project, offset: -1), moveDown: adjacentProjectMove(project, offset: 1),
-                   remove: { Task { await model.hideProject(project.id) } },
-                   rename: { startRenaming(project) }, menuShown: menuShown("project:\(project.id)"),
+                }, actions: projectActions(project), reorder: projectReorderActions(project),
+                   menuShown: menuShown("project:\(project.id)"),
                    hovered: hover("project:\(project.id)"), pressed: press("project:\(project.id)")) {
                     HStack(spacing: .ui(9)) {
                         Image(systemName: "chevron.right")
@@ -346,44 +357,7 @@ struct DeskView: View {
 
                 HStack(spacing: .ui(2)) {
                     Menu {
-                        Button { startChat(in: project) } label: {
-                            Label(L10n.text("Новый чат", "New chat"), systemImage: "square.and.pencil")
-                        }
-                        Divider()
-                        Button {
-                            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: project.path)
-                        } label: {
-                            Label(L10n.text("Открыть в Finder", "Open in Finder"), systemImage: "folder")
-                        }
-                        Button {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(project.path, forType: .string)
-                        } label: {
-                            Label(L10n.text("Скопировать путь", "Copy path"), systemImage: "doc.on.doc")
-                        }
-                        Button {
-                            selection.select(model.state.orderedChats(projectID: project.id, archived: false).map(\.id))
-                        } label: {
-                            Label(L10n.text("Выделить все чаты", "Select all chats"), systemImage: "checkmark.circle")
-                        }.disabled(!model.state.chats.contains { $0.projectID == project.id && !$0.isArchived })
-                        Button { startRenaming(project) } label: {
-                            Label(L10n.text("Переименовать…", "Rename…"), systemImage: "pencil")
-                        }
-                        Button { permissionsProject = project } label: {
-                            Label(L10n.text("Разрешения…", "Permissions…"), systemImage: "lock.shield")
-                        }
-                        Divider()
-                        Button(L10n.text("Переместить выше", "Move up")) {
-                            adjacentProjectMove(project, offset: -1)?()
-                        }.disabled(adjacentProjectMove(project, offset: -1) == nil)
-                        Button(L10n.text("Переместить ниже", "Move down")) {
-                            adjacentProjectMove(project, offset: 1)?()
-                        }.disabled(adjacentProjectMove(project, offset: 1) == nil)
-                        Divider()
-                        Button { Task { await model.hideProject(project.id) } } label: {
-                            Label(L10n.text("Убрать проект из списка", "Remove project from list"), systemImage: "minus.circle")
-                        }
-                        .help(L10n.text("Файлы и чаты сохранятся. Вернуть проект можно через «Добавить проект».", "Files and chats are kept. Restore it with Add project."))
+                        SidebarMenuItems(actions: projectActions(project))
                     } label: {
                         Image(systemName: "ellipsis").frame(width: .ui(28), height: .ui(28)).contentShape(Rectangle())
                     }
@@ -470,69 +444,69 @@ struct DeskView: View {
         visibleChatCounts[chat.projectID] = max(visibleChatCounts[chat.projectID] ?? chatPageSize, limit)
     }
 
-    private func chatActions(_ chat: Chat, reorder: Bool) -> [ChatRowAction] {
-        var actions: [ChatRowAction] = []
+    /// Chat row menu: the chat's own actions, then the agent tools in a submenu. Chats reorder by dragging.
+    private func chatActions(_ chat: Chat) -> [SidebarMenuAction] {
         if selection.contains(chat.id) && selection.ids.count > 1 {
             let count = selection.ids.count
             return [
-                ChatRowAction(title: L10n.text("Архивировать выбранные (\(count))", "Archive selected (\(count))"), enabled: canArchiveSelection) { archiveSelection() },
-                ChatRowAction(title: L10n.text("Снять выделение", "Deselect all")) { selection.clear() }
+                SidebarMenuAction(title: L10n.text("Архивировать выбранные (\(count))", "Archive selected (\(count))"), enabled: canArchiveSelection) { archiveSelection() },
+                SidebarMenuAction(title: L10n.text("Снять выделение", "Deselect all")) { selection.clear() }
             ]
         }
+        var actions: [SidebarMenuAction] = []
         if model.runningBrowserChats[chat.id] != nil {
-            actions.append(ChatRowAction(title: L10n.text("Показать браузер этого чата", "Show this chat’s browser")) { model.showBrowser(chatID: chat.id) })
-        }
-        if reorder {
-            let siblings = model.state.orderedChats(projectID: chat.projectID, archived: chat.isArchived)
-            if let index = siblings.firstIndex(where: { $0.id == chat.id }) {
-                for (offset, title) in [(-1, L10n.text("Переместить выше", "Move up")), (1, L10n.text("Переместить ниже", "Move down"))] {
-                    let target = siblings.indices.contains(index + offset) ? siblings[index + offset].id : nil
-                    actions.append(ChatRowAction(title: title, enabled: target != nil) {
-                        if let target { _ = model.moveChat(chat.id, to: target) }
-                    })
-                }
-            }
+            actions += [SidebarMenuAction(title: L10n.text("Показать браузер этого чата", "Show this chat’s browser")) { model.showBrowser(chatID: chat.id) }, .separator]
         }
         actions += [
-            ChatRowAction(title: chat.isPinned ? L10n.text("Открепить из избранного", "Unpin from favorites") : L10n.text("Закрепить в избранном", "Pin to favorites")) { model.toggleChatPin(chat.id) },
-            ChatRowAction(title: L10n.text("Переименовать…", "Rename…")) { renaming = chat; newTitle = chat.title },
-            ChatRowAction(title: L10n.text("Скопировать ID чата", "Copy chat ID")) { copyToPasteboard(chat.id) },
-            ChatRowAction(title: L10n.text("Скопировать ссылку на чат для агента", "Copy chat reference for an agent")) {
-                copyToPasteboard(ChatReference.text(chat, projectPath: model.state.projects.first { $0.id == chat.projectID }?.path))
-            },
-        ]
-        if chat.nativeSession?.connection == .appClaude {
-            actions.append(ChatRowAction(title: chat.chatDirectoryAccess == true
-                ? L10n.text("Закрыть доступ к другим чатам", "Remove access to other chats")
-                : L10n.text("Дать доступ к другим чатам", "Give access to other chats")) { model.toggleChatDirectory(chat.id) })
-        }
-        actions += [
-            ChatRowAction(title: chat.isArchived ? L10n.text("Восстановить из архива", "Restore from archive") : L10n.text("Архивировать", "Archive"), enabled: model.canDeleteChat(chat.id)) {
+            SidebarMenuAction(title: chat.isPinned ? L10n.text("Открепить из избранного", "Unpin from favorites") : L10n.text("Закрепить в избранном", "Pin to favorites")) { model.toggleChatPin(chat.id) },
+            SidebarMenuAction(title: L10n.text("Переименовать…", "Rename…")) { renaming = chat; newTitle = chat.title },
+            SidebarMenuAction(title: chat.isArchived ? L10n.text("Восстановить из архива", "Restore from archive") : L10n.text("Архивировать", "Archive"), enabled: model.canDeleteChat(chat.id)) {
                 Task {
                     await model.setChatArchived(chat.id, archived: !chat.isArchived)
                 }
             },
-            ChatRowAction(title: L10n.text("Удалить чат…", "Delete chat…"), enabled: model.canDeleteChat(chat.id)) { deleting = chat }
+            SidebarMenuAction(title: L10n.text("Удалить чат…", "Delete chat…"), enabled: model.canDeleteChat(chat.id)) { deleting = chat },
+            .separator
         ]
+        var agents = [
+            SidebarMenuAction(title: L10n.text("Скопировать ID чата", "Copy chat ID")) { copyToPasteboard(chat.id) },
+            SidebarMenuAction(title: L10n.text("Скопировать ссылку на чат для агента", "Copy chat reference for an agent")) {
+                copyToPasteboard(ChatReference.text(chat, projectPath: model.state.projects.first { $0.id == chat.projectID }?.path))
+            },
+        ]
+        if chat.nativeSession?.connection == .appClaude {
+            agents.append(SidebarMenuAction(title: chat.chatDirectoryAccess == true
+                ? L10n.text("Закрыть доступ к другим чатам", "Remove access to other chats")
+                : L10n.text("Дать доступ к другим чатам", "Give access to other chats")) { model.toggleChatDirectory(chat.id) })
+        }
+        actions.append(.submenu(L10n.text("Для агентов", "For agents"), agents))
         return actions
+    }
+    /// Move up/down within the project, offered to VoiceOver as custom actions.
+    private func chatReorderActions(_ chat: Chat) -> [SidebarMenuAction] {
+        let siblings = model.state.orderedChats(projectID: chat.projectID, archived: chat.isArchived)
+        guard let index = siblings.firstIndex(where: { $0.id == chat.id }) else { return [] }
+        return [(-1, L10n.text("Переместить выше", "Move up")), (1, L10n.text("Переместить ниже", "Move down"))].compactMap { offset, title in
+            guard siblings.indices.contains(index + offset) else { return nil }
+            let target = siblings[index + offset].id
+            return SidebarMenuAction(title: title) { _ = model.moveChat(chat.id, to: target) }
+        }
     }
     private func copyToPasteboard(_ text: String) {
         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
     }
 
-    /// `waiting` rows sit in the "Needs you" group: like favorites (no reordering) plus what the chat waits for.
-    private func chatEntry(_ chat: Chat, favorite: Bool = false, waiting: Bool = false) -> some View {
-        let rowID = (waiting ? "waiting:" : favorite ? "favorite:" : "chat:") + chat.id
-        let favorite = favorite || waiting
+    private func chatEntry(_ chat: Chat, favorite: Bool = false) -> some View {
+        let rowID = (favorite ? "favorite:" : "chat:") + chat.id
         return Group {
             if favorite {
-                chatLabel(chat, favorite: true, detail: waiting ? model.attentionDetail(chat) : nil)
+                chatLabel(chat, favorite: true)
                     .accessibilityHidden(true)
                     .overlay {
                         ChatRow(chat: chat, enabled: !model.isChangingChat(chat.id), activate: {
                             Task { await model.openChat(chat) }
                         }, move: { _ in false }, targeted: { _ in },
-                           actions: chatActions(chat, reorder: false), favorite: true, menuShown: menuShown(rowID), hovered: hover(rowID), pressed: press(rowID))
+                           actions: chatActions(chat), favorite: true, menuShown: menuShown(rowID), hovered: hover(rowID), pressed: press(rowID))
                     }
             } else {
                 // Measure and render the same label; the native overlay only handles interaction.
@@ -550,7 +524,7 @@ struct DeskView: View {
                         }, move: { model.moveChat($0, to: chat.id) }, targeted: { targeted in
                             if targeted { dropTargetChatID = chat.id }
                             else if dropTargetChatID == chat.id { dropTargetChatID = nil }
-                        }, actions: chatActions(chat, reorder: true), menuShown: menuShown(rowID), hovered: hover(rowID), pressed: press(rowID))
+                        }, actions: chatActions(chat), reorder: chatReorderActions(chat), menuShown: menuShown(rowID), hovered: hover(rowID), pressed: press(rowID))
                     }
             }
         }
@@ -625,7 +599,7 @@ struct DeskView: View {
         .padding(.horizontal, .ui(12))
     }
 
-    private func chatLabel(_ chat: Chat, favorite: Bool, detail: String? = nil) -> some View {
+    private func chatLabel(_ chat: Chat, favorite: Bool) -> some View {
             HStack(spacing: .ui(8)) {
                 if !favorite && selection.contains(chat.id) {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(DeskPalette.accent)
@@ -640,9 +614,6 @@ struct DeskView: View {
                     if favorite, let project = model.state.projects.first(where: { $0.id == chat.projectID }) {
                         Text(project.name).font(.ui(.caption2)).foregroundStyle(.secondary).lineLimit(1)
                             .help(project.path)
-                    }
-                    if let detail {
-                        Text(detail).font(.ui(.caption)).foregroundStyle(.secondary).lineLimit(2).help(detail)
                     }
                 }
                 if model.runningBrowserChats[chat.id] != nil {
@@ -897,7 +868,7 @@ struct DeskFieldChrome: ViewModifier {
 }
 
 extension View {
-    /// "Needs you", "Favorites", "Projects" above the sidebar groups.
+    /// "Favorites" and similar titles above the sidebar groups.
     func sidebarSectionHeader() -> some View {
         font(.ui(.caption).weight(.semibold)).foregroundStyle(.secondary)
             .padding(.horizontal, .ui(8)).padding(.top, .ui(8)).padding(.bottom, .ui(4))
@@ -923,25 +894,61 @@ struct RoundControlStyle: ButtonStyle {
     }
 }
 
-/// Sidebar navigation items look and respond like the project and chat rows around them:
-/// hover highlight, darker on press, and the selection fill while their pane is open.
-struct SidebarItemStyle: ButtonStyle {
+/// Sidebar icon buttons (the bottom dock, "+" beside Projects): a hover tint, and the selection fill while their page is open.
+struct SidebarIconButtonStyle: ButtonStyle {
     var selected = false
-    func makeBody(configuration: Configuration) -> some View { StyledBody(configuration: configuration, selected: selected) }
+    var width: CGFloat = .ui(34)
+    var height: CGFloat = .ui(30)
+    func makeBody(configuration: Configuration) -> some View { StyledBody(configuration: configuration, style: self) }
 
     private struct StyledBody: View {
         let configuration: ButtonStyleConfiguration
-        let selected: Bool
+        let style: SidebarIconButtonStyle
         @State private var hovering = false
 
         var body: some View {
             configuration.label
-                .padding(.horizontal, .ui(8)).padding(.vertical, .ui(10))
-                .background(selected || configuration.isPressed ? DeskPalette.selection : hovering ? DeskPalette.rowHover : .clear,
-                            in: RoundedRectangle(cornerRadius: 10))
-                .contentShape(Rectangle())
+                .font(.ui(size: 14))
+                .foregroundStyle(style.selected ? DeskPalette.ink : DeskPalette.inkSoft)
+                .frame(width: style.width, height: style.height)
+                .background(style.selected || configuration.isPressed ? DeskPalette.selection : hovering ? DeskPalette.rowHover : .clear,
+                            in: RoundedRectangle(cornerRadius: 8))
+                .contentShape(RoundedRectangle(cornerRadius: 8))
                 .onHover { hovering = $0 }
                 .pointingHandCursor()
+        }
+    }
+}
+
+/// The "Needs you" row: an amber wash while anything waits, otherwise a plain sidebar item.
+struct NeedsYouRowStyle: ButtonStyle {
+    let active: Bool
+    let selected: Bool
+    func makeBody(configuration: Configuration) -> some View { StyledBody(configuration: configuration, active: active, selected: selected) }
+
+    private struct StyledBody: View {
+        let configuration: ButtonStyleConfiguration
+        let active: Bool
+        let selected: Bool
+        @State private var hovering = false
+
+        var body: some View {
+            let shape = RoundedRectangle(cornerRadius: 10)
+            configuration.label
+                .padding(.horizontal, .ui(8)).padding(.vertical, .ui(8))
+                .background(fill(shape))
+                .contentShape(shape)
+                .onHover { hovering = $0 }
+                .pointingHandCursor()
+        }
+        @ViewBuilder private func fill(_ shape: RoundedRectangle) -> some View {
+            if active {
+                // Amber deepens on hover, press and while the page is open, layered like the moss wash buttons.
+                shape.fill(DeskPalette.attentionWash)
+                    .overlay(shape.fill(DeskPalette.attention.opacity(configuration.isPressed ? 0.18 : selected ? 0.14 : hovering ? 0.08 : 0)))
+            } else {
+                shape.fill(selected || configuration.isPressed ? DeskPalette.selection : hovering ? DeskPalette.rowHover : .clear)
+            }
         }
     }
 }
