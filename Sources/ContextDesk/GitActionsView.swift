@@ -70,13 +70,17 @@ struct GitActionsChip: View {
     /// A chat in its own worktree shows the worktree icon first.
     var worktree: ChatWorktree? = nil
     @State private var showingActions = false
+    @State private var opening = false
+    @State private var preloaded: GitRepositoryState?
+    @State private var placement = CompactPopoverPlacement.fallback
+    @State private var anchor = ScreenFrameProbe()
     @State private var sheet: GitActionSheet?
 
     var body: some View {
         // The stack stays in place without a status so a running sheet is not torn down by a status refresh.
         HStack(spacing: 0) {
             if let folder, let status = model.gitStatus.status(for: folder) {
-                Button { showingActions.toggle() } label: {
+                Button { toggle(folder) } label: {
                     HStack(spacing: .ui(4)) {
                         if worktree != nil { Image(systemName: WorktreeText.symbol).imageScale(.small).foregroundStyle(.secondary) }
                         GitBranchBadge(status: status, maxNameWidth: 160)
@@ -85,8 +89,9 @@ struct GitActionsChip: View {
                     .buttonStyle(ChipButtonStyle()).pointingHandCursor()
                     .help(([worktree.map { WorktreeText.tooltip($0) }, GitBranchText.summary(status)].compactMap { $0 }.joined(separator: "\n"))
                           + "\n" + L10n.text("Нажми, чтобы открыть действия Git", "Click for Git actions"))
-                    .popover(isPresented: $showingActions, arrowEdge: .top) {
-                        GitActionsPanel(model: model, folder: folder) { next in
+                    .background(ScreenFrameReader(probe: anchor))
+                    .popover(isPresented: $showingActions, arrowEdge: placement.edge) {
+                        GitActionsPanel(model: model, folder: folder, initial: preloaded, maxHeight: placement.maxHeight) { next in
                             showingActions = false
                             // Let the popover close before the sheet opens.
                             Task { try? await Task.sleep(for: .milliseconds(200)); sheet = next }
@@ -100,6 +105,7 @@ struct GitActionsChip: View {
                     .help(WorktreeText.tooltip(worktree))
             }
         }
+        .disabled(opening)
         .sheet(item: $sheet) { value in
             if let folder {
                 switch value {
@@ -113,12 +119,27 @@ struct GitActionsChip: View {
             }
         }
     }
+
+    /// AppKit fits a popover to the screen only when it opens, so the repository state is read first and the
+    /// popover opens at its full size, on the side of the chip with more room.
+    private func toggle(_ folder: String) {
+        if showingActions { showingActions = false; return }
+        opening = true
+        Task {
+            let actions = GitActions()
+            preloaded = await Task.detached { await actions.state(at: folder) }.value
+            placement = anchor.compactPlacement
+            opening = false
+            showingActions = true
+        }
+    }
 }
 
 /// «Git»: branch, upstream, ahead/behind and changed files, with the actions the state allows.
 struct GitActionsPanel: View {
     @ObservedObject var model: DeskModel
     let folder: String
+    let maxHeight: CGFloat
     let open: (GitActionSheet) -> Void
     @State private var state: GitRepositoryState?
     @State private var loaded = false
@@ -128,20 +149,28 @@ struct GitActionsPanel: View {
     @State private var confirmingPush = false
     private let actions = GitActions()
 
+    init(model: DeskModel, folder: String, initial: GitRepositoryState? = nil, maxHeight: CGFloat = CompactPopoverPlacement.fallback.maxHeight,
+         open: @escaping (GitActionSheet) -> Void) {
+        self.model = model; self.folder = folder; self.maxHeight = maxHeight; self.open = open
+        _state = State(initialValue: initial); _loaded = State(initialValue: initial != nil)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: .ui(10)) {
-            Text("Git").font(.ui(.headline))
-            if let state {
-                content(state)
-            } else if loaded {
-                Text(L10n.text("Папка не в git-репозитории или git не ответил.", "The folder is not in a git repository, or git did not answer."))
-                    .foregroundStyle(.secondary)
-            } else {
-                ProgressView().uiSmallSpinner()
+        CappedScroll(maxHeight: maxHeight) {
+            VStack(alignment: .leading, spacing: .ui(10)) {
+                Text("Git").font(.ui(.headline))
+                if let state {
+                    content(state)
+                } else if loaded {
+                    Text(L10n.text("Папка не в git-репозитории или git не ответил.", "The folder is not in a git repository, or git did not answer."))
+                        .foregroundStyle(.secondary)
+                } else {
+                    ProgressView().uiSmallSpinner()
+                }
             }
+            .font(.ui(.callout))
+            .padding(.ui(16)).frame(width: .ui(340), alignment: .leading)
         }
-        .font(.ui(.callout))
-        .padding(.ui(16)).frame(width: .ui(340), alignment: .leading)
         .task { await load() }
     }
 

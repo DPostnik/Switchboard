@@ -53,15 +53,23 @@ struct PullRequestBadge: View {
 struct ComposerPullRequestChip: View {
     @ObservedObject var model: DeskModel
     @State private var showing = false
+    @State private var placement = CompactPopoverPlacement.fallback
+    @State private var anchor = ScreenFrameProbe()
 
     var body: some View {
         let folder = model.composerPullRequestFolder
         if let status = model.pullRequestStatus(folder: folder) {
-            Button { showing.toggle() } label: { PullRequestBadge(status: status) }
+            Button {
+                if !showing { placement = anchor.compactPlacement }
+                showing.toggle()
+            } label: { PullRequestBadge(status: status) }
                 .buttonStyle(ChipButtonStyle()).fixedSize().pointingHandCursor()
                 .help(PullRequestText.summary(status))
-                .popover(isPresented: $showing, arrowEdge: .top) {
-                    PullRequestPopover(model: model, status: status, chatID: model.chatID).padding(16).frame(width: .ui(320))
+                .background(ScreenFrameReader(probe: anchor))
+                .popover(isPresented: $showing, arrowEdge: placement.edge) {
+                    CappedScroll(maxHeight: placement.maxHeight) {
+                        PullRequestPopover(model: model, status: status, chatID: model.chatID).padding(16).frame(width: .ui(320))
+                    }
                 }
         }
     }

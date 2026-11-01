@@ -35,14 +35,58 @@ struct PopoverPlacement: Equatable {
     }
 }
 
+/// A small popover above or below its anchor (composer chips): it opens on the side with more room and its
+/// height is capped to that room, so content that arrives after presentation scrolls instead of leaving the screen.
+struct CompactPopoverPlacement: Equatable {
+    var edge: Edge
+    var maxHeight: CGFloat
+
+    static let fallback = CompactPopoverPlacement(edge: .top, maxHeight: 480)
+    /// Arrow, popover padding and a gap to the screen edge.
+    static let margin: CGFloat = 48
+    static let minimumHeight: CGFloat = 160
+
+    /// `anchor` and `visible` are screen rectangles (origin bottom-left).
+    static func choose(anchor: CGRect, visible: CGRect) -> CompactPopoverPlacement {
+        let above = visible.maxY - anchor.maxY, below = anchor.minY - visible.minY
+        let edge: Edge = above >= below ? .top : .bottom
+        return CompactPopoverPlacement(edge: edge, maxHeight: max(minimumHeight, max(above, below) - margin))
+    }
+}
+
 /// Exposes the screen frame of the view it backs, for placing popovers attached to it.
 final class ScreenFrameProbe {
     fileprivate weak var view: NSView?
 
+    private var frames: (anchor: CGRect, visible: CGRect)? {
+        guard let view, let window = view.window, let screen = window.screen ?? NSScreen.main else { return nil }
+        return (window.convertToScreen(view.convert(view.bounds, to: nil)), screen.visibleFrame)
+    }
+
     var placement: PopoverPlacement {
-        guard let view, let window = view.window, let screen = window.screen ?? NSScreen.main else { return .fallback }
-        let anchor = window.convertToScreen(view.convert(view.bounds, to: nil))
-        return PopoverPlacement.choose(anchor: anchor, visible: screen.visibleFrame)
+        frames.map { PopoverPlacement.choose(anchor: $0.anchor, visible: $0.visible) } ?? .fallback
+    }
+
+    var compactPlacement: CompactPopoverPlacement {
+        frames.map { CompactPopoverPlacement.choose(anchor: $0.anchor, visible: $0.visible) } ?? .fallback
+    }
+}
+
+/// Scrolls its content once it is taller than `maxHeight`; below that it takes exactly the content's height,
+/// so a popover keeps its natural size and never outgrows the room it was opened in.
+struct CappedScroll<Content: View>: View {
+    let maxHeight: CGFloat
+    @ViewBuilder let content: Content
+    @State private var height: CGFloat = 0
+
+    var body: some View {
+        ScrollView {
+            content.background(GeometryReader { proxy in
+                Color.clear.onAppear { height = proxy.size.height }.onChange(of: proxy.size.height) { _, new in height = new }
+            })
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(height: min(max(height, 1), maxHeight))
     }
 }
 

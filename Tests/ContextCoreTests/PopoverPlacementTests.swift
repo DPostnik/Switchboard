@@ -46,3 +46,16 @@ struct PopoverPlacementTests {
     let short = height(PopoverPlacement.minimumListHeight)
     #expect(full - short == PopoverPlacement.preferredListHeight - PopoverPlacement.minimumListHeight)
 }
+
+@Test func compactPopoverOpensTowardTheRoomAndFitsIt() {
+    let screen = CGRect(x: 0, y: 0, width: 1512, height: 944)
+    // A composer chip near the screen bottom: above, capped to the room above minus the margin.
+    let low = CompactPopoverPlacement.choose(anchor: CGRect(x: 600, y: 60, width: 120, height: 28), visible: screen)
+    #expect(low == CompactPopoverPlacement(edge: .top, maxHeight: 944 - 88 - CompactPopoverPlacement.margin))
+    // Near the top: below.
+    let high = CompactPopoverPlacement.choose(anchor: CGRect(x: 600, y: 860, width: 120, height: 28), visible: screen)
+    #expect(high.edge == .bottom && high.maxHeight == 860 - CompactPopoverPlacement.margin)
+    // A tiny screen still leaves a usable height.
+    let tiny = CompactPopoverPlacement.choose(anchor: CGRect(x: 0, y: 40, width: 100, height: 28), visible: CGRect(x: 0, y: 0, width: 400, height: 150))
+    #expect(tiny.maxHeight == CompactPopoverPlacement.minimumHeight)
+}
