@@ -17,6 +17,8 @@ import ContextCore
     @ObservationIgnored private var tracked: [String: Tracked] = [:]
     @ObservationIgnored private let runner: GitRunner
     @ObservationIgnored private let watchesFileSystem: Bool
+    /// Called after every successful read of a repository folder (pull request lookups follow git changes).
+    @ObservationIgnored var didRead: ((String, GitStatus) -> Void)?
     /// Delay before a requested read; repeated requests within it share one read.
     @ObservationIgnored var debounce: Duration = .milliseconds(250)
 
@@ -116,6 +118,7 @@ import ContextCore
                 if statuses[path] != nil { statuses[path] = nil }
             case .repository(let status, let directories):
                 if statuses[path] != status { statuses[path] = status }
+                didRead?(path, status)
                 if let directories, entry.watcher == nil {
                     entry.watcher = GitDirectoryWatcher(paths: directories) { [weak self] in
                         Task { @MainActor in self?.refresh(path) }
@@ -216,6 +219,7 @@ extension DeskModel {
     /// the turn runs once the turn is marked finished.
     func refreshGitStatus(afterTurnIn threadID: String) {
         gitStatus.refresh(workingDirectory(forChat: threadID))
+        refreshPullRequest(folder: pullRequestFolder(forChat: threadID))
         Task { [weak self] in self?.settleWorktreeBranch(threadID) }
     }
 }

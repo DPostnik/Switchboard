@@ -9,12 +9,14 @@ struct AttentionView: View {
     @State private var showingResolved = false
     var body: some View {
         let waiting = model.attentionChats, open = model.attention.open, resolved = model.attention.resolved, notices = model.notices
+        let pullRequestAlerts = model.pullRequests.openAlerts
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
                 Label(L10n.text("Ждёт тебя", "Needs you"), systemImage: "tray.full")
                     .font(.ui(.title2).weight(.semibold)).foregroundStyle(DeskPalette.ink)
-                if waiting.isEmpty && open.isEmpty && notices.isEmpty { calm }
+                if waiting.isEmpty && open.isEmpty && notices.isEmpty && pullRequestAlerts.isEmpty { calm }
                 if !waiting.isEmpty { waitingSection(waiting) }
+                PullRequestAlertsSection(model: model)
                 if !open.isEmpty || !resolved.isEmpty { importantSection(open: open, resolved: resolved) }
                 if !notices.isEmpty { notificationsSection(notices) }
             }.padding(24).frame(maxWidth: 760, alignment: .leading).frame(maxWidth: .infinity)

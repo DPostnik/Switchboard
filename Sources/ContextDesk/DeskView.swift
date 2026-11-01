@@ -50,6 +50,7 @@ struct DeskView: View {
         }
         .toolbar(removing: .sidebarToggle)
         .modifier(GitStatusTracking(model: model))
+        .modifier(PullRequestTracking(model: model))
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button {
@@ -162,7 +163,9 @@ struct DeskView: View {
                 .background(SidebarWidthLimits(min: .ui(240), ideal: .ui(285), max: .ui(380)))
     }
     /// Everything that waits for the user: waiting chats, unresolved important messages and notifications.
-    private var needsYouCount: Int { model.attentionChats.count + model.openAttentionCount + model.notices.count }
+    private var needsYouCount: Int {
+        model.attentionChats.count + model.openAttentionCount + model.notices.count + model.pullRequests.openAlerts.count
+    }
     /// The one place for what needs the user; it opens the "Needs you" page. Amber while anything waits.
     private var needsYouRow: some View {
         let count = needsYouCount
@@ -341,7 +344,7 @@ struct DeskView: View {
                 }, actions: projectActions(project), reorder: projectReorderActions(project),
                    menuShown: menuShown("project:\(project.id)"),
                    hovered: hover("project:\(project.id)"), pressed: press("project:\(project.id)"),
-                   details: model.gitStatus.status(for: project.path).map { GitBranchText.summary($0) }) {
+                   details: model.projectHeaderDetails(project.path)) {
                     HStack(spacing: .ui(9)) {
                         Image(systemName: "chevron.right")
                             .font(.ui(.caption).weight(.semibold))
@@ -353,7 +356,12 @@ struct DeskView: View {
                         Image(systemName: model.projectID == project.id ? "folder.fill" : "folder")
                         ProjectTitleLayout {
                             Text(project.name).fontWeight(.semibold).lineLimit(1)
-                            if let git = model.gitStatus.status(for: project.path) { GitBranchBadge(status: git).font(.ui(.caption)) }
+                            if let git = model.gitStatus.status(for: project.path) {
+                                HStack(spacing: .ui(5)) {
+                                    GitBranchBadge(status: git)
+                                    if let pr = model.pullRequestStatus(folder: project.path) { PullRequestBadge(status: pr) }
+                                }.font(.ui(.caption))
+                            }
                         }
                         let projectChats = model.state.chats.filter { $0.projectID == project.id && !$0.isArchived }
                         if projectChats.contains(where: { chat in model.pending.contains { $0.threadID == chat.id } || model.restartWaitingChatIDs.contains(chat.id) }) {
@@ -1128,6 +1136,7 @@ struct ChatView: View {
                     if model.chatID == nil, let project = model.selectedProject, model.gitStatus.status(for: project.path) != nil {
                         NewChatWorkspaceChip(model: model, project: project)
                     }
+                    ComposerPullRequestChip(model: model)
                     Spacer()
                     ContextRing(usage: model.currentUsage, claude: model.currentAgent == .appClaude)
                     SendControl(model: model, composer: model.composer, reduceMotion: reduceMotion)
