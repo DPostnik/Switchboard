@@ -174,6 +174,27 @@ private func interactiveFixture(_ root: URL) throws -> URL {
                 if prompt=='background': threading.Timer(0.3, woke).start()
                 if prompt=='background-idle': threading.Timer(0.3, tasks).start()
                 continue
+            if prompt=='thinking':
+                # Claude Code 2.1.x with thinking display: streamed thinking, then one assistant event per content block.
+                out({'type':'stream_event','session_id':sid,'event':{'type':'message_start','message':{'id':'think-'+sid,'usage':{'input_tokens':1,'output_tokens':1}}}})
+                out({'type':'stream_event','session_id':sid,'event':{'type':'content_block_start','index':0,'content_block':{'type':'thinking','thinking':''}}})
+                out({'type':'stream_event','session_id':sid,'event':{'type':'content_block_delta','index':0,'delta':{'type':'thinking_delta','thinking':'Check the '}}})
+                out({'type':'stream_event','session_id':sid,'event':{'type':'content_block_delta','index':0,'delta':{'type':'thinking_delta','thinking':'status first.'}}})
+                out({'type':'stream_event','session_id':sid,'event':{'type':'content_block_delta','index':0,'delta':{'type':'signature_delta','signature':'EqQBCkYIBxgC'}}})
+                out({'type':'stream_event','session_id':sid,'event':{'type':'content_block_stop','index':0}})
+                out({'type':'assistant','session_id':sid,'parent_tool_use_id':None,'message':{'id':'think-'+sid,'content':[{'type':'thinking','thinking':'Check the status first.','signature':'EqQBCkYIBxgC'}]}})
+                out({'type':'assistant','session_id':sid,'parent_tool_use_id':None,'message':{'id':'think-'+sid,'content':[{'type':'tool_use','id':'bash-1','name':'Bash','input':{'command':'git status','description':'Show status'}}]}})
+                out({'type':'user','session_id':sid,'parent_tool_use_id':None,'message':{'role':'user','content':[{'type':'tool_result','tool_use_id':'bash-1','content':'Exit code 128\nfatal: not a git repository','is_error':True}]}})
+                # Thinking display omitted: an empty block with a signature only.
+                out({'type':'stream_event','session_id':sid,'event':{'type':'message_start','message':{'id':'quiet-'+sid,'usage':{'input_tokens':1,'output_tokens':1}}}})
+                out({'type':'stream_event','session_id':sid,'event':{'type':'content_block_start','index':0,'content_block':{'type':'thinking','thinking':''}}})
+                out({'type':'stream_event','session_id':sid,'event':{'type':'content_block_stop','index':0}})
+                out({'type':'assistant','session_id':sid,'parent_tool_use_id':None,'message':{'id':'quiet-'+sid,'content':[{'type':'thinking','thinking':'','signature':'EqQBCkYIBxgC'}]}})
+                out({'type':'assistant','session_id':sid,'parent_tool_use_id':None,'message':{'id':'quiet-'+sid,'content':[{'type':'tool_use','id':'bash-2','name':'Bash','input':{'command':'ls'}}]}})
+                out({'type':'user','session_id':sid,'parent_tool_use_id':None,'message':{'role':'user','content':[{'type':'tool_result','tool_use_id':'bash-2','content':'README.md','is_error':False}]}})
+                out({'type':'assistant','session_id':sid,'parent_tool_use_id':None,'message':{'id':'final-'+sid,'content':[{'type':'text','text':'done'}]}})
+                result()
+                continue
             if prompt=='refusal':
                 # The classifier stops the first message; the CLI notes it to the model and the retry answers.
                 out({'type':'stream_event','session_id':sid,'event':{'type':'message_start','message':{'id':'refused','usage':{'input_tokens':1,'output_tokens':1}}}})
@@ -1458,6 +1479,34 @@ private func completedClaudeSession(_ adapter: ClaudeIntegration, binary: URL, h
     // A settled CLI stays warm for the next message; one stopped at the wait limit is replaced.
     #expect(try launches() == (prompt == "background-hang" ? 2 : 1))
     #expect(await events.startedCount() == events.completionCount())
+    await adapter.disconnect()
+}
+
+@Test func claudeThinkingAndBashExitCodesReachTheTranscriptAndItsRecord() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "thinking")).value()
+    try await waitFor { await events.completion() != nil }
+    let items = await events.items()
+    // One thinking item for the message with text; the signature-only block adds none.
+    let thinking = items.filter { $0.kind == ActivityDetail.thinkingKind }
+    #expect(Set(thinking.map(\.id)) == ["thinking:think-" + session.nativeID])
+    #expect(thinking.last?.text == "Check the status first." && (thinking.last?.seconds ?? -1) >= 0)
+    #expect(thinking.allSatisfy { $0.agentName == "Claude" && $0.turnID != nil })
+    let failed = try #require(items.last { $0.id == "bash-1:result" }), clean = try #require(items.last { $0.id == "bash-2:result" })
+    #expect(failed.exitCode == 128 && failed.failed == nil && ActivityDetail.outcome(failed) == .exit(128))
+    #expect(clean.exitCode == 0 && ActivityDetail.outcome(clean) == .succeeded)
+    // The session record keeps them in order: thinking before the call it led to.
+    let history = try await adapter.history(session, context: descriptor.context).value()
+    let recorded = try #require(history.last).items
+    #expect(recorded.map(\.id).filter { $0 != recorded.first?.id } == ["thinking:think-" + session.nativeID, "bash-1", "bash-1:result", "bash-2", "bash-2:result", "final-" + session.nativeID])
+    #expect(recorded.first { $0.id == "bash-1:result" }?.exitCode == 128 && recorded.first { $0.kind == ActivityDetail.thinkingKind }?.seconds != nil)
     await adapter.disconnect()
 }
 

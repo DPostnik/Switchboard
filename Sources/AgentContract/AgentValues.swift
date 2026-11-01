@@ -65,6 +65,14 @@ public struct TranscriptItem: Identifiable, Codable, Sendable, Equatable {
     public var fullLength: Int?
     /// Set once the body was replaced by its headline and a metadata line after archiving; never undone.
     public var reduced: Bool?
+    /// Native tool name when the text does not start with it: "commandExecution" on a Codex command's call item.
+    public var tool: String?
+    /// Exit status of a finished shell command, on its result item (`<call id>:result`).
+    public var exitCode: Int?
+    /// The call finished unsuccessfully without an exit status (tool error, declined or interrupted command); on its result item.
+    public var failed: Bool?
+    /// Seconds a thinking block or a command took, when the engine reported or the adapter measured it.
+    public var seconds: Double?
     public init(id: String, kind: String, text: String, phase: String? = nil, timing: ResponseTiming? = nil) {
         self.id = id; self.kind = kind; self.phase = phase; self.timing = timing
         self.text = kind == "user" ? InterruptedTurnNote.stripped(text) : text

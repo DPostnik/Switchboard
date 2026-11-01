@@ -240,7 +240,7 @@ import ContextCore
 @Test @MainActor func activitySummaryRowKeepsToolBodiesOutOfTheTextUntilOpened() throws {
     let body = String(repeating: "{\"output\": \"очень длинный вывод инструмента\"}\n", count: 2_000)
     let items = [TranscriptItem(id: "u", kind: "user", text: "Запусти"),
-                 TranscriptItem(id: "t1", kind: "activity", text: "Bash\n" + body),
+                 TranscriptItem(id: "t1", kind: "activity", text: "Grep\n" + body),
                  TranscriptItem(id: "t2", kind: "activity", text: "Read\n" + body),
                  TranscriptItem(id: "a", kind: "assistant", text: "Готово")]
     let grouped = TranscriptScrollView.groupActivities(items, isWorking: false)
@@ -256,7 +256,7 @@ import ContextCore
     #expect(!view.transcript.string.contains("длинный вывод"))
     #expect(view.transcript.string.utf8.count < 200)
     _ = view.textView(view.transcript, clickedOnLink: "contextdesk-action:t1", at: 0)
-    #expect(view.transcript.string.contains("1. Bash\n" + body))
+    #expect(view.transcript.string.contains("1. Grep\n" + body))
     #expect(view.transcript.string.contains("2. Read\n" + body))
     _ = view.textView(view.transcript, clickedOnLink: "contextdesk-action:t1", at: 0)
     #expect(!view.transcript.string.contains("длинный вывод"))

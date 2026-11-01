@@ -16,7 +16,8 @@ public enum ActivityRetention {
     /// Input fields that name what a Claude tool call acts on, in order of preference.
     static let headlineKeys = ["description", "command", "file_path", "path", "pattern", "url", "query", "prompt", "expression"]
 
-    static func isActivity(_ kind: String) -> Bool { kind == "activity" || kind == "tool" }
+    /// Kinds whose bodies are capped and reduced: tool calls and results, and thinking (`ActivityDetail.thinkingKind`).
+    static func isActivity(_ kind: String) -> Bool { kind == "activity" || kind == "tool" || kind == ActivityDetail.thinkingKind }
 
     // MARK: Cap (record time)
 
@@ -116,8 +117,8 @@ public enum ActivityRetention {
 
     /// The first telling field of a JSON object whose end was cut off: `"key" : "value"` read up to the closing quote
     /// or the cut, unescaped.
-    static func scannedValue(in json: String) -> String? {
-        for key in headlineKeys {
+    static func scannedValue(in json: String, keys: [String] = headlineKeys) -> String? {
+        for key in keys {
             guard let range = json.range(of: "\"\(key)\"\\s*:\\s*\"", options: .regularExpression) else { continue }
             var value = "", escaped = false, closed = false
             for character in json[range.upperBound...] {
@@ -143,7 +144,7 @@ public enum ActivityRetention {
         var names: [String: String] = [:], sizes: [String: Int] = [:]
         for item in items where isActivity(item.kind) {
             sizes[item.id] = item.fullLength ?? item.text.utf8.count
-            if item.reduced != true, let call = parsedCall(item.text) { names[item.id] = call.name }
+            if item.reduced != true, let call = parsedCall(item.text) { names[item.id] = call.name } else if let tool = item.tool { names[item.id] = tool }
         }
         return items.map { item in
             guard isActivity(item.kind), item.reduced != true else { return item }
@@ -175,27 +176,33 @@ public enum ActivityRetention {
         !items.contains { isActivity($0.kind) && $0.reduced != true }
     }
     public static func isReduced(_ snapshot: AgentTranscriptSnapshot) -> Bool {
-        !snapshot.items.contains { ($0.kind == .activity || $0.kind == .tool) && $0.presentation?.reduced != true }
+        // Kinds without their own snapshot case (thinking, compaction, refusal) are stored as `.activity`; the presentation names them.
+        !snapshot.items.contains { isActivity($0.presentation?.kind ?? $0.kind.rawValue) && $0.presentation?.reduced != true }
     }
 
     /// Metadata line of a reduced body (its second line): `#activity` followed by space-separated `key=value` fields in
     /// this order, each present only when known. Quoted values are JSON string literals.
-    ///   tool=<name>      Claude tool name: the first line of a call, or of the call paired with a result (`<id>:result`)
+    ///   kind=thinking    a thinking item (Claude thinking, Codex reasoning); its first line keeps the start of the text
+    ///   tool=<name>      tool name: the first line of a Claude call, the `tool` field (Codex `commandExecution`), or
+    ///                    that of the call paired with a result (`<id>:result`)
     ///   target=<"...">   the call's most telling input field (description, command, file_path, path, pattern, url,
     ///                    query, prompt or expression), at most 300 characters
     ///   input=<bytes>    UTF-8 size of the call body before capping; on a call line
     ///   output=<bytes>   UTF-8 size of the paired result body before capping; on the call line and on the result line
-    ///   size=<bytes>     body size of an activity that is neither a Claude call nor a result (Codex commands, status notes)
-    ///   exit=<code>      exit status named near the end of a result ("Exit code 1", "exited with 2", "exit status: 3")
-    ///   error=<"...">    last two non-empty lines of a failed result (exit status other than 0, or an error marker at the
-    ///                    start), each at most 200 characters, joined with " | "
-    /// No duration: items carry no per-call timing.
+    ///   size=<bytes>     body size of an activity that is neither a Claude call nor a result (Codex commands, status
+    ///                    notes, thinking)
+    ///   exit=<code>      exit status of a result: the recorded `exitCode`, else one named near the end of the text
+    ///                    ("Exit code 1", "exited with 2", "exit status: 3")
+    ///   error=<"...">    last two non-empty lines of a failed result (exit status other than 0, `failed`, or an error
+    ///                    marker at the start), each at most 200 characters, joined with " | "
+    ///   seconds=<n.n>    duration of a thinking block or a command, when it was known
     static func metadata(_ item: TranscriptItem, names: [String: String], sizes: [String: Int]) -> String {
         var fields = [metadataPrefix]
+        if item.kind == ActivityDetail.thinkingKind { fields.append("kind=" + item.kind) }
         let isResult = item.id.hasSuffix(":result")
         let callID = isResult ? String(item.id.dropLast(":result".count)) : item.id
         let call = isResult ? nil : parsedCall(item.text)
-        if let name = call?.name ?? names[callID] { fields.append("tool=" + name) }
+        if let name = call?.name ?? item.tool ?? names[callID] { fields.append("tool=" + name) }
         if let call {
             if let target = headlineKeys.lazy.compactMap({ call.input[$0] as? String }).first(where: { !$0.isEmpty }) {
                 fields.append("target=" + quoted(String(target.prefix(300))))
@@ -204,12 +211,14 @@ public enum ActivityRetention {
             if let output = sizes[item.id + ":result"] { fields.append("output=\(output)") }
         } else if isResult {
             fields.append("output=\(sizes[item.id] ?? 0)")
-            let exit = exitStatus(item.text)
+            let exit = item.exitCode ?? exitStatus(item.text)
             if let exit { fields.append("exit=\(exit)") }
-            if exit.map({ $0 != 0 }) ?? looksFailed(item.text) { fields.append("error=" + quoted(lastLines(item.text))) }
+            if exit.map({ $0 != 0 }) ?? (item.failed == true || looksFailed(item.text)) { fields.append("error=" + quoted(lastLines(item.text))) }
         } else {
             fields.append("size=\(sizes[item.id] ?? 0)")
+            if item.tool != nil, let output = sizes[item.id + ":result"] { fields.append("output=\(output)") }
         }
+        if let seconds = item.seconds, seconds.isFinite, seconds >= 0 { fields.append("seconds=" + String(format: "%.1f", seconds)) }
         return fields.joined(separator: " ")
     }
 
