@@ -107,15 +107,30 @@ import ContextCore
     #expect(turns[1]["sandboxPolicy"]["type"].string == "workspaceWrite")
     await model.refreshModels()
     #expect(model.currentModel == "model-b" && model.effort == "low")
-    model.newChat(); model.selectAccessMode(.fullAccess); model.selectModel("new-model"); model.effort = "medium"
+    model.newChat()
+    model.updateProjectRoles(project.id, chatRole: AgentRoleID.fullOperator, jobRole: nil, extraRoots: nil, cookieSites: nil)
+    model.selectModel("new-model"); model.effort = "medium"
     model.draft = "Create a new conversation"
     await model.send()
     let created = try #require(model.selectedChat)
     #expect(created.model == "new-model" && created.effort == "medium" && created.inheritsProjectAccess == true && created.resolvedAccessMode(in: model.state.projects[0]) == .fullAccess)
     model.newChat()
     #expect(model.accessMode == .fullAccess)
+    // The role chip of a new chat sets that chat's role only; the project default stays.
+    model.selectRole(AgentRoleID.reader)
+    #expect(model.currentRole.id == AgentRoleID.reader && model.roleSelection == AgentRoleID.reader)
+    #expect(model.state.projects[0].chatRoleID == AgentRoleID.fullOperator)
+    model.draft = "Create a reader conversation"
+    await model.send()
+    let reader = try #require(model.selectedChat)
+    #expect(reader.id != created.id && reader.roleID == AgentRoleID.reader && reader.inheritsProjectAccess == false)
+    #expect(model.state.projects[0].chatRoleID == AgentRoleID.fullOperator)
+    model.finishActiveTurn(threadID: reader.id, turnID: "turn-created-2", status: .completed, hasError: false)
+    // The picked role is used once; the next new chat starts at the project default again.
+    model.newChat()
+    #expect(model.currentRole.id == AgentRoleID.fullOperator && model.roleSelection == nil)
     // A later project default must reach resume and turn/start for inherited chats.
-    model.selectAccessMode(.standard)
+    model.updateProjectRoles(project.id, chatRole: AgentRoleID.editor, jobRole: nil, extraRoots: nil, cookieSites: nil)
     model.finishActiveTurn(threadID: created.id, turnID: "turn-created-1", status: .completed, hasError: false)
     model.chatID = created.id; model.draft = "Use the changed project default"
     await model.send()
@@ -163,7 +178,13 @@ import ContextCore
     inherited.inheritsProjectAccess = true
     model.state.chats = [legacy, inherited]
     #expect(model.accessMode == .standard)
+    // In a new chat the role chip changes only the chat being created, never the project default.
     model.selectAccessMode(.fullAccess)
+    #expect(model.accessMode == .fullAccess && model.accessSelection == .fullAccess)
+    #expect(model.state.projects[0].defaultChatAccessMode == nil && model.state.projects[0].chatRoleID == nil)
+    model.selectRole(nil)
+    #expect(model.accessMode == .standard && model.accessSelection == nil)
+    model.updateProjectRoles(project.id, chatRole: AccessMode.fullAccess.legacyRoleID, jobRole: nil, extraRoots: nil, cookieSites: nil)
     #expect(model.state.projects[0].defaultChatAccessMode == .fullAccess)
     #expect(model.state.projects[0].accessMode == nil)
     model.chatID = legacy.id
@@ -175,10 +196,10 @@ import ContextCore
     #expect(model.state.projects[0].defaultChatAccessMode == .fullAccess)
     model.selectAccessMode(nil)
     #expect(model.accessMode == .fullAccess && model.accessSelection == nil)
-    model.newChat(); model.selectAccessMode(.standard)
+    model.newChat(); model.updateProjectRoles(project.id, chatRole: AccessMode.standard.legacyRoleID, jobRole: nil, extraRoots: nil, cookieSites: nil)
     model.chatID = inherited.id
     #expect(model.accessMode == .standard)
-    model.newChat(); model.selectAccessMode(.fullAccess)
+    model.newChat(); model.updateProjectRoles(project.id, chatRole: AccessMode.fullAccess.legacyRoleID, jobRole: nil, extraRoots: nil, cookieSites: nil)
     model.projectID = other.id
     #expect(model.accessMode == .standard)
     // A separate store round-trip verifies persisted defaults, inheritance and legacy behavior.

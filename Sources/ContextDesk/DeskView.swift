@@ -948,8 +948,6 @@ struct SidebarItemStyle: ButtonStyle {
 
 struct ChatView: View {
     @ObservedObject var model: DeskModel
-    @State private var followOutput = true
-    @State private var showingUsage = false
     @State private var composerFocused = false
     @State private var composerHeight: CGFloat = 22
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -961,6 +959,8 @@ struct ChatView: View {
     /// Composer column: the transcript's readable text width (magnified with the interface zoom) plus the composer's side insets.
     private var columnWidth: CGFloat { InterfaceZoom.shared.scaled(TranscriptScrollView.readableWidth) + 48 }
     /// The composer grows and shrinks smoothly; past its cap the height no longer changes, so nothing animates.
+    /// The footer under the composer only names a non-direct or unavailable route.
+    private var showsComposerFooter: Bool { model.currentRoute != .direct || !model.routeIsAvailable(model.currentRoute) }
     private func resizeComposer(_ height: CGFloat) {
         let visible = { (h: CGFloat) in min(max(h, 40), 220) }
         guard !reduceMotion, visible(height) != visible(composerHeight) else { composerHeight = height; return }
@@ -990,7 +990,7 @@ struct ChatView: View {
                     HandoffRestoreButton(model: model, composer: model.composer)
                 }.padding(.horizontal, .ui(24))
             }
-            ChatHistoryView(model: model, transcript: model.transcript, followOutput: followOutput, onOpenFile: openPreview)
+            ChatHistoryView(model: model, transcript: model.transcript, onOpenFile: openPreview)
             if let action = model.currentAction {
                 ActionView(action: action, model: model).id(action.id)
                     .task(id: "\(action.id):\(model.loadingChat)") {
@@ -1081,81 +1081,35 @@ struct ChatView: View {
                     ChipMenu(title: model.roleSelection.flatMap { model.roleCatalog.role($0)?.title } ?? model.projectRoleTitle,
                              systemImage: model.accessMode == .fullAccess ? "lock.open" : "lock") {
                         Picker(L10n.text("Роль", "Role"), selection: Binding(get: { model.roleSelection }, set: { model.selectRole($0) })) {
-                            if model.selectedChat != nil { Text(model.projectRoleTitle).tag(Optional<String>.none) }
+                            Text(model.projectRoleTitle).tag(Optional<String>.none)
                             ForEach(model.roleCatalog.interactive) { role in Text(role.title).tag(Optional(role.id)) }
                         }.pickerStyle(.inline).labelsHidden()
                     }.disabled(model.busy || model.sending)
-                        .help(model.currentRole.summary + " " + L10n.text("В новом чате задаёт роль по умолчанию для проекта; в существующем — роль этого чата. Применяется со следующего сообщения.", "In a new chat, sets the project's default role; in an existing chat, this chat's role. Applies from the next message."))
+                        .help(model.currentRole.summary + " " + L10n.text("Роль этого чата; применяется со следующего сообщения. Роль по умолчанию задаётся в настройках проекта.", "This chat’s role; applies from the next message. The default role is set in the project settings."))
+                    ModelChip(model: model)
                     Spacer()
-                    if model.chatID == nil {
-                        ChipMenu(title: model.currentAgent == .appClaude ? "Claude" : "Codex", systemImage: "sparkle") {
-                            Picker(L10n.text("Провайдер", "Provider"), selection: Binding(get: { model.currentAgent }, set: { model.selectAgent($0) })) {
-                                Text("Codex").tag(AgentConnectionID.originalCodex)
-                                Text("Claude").tag(AgentConnectionID.appClaude)
-                            }.pickerStyle(.inline).labelsHidden()
-                        }.disabled(model.sending)
-                            .help(L10n.text("Провайдер нового чата", "Provider for the new chat"))
-                    } else {
-                        ChipLabel(title: model.currentAgentName, systemImage: "sparkle")
-                            .font(.ui(.callout)).foregroundStyle(.secondary).padding(.horizontal, .ui(9))
-                            .help(L10n.text("Провайдер этого чата", "Provider for this chat"))
-                    }
-                    if model.currentAgent == .appClaude {
-                        ClaudeModelSelector(model: model)
-                        ClaudeEffortPicker(model: model)
-                    } else if !model.models.isEmpty {
-                        ChipMenu(title: model.currentModel.isEmpty ? L10n.text("Авто", "Auto")
-                                 : model.models.first(where: { $0.id == model.currentModel })?.displayName ?? model.currentModel) {
-                            Picker(L10n.text("Модель", "Model"), selection: Binding(get: { model.currentModel }, set: { model.selectModel($0) })) {
-                                Text(L10n.text("Авто", "Auto")).tag("")
-                                if !model.currentModel.isEmpty && !model.models.contains(where: { $0.id == model.currentModel }) {
-                                    Text(model.currentModel).tag(model.currentModel)
-                                }
-                                ForEach(model.models, id: \.self) { entry in Text(entry.displayName).tag(entry.id) }
-                            }.pickerStyle(.inline).labelsHidden()
-                        }.disabled(model.busy)
-                        if !model.supportedEfforts.isEmpty {
-                            ChipMenu(title: model.effort.isEmpty ? L10n.text("Авто", "Auto") : model.effort) {
-                                Picker(L10n.text("Рассуждение", "Reasoning"), selection: Binding(get: { model.effort }, set: { model.effort = $0 })) {
-                                    Text(L10n.text("Авто", "Auto")).tag("")
-                                    if !model.effort.isEmpty && !model.supportedEfforts.contains(model.effort) {
-                                        Text(model.effort).tag(model.effort)
-                                    }
-                                    ForEach(model.supportedEfforts, id: \.self) { Text($0).tag($0) }
-                                }.pickerStyle(.inline).labelsHidden()
-                            }.disabled(model.busy)
-                        }
-                    }
+                    ContextRing(usage: model.currentUsage, claude: model.currentAgent == .appClaude)
                     SendControl(model: model, composer: model.composer, reduceMotion: reduceMotion)
                 }.padding(.horizontal, .ui(8)).padding(.bottom, .ui(8))
             }.background(RoundedRectangle(cornerRadius: 20).fill(DeskPalette.canvas).shadow(color: DeskPalette.shadow, radius: 14, y: 4))
                 .overlay(RoundedRectangle(cornerRadius: 20.75).stroke(DeskPalette.focusBorder, lineWidth: 1.5).padding(-0.75)
                     .opacity(composerFocused ? 1 : 0).allowsHitTesting(false))
                 .frame(maxWidth: columnWidth).padding(.horizontal, .ui(24)).padding(.top, .ui(10))
+                .padding(.bottom, showsComposerFooter ? 0 : .ui(14))
             }
-            HStack(spacing: .ui(12)) {
-                if model.currentRoute != .direct {
-                    Text(model.routeTitle(model.currentRoute)).help(model.routeMessage(model.currentRoute))
-                }
-                if !model.routeIsAvailable(model.currentRoute) {
-                    Text(L10n.text("Недоступен", "Unavailable")).foregroundStyle(DeskPalette.attention)
-                }
-                Button { showingUsage.toggle() } label: {
-                    Text(UsageDetail.footer(model.currentUsage))
-                }.buttonStyle(PointerButtonStyle(base: .plain)).popover(isPresented: $showingUsage) { UsageDetail(usage: model.currentUsage, claude: model.currentAgent == .appClaude).padding(20).frame(width: 330) }
-                if let usage = model.currentUsage, usage.cacheTTL != nil {
-                    TimelineView(.periodic(from: .now, by: 30)) { context in
-                        if let state = usage.cacheState(now: context.date) {
-                            Text(UsageDetail.cacheBadge(state))
-                                .foregroundStyle(state.needsAttention ? DeskPalette.attention : Color.secondary)
-                                .help(UsageDetail.cacheHelp)
-                        }
+            // Only a non-direct route or an unavailable one leaves anything to say below the composer.
+            if showsComposerFooter {
+                HStack(spacing: .ui(12)) {
+                    if model.currentRoute != .direct {
+                        Text(model.routeTitle(model.currentRoute)).help(model.routeMessage(model.currentRoute))
                     }
-                }
-                Spacer()
-                Toggle(L10n.text("Следить за ответом", "Follow response"), isOn: $followOutput).toggleStyle(.checkbox).pointingHandCursor()
-            }.font(.ui(.caption2)).foregroundStyle(.secondary).padding(.horizontal, .ui(12))
-                .frame(maxWidth: columnWidth).padding(.horizontal, .ui(24)).padding(.top, .ui(8)).padding(.bottom, .ui(12))
+                    if !model.routeIsAvailable(model.currentRoute) {
+                        Text(L10n.text("Недоступен", "Unavailable")).foregroundStyle(DeskPalette.attention)
+                    }
+                    Spacer()
+                }.font(.ui(.caption2)).foregroundStyle(.secondary).padding(.horizontal, .ui(12))
+                    .frame(maxWidth: columnWidth).padding(.horizontal, .ui(24)).padding(.top, .ui(8)).padding(.bottom, .ui(12))
+            }
         }
         .animation(DeskMotion.standard(reduceMotion), value: model.currentAction?.id)
         .background(DeskPalette.canvas)
@@ -1250,7 +1204,6 @@ struct ChatView: View {
 struct ChatHistoryView: View {
     @ObservedObject var model: DeskModel
     @ObservedObject var transcript: TranscriptPresentation
-    let followOutput: Bool
     var onOpenFile: ((URL, Int?) -> Void)? = nil
     var body: some View {
         if model.loadingChat {
@@ -1268,7 +1221,8 @@ struct ChatHistoryView: View {
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             let renderedItems = transcript.items
-            NativeTranscript(items: renderedItems, conversationID: model.chatID, followOutput: followOutput,
+            // Always following: the transcript itself stops while the reader is scrolled up and resumes at the end.
+            NativeTranscript(items: renderedItems, conversationID: model.chatID, followOutput: true,
                              isWorking: model.busy, workingStatus: model.workingStatus, workingSince: model.workingSince, unreadCompletionID: model.selectedChat?.unreadCompletionID,
                              unreadResponseItemID: model.chatID.flatMap { model.unreadResponseItems[$0] },
                              projectPath: model.selectedProject?.path, onOpenFile: onOpenFile) { threadID, completionID in

@@ -1,5 +1,6 @@
 import SwiftUI
 import ContextTranscript
+import ContextCore
 
 /// A flat composer control: title and chevron without a bezel, highlighted on hover.
 struct ChipMenu<Content: View>: View {
@@ -27,6 +28,67 @@ struct ChipLabel: View {
             Text(title).lineLimit(1)
             if chevron { Image(systemName: "chevron.down").font(.ui(size: 8, weight: .bold)).foregroundStyle(.tertiary) }
         }
+    }
+}
+
+/// Context use as a small ring beside the send button; a dot marks a prompt cache that expired or is about to.
+/// A click opens the "Context and tokens" details.
+struct ContextRing: View {
+    let usage: UsageSnapshot?
+    let claude: Bool
+    @State private var showingDetails = false
+
+    /// The ring turns amber from this share of the context window.
+    static let highFraction = 0.8
+
+    /// Short summary for the tooltip and VoiceOver: the context share (or "no data") and the cache time.
+    static func summary(_ usage: UsageSnapshot?, cache: PromptCacheState?, language: AppLanguage = L10n.language) -> String {
+        var parts = [UsageDetail.footer(usage, language: language)]
+        if let cache { parts.append(UsageDetail.cacheBadge(cache, language: language)) }
+        return parts.joined(separator: " · ")
+    }
+
+    /// The summary plus, while the dot is shown, why an expired cache costs more.
+    static func help(_ usage: UsageSnapshot?, cache: PromptCacheState?) -> String {
+        let summary = summary(usage, cache: cache)
+        return cache?.needsAttention == true ? summary + "\n\n" + UsageDetail.cacheHelp : summary
+    }
+
+    var body: some View {
+        // The cache state depends on the clock, so it is re-read every 30 seconds, as the footer badge did.
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            let cache = usage?.cacheState(now: context.date)
+            Button { showingDetails.toggle() } label: { ring(cache: cache) }
+                .buttonStyle(PointerButtonStyle(base: .plain))
+                .help(Self.help(usage, cache: cache))
+                .accessibilityLabel(Self.summary(usage, cache: cache))
+        }
+        .popover(isPresented: $showingDetails) { UsageDetail(usage: usage, claude: claude).padding(20).frame(width: 330) }
+    }
+
+    private func ring(cache: PromptCacheState?) -> some View {
+        let fraction = usage?.contextFraction
+        let lineWidth = CGFloat.ui(2.5)
+        return ZStack {
+            Circle().stroke(DeskPalette.selection, lineWidth: lineWidth)
+            if let fraction, fraction > 0 {
+                Circle().trim(from: 0, to: max(0.03, fraction))
+                    .stroke(fraction >= Self.highFraction ? DeskPalette.attention : DeskPalette.accent,
+                            style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+            }
+        }
+        .frame(width: .ui(16), height: .ui(16))
+        .overlay(alignment: .topTrailing) {
+            if cache?.needsAttention == true {
+                Circle().fill(DeskPalette.attention)
+                    .overlay(Circle().stroke(DeskPalette.canvas, lineWidth: 1.5))
+                    .frame(width: .ui(7), height: .ui(7))
+                    .offset(x: .ui(2), y: -.ui(2))
+            }
+        }
+        .frame(width: .ui(28), height: .ui(28))
+        .contentShape(Rectangle())
     }
 }
 

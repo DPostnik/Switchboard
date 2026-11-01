@@ -393,7 +393,7 @@ public struct NativeTranscript: NSViewRepresentable {
         }
     }
 
-    @objc private func jumpToEnd() {
+    @objc func jumpToEnd() {
         scrollToEnd()
         updateJumpToLatest()
     }

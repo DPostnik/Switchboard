@@ -1093,6 +1093,19 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     #expect(UsageDetail.cacheLifetime(3600, language: .russian) == "1 ч" && UsageDetail.cacheLifetime(300, language: .english) == "5 min")
 }
 
+@MainActor @Test func contextRingSummaryAndModelChipTitleInBothLanguages() {
+    let half = UsageSnapshot(last: 500, window: 1000)
+    #expect(ContextRing.summary(nil, cache: nil, language: .english) == "Context: no data")
+    #expect(ContextRing.summary(half, cache: .warm(remaining: 2500), language: .english) == "Context ≈50% · Cache: 42 min")
+    #expect(ContextRing.summary(half, cache: .cold, language: .russian) == "Контекст ≈50% · Кэш остыл")
+    // The cost explanation accompanies the dot only.
+    #expect(ContextRing.help(half, cache: .cold).hasSuffix(UsageDetail.cacheHelp))
+    #expect(ContextRing.help(half, cache: .expiring(remaining: 30)).hasSuffix(UsageDetail.cacheHelp))
+    #expect(!ContextRing.help(half, cache: .warm(remaining: 2500)).contains(UsageDetail.cacheHelp))
+    #expect(ModelChip.title(model: "Opus 5.5", effort: "High") == "Opus 5.5 · High")
+    #expect(ModelChip.title(model: "Auto", effort: nil) == "Auto")
+}
+
 private let claudeSkills = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Skills")
 private actor StartCounter {
     var value = 0
