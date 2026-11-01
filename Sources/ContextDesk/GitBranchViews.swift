@@ -117,33 +117,6 @@ struct ProjectTitleLayout: Layout {
     }
 }
 
-/// The current chat's branch (in its own folder, `DeskModel.workingDirectory(forChat:)`) beside the composer's
-/// other chips; nothing outside a repository. A chat in its own worktree shows the worktree icon first.
-struct ComposerBranchChip: View {
-    let store: GitStatusStore
-    let path: String?
-    var worktree: ChatWorktree? = nil
-
-    var body: some View {
-        if let status = store.status(for: path) {
-            HStack(spacing: .ui(4)) {
-                if worktree != nil { Image(systemName: WorktreeText.symbol).imageScale(.small).foregroundStyle(.secondary) }
-                GitBranchBadge(status: status, maxNameWidth: 160)
-            }
-                .font(.ui(.callout))
-                .padding(.horizontal, .ui(9)).frame(height: .ui(28))
-                .contentShape(Capsule())
-                .help([worktree.map { WorktreeText.tooltip($0) }, GitBranchText.summary(status)].compactMap { $0 }.joined(separator: "\n"))
-        } else if let worktree {
-            // The worktree folder is gone or not read yet: its recorded branch.
-            Label(WorktreeText.name(worktree), systemImage: WorktreeText.symbol)
-                .font(.ui(.callout)).foregroundStyle(.secondary).lineLimit(1)
-                .padding(.horizontal, .ui(9)).frame(height: .ui(28))
-                .help(WorktreeText.tooltip(worktree))
-        }
-    }
-}
-
 /// A chat row's title; when the chat works in its own worktree, or last worked on another branch than the
 /// project's current one, the title keeps one line and that branch appears under it, so the row height does not change.
 struct ChatRowTitle: View {

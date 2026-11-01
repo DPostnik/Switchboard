@@ -272,6 +272,20 @@ public actor CodexIntegration: AgentIntegration {
                         route: route, executable: executable, home: environment.home, workspace: environment.workspace,
                         providerArguments: providerArguments, language: AppLanguage(rawValue: request.language) ?? .english,
                         willStart: start))
+                case .commitMessageV1:
+                    let text = try await runner.structured(input: request.historicalInput, instructions: GitGeneration.commitInstructions,
+                        schema: GitGeneration.commitSchema, model: request.model.model, route: route, executable: executable,
+                        home: environment.home, workspace: environment.workspace, providerArguments: providerArguments, willStart: start)
+                    do { output = .commitMessage(try GitGeneration.commitMessage(from: text)) }
+                    catch { throw SummaryRunFailure(uncertain: false, message: error.localizedDescription) }
+                case .pullRequestV1:
+                    let text = try await runner.structured(input: request.historicalInput, instructions: GitGeneration.pullRequestInstructions,
+                        schema: GitGeneration.pullRequestSchema, model: request.model.model, route: route, executable: executable,
+                        home: environment.home, workspace: environment.workspace, providerArguments: providerArguments, willStart: start)
+                    do {
+                        let draft = try GitGeneration.pullRequest(from: text)
+                        output = .pullRequest(title: draft.title, body: draft.body)
+                    } catch { throw SummaryRunFailure(uncertain: false, message: error.localizedDescription) }
                 case .archiveSummaryV1:
                     guard let directory = environment.recipeDirectory else { return .rejected(.invalidInput) }
                     let fragments = try JSONDecoder().decode([AgentSummaryFragment].self, from: Data(request.historicalInput.utf8))

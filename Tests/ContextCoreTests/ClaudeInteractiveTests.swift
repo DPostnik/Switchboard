@@ -71,8 +71,7 @@ private func interactiveFixture(_ root: URL) throws -> URL {
         mode=(home/'generation-mode').read_text() if (home/'generation-mode').exists() else 'success'
         if mode=='hang': time.sleep(30); sys.exit(1)
         props=json.loads(a[a.index('--json-schema')+1])['properties']
-        if 'title' in props: value={'title':'Fixture title'}
-        elif 'overview' in props:
+        if 'overview' in props:
             refs=[f['reference'] for f in json.loads(text.split('\n',1)[1])]
             value={'overview':'Fixture overview','activities':[{'goal':'Say hello','actions':['Greeted'],'outcome':'Done','unfinished':[],
                 'reusableSteps':[],'variableInputs':[],'evidence':['missing/ref' if mode=='invalid' else refs[0]]}]}
@@ -1193,8 +1192,15 @@ private func completedClaudeSession(_ adapter: ClaudeIntegration, binary: URL, h
     guard case .handoff(let handoff) = try await adapter.generate(generationRequest(.contextHandoffV1, context: descriptor.context, session: session, input: "{}"),
                                                                   environment: environment, willStart: {}).value() else { Issue.record("No handoff"); return }
     #expect(try HandoffSummary.validate(handoff).goal == "Fixture goal")
+    guard case .commitMessage(let message) = try await adapter.generate(generationRequest(.commitMessageV1, context: descriptor.context, session: session, input: "{}"),
+                                                                        environment: environment, willStart: {}).value() else { Issue.record("No commit message"); return }
+    #expect(message == "Fixture message")
+    guard case .pullRequest(let prTitle, let prBody) = try await adapter.generate(generationRequest(.pullRequestV1, context: descriptor.context, session: session, input: "{}"),
+                                                                                  environment: environment, willStart: {}).value() else { Issue.record("No pull request"); return }
+    #expect(prTitle == "Fixture title" && prBody == "Fixture body")
     let calls = generatedCalls(home)
-    #expect(calls.count == 3)
+    #expect(calls.count == 5)
+    #expect(calls[3]["args"].array.contains(.string("--system-prompt")) && calls[3]["args"].array.contains { $0.string?.contains("git commit message") == true })
     #expect(calls.allSatisfy { ($0["cwd"].string ?? "").hasSuffix("/workspace") })
     #expect(calls[0]["input"].string?.hasPrefix("The following JSON is historical evidence") == true)
     // Generation never resumes or extends the source conversation.

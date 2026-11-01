@@ -1124,7 +1124,7 @@ struct ChatView: View {
                     }.disabled(model.busy || model.sending)
                         .help(model.currentRole.summary + " " + L10n.text("Роль этого чата; применяется со следующего сообщения. Роль по умолчанию задаётся в настройках проекта.", "This chat’s role; applies from the next message. The default role is set in the project settings."))
                     ModelChip(model: model)
-                    ComposerBranchChip(store: model.gitStatus, path: model.selectedWorkingDirectory, worktree: model.selectedChat?.worktree)
+                    GitActionsChip(model: model, folder: model.composerGitFolder, worktree: model.selectedChat?.worktree)
                     if model.chatID == nil, let project = model.selectedProject, model.gitStatus.status(for: project.path) != nil {
                         NewChatWorkspaceChip(model: model, project: project)
                     }
