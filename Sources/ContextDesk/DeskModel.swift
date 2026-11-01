@@ -61,6 +61,9 @@ private struct ChatRunState: Equatable {
     private var remoteHistoryCache: [String: (revision: Int, session: AgentSessionReference?, messages: [TranscriptItem])] = [:]
     @Published var configuringBrowserChats: Set<String> = []
     @Published var newChatBrowserProfiles: [UUID: UUID] = [:]
+    /// Project ID -> role picked in the composer for the project's next new chat; absent follows the project default.
+    /// It applies to that chat only; the project default changes in the project settings.
+    @Published var newChatRoles: [UUID: String] = [:]
     /// Chat ID -> PID of its running Chrome for Testing; refreshed by `startBrowserActivityMonitor`.
     @Published var runningBrowserChats: [String: Int32] = [:]
     @Published private(set) var composerFocusRequest: UUID?
@@ -1048,14 +1051,20 @@ private struct ChatRunState: Equatable {
         catch { self.error = L10n.text("Чат удалён у агента, но не удалось сохранить изменения в приложении: ", "The chat was deleted in the agent, but the change could not be saved in the app: ") + error.localizedDescription }
     }
     var roleCatalog: AgentRoleCatalog { state.roleCatalog }
-    /// The role the selected chat runs with, or the project's chat default for a new chat.
+    /// The role the selected chat runs with; for a new chat, the role picked for it or the project's chat default.
     var currentRole: AgentRole {
         guard let project = state.projects.first(where: { $0.id == projectID }) else { return AgentRoleCatalog.preset(AgentRoleID.editor) }
-        return selectedChat?.resolvedRole(in: project, catalog: roleCatalog) ?? project.chatRole(roleCatalog)
+        if let chat = selectedChat { return chat.resolvedRole(in: project, catalog: roleCatalog) }
+        return newChatRole(for: project) ?? project.chatRole(roleCatalog)
     }
+    /// The explicit role picked for the project's next new chat, if it still exists in the catalog.
+    func newChatRole(for project: Project) -> AgentRole? { roleCatalog.role(newChatRoles[project.id]) }
     var accessMode: AccessMode { currentRole.legacyAccessMode }
-    /// nil while the selected chat follows the project default.
-    var roleSelection: String? { selectedChat?.inheritsProjectRole == true ? nil : currentRole.id }
+    /// nil while the selected chat (or the new chat) follows the project default.
+    var roleSelection: String? {
+        guard let chat = selectedChat else { return selectedProject.flatMap { newChatRole(for: $0)?.id } }
+        return chat.inheritsProjectRole ? nil : currentRole.id
+    }
     var accessSelection: AccessMode? { roleSelection.map { _ in accessMode } }
     var projectRoleTitle: String {
         let role = state.projects.first { $0.id == projectID }?.chatRole(roleCatalog) ?? AgentRoleCatalog.preset(AgentRoleID.editor)
@@ -1090,19 +1099,19 @@ private struct ChatRunState: Equatable {
         case .scratch: L10n.text("папка research", "research folder")
         }
     }
-    /// A chat's role (nil follows the project); for a new chat, the project's chat default. The legacy mode stays in step for the phone.
+    /// A chat's role (nil follows the project). For a new chat it is the role of the chat being created only;
+    /// the project default changes in the project settings (`updateProjectRoles`). The legacy mode stays in step for the phone.
     func selectRole(_ id: String?) {
         guard !busy, !sending, !isChangingChat(currentRunKey) else { return }
+        guard id == nil || roleCatalog.role(id) != nil else { return }
         if let index = state.chats.firstIndex(where: { $0.id == chatID }) {
-            guard id == nil || roleCatalog.role(id) != nil else { return }
             state.chats[index].roleID = id
             state.chats[index].inheritsProjectAccess = id == nil
             state.chats[index].accessMode = roleCatalog.role(id)?.legacyAccessMode
-        } else if let id, let role = roleCatalog.role(id), let index = state.projects.firstIndex(where: { $0.id == projectID }) {
-            state.projects[index].chatRoleID = id
-            state.projects[index].defaultChatAccessMode = role.legacyAccessMode
-        } else { return }
-        persist()
+            persist()
+        } else if chatID == nil, let projectID, state.projects.contains(where: { $0.id == projectID }) {
+            newChatRoles[projectID] = id
+        }
     }
     func selectAccessMode(_ mode: AccessMode?) { selectRole(mode?.legacyRoleID) }
     /// Project defaults for chats and jobs plus the declared extra roots; the agent never changes these.
@@ -1404,7 +1413,9 @@ private struct ChatRunState: Equatable {
         let role: AgentRole
         if scheduledRun != nil { role = scheduledRole ?? project.jobRole(roleCatalog) }
         else if let threadID { role = state.chats.first { $0.id == threadID }?.resolvedRole(in: project, catalog: roleCatalog) ?? project.chatRole(roleCatalog) }
-        else { role = project.chatRole(roleCatalog) }
+        else { role = newChatRole(for: project) ?? project.chatRole(roleCatalog) }
+        // A role picked for this new chat belongs to it; nil keeps the chat following the project default.
+        let explicitNewChatRole = scheduledRun == nil && threadID == nil ? newChatRole(for: project) : nil
         let access = role.profile(for: project)
         let newConnection = scheduledRun == nil ? currentAgent : scheduledAgent
         let route = scheduledRoute ?? (threadID == nil ? (newConnection == .appClaude ? .direct : defaultRoute) : (state.chats.first { $0.id == threadID }?.route ?? .direct))
@@ -1432,9 +1443,13 @@ private struct ChatRunState: Equatable {
                 guard ConversationIdentity.appID(for: nativeCreated, in: state, connection: session.connection) == nil else { throw ConversationIdentity.invalidStorage }
                 var chat = Chat(session: session, projectID: project.id, title: ChatTitle.placeholder(), model: selectedModel)
                 chat.effort = selectedEffort
-                chat.accessMode = scheduledRun == nil ? nil : role.legacyAccessMode
-                chat.roleID = scheduledRun == nil ? nil : role.id
-                chat.inheritsProjectAccess = scheduledRun == nil
+                let explicitRole = scheduledRun == nil ? explicitNewChatRole : role
+                chat.accessMode = explicitRole?.legacyAccessMode
+                chat.roleID = explicitRole?.id
+                chat.inheritsProjectAccess = explicitRole == nil
+                if let explicitNewChatRole, newChatRoles[project.id] == explicitNewChatRole.id {
+                    newChatRoles.removeValue(forKey: project.id)
+                }
                 let created = chat.id
                 id = created
                 tokenTotals[created] = .zero

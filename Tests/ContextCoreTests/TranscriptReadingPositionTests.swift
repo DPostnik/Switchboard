@@ -91,6 +91,46 @@ import ContextCore
     #expect(view.isAtTranscriptEnd)
 }
 
+/// The chat always passes follow = true: scrolling up stops following, returning to the end or the jump button resumes it.
+@Test @MainActor func scrollingUpStopsFollowingAndReturningToTheEndResumes() {
+    let positions = TranscriptReadingPositions()
+    var items = readingItems()
+    let view = readingView(positions)
+    view.update(items: items, conversationID: "a", followOutput: true)
+    view.layoutSubtreeIfNeeded()
+    #expect(view.isAtTranscriptEnd)
+    func stream(_ id: String) {
+        items.append(TranscriptItem(id: id, kind: "assistant", text: String(repeating: "Streamed / Поток\n", count: 20)))
+        view.update(items: items, conversationID: "a", followOutput: true, isWorking: true)
+        view.layoutSubtreeIfNeeded()
+    }
+    stream("first")
+    #expect(view.isAtTranscriptEnd)
+    // Scrolled up: new output arrives below, the reader keeps their place.
+    view.contentView.scroll(to: NSPoint(x: 0, y: 900))
+    view.reflectScrolledClipView(view.contentView)
+    stream("second")
+    #expect(!view.isAtTranscriptEnd)
+    #expect(abs(view.contentView.bounds.origin.y - 900) < 2)
+    // Back at the end by scrolling: following resumes.
+    if let container = view.transcript.textContainer { view.transcript.layoutManager?.ensureLayout(for: container) }
+    view.transcript.scrollRangeToVisible(NSRange(location: view.transcript.textStorage?.length ?? 0, length: 0))
+    view.reflectScrolledClipView(view.contentView)
+    #expect(view.isAtTranscriptEnd)
+    stream("third")
+    #expect(view.isAtTranscriptEnd)
+    // Scrolled up again, then the jump-to-latest button: following resumes too.
+    view.contentView.scroll(to: NSPoint(x: 0, y: 900))
+    view.reflectScrolledClipView(view.contentView)
+    stream("fourth")
+    #expect(!view.isAtTranscriptEnd)
+    view.jumpToEnd()
+    view.layoutSubtreeIfNeeded()
+    #expect(view.isAtTranscriptEnd)
+    stream("fifth")
+    #expect(view.isAtTranscriptEnd)
+}
+
 @Test @MainActor func streamedTextWaitsForTheScrollGestureToEnd() {
     let positions = TranscriptReadingPositions()
     let items = readingItems()
