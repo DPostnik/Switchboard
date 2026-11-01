@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-01
+
 ### Added
 
 - Detailed activity: Claude thinking and Codex reasoning appear as a collapsed "Thinking · 12 s" row that expands to the text; shell commands show the command line, a check or "exit 1" badge and, when expanded, the last 200 lines of output with a copy button.
@@ -51,5 +53,6 @@ First numbered release. Switchboard has been its author's daily client for Codex
 
 - Repository layout for the release: design documents moved to `design/`, performance probes to `scripts/perf/`; the September browser research scripts and the workflow prototype were removed; the skill checks run with the test suite.
 
-[Unreleased]: https://github.com/DPostnik/Switchboard/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/DPostnik/Switchboard/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/DPostnik/Switchboard/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/DPostnik/Switchboard/releases/tag/v1.0.0
