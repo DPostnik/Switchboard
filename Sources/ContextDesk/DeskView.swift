@@ -1345,7 +1345,7 @@ struct UsageDetail: View {
     static func footer(_ usage: UsageSnapshot?, language: AppLanguage = L10n.language) -> String {
         if let fraction = usage?.contextFraction { return L10n.text("Контекст ≈\(Int(fraction * 100))%", "Context ≈\(Int(fraction * 100))%", language: language) }
         if let last = usage?.last {
-            let value = last.formatted(.number.locale(language.locale))
+            let value = tokens(last)
             return L10n.text("Контекст (токены): \(value)", "Context: \(value) tokens", language: language)
         }
         return L10n.text("Контекст: нет данных", "Context: no data", language: language)
@@ -1367,26 +1367,91 @@ struct UsageDetail: View {
         ttl >= 3600 ? L10n.text("\(Int(ttl / 3600)) ч", "\(Int(ttl / 3600)) h", language: language)
                     : L10n.text("\(Int(ttl / 60)) мин", "\(Int(ttl / 60)) min", language: language)
     }
+    /// Exact token count grouped by thousands with a no-break space in both languages: 1 000 000.
+    static func tokens(_ value: Int) -> String {
+        let digits = Array(String(value.magnitude))
+        var text = ""
+        for (index, digit) in digits.enumerated() {
+            if index > 0, (digits.count - index) % 3 == 0 { text.append("\u{a0}") }
+            text.append(digit)
+        }
+        return value < 0 ? "-" + text : text
+    }
+    /// Cache row value: "42 min of 1 h", or that it has expired.
+    static func cacheRemaining(_ state: PromptCacheState, ttl: TimeInterval, language: AppLanguage = L10n.language) -> String {
+        switch state {
+        case .warm(let remaining), .expiring(let remaining):
+            let minutes = max(1, Int((remaining / 60).rounded(.up)))
+            let lifetime = cacheLifetime(ttl, language: language)
+            return L10n.text("\(minutes) мин из \(lifetime)", "\(minutes) min of \(lifetime)", language: language)
+        case .cold: return L10n.text("Остыл", "Expired", language: language)
+        }
+    }
+    /// Time only for today, otherwise the short date as well.
+    static func time(_ date: Date, now: Date = Date()) -> String {
+        let style: Date.FormatStyle = Calendar.current.isDate(date, inSameDayAs: now)
+            ? .dateTime.hour().minute() : .dateTime.day().month(.abbreviated).hour().minute()
+        return date.formatted(style.locale(L10n.locale))
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(L10n.text("Контекст и токены", "Context and tokens")).font(.ui(.headline))
-            if let usage {
-                LabeledContent(L10n.text("Последний запрос", "Last request"), value: usage.last.map(String.init) ?? L10n.text("Нет данных", "No data"))
-                LabeledContent(L10n.text("Окно контекста", "Context window"), value: usage.window.map(String.init) ?? L10n.text("Нет данных", "No data"))
-                Divider()
-                LabeledContent(L10n.text("Входные за разговор", "Conversation input"), value: usage.input.map(String.init) ?? L10n.text("Нет данных", "No data"))
-                LabeledContent(L10n.text("Из них из кэша", "Cached input"), value: usage.cached.map(String.init) ?? L10n.text("Нет данных", "No data"))
-                LabeledContent(L10n.text("Выходные", "Output"), value: usage.output.map(String.init) ?? L10n.text("Нет данных", "No data"))
-                if let requested = usage.lastRequestAt, let ttl = usage.cacheTTL, let state = usage.cacheState() {
-                    Divider()
-                    LabeledContent(L10n.text("Кэш промпта", "Prompt cache"), value: Self.cacheBadge(state))
-                    LabeledContent(L10n.text("Срок кэша", "Cache lifetime"), value: Self.cacheLifetime(ttl))
-                    LabeledContent(L10n.text("Запрос к модели", "Model request"), value: L10n.date(requested))
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(L10n.text("Контекст и токены", "Context and tokens")).font(.ui(.headline))
+                Spacer()
+                if let fraction = usage?.contextFraction {
+                    Text(fraction.formatted(.percent.precision(.fractionLength(0)).locale(L10n.locale)))
+                        .font(.ui(.headline)).monospacedDigit()
+                        .foregroundStyle(fraction >= ContextRing.highFraction ? DeskPalette.attention : .primary)
                 }
-                Text(L10n.text("Измерено: \(L10n.date(usage.measuredAt))", "Measured: \(L10n.date(usage.measuredAt))")).font(.ui(.caption))
+            }
+            if let usage {
+                if let fraction = usage.contextFraction {
+                    ProgressView(value: fraction)
+                        .tint(fraction >= ContextRing.highFraction ? DeskPalette.attention : DeskPalette.accent)
+                }
+                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+                    row(L10n.text("Занято", "In use"), usage.last)
+                    row(L10n.text("Окно", "Window"), usage.window)
+                    section(L10n.text("За разговор", "This conversation"))
+                    row(L10n.text("Вход", "Input"), usage.input)
+                    row(cachedLabel(usage), usage.cached, indented: true)
+                    row(L10n.text("Выход", "Output"), usage.output)
+                    if let ttl = usage.cacheTTL, let state = usage.cacheState() {
+                        section(L10n.text("Кэш промпта", "Prompt cache"))
+                        GridRow {
+                            Text(L10n.text("Осталось", "Left")).foregroundStyle(.secondary)
+                            Text(Self.cacheRemaining(state, ttl: ttl)).monospacedDigit().gridColumnAlignment(.trailing)
+                                .foregroundStyle(state.needsAttention ? DeskPalette.attention : .primary)
+                        }
+                    }
+                }
+                Text(L10n.text("Обновлено в \(Self.time(usage.measuredAt))", "Updated at \(Self.time(usage.measuredAt))"))
+                    .font(.ui(.caption)).foregroundStyle(.secondary)
             } else { Text(claude ? L10n.text("Показатели появятся после ответа Claude.", "Metrics will appear after Claude responds.") : L10n.text("Показатели появятся после ответа Codex.", "Metrics will appear after Codex responds.")) }
-            Text(L10n.text("Процент — оценка по последнему событию, а не точный порог сжатия. Кэш уже входит во входные токены. Эти числа не равны расходу лимита подписки.", "The percentage is an estimate from the latest event, not an exact compaction threshold. Cached tokens are included in input tokens. These numbers do not represent subscription usage."))
-                .font(.ui(.caption)).foregroundStyle(.secondary)
+            Text(L10n.text("Процент — оценка, а не порог сжатия. Кэш входит во вход. Это не расход лимита подписки.", "The percentage is an estimate, not the compaction threshold. Cached tokens are part of input. This is not subscription usage."))
+                .font(.ui(.caption)).foregroundStyle(.tertiary)
+        }
+    }
+
+    private func cachedLabel(_ usage: UsageSnapshot) -> String {
+        let label = L10n.text("из кэша", "cached")
+        guard let input = usage.input, let cached = usage.cached, input > 0 else { return label }
+        let share = (Double(cached) / Double(input)).formatted(.percent.precision(.fractionLength(0)).locale(L10n.locale))
+        return "\(label) · \(share)"
+    }
+
+    private func row(_ label: String, _ value: Int?, indented: Bool = false) -> some View {
+        GridRow {
+            Text(label).foregroundStyle(.secondary).padding(.leading, indented ? 12 : 0)
+            Text(value.map(Self.tokens) ?? "—").monospacedDigit().gridColumnAlignment(.trailing)
+        }
+    }
+
+    private func section(_ title: String) -> some View {
+        GridRow {
+            Text(title.uppercased()).font(.ui(.caption).weight(.semibold)).foregroundStyle(.tertiary)
+                .padding(.top, 8).gridCellColumns(2)
         }
     }
 }
