@@ -70,19 +70,6 @@ final class ScreenFrameProbe {
     var compactPlacement: CompactPopoverPlacement {
         frames.map { CompactPopoverPlacement.choose(anchor: $0.anchor, visible: $0.visible) } ?? .fallback
     }
-
-    /// Diagnostics for popover placement: the anchor and screen frames, then where AppKit put the popover windows.
-    func logPlacement(_ label: String) {
-        let frames = frames, placement = compactPlacement
-        AppLog.ui.info("\(label, privacy: .public) anchor \(String(describing: frames?.anchor), privacy: .public) visible \(String(describing: frames?.visible), privacy: .public) edge \(String(describing: placement.edge), privacy: .public) max \(placement.maxHeight, privacy: .public)")
-        for delay in [0.4, 1.5] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                for window in NSApp.windows where window.isVisible && String(describing: type(of: window)).contains("Popover") {
-                    AppLog.ui.info("\(label, privacy: .public) +\(delay, privacy: .public)s popover \(String(describing: window.frame), privacy: .public)")
-                }
-            }
-        }
-    }
 }
 
 /// A popover's content at a height fixed when it opens. A SwiftUI popover that changes height after it is shown

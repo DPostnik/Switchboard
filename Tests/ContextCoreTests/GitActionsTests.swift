@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import AgentContract
 @testable import ContextCore
+@testable import ContextDesk
 
 /// A temporary folder with git repositories configured so the user's global identity, signing and hooks never apply.
 private struct GitSandbox {
@@ -394,4 +395,14 @@ private extension URL {
         try FileManager.default.createDirectory(at: self, withIntermediateDirectories: true)
         return self
     }
+}
+
+@Test @MainActor func gitMenuHeaderIsCompactInBothLanguages() {
+    let status = GitStatus(branch: "main", commit: "abc", upstream: "origin/main", ahead: 2, behind: 1, changedFiles: 3)
+    #expect(GitMenuText.header(status) == "main  ↑2  ↓1")
+    #expect(GitMenuText.header(GitStatus(branch: "main", commit: "abc", upstream: "origin/main")) == "main")
+    #expect(GitMenuText.subtitle(status, language: .english) == "origin/main · 3 changed files")
+    #expect(GitMenuText.subtitle(status, language: .russian) == "origin/main · изменено файлов: 3")
+    #expect(GitMenuText.subtitle(GitStatus(branch: "topic", commit: "abc"), language: .english) == "not published · no changes")
+    #expect(GitMenuText.subtitle(GitStatus(branch: "main", commit: "abc", upstream: "origin/main", changedFiles: 1), language: .english) == "origin/main · 1 changed file")
 }

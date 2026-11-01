@@ -63,43 +63,41 @@ enum GitActionSheet: Identifiable {
     }
 }
 
-/// The composer's branch chip; a click opens the «Git» popover with the folder's state and actions.
+/// The composer's branch chip; a click opens a native «Git» menu with the folder's state and the actions it allows.
+/// The menu opens at once: it is built from the live branch status and a cached copy of the slower facts (remote,
+/// default branch), refreshed in the background whenever the status changes. Like any menu it closes on a
+/// choice: Push and Pull run with a spinner in the chip, a failure shows git's output in an alert, and the
+/// commit and pull request flows open their sheets.
 struct GitActionsChip: View {
     @ObservedObject var model: DeskModel
     let folder: String?
     /// A chat in its own worktree shows the worktree icon first.
     var worktree: ChatWorktree? = nil
-    @State private var showingActions = false
-    @State private var opening = false
-    @State private var preloaded: GitRepositoryState?
-    @State private var placement = CompactPopoverPlacement.fallback
-    @State private var panelHeight: CGFloat = 1
-    @State private var anchor = ScreenFrameProbe()
+    @State private var cached: GitRepositoryState?
+    @State private var running: GitAction?
+    @State private var succeeded: GitAction?
+    @State private var failure: GitActionFailure?
+    @State private var confirmingPush: GitRepositoryState?
     @State private var sheet: GitActionSheet?
+    private let actions = GitActions()
 
     var body: some View {
         // The stack stays in place without a status so a running sheet is not torn down by a status refresh.
         HStack(spacing: 0) {
             if let folder, let status = model.gitStatus.status(for: folder) {
-                Button { toggle(folder) } label: {
+                Menu { menu(folder: folder, status: status) } label: {
                     HStack(spacing: .ui(4)) {
-                        if worktree != nil { Image(systemName: WorktreeText.symbol).imageScale(.small).foregroundStyle(.secondary) }
+                        if running != nil { ProgressView().uiSmallSpinner() }
+                        else if succeeded != nil { Image(systemName: "checkmark").foregroundStyle(DeskPalette.accent).imageScale(.small) }
+                        else if worktree != nil { Image(systemName: WorktreeText.symbol).imageScale(.small).foregroundStyle(.secondary) }
                         GitBranchBadge(status: status, maxNameWidth: 160)
                     }
                 }
-                    .buttonStyle(ChipButtonStyle()).pointingHandCursor()
-                    .help(([worktree.map { WorktreeText.tooltip($0) }, GitBranchText.summary(status)].compactMap { $0 }.joined(separator: "\n"))
-                          + "\n" + L10n.text("Нажми, чтобы открыть действия Git", "Click for Git actions"))
-                    .background(ScreenFrameReader(probe: anchor))
-                    .popover(isPresented: $showingActions, arrowEdge: placement.edge) {
-                        FixedHeightPopover(height: panelHeight) {
-                            GitActionsPanel(model: model, folder: folder, initial: preloaded) { next in
-                                showingActions = false
-                                // Let the popover close before the sheet opens.
-                                Task { try? await Task.sleep(for: .milliseconds(200)); sheet = next }
-                            }
-                        }
-                    }
+                .menuStyle(.button).buttonStyle(ChipButtonStyle()).menuIndicator(.hidden).fixedSize()
+                .pointingHandCursor()
+                .disabled(running != nil)
+                .help([worktree.map { WorktreeText.tooltip($0) }, GitBranchText.summary(status)].compactMap { $0 }.joined(separator: "\n"))
+                .task(id: GitCacheKey(folder: folder, status: status)) { await refreshCache(folder) }
             } else if let worktree {
                 // The worktree folder is gone or not read yet: its recorded branch.
                 Label(WorktreeText.name(worktree), systemImage: WorktreeText.symbol)
@@ -108,7 +106,20 @@ struct GitActionsChip: View {
                     .help(WorktreeText.tooltip(worktree))
             }
         }
-        .disabled(opening)
+        .confirmationDialog(L10n.text("Отправить прямо в \(confirmingPush?.pushBranch ?? "")?", "Push directly to \(confirmingPush?.pushBranch ?? "")?"),
+                            isPresented: Binding(get: { confirmingPush != nil }, set: { if !$0 { confirmingPush = nil } }),
+                            presenting: confirmingPush) { state in
+            Button(L10n.text("Отправить в \(state.pushBranch ?? "")", "Push to \(state.pushBranch ?? "")")) { run(.push, state: state) }
+            Button(L10n.text("Отмена", "Cancel"), role: .cancel) {}
+        } message: { _ in
+            Text(L10n.text("Это основная ветка репозитория. Коммиты попадут в неё без PR.",
+                           "This is the repository's default branch. The commits land there without a pull request."))
+        }
+        .alert(failure?.title ?? "", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } }), presenting: failure) { _ in
+            Button("OK", role: .cancel) {}
+        } message: { failure in
+            Text(failure.output)
+        }
         .sheet(item: $sheet) { value in
             if let folder {
                 switch value {
@@ -123,198 +134,130 @@ struct GitActionsChip: View {
         }
     }
 
-    /// AppKit fits a popover to the screen only when it opens, so the repository state is read first and the
-    /// popover opens at its final height, on the side of the chip with more room.
-    private func toggle(_ folder: String) {
-        if showingActions { showingActions = false; return }
-        opening = true
+    @ViewBuilder private func menu(folder: String, status: GitStatus) -> some View {
+        let busy = model.gitFolderBusy(folder)
+        let state = cached.map { GitRepositoryState(root: $0.root, status: status, files: $0.files, remote: $0.remote, defaultBranch: $0.defaultBranch) }
+        let pullRequest = knownPullRequest(folder)
+        Section(GitMenuText.header(status)) {
+            Text(GitMenuText.subtitle(status))
+        }
+        if busy {
+            Text(L10n.text("Агент работает в этой папке: действия доступны после конца хода.",
+                           "An agent is working in this folder: actions unlock when the turn ends."))
+        } else if status.isDetached {
+            Text(L10n.text("HEAD отсоединён: переключись на ветку, чтобы коммитить.", "Detached HEAD: switch to a branch to commit."))
+        } else if status.behind > 0 {
+            Text(L10n.text("Ветка отстаёт: сначала подтяни изменения.", "The branch is behind: pull before pushing."))
+        }
+        if case .open(let url) = pullRequest, let link = URL(string: url) {
+            Divider()
+            Button { NSWorkspace.shared.open(link) } label: {
+                Label(L10n.text("Открыть PR этой ветки", "Open This Branch's Pull Request"), systemImage: "arrow.triangle.pull")
+            }
+        }
+        if let state {
+            let offered = GitAction.allCases.filter { action in
+                if action == .createPR, case .open = pullRequest { return false }
+                return GitActions.availability(action, state: state, gitHubAvailable: actions.gitHubAvailable,
+                                               pullRequest: pullRequest, folderBusy: false).isEnabled
+            }
+            if !offered.isEmpty { Divider() }
+            ForEach(offered) { action in
+                Button { perform(action, folder: folder, state: state) } label: {
+                    Label(action.menuTitle + (action == .push && status.ahead > 0 ? "  ↑\(status.ahead)" : "")
+                                           + (action == .pull && status.behind > 0 ? "  ↓\(status.behind)" : ""),
+                          systemImage: action.icon)
+                }
+                .disabled(busy)
+            }
+            if offered.isEmpty && !busy && !status.isDetached {
+                Text(L10n.text("Изменений нет, ветка синхронизирована.", "Nothing to do: no changes and in sync."))
+            }
+        } else {
+            Text(L10n.text("Читаю репозиторий…", "Reading the repository…"))
+        }
+    }
+
+    /// The PR badge's knowledge of an open PR for this branch; Create PR stays possible when it knows none
+    /// (gh then reports an existing one).
+    private func knownPullRequest(_ folder: String) -> GitPullRequestLookup {
+        guard let known = model.pullRequestStatus(folder: folder), known.state == .open || known.state == .draft else { return .none }
+        return .open(known.url)
+    }
+
+    private func refreshCache(_ folder: String) async {
+        let actions = actions
+        if let fresh = await Task.detached(operation: { await actions.state(at: folder) }).value { cached = fresh }
+    }
+
+    private func perform(_ action: GitAction, folder: String, state: GitRepositoryState) {
+        // The menu was built a moment ago; a turn may have started since.
+        guard running == nil, !model.gitFolderBusy(folder) else { return }
+        switch action {
+        case .commit, .commitAndPush, .commitPushAndCreatePR, .createPR:
+            // The sheets list the files to commit, so they get a fresh read rather than the cached one.
+            running = action
+            Task {
+                let actions = actions
+                let fresh = await Task.detached { await actions.state(at: folder) }.value
+                running = nil
+                guard let fresh else { return }
+                cached = fresh
+                sheet = action == .createPR ? .pullRequest(fresh) : .commit(action, fresh)
+            }
+        case .push:
+            if state.pushesToDefaultBranch { confirmingPush = state } else { run(.push, state: state) }
+        case .pull:
+            run(.pull, state: state)
+        }
+    }
+
+    private func run(_ action: GitAction, state: GitRepositoryState) {
+        guard let folder, running == nil, !model.gitFolderBusy(folder) else { return }
+        running = action; succeeded = nil
         Task {
-            let actions = GitActions()
-            preloaded = await Task.detached { await actions.state(at: folder) }.value
-            placement = anchor.compactPlacement
-            panelHeight = FixedHeightPopover<EmptyView>.height(
-                of: GitActionsPanel(model: model, folder: folder, initial: preloaded) { _ in }, placement: placement)
-            opening = false
-            showingActions = true
-            anchor.logPlacement("git-popover")
+            let outcome = action == .push ? await actions.push(state: state) : await actions.pull(root: state.root)
+            running = nil
+            model.gitStatus.refresh(folder, after: .zero)
+            if outcome.succeeded {
+                succeeded = action
+                try? await Task.sleep(for: .seconds(2))
+                if succeeded == action { succeeded = nil }
+            } else {
+                failure = GitActionFailure(title: L10n.text("\(action.title): ошибка", "\(action.title) failed"),
+                                           output: String(outcome.output.suffix(1500)))
+            }
         }
     }
 }
 
-/// «Git»: branch, upstream, ahead/behind and changed files, with the actions the state allows.
-struct GitActionsPanel: View {
-    @ObservedObject var model: DeskModel
+/// Refreshes the chip's cached repository facts whenever the folder or its status changes.
+private struct GitCacheKey: Equatable {
     let folder: String
-    let open: (GitActionSheet) -> Void
-    @State private var state: GitRepositoryState?
-    @State private var loaded = false
-    @State private var pullRequest: GitPullRequestLookup = .checking
-    @State private var running: GitAction?
-    @State private var result: (action: GitAction, outcome: GitActions.Outcome)?
-    @State private var confirmingPush = false
-    private let actions = GitActions()
+    let status: GitStatus
+}
 
-    init(model: DeskModel, folder: String, initial: GitRepositoryState? = nil, open: @escaping (GitActionSheet) -> Void) {
-        self.model = model; self.folder = folder; self.open = open
-        _state = State(initialValue: initial); _loaded = State(initialValue: initial != nil)
-        // The PR badge already knows an open PR for this branch; the panel's own lookup confirms it.
-        if let known = model.pullRequestStatus(folder: folder), known.state == .open || known.state == .draft {
-            _pullRequest = State(initialValue: .open(known.url))
-        }
+private struct GitActionFailure: Equatable {
+    let title: String
+    let output: String
+}
+
+/// The menu's header: the branch with its sync state, then the upstream and the changes.
+enum GitMenuText {
+    static func header(_ status: GitStatus) -> String {
+        var parts = [status.branch ?? status.displayName]
+        if status.ahead > 0 { parts.append("↑\(status.ahead)") }
+        if status.behind > 0 { parts.append("↓\(status.behind)") }
+        return parts.joined(separator: "  ")
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: .ui(8)) {
-            if let state {
-                content(state)
-            } else if loaded {
-                Text(L10n.text("Папка не в git-репозитории или git не ответил.", "The folder is not in a git repository, or git did not answer."))
-                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            } else {
-                ProgressView().uiSmallSpinner()
-            }
-        }
-        .font(.ui(.callout))
-        .padding(.ui(12)).frame(width: .ui(300), alignment: .leading)
-        .task { await load() }
-    }
-
-    @ViewBuilder private func content(_ state: GitRepositoryState) -> some View {
-        let busy = model.gitFolderBusy(folder)
-        header(state.status)
-        // The popover keeps the height it opened with, so the last action's outcome goes first, where it is seen.
-        if let result {
-            Label(result.outcome.succeeded ? L10n.text("\(result.action.title): готово", "\(result.action.title): done")
-                                           : L10n.text("\(result.action.title): ошибка", "\(result.action.title): failed"),
-                  systemImage: result.outcome.succeeded ? "checkmark.circle" : "xmark.octagon")
-                .font(.ui(.caption))
-                .foregroundStyle(result.outcome.succeeded ? DeskPalette.accent : DeskPalette.problemInk)
-            if !result.outcome.output.isEmpty { GitOutputText(text: result.outcome.output) }
-        }
-        if busy {
-            warning(L10n.text("Агент работает в этой папке: действия доступны после конца хода.",
-                              "An agent is working in this folder: actions unlock when the turn ends."))
-        } else if state.status.isDetached {
-            warning(L10n.text("HEAD отсоединён: переключись на ветку, чтобы коммитить.",
-                              "Detached HEAD: switch to a branch to commit."))
-        } else if state.status.behind > 0 {
-            warning(L10n.text("Ветка отстаёт: сначала подтяни изменения.", "The branch is behind: pull before pushing."))
-        }
-        let rows = GitAction.allCases.filter { offered($0, state: state) }
-        if case .open(let url) = pullRequest, let link = URL(string: url) {
-            Divider()
-            GitMenuRow(icon: "arrow.triangle.pull", title: L10n.text("Открыть PR этой ветки", "Open this branch's pull request"),
-                       detail: nil, enabled: true, running: false) { NSWorkspace.shared.open(link) }
-        }
-        if !rows.isEmpty {
-            Divider()
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(rows) { action in row(action, state: state, busy: busy) }
-            }
-        } else if !busy, !state.status.isDetached {
-            Text(L10n.text("Изменений нет, ветка синхронизирована.", "Nothing to do: no changes and in sync."))
-                .font(.ui(.caption)).foregroundStyle(.secondary)
-        }
-    }
-
-    /// Branch with its sync state on one line, the upstream and changes under it.
-    private func header(_ status: GitStatus) -> some View {
-        VStack(alignment: .leading, spacing: .ui(2)) {
-            HStack(spacing: .ui(6)) {
-                Image(systemName: "arrow.triangle.branch").foregroundStyle(.secondary)
-                Text(status.branch ?? status.displayName).font(.ui(.callout).weight(.semibold))
-                    .lineLimit(1).truncationMode(.middle)
-                Spacer(minLength: .ui(8))
-                if status.ahead > 0 { Text("↑\(status.ahead)").foregroundStyle(.secondary).monospacedDigit() }
-                if status.behind > 0 { Text("↓\(status.behind)").foregroundStyle(DeskPalette.attention).monospacedDigit() }
-            }
-            Text(subtitle(status)).font(.ui(.caption)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-        }
-        .help(GitBranchText.summary(status))
-    }
-
-    private func subtitle(_ status: GitStatus) -> String {
-        let upstream = status.upstream ?? (status.branch == nil ? L10n.text("без ветки", "no branch") : L10n.text("не опубликована", "not published"))
+    static func subtitle(_ status: GitStatus, language: AppLanguage = L10n.language) -> String {
+        let upstream = status.upstream ?? (status.branch == nil ? L10n.text("без ветки", "no branch", language: language)
+                                                                : L10n.text("не опубликована", "not published", language: language))
         let changes = status.hasChanges
-            ? L10n.text("изменено файлов: \(status.changedFiles)", status.changedFiles == 1 ? "1 changed file" : "\(status.changedFiles) changed files")
-            : L10n.text("нет изменений", "no changes")
+            ? L10n.text("изменено файлов: \(status.changedFiles)", status.changedFiles == 1 ? "1 changed file" : "\(status.changedFiles) changed files", language: language)
+            : L10n.text("нет изменений", "no changes", language: language)
         return upstream + " · " + changes
-    }
-
-    /// Actions that make sense in this state. Disabled ones are left out rather than explained, except while an
-    /// agent works (they unlock at the end of the turn) and Create PR while the existing-PR check runs, so the
-    /// popover keeps the height it was measured with.
-    private func offered(_ action: GitAction, state: GitRepositoryState) -> Bool {
-        if action == .createPR, case .open = pullRequest { return false }
-        let lookup: GitPullRequestLookup = pullRequest == .checking ? .none : pullRequest
-        return GitActions.availability(action, state: state, gitHubAvailable: actions.gitHubAvailable,
-                                       pullRequest: lookup, folderBusy: false).isEnabled
-    }
-
-    @ViewBuilder private func row(_ action: GitAction, state: GitRepositoryState, busy: Bool) -> some View {
-        let availability = GitActions.availability(action, state: state, gitHubAvailable: actions.gitHubAvailable,
-                                                   pullRequest: pullRequest, folderBusy: busy)
-        let detail: String? = switch action {
-        case .push: state.status.ahead > 0 ? "↑\(state.status.ahead)" : nil
-        case .pull: state.status.behind > 0 ? "↓\(state.status.behind)" : nil
-        default: nil
-        }
-        GitMenuRow(icon: action.icon, title: action.menuTitle, detail: detail,
-                   enabled: availability.isEnabled && running == nil, running: running == action) { perform(action, state: state) }
-            .help(availability.reason ?? action.title)
-            .confirmationDialog(L10n.text("Отправить прямо в \(state.pushBranch ?? "")?", "Push directly to \(state.pushBranch ?? "")?"),
-                                isPresented: Binding(get: { confirmingPush && action == .push }, set: { confirmingPush = $0 })) {
-                Button(L10n.text("Отправить в \(state.pushBranch ?? "")", "Push to \(state.pushBranch ?? "")")) { Task { await push(state) } }
-                Button(L10n.text("Отмена", "Cancel"), role: .cancel) {}
-            } message: {
-                Text(L10n.text("Это основная ветка репозитория. Коммиты попадут в неё без PR.",
-                               "This is the repository's default branch. The commits land there without a pull request."))
-            }
-    }
-
-    private func warning(_ text: String) -> some View {
-        Label(text, systemImage: "exclamationmark.triangle").foregroundStyle(DeskPalette.attention)
-            .font(.ui(.caption)).fixedSize(horizontal: false, vertical: true)
-    }
-
-    private func perform(_ action: GitAction, state: GitRepositoryState) {
-        // The availability was computed at render time; a turn may have started since.
-        guard !model.gitFolderBusy(folder) else { return }
-        switch action {
-        case .commit, .commitAndPush, .commitPushAndCreatePR: open(.commit(action, state))
-        case .createPR: open(.pullRequest(state))
-        case .push:
-            if state.pushesToDefaultBranch { confirmingPush = true } else { Task { await push(state) } }
-        case .pull:
-            Task {
-                running = .pull
-                let outcome = await actions.pull(root: state.root)
-                finish(.pull, outcome)
-            }
-        }
-    }
-
-    private func push(_ state: GitRepositoryState) async {
-        guard running == nil, !model.gitFolderBusy(folder) else { return }
-        running = .push
-        finish(.push, await actions.push(state: state))
-    }
-
-    private func finish(_ action: GitAction, _ outcome: GitActions.Outcome) {
-        running = nil
-        result = (action, outcome)
-        model.gitStatus.refresh(folder, after: .zero)
-        Task { await load() }
-    }
-
-    private func load() async {
-        let actions = actions, folder = folder
-        let fresh = await Task.detached { await actions.state(at: folder) }.value
-        state = fresh; loaded = true
-        guard let fresh, actions.gitHubAvailable, fresh.remote != nil, fresh.status.upstream != nil, let head = fresh.pushBranch else {
-            pullRequest = .none; return
-        }
-        pullRequest = await Task.detached { await actions.pullRequest(root: fresh.root, head: head) }.value
     }
 }
 
@@ -642,33 +585,6 @@ struct GitPullRequestSheet: View {
         running = true
         defer { running = false; model.gitStatus.refresh(folder, after: .zero) }
         outcome = await actions.createPullRequest(title: title, body: text, base: base, head: head, draft: draft, root: state.root)
-    }
-}
-
-/// A full-width row like a menu item: icon, title, optional trailing detail, highlight on hover.
-private struct GitMenuRow: View {
-    let icon: String
-    let title: String
-    let detail: String?
-    let enabled: Bool
-    let running: Bool
-    let action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: .ui(8)) {
-                Image(systemName: icon).frame(width: .ui(18)).foregroundStyle(.secondary)
-                Text(title).lineLimit(1)
-                Spacer(minLength: .ui(8))
-                if running { ProgressView().uiSmallSpinner() } else if let detail { Text(detail).foregroundStyle(.secondary).monospacedDigit() }
-            }
-            .padding(.horizontal, .ui(8)).frame(height: .ui(28))
-            .background(hovering && enabled ? DeskPalette.subtle : .clear, in: RoundedRectangle(cornerRadius: 6))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain).disabled(!enabled).opacity(enabled ? 1 : 0.45)
-        .onHover { hovering = $0 }
     }
 }
 

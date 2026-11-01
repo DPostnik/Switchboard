@@ -11,5 +11,4 @@ enum AppLog {
     static let remote = Logger(subsystem: subsystem, category: "remote")
     static let browser = Logger(subsystem: subsystem, category: "browser")
     static let processes = Logger(subsystem: subsystem, category: "processes")
-    static let ui = Logger(subsystem: subsystem, category: "ui")
 }

@@ -25,7 +25,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 ### Fixed
 
 - The Git and pull request popovers in the composer open at their full size on the side with more room and scroll instead of running past the screen edge.
-- The Git popover is simpler: the branch with its sync state and changes in a header, then only the actions that apply, as menu rows; the reasons for unavailable actions moved to tooltips.
+- The Git chip opens a native menu at once instead of a popover: the branch with its sync state and changes as a header, then only the actions that apply; Push and Pull close the menu and run with a spinner in the chip, failures show git's output in an alert.
 
 ## [1.0.0] - 2026-10-31
 
