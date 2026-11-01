@@ -59,3 +59,9 @@ struct PopoverPlacementTests {
     let tiny = CompactPopoverPlacement.choose(anchor: CGRect(x: 0, y: 40, width: 100, height: 28), visible: CGRect(x: 0, y: 0, width: 400, height: 150))
     #expect(tiny.maxHeight == CompactPopoverPlacement.minimumHeight)
 }
+
+@MainActor @Test func fixedHeightPopoverMeasuresBeforeOpeningAndCaps() {
+    let view = Color.clear.frame(width: 200, height: 300)
+    #expect(FixedHeightPopover<EmptyView>.height(of: view, placement: CompactPopoverPlacement(edge: .top, maxHeight: 500)) == 300)
+    #expect(FixedHeightPopover<EmptyView>.height(of: view, placement: CompactPopoverPlacement(edge: .top, maxHeight: 200)) == 200)
+}

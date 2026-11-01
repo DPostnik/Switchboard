@@ -70,23 +70,36 @@ final class ScreenFrameProbe {
     var compactPlacement: CompactPopoverPlacement {
         frames.map { CompactPopoverPlacement.choose(anchor: $0.anchor, visible: $0.visible) } ?? .fallback
     }
+
+    /// Diagnostics for popover placement: the anchor and screen frames, then where AppKit put the popover windows.
+    func logPlacement(_ label: String) {
+        let frames = frames, placement = compactPlacement
+        AppLog.ui.info("\(label, privacy: .public) anchor \(String(describing: frames?.anchor), privacy: .public) visible \(String(describing: frames?.visible), privacy: .public) edge \(String(describing: placement.edge), privacy: .public) max \(placement.maxHeight, privacy: .public)")
+        for delay in [0.4, 1.5] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                for window in NSApp.windows where window.isVisible && String(describing: type(of: window)).contains("Popover") {
+                    AppLog.ui.info("\(label, privacy: .public) +\(delay, privacy: .public)s popover \(String(describing: window.frame), privacy: .public)")
+                }
+            }
+        }
+    }
 }
 
-/// Scrolls its content once it is taller than `maxHeight`; below that it takes exactly the content's height,
-/// so a popover keeps its natural size and never outgrows the room it was opened in.
-struct CappedScroll<Content: View>: View {
-    let maxHeight: CGFloat
+/// A popover's content at a height fixed when it opens. A SwiftUI popover that changes height after it is shown
+/// grows downward from its top edge (seen on macOS 26: a popover above a composer chip ran 323 pt past the screen
+/// bottom), so content is measured before presentation and anything added later scrolls inside this frame.
+struct FixedHeightPopover<Content: View>: View {
+    let height: CGFloat
     @ViewBuilder let content: Content
-    @State private var height: CGFloat = 0
 
     var body: some View {
-        ScrollView {
-            content.background(GeometryReader { proxy in
-                Color.clear.onAppear { height = proxy.size.height }.onChange(of: proxy.size.height) { _, new in height = new }
-            })
-        }
-        .scrollBounceBehavior(.basedOnSize)
-        .frame(height: min(max(height, 1), maxHeight))
+        ScrollView { content }.scrollBounceBehavior(.basedOnSize).frame(height: height)
+    }
+
+    /// The natural height of `view`, capped to the room the placement allows.
+    @MainActor static func height(of view: some View, placement: CompactPopoverPlacement) -> CGFloat {
+        let natural = NSHostingView(rootView: view.fixedSize(horizontal: false, vertical: true)).fittingSize.height
+        return min(max(natural, 1), placement.maxHeight)
     }
 }
 

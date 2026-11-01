@@ -53,23 +53,28 @@ struct PullRequestBadge: View {
 struct ComposerPullRequestChip: View {
     @ObservedObject var model: DeskModel
     @State private var showing = false
-    @State private var placement = CompactPopoverPlacement.fallback
+    @State private var edge = CompactPopoverPlacement.fallback.edge
+    @State private var height: CGFloat = 1
     @State private var anchor = ScreenFrameProbe()
 
     var body: some View {
         let folder = model.composerPullRequestFolder
         if let status = model.pullRequestStatus(folder: folder) {
+            let panel = PullRequestPopover(model: model, status: status, chatID: model.chatID).padding(16).frame(width: .ui(320))
             Button {
-                if !showing { placement = anchor.compactPlacement }
+                if !showing {
+                    // Measured before it opens: a popover that changes height after presentation leaves the screen.
+                    let placement = anchor.compactPlacement
+                    edge = placement.edge
+                    height = FixedHeightPopover<EmptyView>.height(of: panel, placement: placement)
+                }
                 showing.toggle()
             } label: { PullRequestBadge(status: status) }
                 .buttonStyle(ChipButtonStyle()).fixedSize().pointingHandCursor()
                 .help(PullRequestText.summary(status))
                 .background(ScreenFrameReader(probe: anchor))
-                .popover(isPresented: $showing, arrowEdge: placement.edge) {
-                    CappedScroll(maxHeight: placement.maxHeight) {
-                        PullRequestPopover(model: model, status: status, chatID: model.chatID).padding(16).frame(width: .ui(320))
-                    }
+                .popover(isPresented: $showing, arrowEdge: edge) {
+                    FixedHeightPopover(height: height) { panel }
                 }
         }
     }

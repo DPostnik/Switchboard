@@ -73,6 +73,7 @@ struct GitActionsChip: View {
     @State private var opening = false
     @State private var preloaded: GitRepositoryState?
     @State private var placement = CompactPopoverPlacement.fallback
+    @State private var panelHeight: CGFloat = 1
     @State private var anchor = ScreenFrameProbe()
     @State private var sheet: GitActionSheet?
 
@@ -91,10 +92,12 @@ struct GitActionsChip: View {
                           + "\n" + L10n.text("Нажми, чтобы открыть действия Git", "Click for Git actions"))
                     .background(ScreenFrameReader(probe: anchor))
                     .popover(isPresented: $showingActions, arrowEdge: placement.edge) {
-                        GitActionsPanel(model: model, folder: folder, initial: preloaded, maxHeight: placement.maxHeight) { next in
-                            showingActions = false
-                            // Let the popover close before the sheet opens.
-                            Task { try? await Task.sleep(for: .milliseconds(200)); sheet = next }
+                        FixedHeightPopover(height: panelHeight) {
+                            GitActionsPanel(model: model, folder: folder, initial: preloaded) { next in
+                                showingActions = false
+                                // Let the popover close before the sheet opens.
+                                Task { try? await Task.sleep(for: .milliseconds(200)); sheet = next }
+                            }
                         }
                     }
             } else if let worktree {
@@ -121,7 +124,7 @@ struct GitActionsChip: View {
     }
 
     /// AppKit fits a popover to the screen only when it opens, so the repository state is read first and the
-    /// popover opens at its full size, on the side of the chip with more room.
+    /// popover opens at its final height, on the side of the chip with more room.
     private func toggle(_ folder: String) {
         if showingActions { showingActions = false; return }
         opening = true
@@ -129,8 +132,11 @@ struct GitActionsChip: View {
             let actions = GitActions()
             preloaded = await Task.detached { await actions.state(at: folder) }.value
             placement = anchor.compactPlacement
+            panelHeight = FixedHeightPopover<EmptyView>.height(
+                of: GitActionsPanel(model: model, folder: folder, initial: preloaded) { _ in }, placement: placement)
             opening = false
             showingActions = true
+            anchor.logPlacement("git-popover")
         }
     }
 }
@@ -139,7 +145,6 @@ struct GitActionsChip: View {
 struct GitActionsPanel: View {
     @ObservedObject var model: DeskModel
     let folder: String
-    let maxHeight: CGFloat
     let open: (GitActionSheet) -> Void
     @State private var state: GitRepositoryState?
     @State private var loaded = false
@@ -149,34 +154,40 @@ struct GitActionsPanel: View {
     @State private var confirmingPush = false
     private let actions = GitActions()
 
-    init(model: DeskModel, folder: String, initial: GitRepositoryState? = nil, maxHeight: CGFloat = CompactPopoverPlacement.fallback.maxHeight,
-         open: @escaping (GitActionSheet) -> Void) {
-        self.model = model; self.folder = folder; self.maxHeight = maxHeight; self.open = open
+    init(model: DeskModel, folder: String, initial: GitRepositoryState? = nil, open: @escaping (GitActionSheet) -> Void) {
+        self.model = model; self.folder = folder; self.open = open
         _state = State(initialValue: initial); _loaded = State(initialValue: initial != nil)
     }
 
     var body: some View {
-        CappedScroll(maxHeight: maxHeight) {
-            VStack(alignment: .leading, spacing: .ui(10)) {
-                Text("Git").font(.ui(.headline))
-                if let state {
-                    content(state)
-                } else if loaded {
-                    Text(L10n.text("Папка не в git-репозитории или git не ответил.", "The folder is not in a git repository, or git did not answer."))
-                        .foregroundStyle(.secondary)
-                } else {
-                    ProgressView().uiSmallSpinner()
-                }
+        VStack(alignment: .leading, spacing: .ui(10)) {
+            Text("Git").font(.ui(.headline))
+            if let state {
+                content(state)
+            } else if loaded {
+                Text(L10n.text("Папка не в git-репозитории или git не ответил.", "The folder is not in a git repository, or git did not answer."))
+                    .foregroundStyle(.secondary)
+            } else {
+                ProgressView().uiSmallSpinner()
             }
-            .font(.ui(.callout))
-            .padding(.ui(16)).frame(width: .ui(340), alignment: .leading)
         }
+        .font(.ui(.callout))
+        .padding(.ui(16)).frame(width: .ui(340), alignment: .leading)
         .task { await load() }
     }
 
     @ViewBuilder private func content(_ state: GitRepositoryState) -> some View {
         let busy = model.gitFolderBusy(folder)
         Text(GitBranchText.summary(state.status)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        // The popover keeps the height it opened with, so the last action's outcome goes first, where it is seen.
+        if let result {
+            Text(result.outcome.succeeded ? L10n.text("\(result.action.title): готово", "\(result.action.title): done")
+                                          : L10n.text("\(result.action.title): ошибка", "\(result.action.title): failed"))
+                .font(.ui(.caption).bold())
+                .foregroundStyle(result.outcome.succeeded ? Color.secondary : DeskPalette.problemInk)
+            if !result.outcome.output.isEmpty { GitOutputText(text: result.outcome.output) }
+            Divider()
+        }
         if busy {
             warning(L10n.text("Агент работает в этой папке: действия станут доступны после конца хода.",
                               "An agent is working in this folder: actions become available when the turn ends."))
@@ -206,14 +217,6 @@ struct GitActionsPanel: View {
         if !actions.gitHubAvailable {
             Text(L10n.text("Нужен GitHub CLI (gh), чтобы создавать PR.", "Requires GitHub CLI (gh) to create pull requests."))
                 .font(.ui(.caption)).foregroundStyle(.secondary)
-        }
-        if let result {
-            Divider()
-            Text(result.outcome.succeeded ? L10n.text("\(result.action.title): готово", "\(result.action.title): done")
-                                          : L10n.text("\(result.action.title): ошибка", "\(result.action.title): failed"))
-                .font(.ui(.caption).bold())
-                .foregroundStyle(result.outcome.succeeded ? Color.secondary : DeskPalette.problemInk)
-            if !result.outcome.output.isEmpty { GitOutputText(text: result.outcome.output) }
         }
     }
 
