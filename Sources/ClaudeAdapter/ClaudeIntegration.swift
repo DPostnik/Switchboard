@@ -71,6 +71,8 @@ public actor ClaudeIntegration: AgentIntegration {
     private var messageIDs: [String: String] = [:]
     /// Session -> the CLI's latest progress summary for its active turn.
     private var summaries: [String: (turn: String, text: String)] = [:]
+    /// Session -> plan-limit signals seen during its active turn.
+    private var limitStops: [String: ClaudeLimitStop] = [:]
     private var meters: [String: ClaudeUsageMeter] = [:]
     private var generations: [UUID: ClaudeGenerationRunner] = [:]
     private var cancelledGenerations = Set<UUID>()
@@ -125,7 +127,7 @@ public actor ClaudeIntegration: AgentIntegration {
         for wire in wires.values { await wire.close() }
         for id in Array(wires.keys) { finish(id, outcome: .uncertain) }
         wires.removeAll(); readers.removeAll(); interactions.removeAll(); seenRequests.removeAll()
-        sessions.removeAll(); messageIDs.removeAll(); summaries.removeAll(); interrupted.removeAll(); commands.removeAll(); meters.removeAll()
+        sessions.removeAll(); messageIDs.removeAll(); summaries.removeAll(); interrupted.removeAll(); commands.removeAll(); meters.removeAll(); limitStops.removeAll()
         backgroundTasks.removeAll(); waiting.removeAll(); wireArguments.removeAll(); warm.removeAll(); pendingSaves.removeAll()
         for id in subagents.keys { sink.yield(.init(session: reference(id), payload: .subagents([]))) }
         subagents.removeAll()
@@ -317,7 +319,7 @@ public actor ClaudeIntegration: AgentIntegration {
             guard request.model.context == context, signedIn, wires[id] === wire else { await wire.close(); return .rejected(.staleContext) }
             let turn = request.id.uuidString
             let prompt = Self.decorated(TranscriptItem(id: "user:" + turn, kind: "user", text: request.prompt), turn: turn)
-            sessions[id]?.active = turn; sessions[id]?.sent = true; sessions[id]?.current = [prompt]
+            sessions[id]?.active = turn; sessions[id]?.sent = true; sessions[id]?.current = [prompt]; limitStops[id] = nil
             pendingSaves.remove(id)
             try save(id) // Durable uncertain claim, including the prompt, before a byte of the user turn is sent.
             delivered = true
@@ -553,6 +555,7 @@ public actor ClaudeIntegration: AgentIntegration {
         guard wires[id] === wire else { return }
         if let native = value["session_id"].string, native != id { await wire.close(); return }
         if subagents[id, default: .init()].observe(value) { publishSubagents(id) }
+        if sessions[id]?.active != nil { limitStops[id, default: .init()].observe(value) }
         switch value["type"].string {
         case "transport_closed":
             wires.removeValue(forKey: id); warm[id] = nil; finish(id, outcome: .uncertain); abandonWait(id); stopSubagents(id)
@@ -978,7 +981,7 @@ public actor ClaudeIntegration: AgentIntegration {
         guard let record = sessions[id] else { return }
         stopWaiting(id)
         let turn = UUID().uuidString
-        sessions[id]?.active = turn; sessions[id]?.current = []
+        sessions[id]?.active = turn; sessions[id]?.current = []; limitStops[id] = nil
         do { try save(id) } catch { sink.yield(.init(session: reference(id), payload: .diagnostic(error.localizedDescription))) }
         let meter = ClaudeUsageMeter(base: record.tokens, window: record.contextWindow, last: record.lastContext)
         meters[id] = meter
@@ -1012,6 +1015,7 @@ public actor ClaudeIntegration: AgentIntegration {
         let history = AgentHistoryTurn(id: turn, items: (sessions[id]?.current ?? []).map(ActivityRetention.cap), startedAt: nil, completedAt: Date(), duration: nil, isComplete: false)
         sessions[id]?.turns.append(history); sessions[id]?.active = nil; sessions[id]?.current = []
         summaries.removeValue(forKey: id); pendingSaves.remove(id)
+        let usageLimit = limitStops.removeValue(forKey: id)?.stop(outcome: outcome)
         if var meter = meters.removeValue(forKey: id) {
             meter.abandon() // No-op after a terminal result; otherwise observed calls still count.
             sessions[id]?.tokens = meter.base; sessions[id]?.contextWindow = meter.window; sessions[id]?.lastContext = meter.last
@@ -1022,7 +1026,8 @@ public actor ClaudeIntegration: AgentIntegration {
         }
         do { try save(id) } catch { sink.yield(.init(session: reference(id), payload: .diagnostic(error.localizedDescription))) }
         sink.yield(.init(session: reference(id), payload: .completed(.init(id: turn, status: outcome, hasError: outcome == .failed || outcome == .uncertain,
-            error: outcome == .uncertain ? L10n.text("Результат Claude неизвестен. Проверь историю перед новой отправкой; повторов не было.", "Claude's outcome is uncertain. Review history before sending again; nothing was retried.") : nil, history: history))))
+            error: outcome == .uncertain ? L10n.text("Результат Claude неизвестен. Проверь историю перед новой отправкой; повторов не было.", "Claude's outcome is uncertain. Review history before sending again; nothing was retried.") : nil, history: history,
+            usageLimit: usageLimit))))
     }
     private func reference(_ id: String) -> AgentSessionReference { .init(connection: .appClaude, nativeID: id) }
     private func file(_ id: String) throws -> URL {

@@ -17,7 +17,8 @@ extension AgentTurnCompletion {
         default: status = .uncertain
         }
         self.init(id: id, status: status, hasError: raw["error"] != .null,
-                  error: raw["error"]["message"].string, history: CodexHistoryTurn(raw))
+                  error: raw["error"]["message"].string, history: CodexHistoryTurn(raw),
+                  usageLimit: CodexDecoding.usageLimitStop(turn: raw))
     }
 }
 

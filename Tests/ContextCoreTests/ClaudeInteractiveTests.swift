@@ -153,6 +153,13 @@ private func interactiveFixture(_ root: URL) throws -> URL {
                 continue
             if prompt=='unknown': out({'type':'control_request','request_id':'unknown','request':{'subtype':'unexpected_action'}}); continue
             if prompt=='wait': continue
+            if prompt=='limit':
+                # Claude Code 2.1.292 on an exhausted plan: a rejected rate_limit_event, an API-error assistant message, an error result.
+                out({'type':'rate_limit_event','session_id':sid,'uuid':'rl','rate_limit_info':{'status':'rejected','resetsAt':1791630000,'rateLimitType':'five_hour','overageStatus':'rejected','overageDisabledReason':'out_of_credits','isUsingOverage':False}})
+                out({'type':'assistant','session_id':sid,'parent_tool_use_id':None,'error':'rate_limit','message':{'id':'limit-'+sid,'content':[{'type':'text','text':"You've hit your limit · resets 3pm"}]}})
+                out({'type':'result','subtype':'success','session_id':sid,'is_error':True,'result':"You've hit your limit · resets 3pm",
+                     'usage':{'input_tokens':0,'cache_creation_input_tokens':0,'cache_read_input_tokens':0,'output_tokens':0}})
+                continue
             if prompt.startswith('hook:'):
                 out({'type':'control_request','request_id':'hook-'+prompt[5:],'request':{'subtype':'hook_callback','callback_id':'switchboard-bash','tool_use_id':'t-hook',
                      'input':{'hook_event_name':'PreToolUse','tool_name':'Bash','tool_input':{'command':prompt[5:]},'session_id':sid,'cwd':os.getcwd()}}})
@@ -245,6 +252,30 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     #expect(await events.capabilities().map(\.decision) == [.allowed])
     let launch = try String(contentsOf: home.appendingPathComponent("submitted"), encoding: .utf8)
     #expect(launch.contains("acceptEdits") && launch.contains("--restricted"))
+    await adapter.disconnect()
+}
+
+@Test func claudeTurnStoppedOnThePlanLimitCarriesItsResetTime() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
+    func stops() async -> [AgentTurnCompletion] {
+        await events.values.compactMap { if case .completed(let value) = $0.payload { return value }; return nil }
+    }
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "limit")).value()
+    try await waitFor { await stops().count == 1 }
+    let stopped = try #require(await stops().first)
+    #expect(stopped.status == .failed && stopped.usageLimit == AgentUsageLimitStop(resetsAt: Date(timeIntervalSince1970: 1_791_630_000)))
+    // The next turn starts clean.
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "hello")).value()
+    try await waitFor { await stops().count == 2 }
+    let next = try #require(await stops().last)
+    #expect(next.status == .completed && next.usageLimit == nil)
     await adapter.disconnect()
 }
 

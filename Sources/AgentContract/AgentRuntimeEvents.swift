@@ -53,11 +53,21 @@ public struct AgentTurnCompletion: Sendable {
     public let status: AgentExecutionOutcome
     public let hasError: Bool
     public let error: String?
+    /// Set when the turn stopped because the account's usage limit is exhausted.
+    public let usageLimit: AgentUsageLimitStop?
     private let history: AgentHistoryTurn
-    public init(id: String, status: AgentExecutionOutcome, hasError: Bool, error: String?, history: AgentHistoryTurn) {
+    public init(id: String, status: AgentExecutionOutcome, hasError: Bool, error: String?, history: AgentHistoryTurn,
+                usageLimit: AgentUsageLimitStop? = nil) {
         self.id = id; self.status = status; self.hasError = hasError; self.error = error; self.history = history
+        self.usageLimit = usageLimit
     }
     public func timing(fallback: ResponseTiming) -> ResponseTiming { history.timing(fallback: fallback) ?? fallback }
+}
+
+/// A turn stopped on an exhausted usage limit. `resetsAt` is the engine's own reset time when it reported one.
+public struct AgentUsageLimitStop: Equatable, Sendable {
+    public let resetsAt: Date?
+    public init(resetsAt: Date?) { self.resetsAt = resetsAt }
 }
 
 public struct AgentInteraction: Identifiable, Sendable {

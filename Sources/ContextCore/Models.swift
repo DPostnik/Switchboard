@@ -43,6 +43,8 @@ public struct Chat: Identifiable, Codable, Hashable, Sendable {
     public var recap: String?
     /// The latest turn ended with an error; cleared by the next successful turn.
     public var lastTurnFailed: Bool?
+    /// The latest turn stopped on an exhausted usage limit; armed once the user asks to continue after the reset.
+    public var limitResume: LimitResume?
     /// The user let this chat read the other chats through the chat directory tools.
     public var chatDirectoryAccess: Bool?
     /// A chat the archive opened to find other chats: its chat tools carry the search recipe.
