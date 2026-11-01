@@ -157,79 +157,110 @@ struct GitActionsPanel: View {
     init(model: DeskModel, folder: String, initial: GitRepositoryState? = nil, open: @escaping (GitActionSheet) -> Void) {
         self.model = model; self.folder = folder; self.open = open
         _state = State(initialValue: initial); _loaded = State(initialValue: initial != nil)
+        // The PR badge already knows an open PR for this branch; the panel's own lookup confirms it.
+        if let known = model.pullRequestStatus(folder: folder), known.state == .open || known.state == .draft {
+            _pullRequest = State(initialValue: .open(known.url))
+        }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: .ui(10)) {
-            Text("Git").font(.ui(.headline))
+        VStack(alignment: .leading, spacing: .ui(8)) {
             if let state {
                 content(state)
             } else if loaded {
                 Text(L10n.text("Папка не в git-репозитории или git не ответил.", "The folder is not in a git repository, or git did not answer."))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             } else {
                 ProgressView().uiSmallSpinner()
             }
         }
         .font(.ui(.callout))
-        .padding(.ui(16)).frame(width: .ui(340), alignment: .leading)
+        .padding(.ui(12)).frame(width: .ui(300), alignment: .leading)
         .task { await load() }
     }
 
     @ViewBuilder private func content(_ state: GitRepositoryState) -> some View {
         let busy = model.gitFolderBusy(folder)
-        Text(GitBranchText.summary(state.status)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        header(state.status)
         // The popover keeps the height it opened with, so the last action's outcome goes first, where it is seen.
         if let result {
-            Text(result.outcome.succeeded ? L10n.text("\(result.action.title): готово", "\(result.action.title): done")
-                                          : L10n.text("\(result.action.title): ошибка", "\(result.action.title): failed"))
-                .font(.ui(.caption).bold())
-                .foregroundStyle(result.outcome.succeeded ? Color.secondary : DeskPalette.problemInk)
+            Label(result.outcome.succeeded ? L10n.text("\(result.action.title): готово", "\(result.action.title): done")
+                                           : L10n.text("\(result.action.title): ошибка", "\(result.action.title): failed"),
+                  systemImage: result.outcome.succeeded ? "checkmark.circle" : "xmark.octagon")
+                .font(.ui(.caption))
+                .foregroundStyle(result.outcome.succeeded ? DeskPalette.accent : DeskPalette.problemInk)
             if !result.outcome.output.isEmpty { GitOutputText(text: result.outcome.output) }
-            Divider()
         }
         if busy {
-            warning(L10n.text("Агент работает в этой папке: действия станут доступны после конца хода.",
-                              "An agent is working in this folder: actions become available when the turn ends."))
+            warning(L10n.text("Агент работает в этой папке: действия доступны после конца хода.",
+                              "An agent is working in this folder: actions unlock when the turn ends."))
+        } else if state.status.isDetached {
+            warning(L10n.text("HEAD отсоединён: переключись на ветку, чтобы коммитить.",
+                              "Detached HEAD: switch to a branch to commit."))
+        } else if state.status.behind > 0 {
+            warning(L10n.text("Ветка отстаёт: сначала подтяни изменения.", "The branch is behind: pull before pushing."))
         }
-        if state.status.isDetached {
-            warning(L10n.text("HEAD отсоединён: коммит и отправка недоступны. Переключись на ветку (git switch).",
-                              "Detached HEAD: commit and push are unavailable. Switch to a branch (git switch)."))
-        }
-        if state.status.behind > 0 {
-            warning(L10n.text("Ветка отстаёт от \(state.status.upstream ?? "") на \(state.status.behind): сначала подтяни, потом отправляй.",
-                              "The branch is \(state.status.behind) behind \(state.status.upstream ?? ""): pull before pushing."))
-        }
+        let rows = GitAction.allCases.filter { offered($0, state: state) }
         if case .open(let url) = pullRequest, let link = URL(string: url) {
-            HStack {
-                Text(L10n.text("Открыт PR для этой ветки", "This branch has an open pull request")).foregroundStyle(.secondary)
-                Spacer()
-                Button(L10n.text("Открыть", "Open")) { NSWorkspace.shared.open(link) }.controlSize(.small)
-            }
+            Divider()
+            GitMenuRow(icon: "arrow.triangle.pull", title: L10n.text("Открыть PR этой ветки", "Open this branch's pull request"),
+                       detail: nil, enabled: true, running: false) { NSWorkspace.shared.open(link) }
         }
-        Divider()
-        VStack(alignment: .leading, spacing: .ui(6)) {
-            ForEach(GitAction.allCases) { action in
-                row(action, availability: GitActions.availability(action, state: state, gitHubAvailable: actions.gitHubAvailable,
-                                                                    pullRequest: pullRequest, folderBusy: busy), state: state)
+        if !rows.isEmpty {
+            Divider()
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(rows) { action in row(action, state: state, busy: busy) }
             }
-        }
-        if !actions.gitHubAvailable {
-            Text(L10n.text("Нужен GitHub CLI (gh), чтобы создавать PR.", "Requires GitHub CLI (gh) to create pull requests."))
+        } else if !busy, !state.status.isDetached {
+            Text(L10n.text("Изменений нет, ветка синхронизирована.", "Nothing to do: no changes and in sync."))
                 .font(.ui(.caption)).foregroundStyle(.secondary)
         }
     }
 
-    @ViewBuilder private func row(_ action: GitAction, availability: GitActionAvailability, state: GitRepositoryState) -> some View {
-        if case .hidden = availability {
-            EmptyView()
-        } else {
-            HStack(spacing: .ui(8)) {
-                Button(action.title) { perform(action, state: state) }
-                    .disabled(!availability.isEnabled || running != nil)
-                if running == action { ProgressView().uiSmallSpinner() }
-                Spacer(minLength: 0)
+    /// Branch with its sync state on one line, the upstream and changes under it.
+    private func header(_ status: GitStatus) -> some View {
+        VStack(alignment: .leading, spacing: .ui(2)) {
+            HStack(spacing: .ui(6)) {
+                Image(systemName: "arrow.triangle.branch").foregroundStyle(.secondary)
+                Text(status.branch ?? status.displayName).font(.ui(.callout).weight(.semibold))
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: .ui(8))
+                if status.ahead > 0 { Text("↑\(status.ahead)").foregroundStyle(.secondary).monospacedDigit() }
+                if status.behind > 0 { Text("↓\(status.behind)").foregroundStyle(DeskPalette.attention).monospacedDigit() }
             }
+            Text(subtitle(status)).font(.ui(.caption)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+        }
+        .help(GitBranchText.summary(status))
+    }
+
+    private func subtitle(_ status: GitStatus) -> String {
+        let upstream = status.upstream ?? (status.branch == nil ? L10n.text("без ветки", "no branch") : L10n.text("не опубликована", "not published"))
+        let changes = status.hasChanges
+            ? L10n.text("изменено файлов: \(status.changedFiles)", status.changedFiles == 1 ? "1 changed file" : "\(status.changedFiles) changed files")
+            : L10n.text("нет изменений", "no changes")
+        return upstream + " · " + changes
+    }
+
+    /// Actions that make sense in this state. Disabled ones are left out rather than explained, except while an
+    /// agent works (they unlock at the end of the turn) and Create PR while the existing-PR check runs, so the
+    /// popover keeps the height it was measured with.
+    private func offered(_ action: GitAction, state: GitRepositoryState) -> Bool {
+        if action == .createPR, case .open = pullRequest { return false }
+        let lookup: GitPullRequestLookup = pullRequest == .checking ? .none : pullRequest
+        return GitActions.availability(action, state: state, gitHubAvailable: actions.gitHubAvailable,
+                                       pullRequest: lookup, folderBusy: false).isEnabled
+    }
+
+    @ViewBuilder private func row(_ action: GitAction, state: GitRepositoryState, busy: Bool) -> some View {
+        let availability = GitActions.availability(action, state: state, gitHubAvailable: actions.gitHubAvailable,
+                                                   pullRequest: pullRequest, folderBusy: busy)
+        let detail: String? = switch action {
+        case .push: state.status.ahead > 0 ? "↑\(state.status.ahead)" : nil
+        case .pull: state.status.behind > 0 ? "↓\(state.status.behind)" : nil
+        default: nil
+        }
+        GitMenuRow(icon: action.icon, title: action.menuTitle, detail: detail,
+                   enabled: availability.isEnabled && running == nil, running: running == action) { perform(action, state: state) }
             .help(availability.reason ?? action.title)
             .confirmationDialog(L10n.text("Отправить прямо в \(state.pushBranch ?? "")?", "Push directly to \(state.pushBranch ?? "")?"),
                                 isPresented: Binding(get: { confirmingPush && action == .push }, set: { confirmingPush = $0 })) {
@@ -239,10 +270,6 @@ struct GitActionsPanel: View {
                 Text(L10n.text("Это основная ветка репозитория. Коммиты попадут в неё без PR.",
                                "This is the repository's default branch. The commits land there without a pull request."))
             }
-            if let reason = availability.reason {
-                Text(reason).font(.ui(.caption)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-        }
     }
 
     private func warning(_ text: String) -> some View {
@@ -615,5 +642,56 @@ struct GitPullRequestSheet: View {
         running = true
         defer { running = false; model.gitStatus.refresh(folder, after: .zero) }
         outcome = await actions.createPullRequest(title: title, body: text, base: base, head: head, draft: draft, root: state.root)
+    }
+}
+
+/// A full-width row like a menu item: icon, title, optional trailing detail, highlight on hover.
+private struct GitMenuRow: View {
+    let icon: String
+    let title: String
+    let detail: String?
+    let enabled: Bool
+    let running: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: .ui(8)) {
+                Image(systemName: icon).frame(width: .ui(18)).foregroundStyle(.secondary)
+                Text(title).lineLimit(1)
+                Spacer(minLength: .ui(8))
+                if running { ProgressView().uiSmallSpinner() } else if let detail { Text(detail).foregroundStyle(.secondary).monospacedDigit() }
+            }
+            .padding(.horizontal, .ui(8)).frame(height: .ui(28))
+            .background(hovering && enabled ? DeskPalette.subtle : .clear, in: RoundedRectangle(cornerRadius: 6))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).disabled(!enabled).opacity(enabled ? 1 : 0.45)
+        .onHover { hovering = $0 }
+    }
+}
+
+private extension GitAction {
+    var icon: String {
+        switch self {
+        case .commit: "checkmark.circle"
+        case .commitAndPush: "arrow.up.circle"
+        case .commitPushAndCreatePR, .createPR: "arrow.triangle.pull"
+        case .push: "arrow.up"
+        case .pull: "arrow.down"
+        }
+    }
+
+    /// Menu wording: actions that open a sheet end with an ellipsis.
+    var menuTitle: String {
+        switch self {
+        case .commit: L10n.text("Коммит…", "Commit…")
+        case .commitAndPush: L10n.text("Коммит и отправка…", "Commit and Push…")
+        case .commitPushAndCreatePR: L10n.text("Коммит, отправка и PR…", "Commit, Push and Open PR…")
+        case .push: L10n.text("Отправить", "Push")
+        case .pull: L10n.text("Подтянуть", "Pull")
+        case .createPR: L10n.text("Создать PR…", "Create Pull Request…")
+        }
     }
 }
