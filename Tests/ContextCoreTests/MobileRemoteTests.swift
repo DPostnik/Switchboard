@@ -74,6 +74,26 @@ import ContextCore
     fallback.quietIntervalMinutes = 30; fallback.quietPublishing = true
 }
 
+@Test @MainActor func remoteHostSavesProjectVisibilityFromProjectSettings() throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let setup = folder.appendingPathComponent("setup.json"), config = folder.appendingPathComponent("mobile-remote.json")
+    let host = MobileRemoteHost(setupFile: setup, configFile: config)
+    #expect(!host.configured && host.projectsEditable)
+    host.url = "https://example.supabase.co"; host.key = "sb_publishable_fixture"
+    #expect(host.configured)
+    let shown = UUID(), other = UUID()
+    #expect(host.setProject(shown, shown: true))
+    #expect(host.setProject(other, shown: true))
+    #expect(host.setProject(other, shown: false))
+    // The choice is written at once and survives a relaunch; the rest of the configuration is kept.
+    let reloaded = MobileRemoteHost(setupFile: setup, configFile: config)
+    #expect(reloaded.projects == [shown.uuidString])
+    #expect(reloaded.url == "https://example.supabase.co")
+    #expect(reloaded.setProject(shown, shown: false))
+    #expect(MobileRemoteHost(setupFile: setup, configFile: config).projects.isEmpty)
+}
+
 @Test @MainActor func remoteHostLeavesInstallerHandoffUntilSettingsAreOpened() throws {
     let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: file) }

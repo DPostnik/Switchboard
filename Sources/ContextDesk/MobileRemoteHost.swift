@@ -46,7 +46,7 @@ import IOKit.ps
     private var apiKey = ""
     private let makeClient: (String, String) throws -> RemoteAPI
     private var assertion: IOPMAssertionID = 0
-    private let configFile = Locations.root.appendingPathComponent("mobile-remote.json")
+    private let configFile: URL
     private let setupFile: URL
     private let journal = RemoteJournal(file: Locations.root.appendingPathComponent("mobile-remote-journal.json"))
     private var device = UUID().uuidString.lowercased()
@@ -62,8 +62,10 @@ import IOKit.ps
         var quietPublishing: Bool?; var quietIntervalMinutes: Int?
     }
     init(setupFile: URL = Locations.root.appendingPathComponent("mobile-setup.json"),
+         configFile: URL = Locations.root.appendingPathComponent("mobile-remote.json"),
          makeClient: @escaping (String, String) throws -> RemoteAPI = { try RemoteAPI(url: $0, key: $1) }) {
         self.setupFile = setupFile
+        self.configFile = configFile
         self.makeClient = makeClient
         if let data = try? Data(contentsOf: configFile), let config = try? JSONDecoder().decode(Config.self, from: data) {
             url = config.url; key = config.key; device = config.device; projects = config.projects
@@ -82,6 +84,20 @@ import IOKit.ps
     private func currentConfig() -> Config {
         Config(url: url, key: key, device: device, projects: projects, autoEnable: autoEnable, active: active,
                quietPublishing: quietPublishing, quietIntervalMinutes: quietIntervalMinutes)
+    }
+    /// A Supabase connection is entered; without it a project cannot be shown on the phone.
+    var configured: Bool { !url.isEmpty && !key.isEmpty }
+    /// The project set can change only while access is off, as in Settings; the snapshot and command checks read it live.
+    var projectsEditable: Bool { !enabled && !transitioning }
+    /// Project settings → Phone: shows or hides one project and saves the choice at once.
+    /// Returns false (and changes nothing) while access is on or switching.
+    @discardableResult func setProject(_ id: UUID, shown: Bool) -> Bool {
+        guard projectsEditable else { return false }
+        let key = id.uuidString
+        guard projects.contains(key) != shown else { return true }
+        if shown { projects.insert(key) } else { projects.remove(key) }
+        saveConfig()
+        return true
     }
     private func fail(_ message: String) {
         status = message; statusFailed = true

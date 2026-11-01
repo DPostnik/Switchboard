@@ -86,7 +86,7 @@ struct DeskView: View {
         .onChange(of: activeChatIDs) { _, ids in
             selection.prune(keeping: ids)
         }
-        .sheet(item: $permissionsProject) { project in ProjectPermissionsView(model: model, project: project) }
+        .sheet(item: $permissionsProject) { project in ProjectSettingsView(model: model, project: project) }
         .alert(L10n.text("Название чата", "Chat title"), isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField(L10n.text("Название", "Title"), text: $newTitle)
             Button(L10n.text("Сохранить", "Save")) { if let chat = renaming { Task { await model.renameChat(chat.id, title: newTitle) } }; renaming = nil }
