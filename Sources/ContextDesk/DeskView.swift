@@ -730,7 +730,7 @@ private struct SidebarDisclosureLayout: Layout {
 
 /// Reads the dropped file URLs from the drag pasteboard while the drop is still on. Item providers resolve
 /// after the drag ends, and a screenshot thumbnail deletes its temporary file by then, so the first drop was lost.
-private struct ChatFileDrop: DropDelegate {
+struct ChatFileDrop: DropDelegate {
     let enabled: Bool
     @Binding var targeted: Bool
     let add: ([URL]) -> Void
@@ -1076,37 +1076,8 @@ struct ChatView: View {
                         .buttonStyle(DeskButtonStyle(kind: .text)).disabled(!model.canDeleteChat(chat.id))
                 }.frame(maxWidth: columnWidth).padding(.horizontal, .ui(24)).padding(.vertical, .ui(12))
             }
-            if !model.visibleQueue.isEmpty {
-                VStack(alignment: .leading, spacing: .ui(6)) {
-                    HStack {
-                        Text(model.queuePaused ? L10n.text("Очередь приостановлена", "Queue paused") : L10n.text("В очереди · \(model.visibleQueue.count)", "Queued · \(model.visibleQueue.count)"))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        if model.queuePaused && model.priorityMessageID == nil {
-                            Button(L10n.text("Продолжить", "Resume")) { model.resumeQueue() }.disabled(model.busy || !model.connected || model.selectedChatIsArchived || model.selectedChat.map { model.isChangingChat($0.id) } == true)
-                        }
-                    }.font(.ui(.caption))
-                    ScrollView {
-                        VStack(spacing: .ui(6)) {
-                            ForEach(model.visibleQueue) { message in
-                                HStack(alignment: .center, spacing: .ui(12)) {
-                                    Text(message.text).font(.ui(.callout)).lineLimit(3)
-                                        .frame(maxWidth: .infinity, alignment: .leading).help(message.text)
-                                    Button {
-                                        Task { await model.sendQueuedMessageNow(message.id) }
-                                    } label: {
-                                        Label(model.priorityMessageID == message.id ? L10n.text("Останавливаю…", "Stopping…") : model.busy ? L10n.text("Прервать и отправить", "Interrupt and send") : L10n.text("Отправить сейчас", "Send now"), systemImage: "arrow.up")
-                                    }.disabled(model.sending || !model.connected || model.priorityMessageID != nil || model.selectedChatIsArchived || model.selectedChat.map { model.isChangingChat($0.id) } == true)
-                                    Button { model.removeQueuedMessage(message.id) } label: { Image(systemName: "xmark") }
-                                        .buttonStyle(PointerButtonStyle(base: .plain)).help(L10n.text("Убрать из очереди", "Remove from queue"))
-                                        .disabled(model.priorityMessageID == message.id)
-                                }.padding(.ui(10))
-                                    .background(DeskPalette.subtle, in: RoundedRectangle(cornerRadius: 12))
-                            }
-                        }
-                    }.frame(maxHeight: min(CGFloat(model.visibleQueue.count) * 78, 180))
-                }.frame(maxWidth: columnWidth).padding(.horizontal, .ui(24)).padding(.top, .ui(8))
-            }
+            QueuePanel(model: model, columnWidth: columnWidth,
+                       fileDrop: ChatFileDrop(enabled: !model.selectedChatIsArchived, targeted: $fileDropTargeted) { model.addDroppedFiles($0) })
             BranchChangeBanner(model: model, width: columnWidth)
             if !model.selectedChatIsArchived {
             VStack(spacing: 4) {

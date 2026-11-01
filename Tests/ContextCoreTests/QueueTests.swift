@@ -521,3 +521,185 @@ private func parallelChatFixture() throws -> (URL, URL) {
     #expect(try await turnStarts() == 3)
     await connection.stop()
 }
+
+@Test func queueMovesStayWithinTheChatAndNeverPassClaimedMessages() {
+    let project = UUID()
+    func message(_ id: String, _ thread: String) -> QueuedMessage { QueuedMessage(id: id, threadID: thread, projectID: project, text: id, model: "", effort: "") }
+    let queue = [message("a1", "a"), message("b1", "b"), message("a2", "a"), message("a3", "a"), message("b2", "b")]
+    // Other chats' messages keep their slots; the position is clamped to the chat's queue.
+    #expect(queue.movingQueued("a3", toChatPosition: 0)?.map(\.id) == ["a3", "b1", "a1", "a2", "b2"])
+    #expect(queue.movingQueued("a1", toChatPosition: 9)?.map(\.id) == ["a2", "b1", "a3", "a1", "b2"])
+    #expect(queue.movingQueued("b2", toChatPosition: 0, pinned: ["a1"])?.map(\.id) == ["a1", "b2", "a2", "a3", "b1"])
+    #expect(queue.movingQueued("a1", toChatPosition: 0) == nil)
+    #expect(queue.movingQueued("missing", toChatPosition: 0) == nil)
+    // A claimed message neither moves nor lets another message pass it.
+    #expect(queue.movingQueued("a1", toChatPosition: 1, pinned: ["a1"]) == nil)
+    #expect(queue.movingQueued("a3", toChatPosition: 0, pinned: ["a1"]) == nil)
+    #expect(queue.movingQueued("a3", toChatPosition: 1, pinned: ["a1"])?.map(\.id) == ["a1", "b1", "a3", "a2", "b2"])
+}
+
+@Test func legacyQueuedMessagesDecodeWithoutTheNewerFields() throws {
+    let legacy = Data(#"[{"id":"q1","threadID":"t","projectID":"00000000-0000-0000-0000-000000000001","text":"Old","model":"gpt","effort":"medium"},{"id":"q2","threadID":"t","projectID":"00000000-0000-0000-0000-000000000001","text":"Held","model":"gpt","effort":"high","heldForRestart":true}]"#.utf8)
+    let queue = try JSONDecoder().decode([QueuedMessage].self, from: legacy)
+    #expect(queue.map(\.text) == ["Old", "Held"])
+    #expect(queue[0].heldForRestart == nil && queue[1].heldForRestart == true)
+    #expect(queue.movingQueued("q2", toChatPosition: 0)?.map(\.id) == ["q2", "q1"])
+}
+
+@MainActor private func queueModel(_ folder: URL, _ executable: URL, _ connection: CodexConnection, chats: [String] = ["t"]) -> (DeskModel, AppStore) {
+    let store = AppStore(file: folder.appendingPathComponent("state.sqlite"))
+    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, summaryExecutable: executable, summaryHome: folder)
+    let project = Project(path: folder.path)
+    model.state.projects = [project]; model.projectID = project.id; model.chatID = chats[0]
+    model.state.chats = chats.map { Chat(id: $0, projectID: project.id, title: $0, model: "") }
+    model.state.defaultRoute = .direct; model.connected = true; model.authenticated = true
+    return (model, store)
+}
+
+/// Texts of the chat's `turn/start` requests once there are `count` of them and the chat is no longer sending.
+@MainActor private func sentTexts(_ connection: CodexConnection, _ model: DeskModel, count: Int, thread: String = "t") async throws -> [String] {
+    var sent: [String] = []
+    for _ in 0..<300 {
+        sent = try await connection.request("test/requests").array.filter { $0["method"].string == "turn/start" && $0["params"]["threadId"].string == thread }
+            .map { InterruptedTurnNote.stripped($0["params"]["input"].array.compactMap { $0["text"].string }.joined()) }
+        if sent.count >= count && !model.sending { break }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    return sent
+}
+
+@Test @MainActor func editedAndReorderedQueueIsPersistedAndDeliveredInTheNewOrder() async throws {
+    let (folder, executable) = try parallelChatFixture()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let connection = CodexConnection()
+    try await connection.start(executable: executable, home: folder)
+    let (model, store) = queueModel(folder, executable, connection, chats: ["t", "o"])
+    model.draft = "First"; await model.send()
+    for text in ["Second", "Third", "Fourth"] { model.draft = text; await model.send() }
+    let projectID = try #require(model.state.projects.first?.id)
+    // Another chat's queued message sits between them and keeps its slot.
+    model.state.queuedMessages?.insert(QueuedMessage(id: "other", threadID: "o", projectID: projectID, text: "Other", model: "", effort: ""), at: 1)
+    let ids = model.visibleQueue.map(\.id)
+    let second = ids[0], fourth = ids[2]
+    if let index = model.state.queuedMessages?.firstIndex(where: { $0.id == second }) {
+        model.state.queuedMessages?[index].model = "custom-model"; model.state.queuedMessages?[index].effort = "high"
+    }
+
+    // Edit in place: only the text changes; the ID, place, model and effort stay. A blank text keeps the editor open.
+    #expect(model.beginQueueEdit(second))
+    model.queueEdit?.draft.text = "  \n"
+    #expect(model.saveQueueEdit() == .unchanged && model.queueEdit != nil)
+    model.queueEdit?.draft.text = "Second, edited\n/tmp/shot.png"
+    #expect(model.saveQueueEdit() == .applied && model.queueEdit == nil)
+    let edited = try #require(model.visibleQueue.first)
+    #expect(edited.id == second && edited.text == "Second, edited\n/tmp/shot.png" && edited.model == "custom-model" && edited.effort == "high")
+    #expect(model.error == nil)
+
+    // Reorder by a step and by a drop onto another message's place; the other chat keeps its slot.
+    #expect(model.moveQueuedMessage(fourth, by: -1) == .applied)
+    #expect(model.moveQueuedMessage(fourth, onto: second) == .applied)
+    #expect(model.moveQueuedMessage(fourth, by: -1) == .unchanged)
+    #expect(!model.canMoveQueuedMessage(fourth, by: -1) && model.canMoveQueuedMessage(fourth, by: 1))
+    #expect(model.visibleQueue.map(\.text) == ["Fourth", "Second, edited\n/tmp/shot.png", "Third"])
+    #expect(model.queuedMessages.map(\.threadID) == ["t", "o", "t", "t"])
+    await model.flushPersist()
+    #expect(try await store.load().queuedMessages == model.state.queuedMessages)
+
+    // Delivery follows the new order with the edited text, one message per finished turn.
+    for turn in 1...3 {
+        #expect(try await sentTexts(connection, model, count: turn).count == turn)
+        model.finishActiveTurn(threadID: "t", turnID: "t-\(turn)", status: .completed, hasError: false)
+    }
+    #expect(try await sentTexts(connection, model, count: 4) == ["First", "Fourth", "Second, edited\n/tmp/shot.png", "Third"])
+    #expect(model.queuedMessages.map(\.id) == ["other"])
+    #expect(try await sentTexts(connection, model, count: 0, thread: "o").isEmpty)
+    await connection.stop()
+}
+
+@Test @MainActor func claimedQueuedMessagesRefuseEditsAndMoves() async throws {
+    let (folder, executable) = try parallelChatFixture()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let connection = CodexConnection()
+    try await connection.start(executable: executable, home: folder)
+    let (model, _) = queueModel(folder, executable, connection)
+    model.draft = "First"; await model.send()
+    for text in ["A", "B", "C"] { model.draft = text; await model.send() }
+    let ids = model.visibleQueue.map(\.id)
+    let (a, b, c) = (ids[0], ids[1], ids[2])
+
+    // "Interrupt and send" claims C: it heads the queue and waits for the interruption.
+    await model.sendQueuedMessageNow(c)
+    #expect(model.visibleQueue.map(\.id) == [c, a, b])
+    #expect(model.queuedMessageIsClaimed(c) && !model.queuedMessageIsClaimed(a))
+    #expect(!model.beginQueueEdit(c) && model.queueEdit == nil)
+    #expect(model.editQueuedMessage(c, text: "C, edited", threadID: "t") == .claimed)
+    #expect(model.visibleQueue.first?.text == "C")
+    // The refused text is not lost: it goes to the empty composer with a notice.
+    #expect(model.draft == "C, edited" && model.error != nil)
+    model.draft = ""; model.error = nil
+    #expect(model.moveQueuedMessage(c, by: 1) == .claimed)
+    #expect(model.moveQueuedMessage(a, by: -1) == .claimed)
+    #expect(model.moveQueuedMessage(b, onto: c) == .claimed)
+    #expect(!model.canMoveQueuedMessage(a, by: -1))
+    // Behind the claimed message the queue still edits and reorders.
+    #expect(model.moveQueuedMessage(b, by: -1) == .applied)
+    #expect(model.editQueuedMessage(a, text: "A, edited", threadID: "t") == .applied)
+    #expect(model.visibleQueue.map(\.text) == ["C", "B", "A, edited"])
+
+    // The interruption finished: C goes out next, so it stays claimed until the drain takes it.
+    model.finishActiveTurn(threadID: "t", turnID: "t-1", status: .cancelled, hasError: false)
+    #expect(model.queuedMessageIsClaimed(c))
+    #expect(model.moveQueuedMessage(b, by: -1) == .claimed)
+    #expect(try await sentTexts(connection, model, count: 2) == ["First", "C"])
+    // Once sent, it is gone: an edit is refused, and nothing is sent again.
+    #expect(model.editQueuedMessage(c, text: "Late", threadID: "t") == .gone)
+    #expect(model.error != nil && model.draft == "Late")
+    #expect(model.moveQueuedMessage(c, by: 1) == .gone)
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(try await sentTexts(connection, model, count: 2) == ["First", "C"])
+    #expect(model.visibleQueue.map(\.text) == ["B", "A, edited"])
+    await connection.stop()
+}
+
+@Test @MainActor func queueEditRacingTheDrainIsDeliveredOrRefusedNeverLostOrResent() async throws {
+    let (folder, executable) = try parallelChatFixture()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let connection = CodexConnection()
+    try await connection.start(executable: executable, home: folder)
+    let (model, store) = queueModel(folder, executable, connection)
+    model.draft = "First"; await model.send()
+    model.draft = "Next"; await model.send()
+
+    // The turn ends and the drain is scheduled, but the save lands first: the edited text goes out.
+    #expect(model.beginQueueEdit(try #require(model.visibleQueue.first?.id)))
+    model.queueEdit?.draft.text = "Next, edited"
+    model.finishActiveTurn(threadID: "t", turnID: "t-1", status: .completed, hasError: false)
+    #expect(model.saveQueueEdit() == .applied)
+    #expect(try await sentTexts(connection, model, count: 2) == ["First", "Next, edited"])
+
+    // The drain takes the message while it is still open in the editor: the earlier text goes out once,
+    // the editor closes, and the edit is refused with a notice; its text waits in the composer.
+    model.draft = "Later"; await model.send()
+    let later = try #require(model.visibleQueue.first?.id)
+    #expect(model.beginQueueEdit(later))
+    model.queueEdit?.draft.text = "Later, edited"
+    model.finishActiveTurn(threadID: "t", turnID: "t-2", status: .completed, hasError: false)
+    #expect(try await sentTexts(connection, model, count: 3) == ["First", "Next, edited", "Later"])
+    #expect(model.queueEdit == nil && model.visibleQueue.isEmpty)
+    #expect(model.error != nil && model.draft == "Later, edited")
+    #expect(model.saveQueueEdit() == .unchanged)
+    #expect(model.editQueuedMessage(later, text: "Later, edited", threadID: "t") == .gone)
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(try await sentTexts(connection, model, count: 3) == ["First", "Next, edited", "Later"])
+    await model.flushPersist()
+    #expect(try await store.load().queuedMessages?.isEmpty != false)
+
+    // An unchanged editor closed by the drain says nothing.
+    model.draft = ""; model.error = nil
+    model.draft = "Quiet"; await model.send()
+    #expect(model.beginQueueEdit(try #require(model.visibleQueue.first?.id)))
+    model.finishActiveTurn(threadID: "t", turnID: "t-3", status: .completed, hasError: false)
+    #expect(try await sentTexts(connection, model, count: 4).last == "Quiet")
+    #expect(model.queueEdit == nil && model.error == nil && model.draft == "")
+    await connection.stop()
+}

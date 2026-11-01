@@ -44,14 +44,16 @@ public struct MessageComposer: NSViewRepresentable {
     /// Each new value moves keyboard focus into the editor once.
     let focusRequest: UUID?
     let onSubmit: () -> Void
+    /// Esc; nil keeps the text view's default handling.
+    let onCancel: (() -> Void)?
     /// Reports the text's height so the composer can grow with what is typed.
     let onContentHeight: ((CGFloat) -> Void)?
     /// Read while the parent renders, so a zoom change updates the editor font.
     let fontSize = InterfaceZoom.shared.scaled(14)
     public init(state: ComposerState, focused: Binding<Bool>, focusRequest: UUID? = nil,
-                onContentHeight: ((CGFloat) -> Void)? = nil, onSubmit: @escaping () -> Void) {
+                onContentHeight: ((CGFloat) -> Void)? = nil, onCancel: (() -> Void)? = nil, onSubmit: @escaping () -> Void) {
         self.state = state; revision = state.revision; _focused = focused; self.focusRequest = focusRequest; self.onSubmit = onSubmit
-        self.onContentHeight = onContentHeight
+        self.onContentHeight = onContentHeight; self.onCancel = onCancel
     }
     public func makeCoordinator() -> Coordinator { Coordinator(self) }
     public func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
@@ -73,7 +75,7 @@ public struct MessageComposer: NSViewRepresentable {
         editor.textContainer?.widthTracksTextView = true
         editor.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         editor.delegate = context.coordinator
-        editor.onSubmit = onSubmit
+        editor.onSubmit = onSubmit; editor.onCancel = onCancel
         editor.setAccessibilityLabel(L10n.text("Сообщение", "Message"))
         scroll.drawsBackground = false; scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = false
         scroll.autohidesScrollers = true
@@ -83,7 +85,7 @@ public struct MessageComposer: NSViewRepresentable {
     public func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? ComposerTextView else { return }
-        editor.onSubmit = onSubmit
+        editor.onSubmit = onSubmit; editor.onCancel = onCancel
         editor.onContentHeight = onContentHeight
         if editor.font?.pointSize != fontSize { editor.font = .systemFont(ofSize: fontSize); editor.reportContentHeight() }
         if editor.string != state.text { editor.string = state.text; editor.reportContentHeight() }
@@ -129,6 +131,8 @@ public struct MessageComposer: NSViewRepresentable {
 
 public final class ComposerTextView: NSTextView {
     public var onSubmit: (() -> Void)?
+    /// Esc; without it the text view keeps its default handling.
+    public var onCancel: (() -> Void)?
     public var onContentHeight: ((CGFloat) -> Void)?
     private var reportedHeight: CGFloat = 0
     public override func setFrameSize(_ newSize: NSSize) {
@@ -173,5 +177,8 @@ public final class ComposerTextView: NSTextView {
             return
         }
         super.keyDown(with: event)
+    }
+    public override func cancelOperation(_ sender: Any?) {
+        if let onCancel, !hasMarkedText() { onCancel() } else { super.cancelOperation(sender) }
     }
 }

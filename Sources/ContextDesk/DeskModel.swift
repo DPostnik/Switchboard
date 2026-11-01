@@ -38,6 +38,29 @@ struct DeskNotice: Identifiable {
     var actionID: String? = nil
 }
 
+/// What an edit or move of a queued message did.
+enum QueueChange: Equatable {
+    case applied, unchanged
+    /// The message is claimed for delivery (or the chat cannot change now); nothing changed.
+    case claimed
+    /// The message is no longer queued: it was sent or removed.
+    case gone
+}
+
+/// A queued message open in the in-place editor; `draft` is the editor's live text, so typing never publishes the model.
+@MainActor final class QueueEditSession {
+    let id: String
+    let threadID: String
+    let original: String
+    let draft = ComposerState()
+    /// Moves keyboard focus into the editor once it appears.
+    let focus = UUID()
+    init(_ message: QueuedMessage) {
+        id = message.id; threadID = message.threadID; original = message.text
+        draft.text = message.text
+    }
+}
+
 private struct ChatRunState: Equatable {
     var running = false
     var sending = false
@@ -277,6 +300,8 @@ private struct ChatRunState: Equatable {
     @Published var loadingChat = false
     @Published var accountLabel = L10n.text("Вход не выполнен", "Not signed in")
     @Published var error: String?
+    /// The queued message being edited in place, at most one at a time.
+    @Published private(set) var queueEdit: QueueEditSession?
     @Published private(set) var accountLimits: AccountLimits?
     @Published private(set) var limitsError: String?
     @Published private(set) var refreshingLimits = false
@@ -1166,6 +1191,104 @@ private struct ChatRunState: Equatable {
         state.queuedMessages = queuedMessages.filter { $0.id != id }
         persist()
     }
+    /// Messages the drain has claimed: "Interrupt and send" chose them, or their interruption finished and they go out next.
+    private var claimedQueueIDs: Set<String> {
+        Set(runs.values.flatMap { [$0.priorityMessageID, $0.interruptedFor].compactMap { $0 } })
+    }
+    /// A claimed message can be neither edited nor moved, and nothing moves past it.
+    func queuedMessageIsClaimed(_ id: String) -> Bool { claimedQueueIDs.contains(id) }
+    /// The chat's queue can be edited and reordered: not archived and not being archived or deleted.
+    func canChangeQueue(_ threadID: String) -> Bool {
+        chatIsAvailable(threadID) && !isChangingChat(threadID) && !isArchived(threadID)
+    }
+    /// Replaces a queued message's text; its ID, place, model and effort stay. Everything here runs on the main actor, and
+    /// the drain takes a message out of the queue before its first suspension, so an edit either lands before the dequeue
+    /// and goes out, or finds the message gone and is refused with a notice. Nothing is sent from here.
+    @discardableResult
+    func editQueuedMessage(_ id: String, text: String, threadID: String) -> QueueChange {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .unchanged }
+        guard let index = queuedMessages.firstIndex(where: { $0.id == id }) else {
+            refuseQueueEdit(text, threadID: threadID, notice: L10n.text("Сообщение уже вышло из очереди, правка не применена.",
+                                                                        "The message already left the queue; the edit was not applied."))
+            return .gone
+        }
+        guard !queuedMessageIsClaimed(id), canChangeQueue(threadID) else {
+            refuseQueueEdit(text, threadID: threadID, notice: L10n.text("Сообщение уже отправляется, правка не применена.",
+                                                                        "The message is already being sent; the edit was not applied."))
+            return .claimed
+        }
+        guard queuedMessages[index].text != text else { return .unchanged }
+        state.queuedMessages?[index].text = text
+        persist()
+        AppLog.delivery.notice("Queued message edited in chat \(threadID, privacy: .public)")
+        return .applied
+    }
+    /// Opens the in-place editor on a queued message that is still waiting.
+    @discardableResult
+    func beginQueueEdit(_ id: String) -> Bool {
+        guard let message = queuedMessages.first(where: { $0.id == id }), !queuedMessageIsClaimed(id), canChangeQueue(message.threadID) else { return false }
+        queueEdit = QueueEditSession(message)
+        return true
+    }
+    func cancelQueueEdit() { queueEdit = nil }
+    /// Saves the open edit; a blank text keeps the editor open (removing the message is a separate action).
+    @discardableResult
+    func saveQueueEdit() -> QueueChange {
+        guard let edit = queueEdit, edit.draft.hasMessage else { return .unchanged }
+        queueEdit = nil
+        return editQueuedMessage(edit.id, text: edit.draft.text, threadID: edit.threadID)
+    }
+    /// The drain took the message under edit: the edit closes, and a changed text is refused with a notice instead of being lost.
+    private func closeQueueEdit(dequeued id: String) {
+        guard let edit = queueEdit, edit.id == id else { return }
+        queueEdit = nil
+        guard edit.draft.text != edit.original, edit.draft.hasMessage else { return }
+        refuseQueueEdit(edit.draft.text, threadID: edit.threadID, notice: L10n.text("Сообщение ушло агенту до сохранения правки, отправлен прежний текст.",
+                                                                                     "The message went to the agent before the edit was saved; the earlier text was sent."))
+    }
+    /// A refused edit keeps the user's text: it goes into the open chat's empty composer and the notice says so.
+    private func refuseQueueEdit(_ text: String, threadID: String, notice: String) {
+        guard state.chats.contains(where: { $0.id == threadID }) else { return } // The chat itself was deleted.
+        AppLog.delivery.notice("Queued message edit refused in chat \(threadID, privacy: .public): it is no longer waiting")
+        if threadID == chatID, !isArchived(threadID), !composer.hasText {
+            composer.text = text
+            error = notice + L10n.text(" Исправленный текст в поле ввода.", " The edited text is in the composer.")
+        } else {
+            error = notice
+        }
+    }
+    func canMoveQueuedMessage(_ id: String, by offset: Int) -> Bool { movedQueue(id, by: offset) != nil }
+    /// Moves a message up (negative) or down among its chat's queued messages; delivery follows the new order.
+    @discardableResult
+    func moveQueuedMessage(_ id: String, by offset: Int) -> QueueChange {
+        applyQueueMove(id, movedQueue(id, by: offset))
+    }
+    /// Drag and drop: moves a message onto another one's place, before it when moving up and after it when moving down.
+    @discardableResult
+    func moveQueuedMessage(_ id: String, onto targetID: String) -> QueueChange {
+        guard let message = queuedMessages.first(where: { $0.id == id }) else { return .gone }
+        let chat = queuedMessages.filter { $0.threadID == message.threadID }
+        guard let target = chat.firstIndex(where: { $0.id == targetID }) else { return .unchanged }
+        return applyQueueMove(id, canChangeQueue(message.threadID) ? queuedMessages.movingQueued(id, toChatPosition: target, pinned: claimedQueueIDs) : nil)
+    }
+    private func movedQueue(_ id: String, by offset: Int) -> [QueuedMessage]? {
+        guard let message = queuedMessages.first(where: { $0.id == id }), canChangeQueue(message.threadID),
+              let position = queuedMessages.filter({ $0.threadID == message.threadID }).firstIndex(where: { $0.id == id }) else { return nil }
+        let target = position + offset
+        guard target >= 0, target < queuedMessages.filter({ $0.threadID == message.threadID }).count else { return nil }
+        return queuedMessages.movingQueued(id, toChatPosition: target, pinned: claimedQueueIDs)
+    }
+    private func applyQueueMove(_ id: String, _ moved: [QueuedMessage]?) -> QueueChange {
+        guard let message = queuedMessages.first(where: { $0.id == id }) else { return .gone }
+        guard let moved else {
+            let claimed = claimedQueueIDs
+            let blocked = !canChangeQueue(message.threadID) || queuedMessages.contains { $0.threadID == message.threadID && claimed.contains($0.id) }
+            return blocked ? .claimed : .unchanged
+        }
+        state.queuedMessages = moved
+        persist()
+        return .applied
+    }
     func sendQueuedMessageNow(_ id: String) async {
         guard let message = queuedMessages.first(where: { $0.id == id }), chatIsAvailable(message.threadID), chatConnected(message.threadID),
               !isChangingChat(message.threadID), !isArchived(message.threadID) else { return }
@@ -1387,6 +1510,7 @@ private struct ChatRunState: Equatable {
         let afterInterrupt = run.interruptedFor == next.id
         runs[threadID, default: ChatRunState()].interruptedFor = nil
         state.queuedMessages = queuedMessages.filter { $0.id != next.id }
+        closeQueueEdit(dequeued: next.id)
         do { try await store.save(state) }
         catch {
             state.queuedMessages = [next] + queuedMessages

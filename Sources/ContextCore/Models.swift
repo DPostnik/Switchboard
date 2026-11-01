@@ -109,6 +109,27 @@ public struct QueuedMessage: Codable, Identifiable, Sendable, Equatable {
         self.text = text; self.model = model; self.effort = effort
     }
 }
+public extension Array where Element == QueuedMessage {
+    /// Moves a message to `position` among its own chat's messages; the drain sends each chat's first message next, so this
+    /// is its delivery order. Other chats' messages keep their slots. `pinned` messages are already claimed for delivery:
+    /// nil when one of them would move, or when the message is missing or already there.
+    func movingQueued(_ id: String, toChatPosition position: Int, pinned: Set<String> = []) -> [QueuedMessage]? {
+        guard let message = first(where: { $0.id == id }), !pinned.contains(id) else { return nil }
+        let slots = indices.filter { self[$0].threadID == message.threadID }
+        var chat = slots.map { self[$0] }
+        guard let from = chat.firstIndex(where: { $0.id == id }) else { return nil }
+        let to = Swift.min(Swift.max(position, 0), chat.count - 1)
+        guard to != from else { return nil }
+        chat.insert(chat.remove(at: from), at: to)
+        // A claimed message keeps its place: nothing moves past it.
+        for (offset, item) in chat.enumerated() where pinned.contains(item.id) {
+            guard self[slots[offset]].id == item.id else { return nil }
+        }
+        var result = self
+        for (slot, item) in zip(slots, chat) { result[slot] = item }
+        return result
+    }
+}
 public struct SavedState: Codable, Sendable {
     public var identityVersion: Int? = 2
     /// `model` and `defaultRoute` belong to this connection, never another engine.
