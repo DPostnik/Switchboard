@@ -22,6 +22,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 - Composer: one chip for agent, model and reasoning; a context ring with an amber dot when the Claude cache is expired replaces the context and cache text; following the answer is automatic; the role picked for a new chat no longer changes the project default.
 - Project settings (formerly Permissions…): roles as cards, browser and sign-in, phone visibility and MCP servers in one sheet.
 - Settings has five tabs: General, Notifications, Accounts, Browser and Advanced; browser changes apply by themselves once chats are idle.
+- A context compaction shows as a full-width divider where it happened, "Context compacted: 120k → 30k · automatic" (or "· was 120k" when the size after is unknown), with the exact token counts in its tooltip, instead of a small badge; Claude Code compactions now appear too, and the sizes stay after reopening the chat.
 
 ### Fixed
 

@@ -794,12 +794,15 @@ private struct ChatRunState: Equatable {
             let timings = try await store.loadTimings(threadID: chat.id)
             guard selectionGeneration == generation else { return }
             guard historyEventRevisions[chat.id, default: 0] == eventRevision else { return }
-            items = turns.flatMap { turn in
+            var loaded = turns.flatMap { turn in
                 var entries = turn.items
                 for index in entries.indices { entries[index].turnID = turn.id }
                 ResponseTiming.apply(turn.timing(fallback: timings[turn.id ?? ""]), to: &entries)
                 return entries
             }
+            // Codex history has no compaction sizes; the stored transcript shown so far has them.
+            ContextCompaction.carry(from: items, into: &loaded)
+            items = loaded
             let snapshot = try LocalHistory.snapshot(conversation: ConversationID(chat.id),
                 source: sessionForChat(chat.id), turns: turns, timings: timings, capturedAt: capturedAt)
             try await store.saveTranscript(snapshot)

@@ -726,20 +726,13 @@ public struct NativeTranscript: NSViewRepresentable {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = 4; paragraph.paragraphSpacing = 0
         paragraph.lineBreakMode = .byWordWrapping
-        if item.kind == "compaction" || item.kind == "refusal" {
-            // A refusal is a stop notice from the safety classifier; a compaction tracks its own progress.
-            let refusal = item.kind == "refusal"
-            let active = !refusal && item.phase == "inProgress"
-            let tint: NSColor? = refusal ? DeskPalette.ns.attention : active ? DeskPalette.ns.accent : nil
-            let color = tint ?? DeskPalette.ns.muted
-            let wash: NSColor? = refusal ? DeskPalette.ns.attentionWash : active ? DeskPalette.ns.accentWash : nil
-            let textColor = refusal ? DeskPalette.ns.attentionInk : active ? DeskPalette.ns.accentDeep : color
-            let symbol = refusal ? "exclamationmark.shield" : active ? "arrow.triangle.2.circlepath"
-                : item.phase == "completed" ? "checkmark.circle" : "minus.circle"
+        if item.kind == "compaction" { return TranscriptCompactionDivider.render(item) }
+        if item.kind == "refusal" {
+            // A stop notice from the safety classifier.
             let attachment = NSTextAttachment()
-            attachment.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            attachment.image = NSImage(systemSymbolName: "exclamationmark.shield", accessibilityDescription: nil)?
                 .withSymbolConfiguration(.init(pointSize: 12, weight: .medium)
-                    .applying(.init(paletteColors: [color])))
+                    .applying(.init(paletteColors: [DeskPalette.ns.attention])))
             attachment.bounds = NSRect(x: 0, y: -2, width: 14, height: 14)
             let spacer = NSMutableParagraphStyle()
             spacer.maximumLineHeight = 8
@@ -757,10 +750,9 @@ public struct NativeTranscript: NSViewRepresentable {
             paragraph.lineSpacing = 2
             result.addAttributes([
                 .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-                .foregroundColor: textColor, .paragraphStyle: paragraph,
-                .compactionBadge: item.id
+                .foregroundColor: DeskPalette.ns.attentionInk, .paragraphStyle: paragraph,
+                .noticeBadge: item.id, .badgeTint: DeskPalette.ns.attentionWash
             ], range: NSRange(location: badgeStart, length: result.length - badgeStart))
-            if let wash { result.addAttribute(.badgeTint, value: wash, range: NSRange(location: badgeStart, length: result.length - badgeStart)) }
             // Keep paragraph terminators outside the badge so it hugs its content.
             result.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: paragraph,
                 .font: NSFont.systemFont(ofSize: 12)]))
@@ -1346,7 +1338,8 @@ private final class HoverAttachmentCell: NSTextAttachmentCell {
 }
 
 extension NSAttributedString.Key {
-    static let compactionBadge = NSAttributedString.Key("ContextDeskCompactionBadge")
+    /// A notice drawn as a rounded badge (a refusal).
+    static let noticeBadge = NSAttributedString.Key("ContextDeskNoticeBadge")
     /// The wash a badge is filled with; badges without it are neutral.
     static let badgeTint = NSAttributedString.Key("ContextDeskBadgeTint")
     /// The "worked for" line of an answer, drawn as a capsule.
@@ -1509,10 +1502,11 @@ private final class BubbleLayoutManager: NSLayoutManager {
             return
         }
         let characters = characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
-        storage.enumerateAttribute(.compactionBadge, in: characters) { value, range, _ in
+        TranscriptCompactionDivider.drawRules(self, storage: storage, characters: characters, container: container, origin: origin)
+        storage.enumerateAttribute(.noticeBadge, in: characters) { value, range, _ in
             guard value != nil else { return }
             var fullRange = NSRange()
-            _ = storage.attribute(.compactionBadge, at: range.location, longestEffectiveRange: &fullRange,
+            _ = storage.attribute(.noticeBadge, at: range.location, longestEffectiveRange: &fullRange,
                                   in: NSRange(location: 0, length: storage.length))
             let glyphs = glyphRange(forCharacterRange: fullRange, actualCharacterRange: nil)
             let bounds = boundingRect(forGlyphRange: glyphs, in: container)
