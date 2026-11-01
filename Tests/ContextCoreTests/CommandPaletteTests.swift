@@ -4,6 +4,7 @@ import ContextTranscript
 import Foundation
 import SwiftUI
 import Testing
+@testable import ContextDesk
 
 @Suite struct PaletteSearchTests {
     @Test func emptyQueryKeepsEverythingNewestFirst() {
@@ -121,10 +122,25 @@ import Testing
         #expect(state.adjacentSidebarChat(from: "b2", offset: 1, listing: listing) == "a3")
         #expect(state.adjacentSidebarChat(from: "a3", offset: -1, listing: listing) == "b2")
         #expect(state.adjacentSidebarChat(from: nil, offset: 1, listing: listing) == "a3")
-        #expect(state.adjacentSidebarChat(from: "a7", offset: -1, listing: listing) == "b2")
+        // Chats behind "Show more" count: a5 is followed by a6, not by b1.
+        #expect(state.adjacentSidebarChat(from: "a5", offset: 1, listing: listing) == "a6")
+        #expect(state.adjacentSidebarChat(from: "a7", offset: -1, listing: listing) == "a6")
+        // Closed projects count too: with everything collapsed the shortcut still moves past the open chat.
         #expect(state.adjacentSidebarChat(from: nil, offset: 1, listing: SidebarListing()) == "a3")
+        #expect(state.adjacentSidebarChat(from: "a1", offset: 1, listing: SidebarListing()) == "a2")
+        #expect(state.adjacentSidebarChat(from: "b1", offset: -1, listing: SidebarListing()) == "a7")
+        // The search still filters.
+        #expect(state.adjacentSidebarChat(from: "b1", offset: 1, listing: SidebarListing(search: "Chat b")) == "b2")
         var empty = state; empty.chats = []
         #expect(empty.adjacentSidebarChat(from: nil, offset: 1, listing: listing) == nil)
+    }
+
+    @Test func recentChatsAreNewestFirstWithoutArchivedOrHidden() {
+        var (state, _, _) = fixture()
+        for index in state.chats.indices { state.chats[index].updated = Date(timeIntervalSince1970: 1000 + Double(index)) }
+        // Newest first; the archived b0 and the hidden project's h1 are left out; the limit applies.
+        #expect(state.recentChats() == ["b2", "b1", "a7", "a6", "a5", "a4", "a3", "a2", "a1"])
+        #expect(state.recentChats(limit: 2) == ["b2", "b1"])
     }
 }
 
@@ -156,4 +172,16 @@ import Testing
         window.makeFirstResponder(nil)
         #expect(TranscriptScrollView.findTarget(in: window) === chat)
     }
+}
+
+@Test func chatKeysMatchPhysicalKeysInAnyLayout() {
+    // Key codes are layout-independent: the Russian layout types "х" on the [ key, the code stays the same.
+    #expect(ChatKey.action(keyCode: 18, modifiers: .command) == .recent(1))
+    #expect(ChatKey.action(keyCode: 25, modifiers: [.command, .capsLock]) == .recent(9))
+    #expect(ChatKey.action(keyCode: 33, modifiers: [.command, .shift]) == .adjacent(-1))
+    #expect(ChatKey.action(keyCode: 30, modifiers: [.command, .shift]) == .adjacent(1))
+    // Cmd+[ without Shift stays with the document preview; other modifiers and plain digits are left alone.
+    #expect(ChatKey.action(keyCode: 33, modifiers: .command) == nil)
+    #expect(ChatKey.action(keyCode: 18, modifiers: [.command, .option]) == nil)
+    #expect(ChatKey.action(keyCode: 18, modifiers: []) == nil)
 }

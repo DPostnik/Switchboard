@@ -66,6 +66,7 @@ struct DeskView: View {
         .onChange(of: model.projectID, initial: true) { _, projectID in
             if let projectID { expandedProjects.insert(projectID) }
         }
+        .onAppear { model.installNavigationKeys() }
         .onChange(of: search) { _, _ in
             collapsedSearchProjects.removeAll()
         }

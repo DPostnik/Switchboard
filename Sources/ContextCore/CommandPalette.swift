@@ -116,20 +116,32 @@ extension SavedState {
 
     /// Chat rows of the sidebar from top to bottom: favorites, then the shown chats of each open project.
     /// A favorite also appears under its project, as in the sidebar, so the N-th row is the N-th chat on screen.
-    public func sidebarChatRows(_ listing: SidebarListing) -> [String] {
+    /// `includeCollapsed` also walks closed projects and chats behind "Show more", in the same order.
+    public func sidebarChatRows(_ listing: SidebarListing, includeCollapsed: Bool = false) -> [String] {
         var rows = visiblePinnedChats.filter { sidebarShowsFavorite($0, search: listing.search) }.map(\.id)
-        for project in visibleProjects where sidebarShowsProject(project, search: listing.search) && listing.isExpanded(project.id) {
+        for project in visibleProjects where sidebarShowsProject(project, search: listing.search)
+            && (includeCollapsed || listing.isExpanded(project.id)) {
             let shown = orderedChats(projectID: project.id, archived: false).filter { sidebarShowsChat($0, in: project, search: listing.search) }
-            rows += shown.prefix(listing.limit(project.id, chatCount: shown.count)).map(\.id)
+            rows += (includeCollapsed ? shown[...] : shown.prefix(listing.limit(project.id, chatCount: shown.count))).map(\.id)
         }
         return rows
     }
 
-    /// The chat `offset` rows away from `current` in the sidebar, wrapping at the ends; each chat counts once.
+    /// Cmd+1…9: active chats of visible projects, most recently updated first - the command palette's order
+    /// for an empty query, so its ⌘1…⌘9 hints match.
+    public func recentChats(limit: Int = 9) -> [String] {
+        let hidden = Set(projects.filter(\.isHidden).map(\.id))
+        let active = chats.filter { !$0.isArchived && !hidden.contains($0.projectID) }
+        return PaletteSearch.rank(active.map { PaletteSearch.Candidate(id: $0.id, title: $0.title, recency: $0.updated) },
+                                  query: "", limit: limit)
+    }
+
+    /// The chat `offset` rows away from `current` in sidebar order, wrapping at the ends; each chat counts once.
+    /// Closed projects count too, so the shortcut still moves when only the current chat is on screen.
     /// Without a current chat on the list, forward starts at the first chat and backward at the last.
     public func adjacentSidebarChat(from current: String?, offset: Int, listing: SidebarListing) -> String? {
         var seen: Set<String> = []
-        let rows = sidebarChatRows(listing).filter { seen.insert($0).inserted }
+        let rows = sidebarChatRows(listing, includeCollapsed: true).filter { seen.insert($0).inserted }
         guard !rows.isEmpty, offset != 0 else { return nil }
         guard let current, let index = rows.firstIndex(of: current) else { return offset > 0 ? rows.first : rows.last }
         let count = rows.count

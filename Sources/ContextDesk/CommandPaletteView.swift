@@ -177,7 +177,12 @@ private struct CommandPalette: View {
 
         let chatIDs = PaletteSearch.rank(active.map { PaletteSearch.Candidate(id: $0.id, title: $0.title, detail: projects[$0.projectID]?.name ?? "", recency: $0.updated) },
                                          query: query, limit: Self.chatLimit)
-        let chats = chatIDs.compactMap { chatsByID[$0] }.map { chatEntry($0, project: projects[$0.projectID]) }
+        // With an empty query the list is the recent order of Cmd+1…9, so the first nine show their shortcut.
+        let chats = chatIDs.compactMap { chatsByID[$0] }.enumerated().map { index, chat in
+            var entry = chatEntry(chat, project: projects[chat.projectID])
+            if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, index < 9 { entry.shortcut = "⌘\(index + 1)" }
+            return entry
+        }
 
         let lastActivity = Dictionary(active.map { ($0.projectID, $0.updated) }, uniquingKeysWith: { max($0, $1) })
         let visible = model.state.visibleProjects

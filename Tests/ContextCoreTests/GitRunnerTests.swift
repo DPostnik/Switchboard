@@ -22,3 +22,14 @@ import Testing
         try await GitRunner(executable: "/nonexistent/git").run(["status"], in: root.path)
     }
 }
+
+@Test func gitHubRunnerUsesTheFolderAsWorkingDirectory() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    #expect(GitRunner.gitHub(searchPaths: ["/nonexistent/gh"]) == nil)
+    // A stand-in tool: /bin/pwd shows the working directory and receives no "-C" flag.
+    let tool = try #require(GitRunner.gitHub(searchPaths: ["/bin/pwd"]))
+    let result = try await tool.run([], in: root.path)
+    #expect(result.succeeded && result.text.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix(root.lastPathComponent))
+}

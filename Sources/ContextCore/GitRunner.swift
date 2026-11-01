@@ -23,15 +23,34 @@ public struct GitRunner: Sendable {
     /// Extra environment, for example `GIT_INDEX_FILE` for a private index.
     public var environment: [String: String]
 
-    public init(executable: String = "/usr/bin/git", timeout: TimeInterval = 10, environment: [String: String] = [:]) {
+    /// True for git (`-C directory`); other tools such as `gh` run with `directory` as their working directory.
+    public var passesDirectoryFlag: Bool
+
+    public init(executable: String = "/usr/bin/git", timeout: TimeInterval = 10, environment: [String: String] = [:],
+                passesDirectoryFlag: Bool = true) {
         self.executable = executable; self.timeout = timeout; self.environment = environment
+        self.passesDirectoryFlag = passesDirectoryFlag
     }
 
-    /// `git -C directory arguments...`; `input` is written to stdin.
+    /// The GitHub CLI (`gh`) with the same guarantees: no prompts, no colour, no update notice, `directory` as cwd.
+    /// Nil when `gh` is not installed. It uses the user's own `gh` sign-in.
+    public static func gitHub(timeout: TimeInterval = 30, searchPaths: [String] = GitRunner.gitHubSearchPaths) -> GitRunner? {
+        guard let path = searchPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return nil }
+        return GitRunner(executable: path, timeout: timeout,
+                         environment: ["GH_PROMPT_DISABLED": "1", "GH_NO_UPDATE_NOTIFIER": "1", "NO_COLOR": "1",
+                                       "GH_PAGER": "cat", "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"],
+                         passesDirectoryFlag: false)
+    }
+
+    public static let gitHubSearchPaths = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh",
+                                           FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/gh").path]
+
+    /// `git -C directory arguments...` (or the tool in `directory`); `input` is written to stdin.
     public func run(_ arguments: [String], in directory: String, input: Data? = nil) async throws(Failure) -> Result {
         let child = Process()
         child.executableURL = URL(fileURLWithPath: executable)
-        child.arguments = ["-C", directory] + arguments
+        child.arguments = passesDirectoryFlag ? ["-C", directory] + arguments : arguments
+        child.currentDirectoryURL = URL(fileURLWithPath: directory)
         var environment = ProcessInfo.processInfo.environment
         environment.removeValue(forKey: "CLAUDECODE")
         environment["GIT_TERMINAL_PROMPT"] = "0"
