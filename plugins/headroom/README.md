@@ -12,7 +12,7 @@ zsh install.sh
 
 From the app repository the equivalent command is `zsh plugins/headroom/install.sh`; `scripts/install-headroom.sh` remains a compatibility wrapper. Installation publishes to `~/Library/Application Support/Switchboard/plugins/headroom`. `SWITCHBOARD_PLUGINS_DIR` overrides the parent directory for isolated installation tests.
 
-In Switchboard, open Settings → Плагины / Plugins, refresh the plugin list, select Headroom for new conversations, and click **Применить выбор / Apply selection**. Existing conversations with route `headroom` keep that route. Direct conversations stay Direct.
+In Switchboard, open Settings → Дополнительно / Advanced → Плагины / Plugins, refresh the plugin list, select Headroom for new conversations, and click **Применить выбор / Apply selection**. Existing conversations with route `headroom` keep that route. Direct conversations stay Direct.
 
 For an upgrade from the former built-in adapter, run this installer once. The old `Context Desk/headroom` directory is left untouched, and no credentials or state are migrated from it. The new plugin keeps its own private runtime data under `plugins/headroom/data`.
 

@@ -55,7 +55,7 @@ node --version
 python3 BrowserRuntime/install.py
 ```
 
-If Node is not on PATH, pass `--node /absolute/path/to/node`. The installer verifies the pinned Chrome DevTools MCP 1.10.1 archive and extracted files; it does not run npm install scripts. The application launches the adapter with `/usr/bin/python3`; check that interpreter as well (`/usr/bin/python3 --version`). Then enable **Settings → Browser → Use Chrome DevTools** and **Apply browser setting** while chats are idle. See the [browser contract](../BrowserRuntime/README.md).
+If Node is not on PATH, pass `--node /absolute/path/to/node`. The installer verifies the pinned Chrome DevTools MCP 1.10.1 archive and extracted files; it does not run npm install scripts. The application launches the adapter with `/usr/bin/python3`; check that interpreter as well (`/usr/bin/python3 --version`). Then enable **Settings → Browser → Use Chrome DevTools**; Codex reconnects to apply it once chats are idle. See the [browser contract](../BrowserRuntime/README.md).
 
 Chrome uses a separate profile; no login is needed for the included loopback fixture. Run the server only while demonstrating the example. An agent can ask for permissions depending on project policy. Stop a blocked run and review the request instead of changing the project to Full access to make the demo pass.
 

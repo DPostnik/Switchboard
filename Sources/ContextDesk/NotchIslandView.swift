@@ -413,18 +413,27 @@ private struct NotchButtonStyle: ButtonStyle {
     }
 }
 
-/// Settings → General: the island can be switched off entirely.
+/// Settings → General: the island can be switched off entirely, and it carries the same options as
+/// the island's own gear. Both read the stored preferences, so a change in one place shows in the other.
 struct NotchIslandSettings: View {
-    @State private var enabled = NotchPreferences.load().enabled
+    @AppStorage(NotchPreferences.defaultsKey) private var stored: Data?
+    private var preferences: NotchPreferences {
+        stored.flatMap { try? JSONDecoder().decode(NotchPreferences.self, from: $0) } ?? NotchPreferences()
+    }
     var body: some View {
         Section(L10n.text("Остров в нотче", "Notch island")) {
-            Toggle(L10n.text("Показывать остров над нотчем", "Show the island over the notch"), isOn: $enabled)
-                .onChange(of: enabled) { _, value in NotchIslandController.setEnabled(value) }
+            Toggle(L10n.text("Показывать остров над нотчем", "Show the island over the notch"),
+                   isOn: Binding(get: { preferences.enabled }, set: { NotchIslandController.setEnabled($0) }))
+            Toggle(L10n.text("Прятать, когда агенты не работают", "Hide when no agent is working"), isOn: binding(\.autoHide))
+                .disabled(!preferences.enabled)
+            Toggle(L10n.text("Звук, когда агент закончил или ждёт ответа", "Sound when an agent finishes or needs you"), isOn: binding(\.sound))
+                .disabled(!preferences.enabled)
             Text(L10n.text("Только на встроенном экране MacBook. Выключенный остров не тратит память и процессор. Пока запущено приложение Fringe, нотч показывает оно, а остров скрыт.",
                            "Built-in MacBook display only. When off, the island uses no memory or CPU. While the Fringe app runs, it owns the notch and the island stays hidden."))
                 .font(.caption).foregroundStyle(.secondary)
         }
-        // The island's own button may have turned it off while Settings was open in the background.
-        .onAppear { enabled = NotchPreferences.load().enabled }
+    }
+    private func binding(_ key: WritableKeyPath<NotchPreferences, Bool>) -> Binding<Bool> {
+        Binding(get: { preferences[keyPath: key] }, set: { value in NotchIslandController.updatePreferences { $0[keyPath: key] = value } })
     }
 }

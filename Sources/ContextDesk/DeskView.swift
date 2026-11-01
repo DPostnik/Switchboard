@@ -1469,10 +1469,9 @@ struct JobDetail: View {
 }
 
 struct SettingsView: View {
-    @Environment(\.openWindow) private var openWindow
-    @Environment(\.dismiss) private var dismiss
     @ObservedObject var model: DeskModel
     let keepAwake: KeepAwake
+    @ObservedObject private var browserApply = BrowserSettingApply.shared
     @AppStorage(AppLanguage.preferenceKey) private var selectedLanguage = L10n.language.rawValue
     @AppStorage("parallelBrowserLimit") private var parallelBrowserLimit = 2
     @State private var selectedTab = "general"
@@ -1482,26 +1481,20 @@ struct SettingsView: View {
             generalSettings
                 .tabItem { Label(L10n.text("Основные", "General"), systemImage: "gearshape") }
                 .tag("general")
+            notificationSettings
+                .tabItem { Label(L10n.text("Уведомления", "Notifications"), systemImage: "bell.badge") }
+                .tag("notifications")
             accountsSettings
                 .tabItem { Label(L10n.text("Аккаунты", "Accounts"), systemImage: "person.crop.circle") }
                 .tag("accounts")
             browserSettings
                 .tabItem { Label(L10n.text("Браузер", "Browser"), systemImage: "globe") }
                 .tag("browser")
-            pluginsSettings
-                .tabItem { Label(L10n.text("Плагины", "Plugins"), systemImage: "puzzlepiece.extension") }
-                .tag("plugins")
-            mobileSettings
-                .tabItem { Label(L10n.text("Мобильный доступ", "Mobile access"), systemImage: "iphone") }
-                .tag("mobile")
-            PermissionsLedgerView(model: model)
-                .tabItem { Label(L10n.text("Разрешения", "Permissions"), systemImage: "lock.shield") }
-                .tag("permissions")
-            dataSettings
-                .tabItem { Label(L10n.text("Данные", "Data"), systemImage: "externaldrive") }
-                .tag("data")
+            AdvancedSettings(model: model)
+                .tabItem { Label(L10n.text("Дополнительно", "Advanced"), systemImage: "slider.horizontal.3") }
+                .tag("advanced")
         }
-        .frame(height: 560)
+        .frame(height: 600)
     }
 
     private var generalSettings: some View {
@@ -1526,15 +1519,28 @@ struct SettingsView: View {
             }
             InterfaceZoomSettings()
             MainWindowScreenSettings()
-            Section(L10n.text("Уведомления", "Notifications")) {
+            NotchIslandSettings()
+            KeepAwakeSettings(controller: keepAwake)
+        }.formStyle(.grouped)
+    }
+
+    private var notificationSettings: some View {
+        Form {
+            Section(L10n.text("Уведомления macOS", "macOS notifications")) {
                 Text(model.notificationStatus).font(.ui(.callout))
                 Button(L10n.text("Разрешить уведомления", "Allow notifications")) { Task { await model.enableNotifications() } }
             }
             TelegramSettings(bridge: model.telegram)
-            KeepAwakeSettings(controller: keepAwake)
-            OrphanProcessSettings(controller: model.orphanProcesses)
-            NotchIslandSettings()
-            AboutSettings()
+            Section(L10n.text("Звук", "Sound")) {
+                Button { selectedTab = "general" } label: {
+                    Label(L10n.text("Звук, когда агент закончил или ждёт ответа, включается у острова в нотче: Основные → Остров в нотче.",
+                                    "The sound when an agent finishes or needs you belongs to the notch island: General → Notch island."),
+                          systemImage: "speaker.wave.2")
+                        .font(.ui(.callout)).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
+                }
+                .buttonStyle(.plain)
+            }
         }.formStyle(.grouped)
     }
 
@@ -1548,7 +1554,8 @@ struct SettingsView: View {
             }
             Section(L10n.text("Подписка Claude", "Claude subscription")) {
                 Text(model.claudeAuthenticated ? L10n.text("Вход выполнен", "Signed in") : L10n.text("Вход не выполнен", "Not signed in"))
-                Text(L10n.text("Официальный Claude Code \(ClaudeRuntime.pinnedVersion). Вход открывается в Terminal, в отдельном профиле Switchboard. После входа нажми «Проверить вход». Существующий профиль Claude Code не изменяется.", "Official Claude Code \(ClaudeRuntime.pinnedVersion). Sign-in opens in Terminal using a separate Switchboard profile. Afterwards, click Check sign-in. Your existing Claude Code profile is unchanged."))
+                Text(L10n.text("Официальный Claude Code \(ClaudeRuntime.pinnedVersion). Вход открывается в Terminal в отдельном профиле Switchboard, затем нажми «Проверить вход»; твой профиль Claude Code не меняется.",
+                               "Official Claude Code \(ClaudeRuntime.pinnedVersion). Sign-in opens in Terminal in a separate Switchboard profile, then click Check sign-in; your own Claude Code profile is unchanged."))
                     .font(.ui(.caption)).foregroundStyle(.secondary)
                 Button(L10n.text("Войти по подписке Claude", "Sign in with Claude subscription")) { Task { await model.loginClaude() } }.disabled(model.anyBusy || model.claudeConnecting)
                 Button(L10n.text("Проверить вход", "Check sign-in")) { Task { if model.claudeConnected { await model.refreshClaudeAccount() } else { await model.connectClaude() } } }.disabled(model.claudeConnecting)
@@ -1560,7 +1567,8 @@ struct SettingsView: View {
                 Picker(L10n.text("Советник", "Advisor"), selection: Binding(get: { model.state.claudeAdvisor ?? "" }, set: { model.selectClaudeAdvisor($0) })) {
                     ForEach(ClaudeAdvisor.options, id: \.id) { Text($0.name).tag($0.id) }
                 }
-                Text(L10n.text("Более сильная модель, с которой Claude советуется перед выбором подхода, при повторяющейся ошибке и перед завершением задачи. Подключается только к чатам и задачам на более слабой модели: Sonnet или Haiku получат Opus, Opus получит только Fable. Советы расходуют лимиты подписки, Fable может списывать кредиты. Применяется со следующего сообщения.", "A stronger model Claude consults before choosing an approach, on a recurring error and before finishing a task. It applies only to chats and jobs on a weaker model: Sonnet or Haiku get Opus, Opus gets only Fable. Advice counts toward subscription limits; Fable may use usage credits. Takes effect from the next message."))
+                Text(L10n.text("Более сильная модель, с которой Claude советуется перед выбором подхода, при повторяющейся ошибке и перед завершением; только для чатов и задач на более слабой модели (Sonnet и Haiku получают Opus, Opus — только Fable). Советы расходуют лимиты подписки, Fable может списывать кредиты; действует со следующего сообщения.",
+                               "A stronger model Claude consults before choosing an approach, on a recurring error and before finishing; only for chats and jobs on a weaker model (Sonnet and Haiku get Opus, Opus gets only Fable). Advice counts toward subscription limits, Fable may use credits; takes effect from the next message."))
                     .font(.ui(.caption)).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped)
@@ -1568,30 +1576,41 @@ struct SettingsView: View {
 
     private var browserSettings: some View {
         Form {
-            Section(L10n.text("Браузер", "Browser")) {
+            Section(L10n.text("Браузер агента", "Agent browser")) {
                 Toggle(L10n.text("Использовать Chrome DevTools", "Use Chrome DevTools"),
-                       isOn: Binding(get: { model.state.browserEnabled == true }, set: { model.selectBrowserEnabled($0) }))
+                       isOn: Binding(get: { model.state.browserEnabled == true }, set: {
+                           model.selectBrowserEnabled($0); browserApply.schedule(model: model)
+                       }))
                 Text(L10n.text("У каждого чата свой Chrome for Testing и сохранённый профиль. Чаты работают параллельно. В меню «Браузер» можно импортировать входы из выбранного профиля Chrome или войти на сайты вручную. Браузеры остаются открытыми после переподключения.", "Each chat has its own Chrome for Testing and saved profile. Chats work in parallel. Use the Browser menu to import sign-ins from a selected Chrome profile, or sign in manually. Browsers stay open after reconnecting."))
                     .font(.ui(.callout)).foregroundStyle(.secondary)
-                Picker(L10n.text("Одновременно открытых браузеров", "Simultaneously open browsers"), selection: $parallelBrowserLimit) {
+                Picker(L10n.text("Одновременно открытых браузеров", "Simultaneously open browsers"),
+                       selection: Binding(get: { parallelBrowserLimit }, set: {
+                           guard $0 != parallelBrowserLimit else { return }
+                           parallelBrowserLimit = $0; browserApply.schedule(model: model)
+                       })) {
                     ForEach(1...8, id: \.self) { Text(String($0)).tag($0) }
                 }
-                Text(L10n.text("По умолчанию — 2. При достижении лимита заверши неиспользуемый Chrome через Cmd+Q. Новый лимит применяется после переподключения; открытые браузеры автоматически не закрываются.", "Default: 2. At the limit, quit an unused Chrome with Cmd+Q. Apply the new limit by reconnecting; open browsers are never closed automatically."))
+                Text(L10n.text("По умолчанию — 2. При достижении лимита заверши неиспользуемый Chrome через Cmd+Q; открытые браузеры автоматически не закрываются.", "Default: 2. At the limit, quit an unused Chrome with Cmd+Q; open browsers are never closed automatically."))
                     .font(.ui(.caption)).foregroundStyle(.secondary)
+                if browserApply.pending {
+                    Label(L10n.text("Применится, когда чаты освободятся", "Applies when chats are idle"), systemImage: "clock")
+                        .font(.ui(.callout)).foregroundStyle(DeskPalette.attentionInk)
+                    Text(L10n.text("Codex переподключится сам, когда не будет выполняющихся ходов, одобрений, сообщений в очереди и фоновых задач. Действия не повторяются.",
+                                   "Codex reconnects on its own once no turn, approval, queued message or background task is active. No action is replayed."))
+                        .font(.ui(.caption)).foregroundStyle(.secondary)
+                } else if model.connecting {
+                    Label(L10n.text("Подключение…", "Connecting…"), systemImage: "arrow.triangle.2.circlepath")
+                        .font(.ui(.callout)).foregroundStyle(.secondary)
+                } else {
+                    Text(L10n.text("Изменения применяются сами: Codex переподключается, когда все чаты свободны. Браузер открывается при первом обращении агента.",
+                                   "Changes apply on their own: Codex reconnects once every chat is idle. The browser opens on the agent’s first browser request."))
+                        .font(.ui(.caption)).foregroundStyle(.secondary)
+                }
                 Button(L10n.text("Инструкция по установке", "Installation instructions")) {
                     if let resources = Bundle.main.resourceURL {
                         NSWorkspace.shared.open(resources.appendingPathComponent("BrowserRuntime/README.md"))
                     }
                 }
-                Button(model.connecting ? L10n.text("Подключение…", "Connecting…") : L10n.text("Применить настройку браузера", "Apply browser setting")) {
-                    Task { await model.connect() }
-                }.disabled(model.anyBusy || model.connecting)
-                if model.anyBusy {
-                    Text(L10n.text("Кнопка недоступна, пока выполняются задачи в чатах или фоновая обработка. Дождись их завершения либо останови нужную задачу в её чате, затем примени настройку. Текущие действия браузера автоматически не повторяются.", "This button is unavailable while chats or background tasks are running. Wait for them to finish or stop the relevant task in its chat, then apply the setting. Browser actions are not automatically replayed."))
-                        .font(.ui(.caption)).foregroundStyle(.secondary)
-                }
-                Text(L10n.text("Применяется при переподключении Codex после завершения текущих задач. Браузер открывается при первом обращении агента.", "Takes effect when Codex reconnects after current tasks finish. The browser opens on the agent’s first browser request."))
-                    .font(.ui(.caption)).foregroundStyle(.secondary)
             }
             Section(L10n.text("Мой Chrome", "My Chrome")) {
                 Toggle(L10n.text("Разрешить чатам Claude управлять моим Chrome", "Let Claude chats control my Chrome"),
@@ -1600,83 +1619,6 @@ struct SettingsView: View {
                     .font(.ui(.callout)).foregroundStyle(.secondary)
                 Text(L10n.text("Применяется переподключением Claude сразу после переключения, если ни один чат Claude не выполняет задачу. Иначе переключи настройку ещё раз, когда задачи завершатся.", "Applied by reconnecting Claude right after the switch, if no Claude chat is running a task. Otherwise switch it again once those tasks finish."))
                     .font(.ui(.caption)).foregroundStyle(.secondary)
-            }
-        }.formStyle(.grouped)
-    }
-
-    private var pluginsSettings: some View {
-        Form {
-            Section(L10n.text("Плагины", "Plugins")) {
-                Text(L10n.text("Плагины дополнительно обрабатывают запросы Codex. Они необязательны: выбери «Без плагина», чтобы работать напрямую.", "Plugins add processing to Codex requests. They are optional: choose No plugin to work directly."))
-                    .font(.ui(.callout)).foregroundStyle(.secondary)
-                Picker(L10n.text("Для новых чатов", "For new chats"), selection: Binding(get: { model.defaultRoute }, set: { model.selectDefaultRoute($0) })) {
-                    ForEach(model.availableRoutes, id: \.self) { route in
-                        Text(model.routeTitle(route)).tag(route).disabled(model.routeCompatibilityIssue(route) != nil)
-                    }
-                }.pointingHandCursor()
-                Text(model.routeMessage(model.defaultRoute)).font(.ui(.callout)).foregroundStyle(.secondary)
-                Button(model.connecting ? L10n.text("Подключение…", "Connecting…") : L10n.text("Применить выбор", "Apply selection")) {
-                    Task { await model.connect() }
-                }.disabled(model.anyBusy || model.connecting)
-                Text(L10n.text("Переподключает Codex, чтобы запустить выбранные плагины. Дождись завершения текущих задач. Существующие чаты сохраняют свой выбор плагина.", "Reconnects Codex to start the selected plugins. Wait for current tasks to finish. Existing chats keep their plugin selection."))
-                    .font(.ui(.caption)).foregroundStyle(.secondary)
-                if model.plugins.isEmpty {
-                    Text(L10n.text("Плагины пока не установлены. Codex может работать без них.", "No plugins installed yet. Codex can work without them."))
-                        .font(.ui(.callout)).foregroundStyle(.secondary)
-                }
-                ForEach(model.plugins) { plugin in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("\(plugin.manifest.localizedTitle()) · \(plugin.manifest.version)").font(.ui(.headline))
-                        if let description = plugin.manifest.descriptionTranslations {
-                            Text(description.text()).font(.ui(.callout)).foregroundStyle(.secondary)
-                        }
-                        Text(model.routeMessage(plugin.route)).font(.ui(.caption)).foregroundStyle(.secondary)
-                        Text("Codex: " + OptimizerCompatibility.summary(agent: .codex, requirements: plugin.manifest.requirements)).font(.ui(.caption))
-                        Text("Claude Code: " + OptimizerCompatibility.summary(agent: .claudeCode, requirements: plugin.manifest.requirements)).font(.ui(.caption)).foregroundStyle(.secondary)
-                        if let status = model.pluginStatuses[plugin.id] {
-                            ForEach(status.metrics) { metric in
-                                LabeledContent(metric.localizedTitle(), value: String(metric.value))
-                            }
-                        }
-                    }
-                }
-                ForEach(model.pluginIssues, id: \.self) { Text($0).font(.ui(.caption)).foregroundStyle(DeskPalette.attention) }
-                Button(L10n.text("Обновить список", "Refresh list")) { model.refreshPlugins() }.disabled(model.anyBusy || model.connecting)
-                Button(L10n.text("Открыть папку плагинов", "Open plugins folder")) {
-                    do {
-                        try FileManager.default.createDirectory(at: model.pluginDirectory, withIntermediateDirectories: true)
-                        NSWorkspace.shared.open(model.pluginDirectory)
-                    } catch { model.error = error.localizedDescription }
-                }
-                Text(L10n.text("Установи плагин с помощью его установщика, затем нажми «Обновить список».", "Use the plugin's installer, then click Refresh list."))
-                    .font(.ui(.caption)).foregroundStyle(.secondary)
-            }
-        }.formStyle(.grouped)
-    }
-
-    private var mobileSettings: some View {
-        Form {
-            MobileRemoteSettings(host: model.mobileRemote, model: model)
-        }.formStyle(.grouped)
-    }
-
-    private var dataSettings: some View {
-        Form {
-            Section(L10n.text("История чатов", "Chat history")) {
-                Button {
-                    model.openArchive()
-                    openWindow(id: "main")
-                    dismiss()
-                } label: {
-                    Label(L10n.text("Открыть архив", "Open archive"), systemImage: "archivebox")
-                }
-                Text(L10n.text("Просматривай и восстанавливай архивные чаты всех проектов.", "Browse and restore archived chats from all projects."))
-                    .font(.ui(.caption)).foregroundStyle(.secondary)
-            }
-            Section(L10n.text("Данные", "Data")) {
-                Text(L10n.text("Разговоры и настройки этого приложения хранятся отдельно от текущего Codex.", "This app’s conversations and settings are stored separately from your existing Codex setup."))
-                    .font(.ui(.callout)).foregroundStyle(.secondary)
-                Button(L10n.text("Открыть папку данных", "Open data folder")) { NSWorkspace.shared.open(Locations.root) }
             }
         }.formStyle(.grouped)
     }

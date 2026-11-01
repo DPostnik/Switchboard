@@ -59,7 +59,7 @@ struct AppVersion: Equatable {
     }
 }
 
-/// Settings → General → About: version, build and changelog, with a copy button for bug reports.
+/// Settings → Advanced → About: version, build and changelog, with a copy button for bug reports.
 struct AboutSettings: View {
     var app = AppVersion.current
     @State private var copied = false

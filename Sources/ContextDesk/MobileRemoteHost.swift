@@ -370,11 +370,11 @@ struct MobileRemoteSettings: View {
                 .font(.ui(.caption)).foregroundStyle(.secondary)
             Text(L10n.text("Выбранные проекты: названия, последние сообщения и запросы подтверждения передаются в Supabase. Фото с телефона удаляются из облака примерно через час после обработки команды, а с Mac — через час после окончания работы чата. Очистка на Mac выполняется, пока приложение открыто. Вложения из истории Mac и учётные данные агентов не передаются. Облачная копия хранится до удаления ниже.", "Selected projects: names, recent messages and approval requests are sent to Supabase. Phone photos are removed from the cloud about an hour after the command is processed, and from your Mac an hour after the chat becomes idle. Mac cleanup runs while the app is open. Attachments from Mac history and agent credentials are excluded. The cloud copy remains until deleted below."))
                 .font(.ui(.caption)).foregroundStyle(.secondary)
-            ForEach(model.state.projects) { project in
-                Toggle(project.name, isOn: Binding(get: { host.projects.contains(project.id.uuidString) }, set: {
-                    if $0 { host.projects.insert(project.id.uuidString) } else { host.projects.remove(project.id.uuidString) }
-                })).disabled(host.enabled)
-            }
+            // Projects are chosen in each project's settings; the stored selection is unchanged.
+            LabeledContent(L10n.text("Проектов на телефоне", "Projects on the phone"),
+                           value: String(model.state.projects.filter { host.projects.contains($0.id.uuidString) }.count))
+            Text(L10n.text("Проекты выбираются в настройках каждого проекта → Телефон.", "Choose projects in each project's settings → Phone."))
+                .font(.ui(.caption)).foregroundStyle(.secondary)
             Text(L10n.text("На питании от сети Mac не засыпает автоматически. Закрытая крышка, принудительный сон и Cmd+Q могут прервать доступ.", "On external power, the Mac stays awake during idle time. Closing the lid, forced sleep and Cmd+Q can interrupt access."))
                 .font(.ui(.caption)).foregroundStyle(.secondary)
             Toggle(L10n.text("Включать доступ при запуске приложения", "Enable access when the app launches"), isOn: $host.autoEnable)

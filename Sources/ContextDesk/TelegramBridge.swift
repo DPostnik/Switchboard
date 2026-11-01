@@ -78,12 +78,14 @@ struct TelegramSettings: View {
                 Stepper(value: $bridge.delayMinutes, in: 0...60) {
                     Text(L10n.text("Задержка: \(bridge.delayMinutes) мин", "Delay: \(bridge.delayMinutes) min"))
                 }
-                TextField(L10n.text("Скрипт уведомителя", "Notifier script"), text: $bridge.script)
-                    .font(.system(.body, design: .monospaced))
                 if let problem = bridge.problem {
                     Text(problem).font(.ui(.caption)).foregroundStyle(DeskPalette.problem)
                 } else if bridge.configured == true {
                     Text(L10n.text("Уведомитель настроен.", "The notifier is set up.")).font(.ui(.caption)).foregroundStyle(.secondary)
+                }
+                DisclosureGroup(L10n.text("Дополнительно", "Advanced")) {
+                    TextField(L10n.text("Скрипт уведомителя", "Notifier script"), text: $bridge.script)
+                        .font(.system(.body, design: .monospaced))
                 }
             }
             Text(L10n.text("Через твой бот telegram-agent-notifier. Сообщение уходит, если чат ждёт одобрения или ответа либо ход завершился ошибкой и это длится дольше задержки; когда ожидание заканчивается, неотправленное сообщение отменяется. В сообщении название чата и суть запроса, без переписки. Ответ через Reply приходит в этот чат: подходящий вопрос получает ответ, иначе текст встаёт в очередь чата. Одобрять действия из Telegram нельзя.",
