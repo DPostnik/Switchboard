@@ -27,7 +27,14 @@ public struct NativeTranscript: NSViewRepresentable {
         self.isWorking = isWorking; self.workingStatus = workingStatus; self.workingSince = workingSince
         self.items = items; self.conversationID = conversationID; self.followOutput = followOutput
     }
-    public func makeNSView(context: Context) -> TranscriptScrollView { TranscriptScrollView(positions: .session) }
+    public func makeNSView(context: Context) -> TranscriptScrollView {
+        let view = TranscriptScrollView(positions: .session)
+        // Cmd+F opens the native find bar above the conversation (`showFind`).
+        view.transcript.usesFindBar = true
+        view.transcript.isIncrementalSearchingEnabled = true
+        TranscriptScrollView.chatTranscript = view
+        return view
+    }
     public func sizeThatFits(_ proposal: ProposedViewSize, nsView: TranscriptScrollView, context: Context) -> CGSize? {
         proposal.replacingUnspecifiedDimensions(by: .zero)
     }
@@ -189,6 +196,32 @@ public struct NativeTranscript: NSViewRepresentable {
         }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    /// The open chat's conversation; one main window shows at most one. Document previews are not registered.
+    public fileprivate(set) static weak var chatTranscript: TranscriptScrollView?
+
+    /// Shows the native find bar above the text and moves focus into it; matches are highlighted as you type.
+    public func showFind() {
+        guard transcript.usesFindBar else { return }
+        window?.makeFirstResponder(transcript)
+        let item = NSMenuItem()
+        item.tag = NSTextFinder.Action.showFindInterface.rawValue
+        transcript.performTextFinderAction(item)
+    }
+
+    /// The transcript that should answer Cmd+F: the document or chat holding keyboard focus (its text or its find bar),
+    /// otherwise the open chat's conversation.
+    public static func findTarget(in window: NSWindow?) -> TranscriptScrollView? {
+        var view = window?.firstResponder as? NSView
+        // A focused text field edits through the window's field editor, which is not inside the field.
+        if let editor = view as? NSTextView, editor.isFieldEditor, let field = editor.delegate as? NSView { view = field }
+        while let current = view {
+            if let scroll = current as? TranscriptScrollView, scroll.transcript.usesFindBar { return scroll }
+            view = current.superview
+        }
+        guard let chat = chatTranscript, chat.window != nil else { return nil }
+        return chat
+    }
 
     public func update(items: [TranscriptItem], conversationID: String?, followOutput: Bool, isWorking: Bool = false, workingStatus: String? = nil,
                        workingSince: Date? = nil, unreadCompletionID: String? = nil, unreadResponseItemID: String? = nil, projectPath: String? = nil) {

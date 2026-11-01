@@ -219,13 +219,7 @@ public enum DocumentPreview {
         }
     }
 
-    func showFind() {
-        guard let view = documentView else { return }
-        view.window?.makeFirstResponder(view.transcript)
-        let item = NSMenuItem()
-        item.tag = NSTextFinder.Action.showFindInterface.rawValue
-        view.transcript.performTextFinderAction(item)
-    }
+    func showFind() { documentView?.showFind() }
 }
 
 /// Follows one path with a vnode dispatch source. Events are coalesced: the handler runs on the main actor

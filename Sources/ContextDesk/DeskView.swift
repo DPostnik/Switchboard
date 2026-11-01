@@ -85,6 +85,18 @@ struct DeskView: View {
         .onChange(of: activeChatIDs) { _, ids in
             selection.prune(keeping: ids)
         }
+        // The chat shortcuts and the command palette (`ChatNavigation.swift`).
+        .onChange(of: sidebarListing, initial: true) { _, listing in model.navigation.sidebar = listing }
+        .onReceive(model.navigation.requests) { request in
+            switch request {
+            case .usage:
+                // The usage popover hangs from the sidebar dock.
+                if columnVisibility == .detailOnly { columnVisibility = .all }
+                DispatchQueue.main.async { limitsPlacement = limitsAnchor.placement; showingLimits = true }
+            case .projectSettings(let id):
+                permissionsProject = model.state.projects.first { $0.id == id }
+            }
+        }
         .sheet(item: $permissionsProject) { project in ProjectSettingsView(model: model, project: project) }
         .alert(L10n.text("Название чата", "Chat title"), isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField(L10n.text("Название", "Title"), text: $newTitle)
@@ -119,18 +131,13 @@ struct DeskView: View {
                         if !model.state.visiblePinnedChats.isEmpty {
                             Text(L10n.text("Избранное", "Favorites"))
                                 .sidebarSectionHeader()
-                            ForEach(model.state.visiblePinnedChats.filter { chat in
-                                (search.isEmpty || chat.title.localizedCaseInsensitiveContains(search)
-                                    || model.state.projects.contains { $0.id == chat.projectID && ($0.name.localizedCaseInsensitiveContains(search) || $0.path.localizedCaseInsensitiveContains(search)) })
-                            }) { chat in
+                            ForEach(model.state.visiblePinnedChats.filter { model.state.sidebarShowsFavorite($0, search: search) }) { chat in
                                 chatEntry(chat, favorite: true)
                             }
                             Divider().padding(.vertical, .ui(6))
                         }
                         projectsHeader
-                        ForEach(model.state.visibleProjects.filter { project in
-                            search.isEmpty || project.name.localizedCaseInsensitiveContains(search) || project.path.localizedCaseInsensitiveContains(search) || model.state.chats.contains { $0.projectID == project.id && !$0.isArchived && $0.title.localizedCaseInsensitiveContains(search) }
-                        }) { project in
+                        ForEach(model.state.visibleProjects.filter { model.state.sidebarShowsProject($0, search: search) }) { project in
                             projectEntries(project)
                         }
                     }.padding(.horizontal, .ui(12)).padding(.bottom, .ui(8))
@@ -200,7 +207,7 @@ struct DeskView: View {
         let jobs = model.showingJobs && !model.showingArchive && !model.showingAttention
         let account = model.currentAgent == .appClaude ? (model.claudeAuthenticated ? L10n.text("Claude · подключён", "Claude · connected") : L10n.text("Claude · вход не выполнен", "Claude · not signed in")) : (model.connecting ? L10n.text("Подключение…", "Connecting…") : model.accountLabel)
         return HStack(spacing: .ui(2)) {
-            Button { model.showingArchive = false; model.showingAttention = false; model.showingJobs = true; Task { await model.refreshJobs() } } label: {
+            Button { model.openSchedule() } label: {
                 Image(systemName: "calendar")
             }
             .buttonStyle(SidebarIconButtonStyle(selected: jobs))
@@ -240,6 +247,10 @@ struct DeskView: View {
             .accessibilityLabel(account)
         }
         .padding(.horizontal, .ui(10)).padding(.bottom, .ui(10))
+    }
+    private var sidebarListing: SidebarListing {
+        SidebarListing(search: search, expanded: expandedProjects, collapsedInSearch: collapsedSearchProjects,
+                       visibleCounts: visibleChatCounts, pageSize: chatPageSize)
     }
     private var sidebarScrollerReserve: CGFloat {
         guard scrollerStyle == .legacy, sidebarContentHeight <= sidebarViewportHeight else { return 0 }
@@ -386,7 +397,7 @@ struct DeskView: View {
             SidebarDisclosure(isExpanded: isExpanded, animation: sidebarAnimation) {
                 VStack(alignment: .leading, spacing: .ui(4)) {
                     let matching = model.state.orderedChats(projectID: project.id, archived: false).filter {
-                        search.isEmpty || project.name.localizedCaseInsensitiveContains(search) || project.path.localizedCaseInsensitiveContains(search) || $0.title.localizedCaseInsensitiveContains(search)
+                        model.state.sidebarShowsChat($0, in: project, search: search)
                     }
                     chatEntries(matching, projectID: project.id)
                     if model.state.chats.allSatisfy({ $0.projectID != project.id || $0.isArchived }) {

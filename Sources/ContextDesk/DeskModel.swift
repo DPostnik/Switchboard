@@ -91,6 +91,8 @@ private struct ChatRunState: Equatable {
     }
     /// Observed by the app menu instead of the model (`ContextDeskApp`).
     let menu = AppMenuState()
+    /// Command palette and chat shortcuts (`ChatNavigation.swift`).
+    let navigation = DeskNavigation()
     private func syncMenu() { menu.update(ready: !isBootstrapping, hasProject: selectedProject != nil) }
     /// (connection, native ID) -> chat ID for `receive`, built on demand after a state change instead of
     /// filtering every chat for every streamed delta.

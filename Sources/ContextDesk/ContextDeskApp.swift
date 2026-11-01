@@ -158,6 +158,12 @@ struct ContextDeskApp: App {
             CommandGroup(after: .newItem) {
                 ChatCommands(model: model, menu: model.menu)
             }
+            CommandGroup(after: .textEditing) {
+                FindCommand()
+            }
+            CommandMenu(L10n.text("Переход", "Go")) {
+                NavigationCommands(model: model, menu: model.menu)
+            }
         }
         Settings {
             SettingsContent(model: model, keepAwake: delegate.keepAwake)
@@ -175,6 +181,7 @@ private struct MainWindowContent: View {
                 StartupLoadingView()
             } else {
                 DeskView(model: model)
+                    .overlay { CommandPaletteHost(model: model, navigation: model.navigation) }
             }
         }
             .buttonStyle(PointerButtonStyle(base: .automatic))
