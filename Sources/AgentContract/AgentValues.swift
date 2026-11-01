@@ -65,6 +65,8 @@ public struct TranscriptItem: Identifiable, Codable, Sendable, Equatable {
     public var fullLength: Int?
     /// Set once the body was replaced by its headline and a metadata line after archiving; never undone.
     public var reduced: Bool?
+    /// Context size around a `compaction` item, when known; nil on other kinds and on items stored before it existed.
+    public var compaction: ContextCompaction?
     public init(id: String, kind: String, text: String, phase: String? = nil, timing: ResponseTiming? = nil) {
         self.id = id; self.kind = kind; self.phase = phase; self.timing = timing
         self.text = kind == "user" ? InterruptedTurnNote.stripped(text) : text
@@ -80,6 +82,18 @@ public struct TranscriptItem: Identifiable, Codable, Sendable, Equatable {
         }) {
             items[index] = item
         } else { items.append(item) }
+    }
+}
+
+/// Context size in tokens before and after an engine compacted the conversation. Claude Code reports both and what
+/// triggered it (`compact_boundary`); for Codex the adapter reads them from the thread's usage reports around the item.
+public struct ContextCompaction: Codable, Sendable, Equatable {
+    public var before: Int?
+    public var after: Int?
+    /// The engine's own value: "auto" or "manual" from Claude Code; kept as text so an unknown value still decodes.
+    public var trigger: String?
+    public init(before: Int? = nil, after: Int? = nil, trigger: String? = nil) {
+        self.before = before; self.after = after; self.trigger = trigger
     }
 }
 

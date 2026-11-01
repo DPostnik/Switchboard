@@ -184,6 +184,16 @@ private func interactiveFixture(_ root: URL) throws -> URL {
                 out({'type':'assistant','session_id':sid,'message':{'id':'retry','stop_reason':'end_turn','content':[{'type':'text','text':'safe answer'}]}})
                 result()
                 continue
+            if prompt in ['compact','compact-unsized']:
+                # Claude Code 2.1.292 auto-compacts mid-turn: the boundary carries the sizes (post_tokens is optional in its schema).
+                out({'type':'stream_event','session_id':sid,'event':{'type':'message_start','message':{'id':'full','usage':{'input_tokens':5,'cache_read_input_tokens':966000,'output_tokens':20}}}})
+                metadata={'trigger':'auto','pre_tokens':966625,'duration_ms':89161}
+                if prompt=='compact': metadata['post_tokens']=19463
+                out({'type':'system','subtype':'compact_boundary','session_id':sid,'uuid':'boundary-1','compact_metadata':metadata})
+                out({'type':'stream_event','session_id':sid,'event':{'type':'message_start','message':{'id':'compacted','usage':{'input_tokens':5,'cache_creation_input_tokens':20000,'output_tokens':1}}}})
+                out({'type':'assistant','session_id':sid,'message':{'id':'compacted','content':[{'type':'text','text':'continued'}]}})
+                result()
+                continue
             if prompt in ['approval','question','outside','connector','approval-twice']:
                 name='AskUserQuestion' if prompt=='question' else 'mcp__claude_ai_Gmail__send_message' if prompt=='connector' else 'Write'
                 args={'questions':[{'question':'Choose','options':[{'label':'Yes','description':'Go ahead','preview':'print(1)'},{'label':'No','description':' '}]}]} if prompt=='question' else {'file_path':'/outside-project/file' if prompt=='outside' else str(pathlib.Path.cwd()/'fixture.txt'),'content':'content'}
@@ -1479,5 +1489,30 @@ private func completedClaudeSession(_ adapter: ClaudeIntegration, binary: URL, h
     #expect(items.first?.phase == "cyber")
     #expect(items.first?.text == ClaudeIntegration.refusalText(category: "cyber"))
     #expect(ClaudeIntegration.refusalText(category: "cyber").hasSuffix("cyber."))
+    await adapter.disconnect()
+}
+
+@Test(arguments: ["compact", "compact-unsized"])
+func claudeCompactBoundaryBecomesADividerWithItsSizes(prompt: String) async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: prompt)).value()
+    try await waitFor { await events.completion() != nil }
+    // Without post_tokens the size after is the next main-thread call's context: 5 + 20000 input and 1 output.
+    let expected = ContextCompaction(before: 966_625, after: prompt == "compact" ? 19_463 : 20_006, trigger: "auto")
+    let emitted = await events.items().filter { $0.kind == "compaction" }
+    #expect(emitted.last?.id == "compact:boundary-1")
+    #expect(emitted.last?.compaction == expected)
+    #expect(emitted.last?.phase == "completed")
+    // The session record keeps it, so reopening the chat or restarting the app shows the same divider.
+    let history = try await adapter.history(session, context: descriptor.context).value().flatMap(\.items)
+    #expect(history.filter { $0.kind != "user" }.map(\.id) == ["compact:boundary-1", "compacted"])
+    #expect(history.first { $0.kind == "compaction" }?.compaction == expected)
     await adapter.disconnect()
 }

@@ -74,6 +74,9 @@ public actor ClaudeIntegration: AgentIntegration {
     /// Session -> plan-limit signals seen during its active turn.
     private var limitStops: [String: ClaudeLimitStop] = [:]
     private var meters: [String: ClaudeUsageMeter] = [:]
+    /// Session -> a compaction whose boundary carried no `post_tokens`, and the main-thread call current at the boundary;
+    /// the next call's context is its size after.
+    private var compactionsAwaitingSize: [String: (item: String, message: String?)] = [:]
     private var generations: [UUID: ClaudeGenerationRunner] = [:]
     private var cancelledGenerations = Set<UUID>()
     /// App bundle resources when the Switchboard browser is attached to chats; nil keeps chats browser-less.
@@ -649,6 +652,10 @@ public actor ClaudeIntegration: AgentIntegration {
                 // A new main turn the CLI started itself after its background tasks finished.
                 if waiting[id] != nil, sessions[id]?.active == nil, value["parent_tool_use_id"].string == nil { wake(id) }
                 if let model = value["model"].string { meters[id]?.model = model }
+            case "compact_boundary":
+                guard sessions[id]?.active != nil, value["parent_tool_use_id"].string == nil, let item = Self.compactionItem(value) else { return }
+                emit(item, session: id)
+                compactionsAwaitingSize[id] = item.compaction?.after == nil ? (item.id, meters[id]?.current) : nil
             case "background_tasks_changed":
                 backgroundTasks[id] = Set(value["tasks"].array.compactMap { $0["task_id"].string })
                 guard let token = waiting[id] else { return }
@@ -856,6 +863,22 @@ public actor ClaudeIntegration: AgentIntegration {
         guard var meter = meters[id], meter.observe(message: message, usage: usage) else { return }
         meters[id] = meter
         sink.yield(.init(session: reference(id), payload: .usage(turn: turn, total: meter.total, snapshot: meter.snapshot())))
+        if let awaiting = compactionsAwaitingSize[id], awaiting.message != message, let size = meter.last,
+           var item = sessions[id]?.current.first(where: { $0.id == awaiting.item }) {
+            compactionsAwaitingSize[id] = nil
+            item.compaction?.after = size
+            emit(item, session: id)
+        }
+    }
+    /// Claude Code 2.1.292 stream-json `{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto"|"manual",
+    /// "pre_tokens":Int,"post_tokens":Int?,...},"uuid":...,"session_id":...}` as a compaction divider.
+    static func compactionItem(_ value: JSONValue) -> TranscriptItem? {
+        let metadata = value["compact_metadata"]
+        guard let before = metadata["pre_tokens"].int else { return nil }
+        var item = TranscriptItem(id: "compact:" + (value["uuid"].string ?? UUID().uuidString), kind: "compaction",
+                                  text: L10n.text("Контекст разговора сжат", "Conversation context compacted"), phase: "completed")
+        item.compaction = ContextCompaction(before: before, after: metadata["post_tokens"].int, trigger: metadata["trigger"].string)
+        return item
     }
     /// Tool results arrive as a string or as content blocks; show their text, never the raw block JSON.
     static func toolResultText(_ content: JSONValue) -> String {
@@ -1014,7 +1037,7 @@ public actor ClaudeIntegration: AgentIntegration {
         // Items were capped when emitted; the map keeps the record capped if an item reached `current` another way.
         let history = AgentHistoryTurn(id: turn, items: (sessions[id]?.current ?? []).map(ActivityRetention.cap), startedAt: nil, completedAt: Date(), duration: nil, isComplete: false)
         sessions[id]?.turns.append(history); sessions[id]?.active = nil; sessions[id]?.current = []
-        summaries.removeValue(forKey: id); pendingSaves.remove(id)
+        summaries.removeValue(forKey: id); pendingSaves.remove(id); compactionsAwaitingSize.removeValue(forKey: id)
         let usageLimit = limitStops.removeValue(forKey: id)?.stop(outcome: outcome)
         if var meter = meters.removeValue(forKey: id) {
             meter.abandon() // No-op after a terminal result; otherwise observed calls still count.

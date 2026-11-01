@@ -174,8 +174,10 @@ public enum ActivityRetention {
     public static func isReduced(_ items: [TranscriptItem]) -> Bool {
         !items.contains { isActivity($0.kind) && $0.reduced != true }
     }
+    /// Kinds without a contract case (compaction dividers, refusal notices) are stored as `.activity`; their presentation
+    /// names the real kind, so they do not keep a reduced transcript looking unreduced.
     public static func isReduced(_ snapshot: AgentTranscriptSnapshot) -> Bool {
-        !snapshot.items.contains { ($0.kind == .activity || $0.kind == .tool) && $0.presentation?.reduced != true }
+        !snapshot.items.contains { isActivity($0.presentation?.kind ?? $0.kind.rawValue) && $0.presentation?.reduced != true }
     }
 
     /// Metadata line of a reduced body (its second line): `#activity` followed by space-separated `key=value` fields in

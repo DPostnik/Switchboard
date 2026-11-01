@@ -49,7 +49,9 @@ extension CodexClient {
             resolve { $0.interaction.session.nativeID == p["threadId"].string && $0.interaction.turn == p["turn"]["id"].string }
         }
         if ["client/disconnected", "account/login/completed", "account/updated"].contains(method) { resetInteractions() }
-        if let event = CodexEventDecoder.notification(raw) { eventSink.yield(event) }
+        if let event = CodexEventDecoder.notification(raw) {
+            for event in compactions.observe(event) { eventSink.yield(event) }
+        }
         if method == "item/started", let native = p["threadId"].string, !native.isEmpty,
            let record = CodexEventDecoder.capability(p["item"], turn: p["turnId"].string) {
             eventSink.yield(.init(session: .init(connection: .originalCodex, nativeID: native), payload: .capability(record)))

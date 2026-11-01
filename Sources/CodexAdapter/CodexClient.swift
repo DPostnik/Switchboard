@@ -15,6 +15,7 @@ public actor CodexClient {
     private var browserResources: URL?
     private var browserRoot = BrowserConfiguration.directory
     var interactions: [UUID: (pending: CodexPendingInteraction, generation: UUID, token: UUID)] = [:]
+    var compactions = CodexCompactionMeter()
 
     public init() {
         let transport = CodexConnection()

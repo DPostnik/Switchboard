@@ -403,7 +403,7 @@ public actor AppStore {
                 guard previous.snapshot.source == snapshot.source else { throw ConversationIdentity.invalidStorage }
                 if previous.capturedAt > snapshot.capturedAt { return }
             }
-            var snapshot = snapshot
+            var snapshot = try carryingCompactions(db, snapshot)
             if try storedStamp(db, id)?.reduced == true, try isArchived(db, id) { snapshot = try ActivityRetention.reduce(snapshot) }
             _ = try writeTranscript(db, snapshot)
             cancelFlush(id)
@@ -473,6 +473,16 @@ public actor AppStore {
         flushTasks[id]?.cancel(); flushTasks[id] = nil
     }
 
+    /// A history refresh replaces the stored transcript, but Codex history returns compaction items without the sizes
+    /// recorded live; they are kept from the stored items. The stored blob is read only when such an item lacks them.
+    private func carryingCompactions(_ db: OpaquePointer, _ snapshot: AgentTranscriptSnapshot) throws -> AgentTranscriptSnapshot {
+        guard snapshot.items.contains(where: { $0.presentation?.kind == "compaction" && $0.presentation?.compaction == nil }),
+              let previous = try transcriptEntry(db, snapshot.conversation.value) else { return snapshot }
+        var items = LocalHistory.items(snapshot)
+        guard ContextCompaction.carry(from: previous.items ?? LocalHistory.items(previous.snapshot), into: &items) else { return snapshot }
+        return try LocalHistory.snapshot(conversation: snapshot.conversation, source: snapshot.source, items: items,
+                                         completeness: snapshot.completeness, capturedAt: snapshot.capturedAt)
+    }
     /// Cached entry, or the decoded blob inserted into the cache; nil when no transcript is stored.
     private func transcriptEntry(_ db: OpaquePointer, _ id: String) throws -> TranscriptEntry? {
         if let entry = transcripts[id] { touch(id); return entry }
