@@ -117,22 +117,6 @@ struct ProjectTitleLayout: Layout {
     }
 }
 
-/// The current chat's project branch beside the composer's other chips; nothing outside a repository.
-struct ComposerBranchChip: View {
-    let store: GitStatusStore
-    let path: String?
-
-    var body: some View {
-        if let status = store.status(for: path) {
-            GitBranchBadge(status: status, maxNameWidth: 160)
-                .font(.ui(.callout))
-                .padding(.horizontal, .ui(9)).frame(height: .ui(28))
-                .contentShape(Capsule())
-                .help(GitBranchText.summary(status))
-        }
-    }
-}
-
 /// A chat row's title; when the chat last worked on another branch than the project's current one,
 /// the title keeps one line and that branch appears under it, so the row height does not change.
 struct ChatRowTitle: View {

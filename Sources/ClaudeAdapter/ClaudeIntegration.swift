@@ -1139,6 +1139,10 @@ public actor ClaudeIntegration: AgentIntegration {
             case .contextHandoffV1:
                 input = request.historicalInput
                 instructions = HandoffSummary.instructions + "\nWrite all fields in " + languageLine; schema = HandoffSummary.schema
+            case .commitMessageV1:
+                input = request.historicalInput; instructions = GitGeneration.commitInstructions; schema = GitGeneration.commitSchema
+            case .pullRequestV1:
+                input = request.historicalInput; instructions = GitGeneration.pullRequestInstructions; schema = GitGeneration.pullRequestSchema
             case .archiveSummaryV1:
                 guard let directory = environment.recipeDirectory else { return .rejected(.invalidInput) }
                 let fragments = try JSONDecoder().decode([AgentSummaryFragment].self, from: Data(request.historicalInput.utf8))
@@ -1173,6 +1177,10 @@ public actor ClaudeIntegration: AgentIntegration {
                 switch request.recipe {
                 case .chatTitleV1: return .success(.title(try ChatTitle.validate(output.text)))
                 case .contextHandoffV1: _ = try HandoffSummary.validate(output.text); return .success(.handoff(output.text))
+                case .commitMessageV1: return .success(.commitMessage(try GitGeneration.commitMessage(from: output.text)))
+                case .pullRequestV1:
+                    let draft = try GitGeneration.pullRequest(from: output.text)
+                    return .success(.pullRequest(title: draft.title, body: draft.body))
                 case .archiveSummaryV1:
                     guard let recipe, let chunk else { return .rejected(.invalidInput) }
                     let content = try recipe.validate(output.text, chunk: chunk)

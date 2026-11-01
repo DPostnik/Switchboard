@@ -1115,7 +1115,7 @@ struct ChatView: View {
                     }.disabled(model.busy || model.sending)
                         .help(model.currentRole.summary + " " + L10n.text("Роль этого чата; применяется со следующего сообщения. Роль по умолчанию задаётся в настройках проекта.", "This chat’s role; applies from the next message. The default role is set in the project settings."))
                     ModelChip(model: model)
-                    ComposerBranchChip(store: model.gitStatus, path: model.selectedProject?.path)
+                    GitActionsChip(model: model, folder: model.composerGitFolder)
                     Spacer()
                     ContextRing(usage: model.currentUsage, claude: model.currentAgent == .appClaude)
                     SendControl(model: model, composer: model.composer, reduceMotion: reduceMotion)

@@ -167,6 +167,30 @@ public actor AgentGenerationRunner {
         }
         return try HandoffSummary.validate(output)
     }
+    /// A commit message draft from `GitGeneration.commitInput`.
+    public func commitMessage(source: AgentSessionReference, input: String, model: String, route: RequestRoute,
+                              environment: AgentGenerationEnvironment) async throws -> String {
+        let context = try await integration.descriptor().value().context
+        let request = AgentGenerationRequest(source: source, recipe: .commitMessageV1, historicalInput: input,
+            model: .init(context: context, model: model), route: route.agentRoute, language: L10n.language.rawValue)
+        active = request.id; defer { active = nil }
+        guard case .commitMessage(let message) = try await integration.generate(request, environment: environment, willStart: {}).value() else {
+            throw AgentOperationFailure(rejection: .invalidResponse, failure: nil)
+        }
+        return message
+    }
+    /// A pull request title and body draft from `GitGeneration.pullRequestInput`.
+    public func pullRequest(source: AgentSessionReference, input: String, model: String, route: RequestRoute,
+                            environment: AgentGenerationEnvironment) async throws -> GitPullRequestText {
+        let context = try await integration.descriptor().value().context
+        let request = AgentGenerationRequest(source: source, recipe: .pullRequestV1, historicalInput: input,
+            model: .init(context: context, model: model), route: route.agentRoute, language: L10n.language.rawValue)
+        active = request.id; defer { active = nil }
+        guard case .pullRequest(let title, let body) = try await integration.generate(request, environment: environment, willStart: {}).value() else {
+            throw AgentOperationFailure(rejection: .invalidResponse, failure: nil)
+        }
+        return GitPullRequestText(title: title, body: body)
+    }
     public func summarize(source: AgentSessionReference, chunk: SummarySource.Chunk, model: String, route: RequestRoute,
                           environment: AgentGenerationEnvironment, language: AppLanguage,
                           willStart: @escaping @Sendable () async throws -> Void) async throws -> SummaryPart {

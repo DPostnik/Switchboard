@@ -61,6 +61,15 @@ public actor ArchiveSummaryRunner {
         catch { throw SummaryRunFailure(uncertain: false, message: error.localizedDescription) }
     }
 
+    /// One schema-constrained answer for app-owned recipes (git drafts); the caller validates the text.
+    public func structured(input: String, instructions: String, schema: JSONValue, model: String, route: RequestRoute,
+                           executable: URL, home: URL, workspace: URL, providerArguments: [String],
+                           willStart: @Sendable () async throws -> Void) async throws -> String {
+        try await generate(input: input, instructions: instructions, schema: schema, model: model, route: route,
+                           executable: executable, home: home, workspace: workspace, providerArguments: providerArguments,
+                           willStart: willStart).text
+    }
+
     private func generate(input: String, instructions: String, schema: JSONValue, model: String,
                           route: RequestRoute, executable: URL, home: URL, workspace: URL,
                           providerArguments: [String], willStart: @Sendable () async throws -> Void) async throws -> Output {
