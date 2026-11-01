@@ -118,6 +118,7 @@ struct DeskView: View {
         } message: { chat in
             Text(L10n.text("Чат «\(chat.title)» и его сообщения в очереди будут удалены. Отменить это действие нельзя. Файлы проекта останутся на месте.", "The chat “\(chat.title)” and its queued messages will be deleted. This cannot be undone. Project files will be kept."))
         }
+        .modifier(WorktreeRemovalAlert(model: model))
     }
     private var sidebar: some View {
             VStack(spacing: .ui(12)) {
@@ -484,6 +485,13 @@ struct DeskView: View {
             SidebarMenuAction(title: L10n.text("Удалить чат…", "Delete chat…"), enabled: model.canDeleteChat(chat.id)) { deleting = chat },
             .separator
         ]
+        if let worktree = chat.worktree {
+            actions += [
+                SidebarMenuAction(title: L10n.text("Открыть worktree в Finder", "Show worktree in Finder"), help: worktree.path) { model.revealWorktree(worktree) },
+                SidebarMenuAction(title: L10n.text("Скопировать путь", "Copy path"), help: worktree.path) { copyToPasteboard(worktree.path) },
+                .separator
+            ]
+        }
         var agents = [
             SidebarMenuAction(title: L10n.text("Скопировать ID чата", "Copy chat ID")) { copyToPasteboard(chat.id) },
             SidebarMenuAction(title: L10n.text("Скопировать ссылку на чат для агента", "Copy chat reference for an agent")) {
@@ -625,7 +633,8 @@ struct DeskView: View {
                 }
                 VStack(alignment: .leading, spacing: .ui(3)) {
                     ChatRowTitle(title: chat.title, branch: favorite || model.isBusy(threadID: chat.id) ? nil
-                                 : model.gitStatus.branchChange(for: chat, projectPath: model.projectPath(forChat: chat.id))?.from)
+                                 : model.gitStatus.branchChange(for: chat, projectPath: model.workingDirectory(forChat: chat.id))?.from,
+                                 worktreeBranch: chat.worktree.map { model.gitStatus.status(for: $0.workingDirectory)?.displayName ?? WorktreeText.name($0) })
                     if favorite, let project = model.state.projects.first(where: { $0.id == chat.projectID }) {
                         Text(project.name).font(.ui(.caption2)).foregroundStyle(.secondary).lineLimit(1)
                             .help(project.path)
@@ -1115,7 +1124,10 @@ struct ChatView: View {
                     }.disabled(model.busy || model.sending)
                         .help(model.currentRole.summary + " " + L10n.text("Роль этого чата; применяется со следующего сообщения. Роль по умолчанию задаётся в настройках проекта.", "This chat’s role; applies from the next message. The default role is set in the project settings."))
                     ModelChip(model: model)
-                    ComposerBranchChip(store: model.gitStatus, path: model.selectedProject?.path)
+                    ComposerBranchChip(store: model.gitStatus, path: model.selectedWorkingDirectory, worktree: model.selectedChat?.worktree)
+                    if model.chatID == nil, let project = model.selectedProject, model.gitStatus.status(for: project.path) != nil {
+                        NewChatWorkspaceChip(model: model, project: project)
+                    }
                     Spacer()
                     ContextRing(usage: model.currentUsage, claude: model.currentAgent == .appClaude)
                     SendControl(model: model, composer: model.composer, reduceMotion: reduceMotion)
@@ -1162,7 +1174,7 @@ struct ChatView: View {
                 if let chat = model.selectedChat {
                     if model.state.browserEnabled == true, let session = chat.nativeSession,
                        [.originalCodex, .appClaude].contains(session.connection) {
-                        ChatBrowserControls(session: session, project: model.selectedProject?.path ?? "",
+                        ChatBrowserControls(session: session, project: model.selectedWorkingDirectory ?? "",
                                             busy: model.isBusy(threadID: chat.id) || model.isChangingChat(chat.id),
                                             ownerName: model.browserProfileOwnerName) { action in
                             try await model.changeBrowserProfile(chatID: chat.id, action: action)
@@ -1178,7 +1190,8 @@ struct ChatView: View {
                         Label(L10n.text("Передать контекст…", "Hand off context…"), systemImage: "arrowshape.turn.up.right")
                     }.pointingHandCursor().help(L10n.text("Передать контекст в новый чат", "Hand off context to a new chat"))
                         .disabled(model.loadingChat || model.creatingHandoff || model.preparingHandoff || model.isBusy(threadID: chat.id))
-                } else if model.state.browserEnabled == true, [.originalCodex, .appClaude].contains(model.currentAgent), let project = model.selectedProject {
+                } else if model.state.browserEnabled == true, [.originalCodex, .appClaude].contains(model.currentAgent), let project = model.selectedProject,
+                          model.newChatWorkspaces[project.id] == nil { // A worktree chat starts with its own browser profile.
                     NewChatBrowserProfilePicker(project: project.path, connection: model.currentAgent, ownerName: model.browserProfileOwnerName, selection: Binding(
                         get: { model.newChatBrowserProfiles[project.id] },
                         set: { model.newChatBrowserProfiles[project.id] = $0 }))
@@ -1221,7 +1234,7 @@ struct ChatView: View {
 
     /// A fragment selected in the preview goes into the draft with its file and lines; nothing is sent.
     private func quoteIntoDraft(_ url: URL, text: String, lines: ClosedRange<Int>?) {
-        let path = TranscriptScrollView.relativePath(url.path, project: model.selectedProject?.path) ?? url.path
+        let path = TranscriptScrollView.relativePath(url.path, project: model.selectedWorkingDirectory) ?? url.path
         model.composer.text = DocumentQuote.draft(path: path, lines: lines, text: text, appendingTo: model.composer.text)
         // The composer is hidden behind an expanded preview.
         preview.expanded = false
@@ -1254,7 +1267,7 @@ struct ChatHistoryView: View {
             NativeTranscript(items: renderedItems, conversationID: model.chatID, followOutput: true,
                              isWorking: model.busy, workingStatus: model.workingStatus, workingSince: model.workingSince, unreadCompletionID: model.selectedChat?.unreadCompletionID,
                              unreadResponseItemID: model.chatID.flatMap { model.unreadResponseItems[$0] },
-                             projectPath: model.selectedProject?.path, onOpenFile: onOpenFile) { threadID, completionID in
+                             projectPath: model.selectedWorkingDirectory, onOpenFile: onOpenFile) { threadID, completionID in
                 guard transcript.items == renderedItems else { return }
                 model.markResponseRead(threadID: threadID, completionID: completionID)
             }

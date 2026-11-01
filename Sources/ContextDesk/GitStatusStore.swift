@@ -200,14 +200,9 @@ final class GitDirectoryWatcher: @unchecked Sendable {
 }
 
 extension DeskModel {
-    func projectPath(forChat threadID: String) -> String? {
-        guard let projectID = state.chats.first(where: { $0.id == threadID })?.projectID else { return nil }
-        return state.projects.first { $0.id == projectID }?.path
-    }
-
-    /// Stores the branch checked out as the chat's turn starts, for the branch-change banner and the chat row.
+    /// Stores the branch checked out in the chat's folder as its turn starts, for the branch-change banner and the chat row.
     func recordTurnBranch(threadID: String) {
-        guard let path = projectPath(forChat: threadID) else { return }
+        guard let path = workingDirectory(forChat: threadID) else { return }
         Task {
             let branch = await gitStatus.currentStatus(path)?.branch
             guard let index = state.chats.firstIndex(where: { $0.id == threadID }),
@@ -217,8 +212,10 @@ extension DeskModel {
         }
     }
 
-    /// The agent may have committed, switched branches or edited files.
+    /// The agent may have committed, switched branches or edited files. A worktree branch rename that waited for
+    /// the turn runs once the turn is marked finished.
     func refreshGitStatus(afterTurnIn threadID: String) {
-        gitStatus.refresh(projectPath(forChat: threadID))
+        gitStatus.refresh(workingDirectory(forChat: threadID))
+        Task { [weak self] in self?.settleWorktreeBranch(threadID) }
     }
 }

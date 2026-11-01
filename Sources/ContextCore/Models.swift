@@ -52,6 +52,9 @@ public struct Chat: Identifiable, Codable, Hashable, Sendable {
     /// The git branch checked out in the project when the chat's latest turn started; nil outside a repository
     /// or on a detached HEAD.
     public var turnBranch: String?
+    /// The chat works in its own git worktree instead of the project folder (`workingDirectory(in:)`); nil for the
+    /// project folder.
+    public var worktree: ChatWorktree?
     public var sidebarOrder: Int?
     public var pinned: Bool?
     public var isPinned: Bool { pinned == true }

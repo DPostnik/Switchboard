@@ -21,6 +21,10 @@ import ContextTranscript
             lines.append(text("Сессия \(agent): ", "\(agent) session: ") + session.nativeID)
         }
         if let projectPath { lines.append(text("Проект: ", "Project: ") + projectPath) }
+        if let worktree = chat.worktree {
+            lines.append(text("Рабочая папка (worktree): ", "Working folder (worktree): ") + worktree.workingDirectory
+                         + (worktree.branch.map { text(", ветка ", ", branch ") + $0 } ?? ""))
+        }
         return lines.joined(separator: "\n")
     }
 }

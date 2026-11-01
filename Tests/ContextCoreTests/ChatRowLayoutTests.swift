@@ -14,7 +14,10 @@ import Testing
     model.state.projects = [project]
     model.projectID = project.id
     model.state.chats = [Chat(id: "short", projectID: project.id, title: "Chat", model: ""),
-                         Chat(id: "long", projectID: project.id, title: "Title", model: "")]
+                         Chat(id: "long", projectID: project.id, title: "Title", model: ""),
+                         Chat(id: "worktree", projectID: project.id, title: "Worktree chat", model: "")]
+    // A chat in its own worktree shows its branch on the same secondary line.
+    model.state.chats[2].worktree = ChatWorktree(path: "/tmp/wt/sidebar/chat-abcdef", branch: "switchboard/" + String(repeating: "long-title-slug-", count: 3))
     // The short chat last worked on another branch: its branch line must not change the row height.
     model.state.chats[0].turnBranch = "feature/" + String(repeating: "long-branch-name-", count: 4)
     model.gitStatus.setStatus(GitStatus(branch: "main", commit: "abcdef1234", changedFiles: 2), for: project.path)
@@ -38,9 +41,12 @@ import Testing
         settle()
         let short = try #require(rows(host).first { $0.chatID == "short" })
         let long = try #require(rows(host).first { $0.chatID == "long" })
+        let worktree = try #require(rows(host).first { $0.chatID == "worktree" })
         let height = long.frame.height
         #expect(abs(height - 40) < 1)
         #expect(abs(short.frame.height - height) < 1)
+        #expect(abs(worktree.frame.height - height) < 1)
+        #expect(worktree.toolTip?.contains("/tmp/wt/sidebar/chat-abcdef") == true)
         for index in 0..<6 {
             model.state.chats[1].unreadCompletionID = index.isMultiple(of: 2) ? "response" : nil
             model.showingJobs = index.isMultiple(of: 2)

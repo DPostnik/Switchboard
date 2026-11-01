@@ -297,12 +297,12 @@ import IOKit.ps
             self?.realtime?.recover(from: error)
         })
     }
-    /// Reads only from the chat's own project folder and answers once; the agent is not involved.
+    /// Reads only from the chat's own folder (its project folder or worktree) and answers once; the agent is not involved.
     private func answerFile(_ command: RemoteCommand, model: DeskModel, api: RemoteAPI) async throws -> String {
         guard filesReady,
               let project = model.state.projects.first(where: { $0.id.uuidString == command.project }),
-              model.state.chats.contains(where: { $0.id == command.chat && $0.projectID == project.id }) else { throw RemoteFailure.invalidCommand }
-        let path = command.text, root = project.path
+              let chat = model.state.chats.first(where: { $0.id == command.chat && $0.projectID == project.id }) else { throw RemoteFailure.invalidCommand }
+        let path = command.text, root = chat.workingDirectory(in: project)
         let file = await Task.detached(priority: .userInitiated) { RemoteFileReader.read(path, root: root) }.value
         try await api.publishFile(file, command: command.id)
         return "submitted"

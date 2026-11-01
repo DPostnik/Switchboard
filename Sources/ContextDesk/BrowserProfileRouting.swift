@@ -43,8 +43,9 @@ extension DeskModel {
         defer { configuringBrowserChats.remove(chatID) }
         let client = session.connection == .appClaude ? claudeConnection : connection
         let store = BrowserProfileStore()
+        let folder = chat.workingDirectory(in: project)
         if try store.current(session: session) == nil {
-            try await client.resume(session, projectPath: project.path, access: chat.resolvedAccessMode(in: project), route: chat.route ?? .direct)
+            try await client.resume(session, projectPath: folder, access: chat.resolvedAccessMode(in: project), route: chat.route ?? .direct)
         }
         try await Task.detached {
             switch action {
@@ -52,14 +53,14 @@ extension DeskModel {
             case .release:
                 try store.release(session: session) { try BrowserProfileControl.verifyClosed(environment: $0, runtime: runtime) }
             case .select(let id):
-                try store.select(id, session: session, project: project.path) { try BrowserProfileControl.verifyClosed(environment: $0, runtime: runtime) }
+                try store.select(id, session: session, project: folder) { try BrowserProfileControl.verifyClosed(environment: $0, runtime: runtime) }
             case .takeControl: try store.humanControl(session: session, take: true)
             case .returnControl: try store.humanControl(session: session, take: false)
             }
         }.value
         switch action {
         case .select, .returnControl:
-            try await client.resume(session, projectPath: project.path, access: chat.resolvedAccessMode(in: project), route: chat.route ?? .direct)
+            try await client.resume(session, projectPath: folder, access: chat.resolvedAccessMode(in: project), route: chat.route ?? .direct)
         default: break
         }
     }

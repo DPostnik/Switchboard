@@ -143,10 +143,6 @@ private let checkpointLog = Logger(subsystem: AppLog.subsystem, category: "check
 // MARK: - Model hooks
 
 @MainActor extension DeskModel {
-    private func projectPath(ofChat id: String) -> String? {
-        guard let chat = state.chats.first(where: { $0.id == id }) else { return nil }
-        return state.projects.first { $0.id == chat.projectID }?.path
-    }
     private var runningChatIDs: Set<String> { Set(state.chats.lazy.map(\.id).filter { self.isBusy(threadID: $0) }) }
 
     /// Called right before a message goes to the engine; waits briefly for the start checkpoint.
@@ -155,7 +151,7 @@ private let checkpointLog = Logger(subsystem: AppLog.subsystem, category: "check
     }
 
     func noteTurnStarted(chatID: String, turnID: String) {
-        guard let path = projectPath(ofChat: chatID) else { return }
+        guard let path = workingDirectory(forChat: chatID) else { return }
         turnCheckpoints.turnStarted(chatID: chatID, turnID: turnID, projectPath: path, running: runningChatIDs)
     }
 
@@ -175,7 +171,7 @@ private let checkpointLog = Logger(subsystem: AppLog.subsystem, category: "check
     }
 
     func forgetTurnCheckpoints(chatID: String) {
-        guard let path = projectPath(ofChat: chatID) else { return }
+        guard let path = workingDirectory(forChat: chatID) else { return }
         turnCheckpoints.forget(chatID: chatID, projectPath: path)
     }
 
@@ -186,7 +182,7 @@ private let checkpointLog = Logger(subsystem: AppLog.subsystem, category: "check
         return state.chats.contains { chat in
             guard isBusy(threadID: chat.id) else { return false }
             if chat.projectID == projectID { return true }
-            guard let path = state.projects.first(where: { $0.id == chat.projectID })?.path else { return false }
+            guard let path = workingDirectory(forChat: chat.id) else { return false }
             return path == repository || path.hasPrefix(repository + "/") || repository.hasPrefix(path + "/")
         }
     }

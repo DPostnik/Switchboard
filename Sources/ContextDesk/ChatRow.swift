@@ -27,7 +27,7 @@ struct ChatRow: NSViewRepresentable {
         view.projectID = chat.projectID
         view.archived = chat.isArchived
         view.title = chat.title
-        view.toolTip = chat.title
+        view.toolTip = chat.worktree.map { chat.title + "\n" + WorktreeText.tooltip($0) } ?? chat.title
         view.isInteractionEnabled = enabled
         view.activate = activate
         view.select = select

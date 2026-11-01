@@ -66,6 +66,13 @@ private struct ChatRunState: Equatable {
     /// Project ID -> role picked in the composer for the project's next new chat; absent follows the project default.
     /// It applies to that chat only; the project default changes in the project settings.
     @Published var newChatRoles: [UUID: String] = [:]
+    /// Project ID -> where the project's next new chat works; absent is the project folder (`ChatWorktrees.swift`).
+    @Published var newChatWorkspaces: [UUID: NewChatWorkspace] = [:]
+    /// A new chat's worktree is being created; sending waits for it.
+    @Published var creatingWorktree = false
+    /// Worktrees of archived or deleted chats waiting for the user's answer.
+    @Published var worktreeRemovalOffers: [WorktreeRemovalOffer] = []
+    var worktrees = GitWorktrees()
     /// Chat ID -> PID of its running Chrome for Testing; refreshed by `startBrowserActivityMonitor`.
     @Published var runningBrowserChats: [String: Int32] = [:]
     @Published private(set) var composerFocusRequest: UUID?
@@ -321,7 +328,7 @@ private struct ChatRunState: Equatable {
     var chats: [Chat] { projectID.map { state.orderedChats(projectID: $0, archived: false) } ?? [] }
     var currentAction: PendingAction? { pending.first { $0.threadID == chatID } }
     var currentUsage: UsageSnapshot? { chatID.flatMap { usage[$0] } }
-    var canSend: Bool { (selectedChat?.isScheduledRecord != true || !busy) && !creatingHandoff && (chatID.map { chatIsAvailable($0) } ?? ([.originalCodex, .appClaude].contains(currentAgent))) && !selectedChatIsArchived && !isChangingChat(currentRunKey) && routeIsAvailable(currentRoute) && currentAgentConnected && currentAgentAuthenticated && selectedProject != nil && !sending && !loadingChat && composer.hasMessage }
+    var canSend: Bool { (selectedChat?.isScheduledRecord != true || !busy) && !creatingHandoff && (chatID.map { chatIsAvailable($0) } ?? ([.originalCodex, .appClaude].contains(currentAgent))) && !selectedChatIsArchived && !isChangingChat(currentRunKey) && routeIsAvailable(currentRoute) && currentAgentConnected && currentAgentAuthenticated && selectedProject != nil && !sending && !creatingWorktree && !loadingChat && composer.hasMessage }
     var supportedEfforts: [String] {
         models.first { $0.id == currentModel }?.efforts ?? []
     }
@@ -934,6 +941,8 @@ private struct ChatRunState: Equatable {
         do {
             if !isScheduledRecord(id) { try await clientForChat(id).rename(sessionForChat(id), title: title) }
             if let i = state.chats.firstIndex(where: { $0.id == id }) { state.chats[i].title = title; persist() }
+            // A name given before the generated title arrived (which it cancels) names the worktree branch instead.
+            settleWorktreeBranch(id)
         } catch { self.error = error.localizedDescription }
     }
     func canDeleteChat(_ id: String) -> Bool {
@@ -1014,6 +1023,7 @@ private struct ChatRunState: Equatable {
             }
             state.chats[index].sidebarOrder = nil
             loadedThreads.remove(id)
+            if archived { offerWorktreeRemoval(state.chats[index]) }
             // A summary from an earlier archive may no longer match the conversation.
             if archived, var record = archiveSummaries[id], record.status == .ready {
                 record.status = .stale
@@ -1046,7 +1056,9 @@ private struct ChatRunState: Equatable {
             return
         }
         forgetTurnCheckpoints(chatID: id)
+        let removed = state.chats.first { $0.id == id }
         state.chats.removeAll { $0.id == id }
+        if let removed { offerWorktreeRemoval(removed) }
         state.queuedMessages = queuedMessages.filter { $0.threadID != id }
         usage.removeValue(forKey: id)
         archiveSummaries.removeValue(forKey: id)
@@ -1395,6 +1407,14 @@ private struct ChatRunState: Equatable {
         }
         // A quit is in progress: a new chat cannot be created any more, so its text stays in the composer.
         if shuttingDown && chatID == nil { return }
+        // A new chat's own worktree exists before anything is sent; after a git failure the text stays in the composer.
+        var worktree: ChatWorktree?
+        if chatID == nil {
+            let selection = selectionGeneration
+            let prepared = await worktreeForNewChat(project)
+            guard !prepared.failed, selectionGeneration == selection, chatID == nil, !shuttingDown else { return }
+            worktree = prepared.worktree
+        }
         let text = composer.text; composer.text = ""
         let localID = "local-user:" + UUID().uuidString
         if shuttingDown, let thread = chatID {
@@ -1411,11 +1431,13 @@ private struct ChatRunState: Equatable {
             return
         }
         await deliver(text: text, project: project, threadID: chatID, localID: localID,
-                      selectedModel: currentModel, selectedEffort: currentAgent == .appClaude ? claudeEffort : effort)
+                      selectedModel: currentModel, selectedEffort: currentAgent == .appClaude ? claudeEffort : effort, worktree: worktree)
     }
+    /// `worktree` is the new chat's own worktree (only with `threadID == nil`); an existing chat keeps its own folder.
     func deliver(text: String, project: Project, threadID: String?, localID: String,
                          selectedModel: String, selectedEffort: String, scheduledRun: UUID? = nil, scheduledRoute: RequestRoute? = nil, scheduledBrowserImport: ChromeSessionImportPolicy? = nil,
-                         scheduledAgent: AgentConnectionID = .originalCodex, scheduledRole: AgentRole? = nil, afterInterrupt: Bool = false) async {
+                         scheduledAgent: AgentConnectionID = .originalCodex, scheduledRole: AgentRole? = nil, afterInterrupt: Bool = false,
+                         worktree: ChatWorktree? = nil) async {
         let selection = selectionGeneration
         let visible = scheduledRun == nil && threadID == chatID && project.id == projectID
         if scheduledRun == nil, let threadID, !localID.hasPrefix(LimitResume.messageIDPrefix) { dropLimitResume(threadID) }
@@ -1438,6 +1460,9 @@ private struct ChatRunState: Equatable {
         // A role picked for this new chat belongs to it; nil keeps the chat following the project default.
         let explicitNewChatRole = scheduledRun == nil && threadID == nil ? newChatRole(for: project) : nil
         let access = role.profile(for: project)
+        let newWorktree = threadID == nil && scheduledRun == nil ? worktree : nil
+        // The chat's own folder (`Chat.workingDirectory(in:)`): engine cwd, permission root and checkpoints.
+        let workingDirectory = newWorktree?.workingDirectory ?? threadID.flatMap { workingDirectory(forChat: $0) } ?? project.path
         let newConnection = scheduledRun == nil ? currentAgent : scheduledAgent
         let route = scheduledRoute ?? (threadID == nil ? (newConnection == .appClaude ? .direct : defaultRoute) : (state.chats.first { $0.id == threadID }?.route ?? .direct))
         do {
@@ -1445,6 +1470,9 @@ private struct ChatRunState: Equatable {
                 guard !isScheduledRecord(threadID) else { throw ClientFailure(Self.scheduledRecordReadOnly) }
                 _ = try nativeThread(threadID)
             } else if ![.originalCodex, .appClaude].contains(newConnection) { throw ConversationIdentity.unavailable }
+            if workingDirectory != project.path, !FileManager.default.fileExists(atPath: workingDirectory) {
+                throw ClientFailure(L10n.text("Папка worktree этого чата не найдена: \(workingDirectory)", "This chat's worktree folder was not found: \(workingDirectory)"))
+            }
             let client = try threadID.map { try clientForChat($0) } ?? (newConnection == .appClaude ? claudeConnection : connection)
             if route != .direct {
                 guard let runtime = pluginRuntimes[route.rawValue], routeIsAvailable(route) else { throw ClientFailure(routeMessage(route)) }
@@ -1452,9 +1480,10 @@ private struct ChatRunState: Equatable {
             }
             var id = threadID
             if id == nil {
-                let browserProfile = scheduledRun == nil && state.browserEnabled == true
+                // Browser profiles belong to the folder they were made in, so a worktree chat starts with its own.
+                let browserProfile = scheduledRun == nil && state.browserEnabled == true && newWorktree == nil
                     ? newChatBrowserProfiles[project.id].map { AgentBrowserProfile(id: $0) } : nil
-                let session = try await client.createSession(projectPath: project.path, permissions: access,
+                let session = try await client.createSession(projectPath: workingDirectory, permissions: access,
                                                                  model: selectedModel, route: route, browserProfile: browserProfile,
                                                                  kind: scheduledRun == nil ? .interactive : .scheduled)
                 if let browserProfile, newChatBrowserProfiles[project.id] == browserProfile.id {
@@ -1464,6 +1493,8 @@ private struct ChatRunState: Equatable {
                 guard ConversationIdentity.appID(for: nativeCreated, in: state, connection: session.connection) == nil else { throw ConversationIdentity.invalidStorage }
                 var chat = Chat(session: session, projectID: project.id, title: ChatTitle.placeholder(), model: selectedModel)
                 chat.effort = selectedEffort
+                chat.worktree = newWorktree
+                if let newWorktree { consumeNewChatWorktree(newWorktree, project: project.id) }
                 let explicitRole = scheduledRun == nil ? explicitNewChatRole : role
                 chat.accessMode = explicitRole?.legacyAccessMode
                 chat.roleID = explicitRole?.id
@@ -1490,7 +1521,7 @@ private struct ChatRunState: Equatable {
             }
             guard let id else { throw ClientFailure(L10n.text("Не выбран разговор", "No conversation selected")) }
             if !loadedThreads.contains(id) {
-                try await client.resume(sessionForChat(id), projectPath: project.path, permissions: access, route: route,
+                try await client.resume(sessionForChat(id), projectPath: workingDirectory, permissions: access, route: route,
                                         kind: scheduledRun == nil ? .interactive : .scheduled)
                 loadedThreads.insert(id)
             }
@@ -1515,8 +1546,8 @@ private struct ChatRunState: Equatable {
                     outgoing = ScheduledBrowserImport.applying(preflight, policy: scheduledBrowserImport, to: text, tool: tool)
                 }
             }
-            await prepareTurnCheckpoint(chatID: id, projectPath: project.path)
-            let submittedTurn = try await client.send(outgoing, to: sessionForChat(id), projectPath: project.path,
+            await prepareTurnCheckpoint(chatID: id, projectPath: workingDirectory)
+            let submittedTurn = try await client.send(outgoing, to: sessionForChat(id), projectPath: workingDirectory,
                                                           permissions: access, model: selectedModel, effort: selectedEffort,
                                                           advisor: ClaudeAdvisor.attached(state.claudeAdvisor, mainModel: selectedModel),
                                                           kind: scheduledRun == nil ? .interactive : .scheduled, conversation: ConversationID(id),
@@ -1791,6 +1822,7 @@ private struct ChatRunState: Equatable {
                 }
                 self.state.chats[index].title = title
                 self.persist()
+                self.settleWorktreeBranch(id)
                 log.info("Title ready for chat \(id, privacy: .public) in \(Date().timeIntervalSince(started), format: .fixed(precision: 1), privacy: .public)s")
             } catch is CancellationError {
                 log.info("Title cancelled for chat \(id, privacy: .public)")
