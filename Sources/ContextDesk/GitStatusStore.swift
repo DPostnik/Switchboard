@@ -143,11 +143,18 @@ import ContextCore
 }
 
 /// Recursive FSEvents watch of a repository's git directories. FSEvents coalesces bursts for `latency` seconds;
-/// changes that only touch `objects/` (packing, fetch downloads) do not change the status and are ignored.
+/// changes that only touch `objects/` (packing, fetch downloads) or the app's own turn checkpoints
+/// (`refs/switchboard/`) do not change the status and are ignored.
 final class GitDirectoryWatcher: @unchecked Sendable {
     private static let queue = DispatchQueue(label: "local.daniil.switchboard.git-watch", qos: .utility)
     private var stream: FSEventStreamRef?
     private let box: Unmanaged<Handler>
+
+    static func isRelevant(_ path: String, roots: [String]) -> Bool {
+        !roots.contains { root in
+            ["/objects", "/refs/switchboard"].contains { path == root + $0 || path.hasPrefix(root + $0 + "/") }
+        }
+    }
 
     private final class Handler {
         let roots: [String]
@@ -155,10 +162,7 @@ final class GitDirectoryWatcher: @unchecked Sendable {
         init(roots: [String], changed: @escaping @Sendable () -> Void) { self.roots = roots; self.changed = changed }
 
         func handle(_ paths: [String]) {
-            let relevant = paths.contains { path in
-                !roots.contains { root in path.hasPrefix(root + "/objects/") || path == root + "/objects" }
-            }
-            if relevant { changed() }
+            if paths.contains(where: { GitDirectoryWatcher.isRelevant($0, roots: roots) }) { changed() }
         }
     }
 

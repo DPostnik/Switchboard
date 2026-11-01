@@ -74,3 +74,12 @@ private func makeRepository() async throws -> URL {
     #expect(GitBranchText.changed(change, language: .russian) == "Ветка сменилась: чат работал в feature, сейчас main")
     #expect(GitBranchText.switchBack("feature", language: .russian) == "Вернуть feature")
 }
+
+@Test func gitWatcherIgnoresObjectsAndTurnCheckpoints() {
+    let roots = ["/repo/.git"]
+    #expect(GitDirectoryWatcher.isRelevant("/repo/.git/HEAD", roots: roots))
+    #expect(GitDirectoryWatcher.isRelevant("/repo/.git/refs/heads/main", roots: roots))
+    #expect(!GitDirectoryWatcher.isRelevant("/repo/.git/objects/ab/cdef", roots: roots))
+    #expect(!GitDirectoryWatcher.isRelevant("/repo/.git/refs/switchboard/checkpoints/chat/3", roots: roots))
+    #expect(GitDirectoryWatcher.isRelevant("/repo/.git/refs/switchboardish", roots: roots))
+}
