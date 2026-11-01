@@ -85,6 +85,8 @@ private struct ChatRunState: Equatable {
     let telegram = TelegramBridge()
     /// Branch and changes per project folder (`GitStatusStore`).
     let gitStatus = GitStatusStore()
+    /// Pull request badges and the per-chat PR watch (`PullRequestStore`).
+    let pullRequests: PullRequestStore
     /// Latest messages per chat for the chat directory, reloaded when the chat changes.
     private var directoryHistoryCache: [String: (updated: Date, messages: [TranscriptItem])] = [:]
     @Published var state = SavedState() {
@@ -301,6 +303,7 @@ private struct ChatRunState: Equatable {
          jobStore: JobStore = JobStore(file: Locations.root.appendingPathComponent("scheduled-jobs.json"))) {
         self.jobStore = jobStore
         self.attentionStore = AttentionStore(file: jobStore.file.deletingLastPathComponent().appendingPathComponent("attention.json"))
+        self.pullRequests = PullRequestStore(file: jobStore.file.deletingLastPathComponent().appendingPathComponent(PullRequestWatchStore.fileName))
         self.chatSearchIndex = ChatSearchIndex(file: jobStore.file.deletingLastPathComponent().appendingPathComponent(ChatSearchIndex.fileName))
         self.connection = AgentClient(integration: connection)
         self.claudeConnection = AgentClient(integration: claudeIntegration)
@@ -368,6 +371,7 @@ private struct ChatRunState: Equatable {
         }
         await refreshJobs(); step("jobs")
         await loadAttention()
+        await startPullRequests()
         await connection.observeEvents(sessions: state.chats.compactMap(\.nativeSession))
         eventTask = Task { [weak self, connection] in
             for await event in connection.events { await self?.receive(event) }
