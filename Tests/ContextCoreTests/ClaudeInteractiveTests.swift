@@ -1152,8 +1152,9 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     #expect(UsageDetail.cacheBadge(.cold, language: .english) == "Cache expired")
     #expect(UsageDetail.cacheBadge(.cold, language: .russian) == "Кэш остыл")
     #expect(UsageDetail.cacheLifetime(3600, language: .russian) == "1 ч" && UsageDetail.cacheLifetime(300, language: .english) == "5 min")
-    #expect(UsageDetail.cacheRemaining(.warm(remaining: 2500), ttl: 3600, language: .english) == "42 min of 1 h")
-    #expect(UsageDetail.cacheRemaining(.expiring(remaining: 10), ttl: 300, language: .russian) == "1 мин из 5 мин")
+    #expect(UsageDetail.cacheRemaining(.warm(remaining: 2500), ttl: 3600, language: .english) == "42 of 60 min")
+    #expect(UsageDetail.cacheRemaining(.warm(remaining: 3600), ttl: 3600, language: .russian) == "60 из 60 мин")
+    #expect(UsageDetail.cacheRemaining(.expiring(remaining: 10), ttl: 300, language: .russian) == "1 из 5 мин")
     #expect(UsageDetail.cacheRemaining(.cold, ttl: 3600, language: .english) == "Expired")
     #expect(UsageDetail.cacheRemaining(.cold, ttl: 3600, language: .russian) == "Остыл")
 }
@@ -1164,6 +1165,9 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     #expect(UsageDetail.tokens(382_863) == "382\u{a0}863")
     #expect(UsageDetail.tokens(43_690_429) == "43\u{a0}690\u{a0}429")
     #expect(UsageDetail.tokens(-12_345) == "-12\u{a0}345")
+    #expect(UsageDetail.contextLine(UsageSnapshot(last: 57_819, window: 1_000_000), language: .english) == "57\u{a0}819 of 1\u{a0}000\u{a0}000 tokens")
+    #expect(UsageDetail.contextLine(UsageSnapshot(last: 57_819), language: .russian) == "57\u{a0}819 токенов")
+    #expect(UsageDetail.contextLine(UsageSnapshot(), language: .english) == nil)
 }
 
 @MainActor @Test func contextRingSummaryAndModelChipTitleInBothLanguages() {
