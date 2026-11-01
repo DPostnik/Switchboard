@@ -8,6 +8,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 - Continue after limit reset: when a Codex or Claude turn stops on an exhausted usage limit, the chat shows the reset time and a "Continue after reset" button; once clicked, one "Continue where you left off." message is sent a minute after the reset (also after an app restart), unless you write yourself, the chat is busy or archived.
 - Command palette on Cmd+K (Go menu): find chats across projects with their status, projects, pages and actions such as New chat, Needs you, Schedule, Archive, Usage and Settings, plus matches in message text; Cmd+1…9 open the chats listed in the sidebar, Cmd+Shift+[ and Cmd+Shift+] the previous and next chat, and Cmd+F searches the open conversation.
+- Git branch at a glance: project rows and the composer show the current branch, a dot for uncommitted changes and ↑/↓ against the upstream; a chat whose last turn ran on another branch shows that branch in its row and offers "Switch back to X" above the composer.
 
 ### Changed
 

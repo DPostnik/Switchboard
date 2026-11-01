@@ -15,6 +15,10 @@ import Testing
     model.projectID = project.id
     model.state.chats = [Chat(id: "short", projectID: project.id, title: "Chat", model: ""),
                          Chat(id: "long", projectID: project.id, title: "Title", model: "")]
+    // The short chat last worked on another branch: its branch line must not change the row height.
+    model.state.chats[0].turnBranch = "feature/" + String(repeating: "long-branch-name-", count: 4)
+    model.gitStatus.setStatus(GitStatus(branch: "main", commit: "abcdef1234", changedFiles: 2), for: project.path)
+    #expect(model.gitStatus.branchChange(for: model.state.chats[0], projectPath: project.path) != nil)
     let host = NSHostingView(rootView: DeskView(model: model))
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
                           styleMask: [.titled, .resizable], backing: .buffered, defer: false)

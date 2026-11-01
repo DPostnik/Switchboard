@@ -49,6 +49,7 @@ struct DeskView: View {
                 .background(DeskPalette.canvas)
         }
         .toolbar(removing: .sidebarToggle)
+        .modifier(GitStatusTracking(model: model))
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button {
@@ -337,7 +338,8 @@ struct DeskView: View {
                     else if dropTargetProjectID == project.id { dropTargetProjectID = nil }
                 }, actions: projectActions(project), reorder: projectReorderActions(project),
                    menuShown: menuShown("project:\(project.id)"),
-                   hovered: hover("project:\(project.id)"), pressed: press("project:\(project.id)")) {
+                   hovered: hover("project:\(project.id)"), pressed: press("project:\(project.id)"),
+                   details: model.gitStatus.status(for: project.path).map { GitBranchText.summary($0) }) {
                     HStack(spacing: .ui(9)) {
                         Image(systemName: "chevron.right")
                             .font(.ui(.caption).weight(.semibold))
@@ -347,8 +349,10 @@ struct DeskView: View {
                             .frame(width: .ui(10), height: .ui(16))
                             .foregroundStyle(.secondary)
                         Image(systemName: model.projectID == project.id ? "folder.fill" : "folder")
-                        Text(project.name).fontWeight(.semibold).lineLimit(1)
-                        Spacer(minLength: 0)
+                        ProjectTitleLayout {
+                            Text(project.name).fontWeight(.semibold).lineLimit(1)
+                            if let git = model.gitStatus.status(for: project.path) { GitBranchBadge(status: git).font(.ui(.caption)) }
+                        }
                         let projectChats = model.state.chats.filter { $0.projectID == project.id && !$0.isArchived }
                         if projectChats.contains(where: { chat in model.pending.contains { $0.threadID == chat.id } || model.restartWaitingChatIDs.contains(chat.id) }) {
                             Circle().fill(DeskPalette.attention).frame(width: .ui(7), height: .ui(7))
@@ -619,9 +623,8 @@ struct DeskView: View {
                     Image(systemName: "archivebox").foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: .ui(3)) {
-                    Text(chat.title)
-                        .lineLimit(2, reservesSpace: true)
-                        .frame(height: .ui(32), alignment: .leading)
+                    ChatRowTitle(title: chat.title, branch: favorite || model.isBusy(threadID: chat.id) ? nil
+                                 : model.gitStatus.branchChange(for: chat, projectPath: model.projectPath(forChat: chat.id))?.from)
                     if favorite, let project = model.state.projects.first(where: { $0.id == chat.projectID }) {
                         Text(project.name).font(.ui(.caption2)).foregroundStyle(.secondary).lineLimit(1)
                             .help(project.path)
@@ -1086,6 +1089,7 @@ struct ChatView: View {
                     }.frame(maxHeight: min(CGFloat(model.visibleQueue.count) * 78, 180))
                 }.frame(maxWidth: columnWidth).padding(.horizontal, .ui(24)).padding(.top, .ui(8))
             }
+            BranchChangeBanner(model: model, width: columnWidth)
             if !model.selectedChatIsArchived {
             VStack(spacing: 4) {
                 ComposerEditor(composer: model.composer,
@@ -1110,6 +1114,7 @@ struct ChatView: View {
                     }.disabled(model.busy || model.sending)
                         .help(model.currentRole.summary + " " + L10n.text("Роль этого чата; применяется со следующего сообщения. Роль по умолчанию задаётся в настройках проекта.", "This chat’s role; applies from the next message. The default role is set in the project settings."))
                     ModelChip(model: model)
+                    ComposerBranchChip(store: model.gitStatus, path: model.selectedProject?.path)
                     Spacer()
                     ContextRing(usage: model.currentUsage, claude: model.currentAgent == .appClaude)
                     SendControl(model: model, composer: model.composer, reduceMotion: reduceMotion)

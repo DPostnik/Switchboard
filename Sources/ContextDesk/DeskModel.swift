@@ -83,6 +83,8 @@ private struct ChatRunState: Equatable {
     private var latestAnswers: [String: String] = [:]
     /// Sends "needs you" waits to the user's Telegram notifier and brings Reply answers back.
     let telegram = TelegramBridge()
+    /// Branch and changes per project folder (`GitStatusStore`).
+    let gitStatus = GitStatusStore()
     /// Latest messages per chat for the chat directory, reloaded when the chat changes.
     private var directoryHistoryCache: [String: (updated: Date, messages: [TranscriptItem])] = [:]
     @Published var state = SavedState() {
@@ -1593,6 +1595,7 @@ private struct ChatRunState: Equatable {
     func finishActiveTurn(threadID: String?, turnID: String?, status: AgentExecutionOutcome, hasError: Bool) {
         guard let threadID, let turnID else { return }
         completedTurns[threadID + ":" + turnID] = (status, hasError)
+        refreshGitStatus(afterTurnIn: threadID)
         if let run = jobLedger.runs.first(where: { $0.threadID == threadID && $0.status.active && ($0.turnID == nil || $0.turnID == turnID) }) {
             let outcome: JobRunStatus = status == .uncertain ? .uncertain : status == .completed && !hasError ? .completed : status == .cancelled ? .interrupted : .failed
             Task { await finishJob(run.id, status: outcome) }
@@ -2219,6 +2222,7 @@ private struct ChatRunState: Equatable {
         case .started(let turn):
             if let thread,
                completedTurns[thread + ":" + turn] == nil {
+                if turnStarts[thread + ":" + turn] == nil { recordTurnBranch(threadID: thread) }
                 turnStarts[thread + ":" + turn] = turnStarts[thread + ":" + turn] ?? Date()
                 if turnTokens[thread + ":" + turn] == nil {
                     turnTokens[thread + ":" + turn] = ResponseTokenTracker(baseline: tokenTotals[thread])
