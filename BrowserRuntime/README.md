@@ -19,11 +19,11 @@ directory, checking the pinned archive SHA-256. ARM64 and Intel Macs are
 supported. Chrome for Testing does not auto-update: a new release requires an
 updated installer/lock and rerunning installation. Regular Chrome is never a fallback.
 
-In Settings → Browser, enable Use Chrome DevTools and select Apply browser setting
-after current tasks finish. The agent opens the separate Chrome for Testing app
-on first use, in manual debugging mode, then the adapter attaches.
-The Apply button remains disabled during chat or background tasks; wait for them
-to finish or stop the relevant chat task before reconnecting. No actions are replayed.
+In Settings → Browser, enable Use Chrome DevTools. The change applies on its own:
+Codex reconnects once no turn, approval, queued message or background task is
+active, and Settings shows "Applies when chats are idle" until then. No actions are
+replayed. The agent opens the separate Chrome for Testing app on first use, in
+manual debugging mode, then the adapter attaches.
 Sign in manually in the new testing-profile, or use Browser → Import cookies only… in the chat. Existing agent profile data is left
 in place, but is not migrated; site sign-ins and Google account sync are not guaranteed. Google still decides whether to accept sign-in. Chrome
 stays open across adapter reconnects; close its window yourself when finished.
@@ -265,7 +265,7 @@ that environment; automatic per-subagent profile allocation is not implemented.
 The independent unit in this release is a Switchboard chat.
 
 Settings → Browser controls the maximum number of open managed environment
-browsers (default 2, range 1–8). Apply after current tasks finish. Admission is
+browsers (default 2, range 1–8). It applies once chats are idle. Admission is
 serialized only during startup. At the limit, a new open is rejected before any
 page action; it is not queued or replayed. Existing browsers are never evicted.
 Quit an unused browser with Cmd+Q or use the chat's Browser → Close browser menu.

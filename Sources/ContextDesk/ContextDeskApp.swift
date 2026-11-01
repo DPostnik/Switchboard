@@ -205,7 +205,7 @@ private struct SettingsContent: View {
             .tint(DeskPalette.accent)
             .modifier(InterfaceZoomed())
             .preferredColorScheme(.light)
-            .environment(\.locale, L10n.locale).frame(width: 720).padding(20)
+            .environment(\.locale, L10n.locale).frame(width: 760).padding(20)
     }
 }
 

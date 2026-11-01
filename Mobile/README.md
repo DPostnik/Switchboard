@@ -16,10 +16,10 @@ was provisioned on 2026-09-27; public signup is disabled.
    `supabase/migrations/202609280006_chat_settings.sql` once, in order, with its SQL editor. The migration uses Supabase Auth and PostgREST v1;
    it has no Supabase SDK dependency. Create a confirmed email/password Auth user.
    Disable public signup if the project is only for personal use.
-2. In the Mac app, Settings → Mobile access, enter the project HTTPS URL,
+2. In the Mac app, Settings → Advanced → Mobile access, enter the project HTTPS URL,
    **public publishable or legacy anon key**, and the Auth user's credentials.
-   Never use `service_role` or a secret key. Choose projects and explicitly enable
-   access. Both devices use this same owner account.
+   Never use `service_role` or a secret key. Choose projects in each project's
+   settings → Phone, then explicitly enable access. Both devices use this same owner account.
 3. Open `Mobile/ContextMobile.xcodeproj` in full Xcode. Select your development
    team in Signing & Capabilities and select the connected iPhone. Build and run.
    Enable Developer Mode on the phone if Xcode requests it. Signing/installation

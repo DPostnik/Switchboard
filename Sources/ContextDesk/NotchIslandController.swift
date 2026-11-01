@@ -71,6 +71,15 @@ import ContextCore
         if enabled, let launch { start(model: launch.model, showMainWindow: launch.showMainWindow) }
         if !enabled { running?.stop(); running = nil }
     }
+    /// Settings changes the island's own options here, so a running island and its gear stay in sync.
+    static func updatePreferences(_ change: (inout NotchPreferences) -> Void) {
+        var preferences = NotchPreferences.load()
+        change(&preferences)
+        preferences.save()
+        guard let running else { return }
+        running.state.preferences = preferences
+        running.applyMode()
+    }
     /// Fringe connected (true) or disconnected (false). Two panels never share the notch.
     static func setHandedOff(_ value: Bool) {
         guard handedOff != value else { return }
