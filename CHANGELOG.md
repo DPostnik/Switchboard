@@ -14,10 +14,6 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 - Turn changes for projects in git repositories: each Codex or Claude turn is checkpointed at its start and end under hidden refs in the project's repository (index, HEAD and branches untouched), the answer shows "3 files changed · +12 −4", and a click opens a diff viewer with "Restore files to before this turn".
 - Chats in their own git worktree: a new chat in a git project can work "In a new worktree" (created in ~/.switchboard/worktrees on a switchboard/… branch from the project's current branch when the first message is sent, renamed once after the chat's title) or in an existing worktree; the chat's agent, checkpoints, file links and branch chip use that folder, its sidebar row shows the worktree branch, its menu offers Show worktree in Finder and Copy path, and archiving or deleting it asks whether to remove the worktree (never with changes, never the branch).
 
-### Fixed
-
-- The Git and pull request popovers in the composer open at their full size on the side with more room and scroll instead of running past the screen edge.
-
 ### Changed
 
 - New light "sage" look: green-tinted surfaces instead of pure gray, a moss accent for actions and unread chats, amber for anything that needs you and clay for errors; fewer borders, a raised composer, tool calls as cards, softer code blocks, tables, quotes and callouts.
@@ -25,6 +21,10 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 - Composer: one chip for agent, model and reasoning; a context ring with an amber dot when the Claude cache is expired replaces the context and cache text; following the answer is automatic; the role picked for a new chat no longer changes the project default.
 - Project settings (formerly Permissions…): roles as cards, browser and sign-in, phone visibility and MCP servers in one sheet.
 - Settings has five tabs: General, Notifications, Accounts, Browser and Advanced; browser changes apply by themselves once chats are idle.
+
+### Fixed
+
+- The Git and pull request popovers in the composer open at their full size on the side with more room and scroll instead of running past the screen edge.
 
 ## [1.0.0] - 2026-10-31
 
