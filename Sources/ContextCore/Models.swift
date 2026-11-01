@@ -47,6 +47,9 @@ public struct Chat: Identifiable, Codable, Hashable, Sendable {
     public var chatDirectoryAccess: Bool?
     /// A chat the archive opened to find other chats: its chat tools carry the search recipe.
     public var chatSearch: Bool?
+    /// The git branch checked out in the project when the chat's latest turn started; nil outside a repository
+    /// or on a detached HEAD.
+    public var turnBranch: String?
     public var sidebarOrder: Int?
     public var pinned: Bool?
     public var isPinned: Bool { pinned == true }

@@ -4,6 +4,10 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Added
+
+- Git branch at a glance: project rows and the composer show the current branch, a dot for uncommitted changes and ↑/↓ against the upstream; a chat whose last turn ran on another branch shows that branch in its row and offers "Switch back to X" above the composer.
+
 ### Changed
 
 - New light "sage" look: green-tinted surfaces instead of pure gray, a moss accent for actions and unread chats, amber for anything that needs you and clay for errors; fewer borders, a raised composer, tool calls as cards, softer code blocks, tables, quotes and callouts.

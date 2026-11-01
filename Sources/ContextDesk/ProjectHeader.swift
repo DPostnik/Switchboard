@@ -16,6 +16,8 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
     var menuShown: (Bool) -> Void = { _ in }
     var hovered: (Bool) -> Void = { _ in }
     var pressed: (Bool) -> Void = { _ in }
+    /// Extra tooltip lines under the path, such as the git status; the native view gets the tooltip, not its label.
+    var details: String? = nil
     @ViewBuilder var content: Content
 
     func makeNSView(context: Context) -> ProjectHeaderView {
@@ -36,7 +38,8 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
         (view.subviews.first as? NSHostingView<Content>)?.rootView = content
         view.projectID = project.id
         view.title = project.name
-        view.toolTip = project.path
+        view.toolTip = [project.path, details].compactMap { $0 }.joined(separator: "\n")
+        view.setAccessibilityHelp(details)
         view.activate = activate
         view.move = move
         view.targeted = targeted
