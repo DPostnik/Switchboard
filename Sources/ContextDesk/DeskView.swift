@@ -637,6 +637,10 @@ struct DeskView: View {
                     Circle().fill(DeskPalette.attention).frame(width: .ui(7), height: .ui(7))
                         .help(L10n.text("Требуется действие", "Action required"))
                         .accessibilityLabel(L10n.text("Требуется действие", "Action required"))
+                } else if let due = chat.limitResume?.continueAt {
+                    // An armed continuation replaces the unread dot: the chat continues on its own.
+                    let text = LimitResume.armedText(due, now: Date())
+                    Image(systemName: "clock").font(.ui(.caption)).foregroundStyle(.secondary).help(text).accessibilityLabel(text)
                 } else if chat.hasUnreadResponse {
                     Circle().fill(DeskPalette.accent).frame(width: .ui(7), height: .ui(7))
                         .help(L10n.text("Непрочитанный ответ", "Unread response"))
@@ -1031,6 +1035,7 @@ struct ChatView: View {
                 .font(.ui(.callout))
                 .frame(maxWidth: columnWidth, alignment: .leading).padding(.horizontal, .ui(24)).padding(.vertical, .ui(8))
             }
+            if let chat = model.selectedChat { LimitResumeBar(model: model, chat: chat, columnWidth: columnWidth) }
             if model.selectedChatIsArchived, let chat = model.selectedChat {
                 HStack {
                     Label(L10n.text("Чат в архиве. Полный вывод инструментов сокращён до кратких строк и после восстановления не возвращается.", "This chat is archived. Full tool output was reduced to one-line summaries and does not come back when the chat is restored."), systemImage: "archivebox")

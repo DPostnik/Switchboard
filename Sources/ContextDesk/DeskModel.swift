@@ -55,6 +55,8 @@ private struct ChatRunState: Equatable {
     let mobileRemote = MobileRemoteHost()
     /// Stops processes that chats leave behind (labelled through the launch environment).
     let orphanProcesses = OrphanProcessController()
+    /// Wall-clock checks for armed "continue after limit reset" requests (`LimitResumeScheduling`).
+    let limitResumeClock = LimitResumeClock()
     private var remoteDeliveryResults: [String: Bool] = [:]
     private var configuringRemoteChats: Set<String> = []
     /// Chat ID -> last stored messages sent to the phone, keyed by store revision and native session.
@@ -376,6 +378,7 @@ private struct ChatRunState: Equatable {
         Task { await mobileRemote.restoreOnLaunch(model: self) } // Network sign-in must not hold up boot.
         continueAfterRestart(RestartContinuation.take())
         releaseQueueHeldForRestart()
+        startLimitResumeClock()
         let settings = await UNUserNotificationCenter.current().notificationSettings()
         notificationsAllowed = settings.authorizationStatus == .authorized
         notificationStatus = settings.authorizationStatus == .authorized ? L10n.text("Уведомления включены", "Notifications are on") : L10n.text("Уведомления не включены", "Notifications are off")
@@ -996,6 +999,7 @@ private struct ChatRunState: Equatable {
         for id in ids {
             guard let index = state.chats.firstIndex(where: { $0.id == id }) else { continue }
             state.chats[index].archived = archived
+            if archived { state.chats[index].limitResume = nil }
             // Further turns add bodies to the history file; the next archive pass reads it again.
             if !archived { state.chats[index].historyReduced = nil }
             if chatID == id {
@@ -1198,21 +1202,26 @@ private struct ChatRunState: Equatable {
         for id in released { scheduleQueue(threadID: id) }
     }
     func continueAfterRestart(_ chatIDs: [String]) {
-        var queued: [String] = []
-        for id in chatIDs {
-            guard let chat = state.chats.first(where: { $0.id == id }), !chat.isArchived, chatIsAvailable(id) else { continue }
-            let claude = chat.nativeSession?.connection == .appClaude
-            state.queuedMessages = queuedMessages + [QueuedMessage(id: "local-user:" + UUID().uuidString, threadID: id,
-                projectID: chat.projectID, text: RestartContinuation.message,
-                model: claude ? ClaudeModel.resolved(chat.model) : chat.model,
-                effort: claude ? ClaudeEffort.resolved(chat.effort ?? state.claudeEffort) : chat.effort ?? "medium")]
-            runs[id, default: ChatRunState()].queuePaused = false
-            queued.append(id)
-        }
+        let queued = chatIDs.filter { queueContinuation($0, text: RestartContinuation.message) }
         guard !queued.isEmpty else { return }
         AppLog.lifecycle.notice("Restart continuation queued for \(queued.count, privacy: .public) chat(s)")
+    }
+    /// Queues an app-written continuation; with `removingLimitResume` the chat's limit-resume record goes in the same
+    /// state change, so the continuation is queued at most once. It is delivered like any queued message.
+    @discardableResult
+    func queueContinuation(_ id: String, text: String, localID: String = "local-user:" + UUID().uuidString, removingLimitResume: Bool = false) -> Bool {
+        guard let index = state.chats.firstIndex(where: { $0.id == id }), !state.chats[index].isArchived, chatIsAvailable(id) else { return false }
+        let chat = state.chats[index]
+        let claude = chat.nativeSession?.connection == .appClaude
+        if removingLimitResume { state.chats[index].limitResume = nil }
+        state.queuedMessages = queuedMessages + [QueuedMessage(id: localID, threadID: id,
+            projectID: chat.projectID, text: text,
+            model: claude ? ClaudeModel.resolved(chat.model) : chat.model,
+            effort: claude ? ClaudeEffort.resolved(chat.effort ?? state.claudeEffort) : chat.effort ?? "medium")]
+        runs[id, default: ChatRunState()].queuePaused = false
         persist()
-        for id in queued { scheduleQueue(threadID: id) }
+        scheduleQueue(threadID: id)
+        return true
     }
     /// The chat directory server's command line for a chat the user opted in (Claude chats only, plan Phase 5).
     func chatDirectoryArguments(for id: String) -> [String]? {
@@ -1277,7 +1286,7 @@ private struct ChatRunState: Equatable {
             }
             result.append(.init(key: TelegramAlerts.key(chatID: chat.id, wait: action.id), chatID: chat.id, job: chat.title, question: question))
         }
-        for chat in state.chats where chat.lastTurnFailed == true && chat.hasUnreadResponse && !chat.isArchived {
+        for chat in state.chats where chat.lastTurnFailed == true && chat.hasUnreadResponse && !chat.isArchived && chat.limitResume?.isArmed != true {
             let question = L10n.text("Ход завершился ошибкой.", "The turn ended with an error.") + (chat.recap.map { "\n" + $0 } ?? "")
             result.append(.init(key: TelegramAlerts.key(chatID: chat.id, wait: "failed-" + (chat.unreadCompletionID ?? "")),
                                 chatID: chat.id, job: chat.title, question: question))
@@ -1373,6 +1382,7 @@ private struct ChatRunState: Equatable {
     }
     func send() async {
         guard canSend, let project = selectedProject else { return }
+        if let thread = chatID { dropLimitResume(thread) } // The user's own message replaces a planned continuation.
         if let record = selectedChat, record.isScheduledRecord {
             await followUpScheduledRecord(record, text: composer.text, project: project); return
         }
@@ -1401,6 +1411,7 @@ private struct ChatRunState: Equatable {
                          scheduledAgent: AgentConnectionID = .originalCodex, scheduledRole: AgentRole? = nil, afterInterrupt: Bool = false) async {
         let selection = selectionGeneration
         let visible = scheduledRun == nil && threadID == chatID && project.id == projectID
+        if scheduledRun == nil, let threadID, !localID.hasPrefix(LimitResume.messageIDPrefix) { dropLimitResume(threadID) }
         if visible { items.append(TranscriptItem(id: localID, kind: "user", text: text, phase: L10n.text("Отправляется…", "Sending…"))) }
         let initialKey = scheduledRun.map { "job:" + $0.uuidString } ?? threadID ?? currentRunKey
         var runKey = initialKey
@@ -1646,7 +1657,8 @@ private struct ChatRunState: Equatable {
             let requests = pending.filter { $0.threadID == chat.id }
             let approval = requests.contains { if case .approval = $0.interaction.kind { true } else { false } }
             guard let attention = ChatAttention.of(approval: approval, question: !requests.isEmpty && !approval, running: isBusy(threadID: chat.id),
-                                                   unread: chat.hasUnreadResponse, failed: chat.lastTurnFailed == true) else { return nil }
+                                                   unread: chat.hasUnreadResponse && chat.limitResume?.isArmed != true,
+                                                   failed: chat.lastTurnFailed == true) else { return nil }
             return (chat, attention)
         }.sorted { $0.1 != $1.1 ? $0.1 < $1.1 : $0.0.updated > $1.0.updated }
     }
@@ -2229,6 +2241,7 @@ private struct ChatRunState: Equatable {
                 let title = completion.hasError || (status != .completed && status != .cancelled) ? L10n.text("Ошибка в разговоре", "Conversation error") : status == .cancelled ? L10n.text("Ответ остановлен", "Response stopped") : L10n.text("Ответ готов", "Response ready")
                 let completionID = "turn:" + threadID + ":" + turnID
                 recordRecap(threadID: threadID, failed: completion.hasError || (status != .completed && status != .cancelled), error: completion.error)
+                noteLimitStop(threadID: threadID, completion: completion)
                 recordUnreadCompletion(threadID: threadID, completionID: completionID)
                 postNotice(threadID: threadID, title: title, identifier: completionID, completionID: completionID,
                            body: state.chats.first { $0.id == threadID }?.recap)

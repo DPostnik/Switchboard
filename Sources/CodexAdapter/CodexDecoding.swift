@@ -31,6 +31,13 @@ enum CodexDecoding {
         let resetsAt = value["resetsAt"].int.flatMap { $0 > 0 ? Date(timeIntervalSince1970: Double($0)) : nil }
         return LimitWindow(id: id, remainingPercent: remainingPercent, durationMinutes: durationMinutes, resetsAt: resetsAt)
     }
+    /// Codex 0.160.0 `TurnError.codexErrorInfo` is the unit variant "usageLimitExceeded" when the account's plan
+    /// limit stopped the turn. The error carries no reset time (only prose in `message`); the account limits supply it.
+    /// "rateLimitExceeded" is short-term throttling, not an exhausted plan, and is not treated as one.
+    static func usageLimitStop(turn: JSONValue) -> AgentUsageLimitStop? {
+        guard turn["status"].string != "interrupted", turn["error"]["codexErrorInfo"].string == "usageLimitExceeded" else { return nil }
+        return AgentUsageLimitStop(resetsAt: nil)
+    }
     static func tokenCounters(_ raw: JSONValue) -> TokenCounters? {
         guard let input = raw["inputTokens"].int, let cached = raw["cachedInputTokens"].int,
               let output = raw["outputTokens"].int, input >= 0, cached >= 0, cached <= input,
