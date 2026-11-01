@@ -9,10 +9,10 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
     let activate: () -> Void
     let move: (UUID) -> Bool
     let targeted: (Bool) -> Void
-    let moveUp: (() -> Void)?
-    let moveDown: (() -> Void)?
-    var remove: (() -> Void)? = nil
-    var rename: (() -> Void)? = nil
+    /// The right-click menu; the same list as the row's "…" menu (`ProjectMenu.actions`).
+    var actions: [SidebarMenuAction] = []
+    /// Move up/down for VoiceOver; sighted users reorder by dragging.
+    var reorder: [SidebarMenuAction] = []
     var menuShown: (Bool) -> Void = { _ in }
     var hovered: (Bool) -> Void = { _ in }
     var pressed: (Bool) -> Void = { _ in }
@@ -40,10 +40,7 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
         view.activate = activate
         view.move = move
         view.targeted = targeted
-        view.moveUp = moveUp
-        view.moveDown = moveDown
-        view.remove = remove
-        view.rename = rename
+        view.actions = actions
         view.menuShown = menuShown
         view.hovered = hovered
         view.pressed = pressed
@@ -51,6 +48,37 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
         view.setAccessibilityRole(.button)
         view.setAccessibilityLabel(project.name)
         view.setAccessibilityValue(expanded ? L10n.text("Развёрнуто", "Expanded") : L10n.text("Свёрнуто", "Collapsed"))
+        view.setAccessibilityCustomActions(SidebarMenuAction.accessibilityActions(reorder))
+    }
+}
+
+/// One project menu for the row's "…" button and its right-click menu, so both list the same items in the same order.
+enum ProjectMenu {
+    static var removeHelp: String {
+        L10n.text("Файлы и чаты сохранятся. Вернуть проект можно через «Добавить проект».", "Files and chats are kept. Restore it with Add project.")
+    }
+
+    static func actions(path: String, hasChats: Bool, settings: @escaping () -> Void, newChat: @escaping () -> Void,
+                        rename: @escaping () -> Void, selectAllChats: @escaping () -> Void,
+                        remove: @escaping () -> Void) -> [SidebarMenuAction] {
+        [
+            SidebarMenuAction(title: L10n.text("Настройки проекта…", "Project settings…"), systemImage: "slider.horizontal.3", perform: settings),
+            SidebarMenuAction(title: L10n.text("Новый чат", "New chat"), systemImage: "square.and.pencil", perform: newChat),
+            .separator,
+            SidebarMenuAction(title: L10n.text("Открыть в Finder", "Open in Finder"), systemImage: "folder") {
+                NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
+            },
+            SidebarMenuAction(title: L10n.text("Скопировать путь", "Copy path"), systemImage: "doc.on.doc") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(path, forType: .string)
+            },
+            SidebarMenuAction(title: L10n.text("Переименовать…", "Rename…"), systemImage: "pencil", perform: rename),
+            SidebarMenuAction(title: L10n.text("Выделить все чаты", "Select all chats"), systemImage: "checkmark.circle",
+                              enabled: hasChats, perform: selectAllChats),
+            .separator,
+            SidebarMenuAction(title: L10n.text("Убрать проект из списка", "Remove project from list"), systemImage: "minus.circle",
+                              help: removeHelp, perform: remove),
+        ]
     }
 }
 
@@ -199,13 +227,10 @@ class SidebarRowView: NSView, NSDraggingSource {
 }
 
 class ProjectHeaderView: SidebarRowView {
-    var remove: (() -> Void)?
-    var rename: (() -> Void)?
+    var actions: [SidebarMenuAction] = []
     static let pasteboardType = NSPasteboard.PasteboardType("local.daniil.switchboard.project-order")
     var projectID = UUID()
     var move: (UUID) -> Bool = { _ in false }
-    var moveUp: (() -> Void)?
-    var moveDown: (() -> Void)?
     override var dragType: NSPasteboard.PasteboardType { Self.pasteboardType }
     override var dragID: String { projectID.uuidString }
     override var dragGroup: String { "projects" }
@@ -217,23 +242,6 @@ class ProjectHeaderView: SidebarRowView {
         return move(source.projectID)
     }
     override func menu(for event: NSEvent) -> NSMenu? {
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-        let renameItem = menu.addItem(withTitle: L10n.text("Переименовать…", "Rename…"), action: #selector(performRename), keyEquivalent: "")
-        renameItem.target = self; renameItem.isEnabled = rename != nil
-        menu.addItem(.separator())
-        let up = menu.addItem(withTitle: L10n.text("Переместить выше", "Move up"), action: #selector(performMoveUp), keyEquivalent: "")
-        up.target = self; up.isEnabled = moveUp != nil
-        let down = menu.addItem(withTitle: L10n.text("Переместить ниже", "Move down"), action: #selector(performMoveDown), keyEquivalent: "")
-        down.target = self; down.isEnabled = moveDown != nil
-        menu.addItem(.separator())
-        let removeItem = menu.addItem(withTitle: L10n.text("Убрать проект из списка", "Remove project from list"), action: #selector(performRemove), keyEquivalent: "")
-        removeItem.target = self; removeItem.isEnabled = remove != nil
-        removeItem.toolTip = L10n.text("Файлы и чаты сохранятся. Вернуть проект можно через «Добавить проект».", "Files and chats are kept. Restore it with Add project.")
-        return menu
+        SidebarMenuAction.menu(actions)
     }
-    @objc private func performMoveUp() { moveUp?() }
-    @objc private func performMoveDown() { moveDown?() }
-    @objc private func performRemove() { remove?() }
-    @objc private func performRename() { rename?() }
 }
