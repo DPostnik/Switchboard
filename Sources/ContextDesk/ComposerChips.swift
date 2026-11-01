@@ -66,28 +66,40 @@ struct ContextRing: View {
         .popover(isPresented: $showingDetails) { UsageDetail(usage: usage, claude: claude).padding(20).frame(width: 330) }
     }
 
+    /// Text inside the ring and the tooltip: the rounded percentage, "6%", as in the details; nil until the window is known.
+    static func percent(_ usage: UsageSnapshot?) -> String? {
+        usage?.contextFraction.map { "\(Int(($0 * 100).rounded()))%" }
+    }
+
     private func ring(cache: PromptCacheState?) -> some View {
         let fraction = usage?.contextFraction
-        let lineWidth = CGFloat.ui(2.5)
+        let lineWidth = CGFloat.ui(2)
+        let high = (fraction ?? 0) >= Self.highFraction
         return ZStack {
             Circle().stroke(DeskPalette.selection, lineWidth: lineWidth)
             if let fraction, fraction > 0 {
                 Circle().trim(from: 0, to: max(0.03, fraction))
-                    .stroke(fraction >= Self.highFraction ? DeskPalette.attention : DeskPalette.accent,
+                    .stroke(high ? DeskPalette.attention : DeskPalette.accent,
                             style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                     .rotationEffect(.degrees(-90))
             }
+            if let percent = Self.percent(usage) {
+                Text(percent)
+                    .font(.ui(size: 8.5, weight: .semibold)).monospacedDigit()
+                    .foregroundStyle(high ? DeskPalette.attention : .secondary)
+                    .lineLimit(1).minimumScaleFactor(0.75).padding(.horizontal, .ui(3))
+            }
         }
-        .frame(width: .ui(16), height: .ui(16))
+        .frame(width: .ui(26), height: .ui(26))
         .overlay(alignment: .topTrailing) {
             if cache?.needsAttention == true {
                 Circle().fill(DeskPalette.attention)
                     .overlay(Circle().stroke(DeskPalette.canvas, lineWidth: 1.5))
                     .frame(width: .ui(7), height: .ui(7))
-                    .offset(x: .ui(2), y: -.ui(2))
+                    .offset(x: .ui(1), y: -.ui(1))
             }
         }
-        .frame(width: .ui(28), height: .ui(28))
+        .frame(width: .ui(30), height: .ui(30))
         .contentShape(Rectangle())
     }
 }

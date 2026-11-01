@@ -1343,7 +1343,7 @@ struct UsageDetail: View {
     var claude = false
     /// Until the window is reported, the occupied size alone is still a measurement.
     static func footer(_ usage: UsageSnapshot?, language: AppLanguage = L10n.language) -> String {
-        if let fraction = usage?.contextFraction { return L10n.text("Контекст ≈\(Int(fraction * 100))%", "Context ≈\(Int(fraction * 100))%", language: language) }
+        if let percent = ContextRing.percent(usage) { return L10n.text("Контекст ≈\(percent)", "Context ≈\(percent)", language: language) }
         if let last = usage?.last {
             let value = tokens(last)
             return L10n.text("Контекст (токены): \(value)", "Context: \(value) tokens", language: language)
@@ -1387,12 +1387,6 @@ struct UsageDetail: View {
         case .cold: return L10n.text("Остыл", "Expired", language: language)
         }
     }
-    /// Line under the title: "57 819 of 1 000 000 tokens"; the occupied size alone until the window is known.
-    static func contextLine(_ usage: UsageSnapshot, language: AppLanguage = L10n.language) -> String? {
-        guard let last = usage.last else { return nil }
-        guard let window = usage.window else { return L10n.text("\(tokens(last)) токенов", "\(tokens(last)) tokens", language: language) }
-        return L10n.text("\(tokens(last)) из \(tokens(window)) токенов", "\(tokens(last)) of \(tokens(window)) tokens", language: language)
-    }
     /// Time only for today, otherwise the short date as well.
     static func time(_ date: Date, now: Date = Date()) -> String {
         let style: Date.FormatStyle = Calendar.current.isDate(date, inSameDayAs: now)
@@ -1402,17 +1396,23 @@ struct UsageDetail: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                if let fraction = usage?.contextFraction { gauge(fraction) }
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(L10n.text("Контекст и токены", "Context and tokens")).font(.ui(.headline))
-                    if let usage, let line = Self.contextLine(usage) {
-                        Text(line).font(.ui(.caption)).monospacedDigit().foregroundStyle(.secondary)
-                    }
+            HStack(alignment: .firstTextBaseline) {
+                Text(L10n.text("Контекст и токены", "Context and tokens")).font(.ui(.headline))
+                Spacer()
+                if let fraction = usage?.contextFraction {
+                    Text(fraction.formatted(.percent.precision(.fractionLength(0)).locale(L10n.locale)))
+                        .font(.ui(.headline)).monospacedDigit()
+                        .foregroundStyle(fraction >= ContextRing.highFraction ? DeskPalette.attention : .primary)
                 }
             }
             if let usage {
+                if let fraction = usage.contextFraction {
+                    ProgressView(value: fraction)
+                        .tint(fraction >= ContextRing.highFraction ? DeskPalette.attention : DeskPalette.accent)
+                }
                 Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+                    row(L10n.text("Занято", "In use"), usage.last)
+                    row(L10n.text("Окно", "Window"), usage.window)
                     section(L10n.text("За разговор", "This conversation"))
                     row(L10n.text("Вход", "Input"), usage.input)
                     row(cachedLabel(usage), usage.cached, indented: true)
@@ -1432,25 +1432,6 @@ struct UsageDetail: View {
             Text(L10n.text("Процент — оценка, а не порог сжатия. Кэш входит во вход. Это не расход лимита подписки.", "The percentage is an estimate, not the compaction threshold. Cached tokens are part of input. This is not subscription usage."))
                 .font(.ui(.caption)).foregroundStyle(.tertiary)
         }
-    }
-
-    /// Context share as a ring with the percentage inside, amber from `ContextRing.highFraction`.
-    private func gauge(_ fraction: Double) -> some View {
-        let color = fraction >= ContextRing.highFraction ? DeskPalette.attention : DeskPalette.accent
-        return ZStack {
-            Circle().stroke(DeskPalette.selection, lineWidth: 4)
-            if fraction > 0 {
-                Circle().trim(from: 0, to: max(0.02, fraction))
-                    .stroke(color, style: StrokeStyle(lineWidth: 4, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-            }
-            Text(fraction.formatted(.percent.precision(.fractionLength(0)).locale(L10n.locale)))
-                .font(.ui(size: 12, weight: .semibold)).monospacedDigit()
-                .minimumScaleFactor(0.7).lineLimit(1).padding(.horizontal, 6)
-        }
-        .frame(width: .ui(46), height: .ui(46))
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Self.footer(usage))
     }
 
     private func cachedLabel(_ usage: UsageSnapshot) -> String {

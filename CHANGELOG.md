@@ -18,7 +18,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Changed
 
-- "Context and tokens" popover is easier to scan: the context share as a ring with the percentage inside and "57 819 of 1 000 000 tokens" beside it, aligned token counts grouped by thousands with spaces, the cached share in percent, the cache as "42 of 60 min", one update time and a shorter note.
+- The context ring beside the send button shows the percentage inside it.
+- "Context and tokens" popover is easier to scan: the context share with a progress bar, aligned token counts grouped by thousands with spaces, the cached share in percent, the cache as "42 of 60 min", one update time and a shorter note.
 - New light "sage" look: green-tinted surfaces instead of pure gray, a moss accent for actions and unread chats, amber for anything that needs you and clay for errors; fewer borders, a raised composer, tool calls as cards, softer code blocks, tables, quotes and callouts.
 - Simpler sidebar: no New chat button at the top (use the pencil on a project or Cmd+N); one "Needs you" row gathers waiting chats, important items and notifications; Schedule, Archive, Usage and Settings sit in a bottom dock; chat and project menus are shorter and the same everywhere.
 - Composer: one chip for agent, model and reasoning; a context ring with an amber dot when the Claude cache is expired replaces the context and cache text; following the answer is automatic; the role picked for a new chat no longer changes the project default.

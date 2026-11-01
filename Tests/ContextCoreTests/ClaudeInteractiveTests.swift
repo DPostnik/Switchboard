@@ -1165,9 +1165,9 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     #expect(UsageDetail.tokens(382_863) == "382\u{a0}863")
     #expect(UsageDetail.tokens(43_690_429) == "43\u{a0}690\u{a0}429")
     #expect(UsageDetail.tokens(-12_345) == "-12\u{a0}345")
-    #expect(UsageDetail.contextLine(UsageSnapshot(last: 57_819, window: 1_000_000), language: .english) == "57\u{a0}819 of 1\u{a0}000\u{a0}000 tokens")
-    #expect(UsageDetail.contextLine(UsageSnapshot(last: 57_819), language: .russian) == "57\u{a0}819 токенов")
-    #expect(UsageDetail.contextLine(UsageSnapshot(), language: .english) == nil)
+    #expect(ContextRing.percent(UsageSnapshot(last: 57_819, window: 1_000_000)) == "6%")
+    #expect(ContextRing.percent(UsageSnapshot(last: 1_000, window: 1_000)) == "100%")
+    #expect(ContextRing.percent(UsageSnapshot(last: 57_819)) == nil && ContextRing.percent(nil) == nil)
 }
 
 @MainActor @Test func contextRingSummaryAndModelChipTitleInBothLanguages() {
