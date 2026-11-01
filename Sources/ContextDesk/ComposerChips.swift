@@ -43,8 +43,8 @@ struct ChipButtonStyle: ButtonStyle {
                 .font(.ui(.callout)).foregroundStyle(isEnabled ? .primary : .secondary)
                 .padding(.horizontal, .ui(9)).frame(height: .ui(28))
                 .background(configuration.isPressed ? DeskPalette.selection : hovering && isEnabled ? DeskPalette.subtle : .clear,
-                            in: RoundedRectangle(cornerRadius: 8))
-                .contentShape(RoundedRectangle(cornerRadius: 8))
+                            in: Capsule())
+                .contentShape(Capsule())
                 .onHover { hovering = $0 }
         }
     }

@@ -406,7 +406,7 @@ struct MobileRemoteSettings: View {
                                    "Phone access stops and queued commands are lost. You will need to sign in to Supabase again."))
                 }
             if !host.status.isEmpty {
-                Text(host.status).font(.ui(.caption)).foregroundStyle(host.statusFailed ? Color.orange : Color.primary).textSelection(.enabled)
+                Text(host.status).font(.ui(.caption)).foregroundStyle(host.statusFailed ? DeskPalette.problem : Color.primary).textSelection(.enabled)
             }
         }
         .task { host.prepareConnection() }

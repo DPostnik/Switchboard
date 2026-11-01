@@ -75,7 +75,7 @@ struct BrowserProfilesView: View {
                 }
             }.frame(maxHeight: 190)
             Button(L10n.text("Новый отдельный профиль", "New separate profile")) { perform(.select(nil)) }
-            if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
+            if let error { Text(error).foregroundStyle(DeskPalette.problem).textSelection(.enabled) }
             HStack {
                 Button(L10n.text("Обновить", "Refresh")) { reload() }
                 Spacer()

@@ -86,10 +86,8 @@ struct ArchiveView: View {
                 // Built only for the list: while an archived chat is open, the body reruns on every streamed event.
                 let listing = makeListing()
                 HStack {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField(projectFilter.flatMap { listing.projects[$0] }.map { L10n.text("Найти чат в проекте \($0.name)", "Find a chat in \($0.name)") }
-                              ?? L10n.text("Найти чат или проект", "Find a chat or project"), text: $search)
-                        .textFieldStyle(.roundedBorder)
+                    DeskSearchField(prompt: projectFilter.flatMap { listing.projects[$0] }.map { L10n.text("Найти чат в проекте \($0.name)", "Find a chat in \($0.name)") }
+                                    ?? L10n.text("Найти чат или проект", "Find a chat or project"), text: $search)
                     if !search.trimmingCharacters(in: .whitespaces).isEmpty {
                         Button {
                             Task { await model.startChatSearch(query: search, projectID: projectFilter) }
@@ -131,7 +129,7 @@ struct ArchiveView: View {
                                 ForEach(listing.active) { chat in
                                     Button { Task { await model.openChat(chat) } } label: { chatSummary(chat, listing) }
                                         .buttonStyle(PointerButtonStyle(base: .plain))
-                                        .padding(16).background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+                                        .padding(16).background(DeskPalette.subtle, in: RoundedRectangle(cornerRadius: 12))
                                 }
                             }
                         }.padding(.horizontal).padding(.bottom)
@@ -204,8 +202,8 @@ struct ArchiveView: View {
             }
             Button(L10n.text("Восстановить", "Restore")) {
                 Task { await model.setChatArchived(chat.id, archived: false) }
-            }.buttonStyle(DeskButtonStyle()).disabled(!model.canDeleteChat(chat.id))
-        }.padding(16).background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+            }.buttonStyle(DeskButtonStyle(kind: .text)).disabled(!model.canDeleteChat(chat.id))
+        }.padding(16).background(DeskPalette.subtle, in: RoundedRectangle(cornerRadius: 12))
     }
 
     nonisolated static func chatCount(_ count: Int, language: AppLanguage = L10n.language) -> String {

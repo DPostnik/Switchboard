@@ -202,6 +202,7 @@ private struct SettingsContent: View {
             if model.isBootstrapping { StartupLoadingView() }
             else { SettingsView(model: model, keepAwake: keepAwake) }
         }.buttonStyle(PointerButtonStyle(base: .automatic))
+            .tint(DeskPalette.accent)
             .modifier(InterfaceZoomed())
             .preferredColorScheme(.light)
             .environment(\.locale, L10n.locale).frame(width: 720).padding(20)

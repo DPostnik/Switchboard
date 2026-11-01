@@ -62,7 +62,7 @@ struct DeskView: View {
                 .accessibilityLabel(L10n.text("Показать или скрыть боковую панель", "Show or hide sidebar"))
             }
         }
-        .tint(.primary)
+        .tint(DeskPalette.accent)
         .onChange(of: model.projectID, initial: true) { _, projectID in
             if let projectID { expandedProjects.insert(projectID) }
         }
@@ -113,7 +113,7 @@ struct DeskView: View {
                     Spacer()
                     Button { showingNotifications.toggle() } label: {
                         Image(systemName: (model.notices.isEmpty && !model.state.chats.contains(where: \.hasUnreadResponse)) ? "bell" : "bell.badge.fill")
-                            .foregroundStyle((model.notices.isEmpty && !model.state.chats.contains(where: \.hasUnreadResponse)) ? Color.primary : .blue)
+                            .foregroundStyle((model.notices.isEmpty && !model.state.chats.contains(where: \.hasUnreadResponse)) ? Color.primary : DeskPalette.accent)
                     }.buttonStyle(PointerButtonStyle(base: .plain)).help(L10n.text("Уведомления", "Notifications"))
                         // Anchored to the bell, so the panel visibly comes from the control that opened it.
                         .popover(isPresented: $showingNotifications, arrowEdge: .bottom) { notificationsPanel }
@@ -124,24 +124,15 @@ struct DeskView: View {
                 }
                 Button { model.newChat() } label: {
                     Label(L10n.text("Новый чат", "New chat"), systemImage: "square.and.pencil").frame(maxWidth: .infinity, alignment: .leading)
-                }.buttonStyle(DeskButtonStyle()).disabled(model.selectedProject == nil).padding(.horizontal, .ui(12))
-                HStack(spacing: .ui(8)) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField(L10n.text("Найти проект или чат", "Find a project or chat"), text: $search).textFieldStyle(.plain)
-                    if !search.isEmpty {
-                        Button { search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-                            .buttonStyle(PointerButtonStyle(base: .plain)).help(L10n.text("Очистить поиск", "Clear search"))
-                    }
-                }.padding(.ui(10)).background(DeskPalette.subtle, in: RoundedRectangle(cornerRadius: 10))
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(DeskPalette.border))
+                }.buttonStyle(DeskButtonStyle(kind: .wash)).disabled(model.selectedProject == nil).padding(.horizontal, .ui(12))
+                DeskSearchField(prompt: L10n.text("Найти проект или чат", "Find a project or chat"), text: $search, clearable: true)
                     .padding(.horizontal, .ui(12))
                 ScrollView {
                     VStack(alignment: .leading, spacing: .ui(4)) {
                         let waiting = search.isEmpty ? Array(model.attentionChats.prefix(8)) : []
                         if !waiting.isEmpty {
                             Text(L10n.text("Ждёт тебя", "Needs you"))
-                                .font(.ui(.caption).weight(.semibold)).foregroundStyle(.secondary)
-                                .padding(.horizontal, .ui(8)).padding(.top, .ui(8)).padding(.bottom, .ui(4))
+                                .sidebarSectionHeader()
                             ForEach(waiting, id: \.chat.id) { entry in
                                 chatEntry(entry.chat, waiting: true)
                             }
@@ -149,8 +140,7 @@ struct DeskView: View {
                         }
                         if !model.state.visiblePinnedChats.isEmpty {
                             Text(L10n.text("Избранное", "Favorites"))
-                                .font(.ui(.caption).weight(.semibold)).foregroundStyle(.secondary)
-                                .padding(.horizontal, .ui(8)).padding(.top, .ui(8)).padding(.bottom, .ui(4))
+                                .sidebarSectionHeader()
                             ForEach(model.state.visiblePinnedChats.filter { chat in
                                 (search.isEmpty || chat.title.localizedCaseInsensitiveContains(search)
                                     || model.state.projects.contains { $0.id == chat.projectID && ($0.name.localizedCaseInsensitiveContains(search) || $0.path.localizedCaseInsensitiveContains(search)) })
@@ -160,8 +150,7 @@ struct DeskView: View {
                             Divider().padding(.vertical, .ui(6))
                         }
                         Text(L10n.text("Проекты", "Projects"))
-                            .font(.ui(.caption).weight(.semibold)).foregroundStyle(.secondary)
-                            .padding(.horizontal, .ui(8)).padding(.top, .ui(8)).padding(.bottom, .ui(4))
+                            .sidebarSectionHeader()
                         ForEach(model.state.visibleProjects.filter { project in
                             search.isEmpty || project.name.localizedCaseInsensitiveContains(search) || project.path.localizedCaseInsensitiveContains(search) || model.state.chats.contains { $0.projectID == project.id && !$0.isArchived && $0.title.localizedCaseInsensitiveContains(search) }
                         }) { project in
@@ -178,8 +167,12 @@ struct DeskView: View {
                         }.buttonStyle(SidebarItemStyle(selected: model.showingJobs))
                         Button { model.openAttention() } label: {
                             HStack {
-                                Label(L10n.text("Важное", "Important"), systemImage: model.openAttentionCount > 0 ? "exclamationmark.triangle.fill" : "exclamationmark.triangle")
-                                    .foregroundStyle(model.openAttentionCount > 0 ? AttentionPalette.accent : Color.primary)
+                                Label {
+                                    Text(L10n.text("Важное", "Important"))
+                                } icon: {
+                                    Image(systemName: model.openAttentionCount > 0 ? "exclamationmark.triangle.fill" : "exclamationmark.triangle")
+                                        .foregroundStyle(model.openAttentionCount > 0 ? AttentionPalette.accent : Color.primary)
+                                }
                                 Spacer()
                                 if model.openAttentionCount > 0 {
                                     Text("\(model.openAttentionCount)").font(.ui(.caption).weight(.bold)).foregroundStyle(.white)
@@ -227,11 +220,12 @@ struct DeskView: View {
             VStack(spacing: 0) {
                 if let error = model.error {
                     HStack(alignment: .top) {
-                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(DeskPalette.problem)
                         Text(error).font(.ui(.callout)).textSelection(.enabled)
                         Spacer()
                         Button { model.error = nil } label: { Image(systemName: "xmark") }.buttonStyle(PointerButtonStyle(base: .plain)).help(L10n.text("Закрыть", "Close"))
-                    }.padding().background(.orange.opacity(0.1))
+                    }.foregroundStyle(DeskPalette.problemInk).padding(.ui(12)).background(DeskPalette.problemWash, in: RoundedRectangle(cornerRadius: 10))
+                        .padding(.horizontal, .ui(12)).padding(.top, .ui(8))
                         .transition(DeskMotion.slide(from: .top, reduceMotion))
                 }
                 if model.showingArchive {
@@ -247,6 +241,7 @@ struct DeskView: View {
             }.animation(DeskMotion.standard(reduceMotion), value: model.error)
                 .navigationTitle(detailTitle)
                 .navigationSubtitle(detailSubtitle)
+                .toolbarBackground(DeskPalette.canvas, for: .windowToolbar)
                 .modifier(ZoomedWindowTitle(title: detailTitle, subtitle: detailSubtitle))
     }
     private var detailTitle: String {
@@ -258,7 +253,7 @@ struct DeskView: View {
     private var notificationsPanel: some View {
             VStack(alignment: .leading, spacing: .ui(16)) {
                 HStack {
-                    Label(L10n.text("Уведомления", "Notifications"), systemImage: "bell.fill").font(.ui(.headline)).foregroundStyle(.blue)
+                    Label(L10n.text("Уведомления", "Notifications"), systemImage: "bell.fill").font(.ui(.headline)).foregroundStyle(DeskPalette.ink)
                     Spacer()
                     Button(L10n.text("Очистить", "Clear")) { model.notices.removeAll() }.disabled(model.notices.isEmpty)
                 }
@@ -273,13 +268,13 @@ struct DeskView: View {
                                 Task { await model.focusAction(threadID: notice.threadID) }
                             } label: {
                                 HStack(alignment: .top) {
-                                    Image(systemName: "bubble.left.fill").foregroundStyle(.blue)
+                                    Image(systemName: "bubble.left.fill").foregroundStyle(DeskPalette.accent)
                                     VStack(alignment: .leading, spacing: .ui(5)) {
                                         Text(notice.title).fontWeight(.medium)
                                         Text(notice.detail).font(.ui(.caption)).foregroundStyle(.secondary).lineLimit(2)
                                     }
                                     Spacer()
-                                }.padding(.ui(12)).background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                                }.padding(.ui(12)).background(DeskPalette.accentWash, in: RoundedRectangle(cornerRadius: 12))
                             }.buttonStyle(PointerButtonStyle(base: .plain))
                         }
                     }
@@ -334,11 +329,11 @@ struct DeskView: View {
                         Spacer(minLength: 0)
                         let projectChats = model.state.chats.filter { $0.projectID == project.id && !$0.isArchived }
                         if projectChats.contains(where: { chat in model.pending.contains { $0.threadID == chat.id } || model.restartWaitingChatIDs.contains(chat.id) }) {
-                            Circle().fill(.yellow).frame(width: .ui(7), height: .ui(7))
+                            Circle().fill(DeskPalette.attention).frame(width: .ui(7), height: .ui(7))
                                 .help(L10n.text("Есть чаты, которые ждут действия или перезапуска", "Chats are waiting for action or a restart"))
                                 .accessibilityLabel(L10n.text("Есть чаты, которые ждут действия или перезапуска", "Chats are waiting for action or a restart"))
                         } else if projectChats.contains(where: \.hasUnreadResponse) {
-                            Circle().fill(.blue).frame(width: .ui(7), height: .ui(7))
+                            Circle().fill(DeskPalette.accent).frame(width: .ui(7), height: .ui(7))
                                 .help(L10n.text("Есть непрочитанные ответы", "Unread responses"))
                                 .accessibilityLabel(L10n.text("Есть непрочитанные ответы", "Unread responses"))
                         }
@@ -410,7 +405,7 @@ struct DeskView: View {
             }
             .padding(.trailing, .ui(4))
             .frame(height: .ui(32))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(dropTargetProjectID == project.id || menuRowID == "project:\(project.id)" ? Color.accentColor : .clear, lineWidth: 2).allowsHitTesting(false))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(dropTargetProjectID == project.id || menuRowID == "project:\(project.id)" ? DeskPalette.accent : .clear, lineWidth: 2).allowsHitTesting(false))
             .background(SidebarRowBackground(hover: rowHover, rowID: "project:\(project.id)", base: pressedRowID == "project:\(project.id)" || model.projectID == project.id && model.chatID == nil && !model.showingJobs && !model.showingAttention && !model.showingArchive ? DeskPalette.selection
                         : rowHighlighted("project:\(project.id)") ? DeskPalette.rowHover : Color.clear))
 
@@ -559,9 +554,10 @@ struct DeskView: View {
                     }
             }
         }
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder((!favorite && dropTargetChatID == chat.id) || menuRowID == rowID ? Color.accentColor : .clear, lineWidth: 2).allowsHitTesting(false))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder((!favorite && dropTargetChatID == chat.id) || menuRowID == rowID ? DeskPalette.accent : .clear, lineWidth: 2).allowsHitTesting(false))
         .background(SidebarRowBackground(hover: rowHover, rowID: rowID,
-                                         base: pressedRowID == rowID ? DeskPalette.selection : chatBackground(chat, favorite: favorite, highlighted: rowHighlighted(rowID))))
+                                         base: pressedRowID == rowID ? DeskPalette.selection : chatBackground(chat, favorite: favorite, highlighted: rowHighlighted(rowID)),
+                                         marked: chatSelected(chat, favorite: favorite)))
         .disabled(model.isChangingChat(chat.id))
     }
 
@@ -572,9 +568,13 @@ struct DeskView: View {
         !archivingSelection && selection.ids.allSatisfy { model.canDeleteChat($0) }
     }
     private func chatBackground(_ chat: Chat, favorite: Bool, highlighted: Bool) -> Color {
-        if !favorite && selection.contains(chat.id) { return Color.accentColor.opacity(0.18) }
+        if !favorite && selection.contains(chat.id) { return DeskPalette.accentWash }
         if model.chatID == chat.id && !model.showingJobs && !model.showingAttention && !model.showingArchive { return DeskPalette.selection }
         return highlighted ? DeskPalette.rowHover : .clear
+    }
+    /// The open chat's row carries the moss bar at its leading edge; a multi-selected row shows its check instead.
+    private func chatSelected(_ chat: Chat, favorite: Bool) -> Bool {
+        model.chatID == chat.id && !model.showingJobs && !model.showingAttention && !model.showingArchive && (favorite || !selection.contains(chat.id))
     }
     private func menuShown(_ rowID: String) -> (Bool) -> Void {
         { shown in
@@ -628,7 +628,7 @@ struct DeskView: View {
     private func chatLabel(_ chat: Chat, favorite: Bool, detail: String? = nil) -> some View {
             HStack(spacing: .ui(8)) {
                 if !favorite && selection.contains(chat.id) {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.accentColor)
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(DeskPalette.accent)
                         .accessibilityLabel(L10n.text("Выбран", "Selected"))
                 } else if chat.isArchived {
                     Image(systemName: "archivebox").foregroundStyle(.secondary)
@@ -646,7 +646,7 @@ struct DeskView: View {
                     }
                 }
                 if model.runningBrowserChats[chat.id] != nil {
-                    Image(systemName: "globe").font(.ui(.caption2)).foregroundStyle(.teal)
+                    Image(systemName: "globe").font(.ui(.caption2)).foregroundStyle(DeskPalette.browser)
                         .help(L10n.text("Браузер этого чата открыт. Показать его можно из контекстного меню чата или меню «Браузеры».",
                                         "This chat’s browser is open. Show it from the chat’s context menu or the Browsers menu."))
                         .accessibilityLabel(L10n.text("Браузер открыт", "Browser is open"))
@@ -656,18 +656,18 @@ struct DeskView: View {
                         .accessibilityLabel(L10n.text("В избранном", "In favorites"))
                 }
                 Spacer(minLength: 0)
-                // Yellow: the chat waits for the user or for the app restart. Blue: an unread response.
+                // Amber: the chat waits for the user or for the app restart. Moss: an unread response.
                 if model.restartWaitingChatIDs.contains(chat.id) {
-                    Image(systemName: "arrow.clockwise.circle.fill").font(.ui(.caption)).foregroundStyle(.yellow)
+                    Image(systemName: "arrow.clockwise.circle.fill").font(.ui(.caption)).foregroundStyle(DeskPalette.attention)
                         .help(L10n.text("Ждёт перезапуска приложения", "Waiting for the app restart"))
                         .accessibilityLabel(L10n.text("Ждёт перезапуска приложения", "Waiting for the app restart"))
                 }
                 if model.pending.contains(where: { $0.threadID == chat.id }) {
-                    Circle().fill(.yellow).frame(width: .ui(7), height: .ui(7))
+                    Circle().fill(DeskPalette.attention).frame(width: .ui(7), height: .ui(7))
                         .help(L10n.text("Требуется действие", "Action required"))
                         .accessibilityLabel(L10n.text("Требуется действие", "Action required"))
                 } else if chat.hasUnreadResponse {
-                    Circle().fill(.blue).frame(width: .ui(7), height: .ui(7))
+                    Circle().fill(DeskPalette.accent).frame(width: .ui(7), height: .ui(7))
                         .help(L10n.text("Непрочитанный ответ", "Unread response"))
                         .accessibilityLabel(L10n.text("Непрочитанный ответ", "Unread response"))
                 }
@@ -820,22 +820,87 @@ enum DeskMotion {
     }
 }
 
+/// Shell buttons. `secondary`: tonal fill; `primary`: the one main action, moss; `wash`: moss wash for "New chat";
+/// `text`: a tertiary text-only action in deep moss.
 struct DeskButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View { StyledBody(configuration: configuration) }
+    enum Kind { case secondary, primary, wash, text }
+    var kind: Kind = .secondary
+    func makeBody(configuration: Configuration) -> some View { StyledBody(configuration: configuration, kind: kind) }
 
     private struct StyledBody: View {
         let configuration: ButtonStyleConfiguration
+        let kind: Kind
         @Environment(\.isEnabled) private var isEnabled
         @State private var hovering = false
 
         var body: some View {
-            configuration.label.font(.ui(.callout).weight(.medium)).padding(.horizontal, .ui(14)).padding(.vertical, .ui(10))
-                .background(configuration.isPressed ? DeskPalette.selection : hovering && isEnabled ? DeskPalette.rowHover : DeskPalette.subtle,
-                            in: RoundedRectangle(cornerRadius: 12))
-                .contentShape(RoundedRectangle(cornerRadius: 12))
+            Group {
+                // Secondary keeps the foreground its caller sets.
+                if let foreground { configuration.label.foregroundStyle(foreground) } else { configuration.label }
+            }.font(.ui(.callout).weight(.medium)).padding(.horizontal, .ui(kind == .text ? 8 : 14)).padding(.vertical, .ui(10))
+                .background(fill)
+                .contentShape(RoundedRectangle(cornerRadius: 10))
                 .onHover { hovering = $0 }
                 .pointingHandCursor()
         }
+        private var hovered: Bool { hovering && isEnabled }
+        private var foreground: Color? {
+            switch kind {
+            case .secondary: nil
+            case .primary: isEnabled ? .white : .secondary
+            case .wash, .text: isEnabled ? DeskPalette.accentDeep : .secondary
+            }
+        }
+        /// Moss kinds darken on hover and press by layering the deeper tone over the base, so no extra shades are needed.
+        private var fill: some View {
+            let shape = RoundedRectangle(cornerRadius: 10)
+            let (base, tone, amount): (Color, Color, Double) = switch kind {
+            case .secondary: (configuration.isPressed ? DeskPalette.selection : hovered ? DeskPalette.rowHover : DeskPalette.subtle, .clear, 0)
+            case .primary: isEnabled ? (DeskPalette.accent, DeskPalette.accentDeep, configuration.isPressed ? 1 : hovered ? 0.5 : 0) : (DeskPalette.selection, .clear, 0)
+            case .wash: (DeskPalette.accentWash, DeskPalette.accent, configuration.isPressed ? 0.16 : hovered ? 0.08 : 0)
+            case .text: (configuration.isPressed ? DeskPalette.selection : hovered ? DeskPalette.subtle : .clear, .clear, 0)
+            }
+            return shape.fill(base).overlay(shape.fill(tone.opacity(amount)))
+        }
+    }
+}
+
+/// Search field of the sidebar and lists: tonal fill without a stroke; focused, it turns to canvas with a moss ring.
+struct DeskSearchField: View {
+    let prompt: String
+    @Binding var text: String
+    var clearable = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: .ui(8)) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField(prompt, text: $text).textFieldStyle(.plain).focused($focused)
+            if clearable && !text.isEmpty {
+                Button { text = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                    .buttonStyle(PointerButtonStyle(base: .plain)).help(L10n.text("Очистить поиск", "Clear search"))
+            }
+        }.padding(.ui(10)).modifier(DeskFieldChrome(focused: focused))
+    }
+}
+
+/// Fill and focus ring shared by the shell's text fields: subtle at rest, canvas plus a 3 pt moss ring outside the edge when focused.
+struct DeskFieldChrome: ViewModifier {
+    let focused: Bool
+    var cornerRadius: CGFloat = 10
+    func body(content: Content) -> some View {
+        content
+            .background(focused ? DeskPalette.canvas : DeskPalette.subtle, in: RoundedRectangle(cornerRadius: cornerRadius))
+            .overlay(RoundedRectangle(cornerRadius: cornerRadius + 1.5).stroke(DeskPalette.focusBorder, lineWidth: 3).padding(-1.5)
+                .opacity(focused ? 1 : 0).allowsHitTesting(false))
+    }
+}
+
+extension View {
+    /// "Needs you", "Favorites", "Projects" above the sidebar groups.
+    func sidebarSectionHeader() -> some View {
+        font(.ui(.caption).weight(.semibold)).foregroundStyle(.secondary)
+            .padding(.horizontal, .ui(8)).padding(.top, .ui(8)).padding(.bottom, .ui(4))
     }
 }
 
@@ -873,7 +938,7 @@ struct SidebarItemStyle: ButtonStyle {
             configuration.label
                 .padding(.horizontal, .ui(8)).padding(.vertical, .ui(10))
                 .background(selected || configuration.isPressed ? DeskPalette.selection : hovering ? DeskPalette.rowHover : .clear,
-                            in: RoundedRectangle(cornerRadius: 8))
+                            in: RoundedRectangle(cornerRadius: 10))
                 .contentShape(Rectangle())
                 .onHover { hovering = $0 }
                 .pointingHandCursor()
@@ -934,7 +999,6 @@ struct ChatView: View {
                     .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                         model.markActionRead(action)
                     }
-                    .tint(.blue)
                     // Same column as the composer it sits on, and it arrives from the composer's side.
                     .frame(maxWidth: columnWidth).padding(.horizontal, .ui(24))
                     .transition(DeskMotion.slide(from: .bottom, reduceMotion))
@@ -965,7 +1029,7 @@ struct ChatView: View {
                     Label(L10n.text("Чат в архиве. Полный вывод инструментов сокращён до кратких строк и после восстановления не возвращается.", "This chat is archived. Full tool output was reduced to one-line summaries and does not come back when the chat is restored."), systemImage: "archivebox")
                     Spacer()
                     Button(L10n.text("Восстановить", "Restore")) { Task { await model.setChatArchived(chat.id, archived: false) } }
-                        .disabled(!model.canDeleteChat(chat.id))
+                        .buttonStyle(DeskButtonStyle(kind: .text)).disabled(!model.canDeleteChat(chat.id))
                 }.frame(maxWidth: columnWidth).padding(.horizontal, .ui(24)).padding(.vertical, .ui(12))
             }
             if !model.visibleQueue.isEmpty {
@@ -1064,10 +1128,9 @@ struct ChatView: View {
                     }
                     SendControl(model: model, composer: model.composer, reduceMotion: reduceMotion)
                 }.padding(.horizontal, .ui(8)).padding(.bottom, .ui(8))
-            }.background(DeskPalette.canvas, in: RoundedRectangle(cornerRadius: 20))
-                .overlay(RoundedRectangle(cornerRadius: 20).stroke(composerFocused ? DeskPalette.focusBorder : DeskPalette.border, lineWidth: 1)
-                )
-                .shadow(color: .black.opacity(0.05), radius: 12, y: 3)
+            }.background(RoundedRectangle(cornerRadius: 20).fill(DeskPalette.canvas).shadow(color: DeskPalette.shadow, radius: 14, y: 4))
+                .overlay(RoundedRectangle(cornerRadius: 20.75).stroke(DeskPalette.focusBorder, lineWidth: 1.5).padding(-0.75)
+                    .opacity(composerFocused ? 1 : 0).allowsHitTesting(false))
                 .frame(maxWidth: columnWidth).padding(.horizontal, .ui(24)).padding(.top, .ui(10))
             }
             HStack(spacing: .ui(12)) {
@@ -1075,7 +1138,7 @@ struct ChatView: View {
                     Text(model.routeTitle(model.currentRoute)).help(model.routeMessage(model.currentRoute))
                 }
                 if !model.routeIsAvailable(model.currentRoute) {
-                    Text(L10n.text("Недоступен", "Unavailable")).foregroundStyle(.orange)
+                    Text(L10n.text("Недоступен", "Unavailable")).foregroundStyle(DeskPalette.attention)
                 }
                 Button { showingUsage.toggle() } label: {
                     Text(UsageDetail.footer(model.currentUsage))
@@ -1084,7 +1147,7 @@ struct ChatView: View {
                     TimelineView(.periodic(from: .now, by: 30)) { context in
                         if let state = usage.cacheState(now: context.date) {
                             Text(UsageDetail.cacheBadge(state))
-                                .foregroundStyle(state.needsAttention ? Color.orange : Color.secondary)
+                                .foregroundStyle(state.needsAttention ? DeskPalette.attention : Color.secondary)
                                 .help(UsageDetail.cacheHelp)
                         }
                     }
@@ -1102,7 +1165,7 @@ struct ChatView: View {
             ZStack {
             if fileDropTargeted && !model.selectedChatIsArchived {
                 RoundedRectangle(cornerRadius: 16).fill(DeskPalette.subtle.opacity(0.6))
-                    .overlay(RoundedRectangle(cornerRadius: 16).stroke(DeskPalette.focusBorder, style: StrokeStyle(lineWidth: 2, dash: [8, 6])))
+                    .overlay(RoundedRectangle(cornerRadius: 16).stroke(DeskPalette.accent, style: StrokeStyle(lineWidth: 2, dash: [8, 6])))
                     .overlay(Label(L10n.text("Отпусти, чтобы добавить путь к файлу в сообщение", "Drop to add the file path to the message"), systemImage: "photo.badge.plus")
                         .font(.ui(.title3).weight(.medium)).foregroundStyle(.secondary))
                     .padding(12).allowsHitTesting(false)
@@ -1255,8 +1318,8 @@ private struct SendControl: View {
                 .font(stops ? .ui(size: 11) : .ui(size: 14, weight: .semibold))
                 .contentTransition(.symbolEffect(.replace))
                 .frame(width: .ui(32), height: .ui(32))
-                .foregroundStyle(.white)
-                .background(DeskPalette.ink.opacity(stops || model.canSend ? 1 : 0.2), in: Circle())
+                .foregroundStyle(stops || model.canSend ? Color.white : Color.secondary)
+                .background(stops || model.canSend ? DeskPalette.accent : DeskPalette.selection, in: Circle())
         }.buttonStyle(RoundControlStyle())
             .keyboardShortcut(stops ? nil : KeyboardShortcut(.return, modifiers: .command))
             .disabled(!stops && !model.canSend).padding(.leading, .ui(6))
@@ -1360,7 +1423,7 @@ struct MessageText: View {
             ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
                 if index % 2 == 1 {
                     ScrollView(.horizontal) { Text(block).font(.ui(.callout, design: .monospaced)).textSelection(.enabled).padding(12) }
-                        .background(.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+                        .background(DeskPalette.subtle, in: RoundedRectangle(cornerRadius: 8))
                 } else {
                     Text((try? AttributedString(markdown: block, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(block))
                         .textSelection(.enabled).lineSpacing(4)
@@ -1395,7 +1458,7 @@ struct JobDetail: View {
                 LabeledContent(L10n.text("Тип", "Type"), value: job.kind)
                 VStack(alignment: .leading, spacing: 8) { Text(L10n.text("Расписание", "Schedule")).font(.ui(.headline)); Text(job.schedule).textSelection(.enabled) }
                 Text(L10n.text("Часовой пояс и результаты запусков здесь не проверены.", "The time zone and run results have not been verified here.")).font(.ui(.caption)).foregroundStyle(.secondary)
-                if let issue = job.issue { Label(issue, systemImage: "exclamationmark.triangle").foregroundStyle(.orange) }
+                if let issue = job.issue { Label(issue, systemImage: "exclamationmark.triangle").foregroundStyle(DeskPalette.attention) }
                 Divider()
                 Text(L10n.text("Задание", "Task")).font(.ui(.headline))
                 Text(job.prompt).textSelection(.enabled)
@@ -1577,7 +1640,7 @@ struct SettingsView: View {
                         }
                     }
                 }
-                ForEach(model.pluginIssues, id: \.self) { Text($0).font(.ui(.caption)).foregroundStyle(.orange) }
+                ForEach(model.pluginIssues, id: \.self) { Text($0).font(.ui(.caption)).foregroundStyle(DeskPalette.attention) }
                 Button(L10n.text("Обновить список", "Refresh list")) { model.refreshPlugins() }.disabled(model.anyBusy || model.connecting)
                 Button(L10n.text("Открыть папку плагинов", "Open plugins folder")) {
                     do {

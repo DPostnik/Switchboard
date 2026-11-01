@@ -47,7 +47,7 @@ public struct ChatLoadingIndicator: NSViewRepresentable {
     private func updateColor() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             CATransaction.begin(); CATransaction.setDisableActions(true)
-            dot.backgroundColor = NSColor.labelColor.cgColor
+            dot.backgroundColor = DeskPalette.ns.muted.cgColor
             CATransaction.commit()
         }
     }

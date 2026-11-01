@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import ContextCore
+import ContextTranscript
 
 /// Telegram alerts through the user's notifier: a chat that waits for an approval, an answer or after a failed
 /// turn is sent once it waited `delay`; the question is withdrawn when the wait ends. Reply answers come back
@@ -80,7 +81,7 @@ struct TelegramSettings: View {
                 TextField(L10n.text("Скрипт уведомителя", "Notifier script"), text: $bridge.script)
                     .font(.system(.body, design: .monospaced))
                 if let problem = bridge.problem {
-                    Text(problem).font(.ui(.caption)).foregroundStyle(.orange)
+                    Text(problem).font(.ui(.caption)).foregroundStyle(DeskPalette.problem)
                 } else if bridge.configured == true {
                     Text(L10n.text("Уведомитель настроен.", "The notifier is set up.")).font(.ui(.caption)).foregroundStyle(.secondary)
                 }

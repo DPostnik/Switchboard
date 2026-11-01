@@ -22,6 +22,16 @@ record.update(version=version, build=int(build), commit=commit, dirty=dirty == '
 json.dump(record, open(target, 'w'), indent=2)
 PY
 cp Assets/AppIcon/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+# The moss app accent (NSAccentColorName) tints native focus rings, list selection and text selection.
+# actool ships only with Xcode; without it the app keeps the system accent.
+accent_key=""
+if xcrun --find actool >/dev/null 2>&1; then
+  xcrun actool Assets/Accent.xcassets --compile "$app/Contents/Resources" --platform macosx \
+    --minimum-deployment-target 14.0 --output-format human-readable-text >/dev/null
+  accent_key="<key>NSAccentColorName</key><string>AccentColor</string>"
+else
+  echo "warning: actool not found; building without the app accent colour" >&2
+fi
 mkdir -p "$app/Contents/Resources/ChatDirectoryRuntime"
 cp ChatDirectoryRuntime/server.py "$app/Contents/Resources/ChatDirectoryRuntime/"
 mkdir -p "$app/Contents/Resources/BrowserRuntime"
@@ -44,6 +54,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <key>CFBundleLocalizations</key><array><string>ru</string><string>en</string></array>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
+$accent_key
 <key>UTExportedTypeDeclarations</key><array><dict>
 <key>UTTypeIdentifier</key><string>local.daniil.switchboard.project-order</string>
 <key>UTTypeDescription</key><string>Switchboard project order</string>

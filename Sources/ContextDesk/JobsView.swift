@@ -23,10 +23,7 @@ struct JobsView: View {
             Divider()
             HSplitView {
                 VStack(spacing: 0) {
-                HStack {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField(L10n.text("Найти задание", "Find a task"), text: $search).textFieldStyle(.plain)
-                }.padding(12).background(DeskPalette.canvas, in: RoundedRectangle(cornerRadius: 10)).padding(12)
+                DeskSearchField(prompt: L10n.text("Найти задание", "Find a task"), text: $search).padding(12)
                 List(selection: $selection) {
                     Section("Switchboard") {
                         ForEach(model.jobLedger.jobs.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }) { job in
@@ -134,7 +131,7 @@ struct JobsView: View {
                 LabeledContent(L10n.text("Исполнитель", "Agent"), value: job.engine.title)
                 if let routine = job.routine {
                     Text(L10n.text("Рутина", "Routine") + ": \(routine.definition.name) · \(routine.definition.revision.uuidString)").font(.ui(.caption)).textSelection(.enabled)
-                    if let issue = model.routineIssue(job) { Text(issue).font(.ui(.caption)).foregroundStyle(.orange) }
+                    if let issue = model.routineIssue(job) { Text(issue).font(.ui(.caption)).foregroundStyle(DeskPalette.attention) }
                 }
                 LabeledContent(L10n.text("Проект", "Project"), value: model.state.projects.first { $0.id == job.projectID }?.path ?? L10n.text("Недоступен", "Unavailable"))
                 LabeledContent(L10n.text("Часовой пояс", "Time zone"), value: job.schedule.timeZone)
@@ -182,7 +179,7 @@ struct JobsView: View {
                                 Text((try? routine.prompt()) ?? L10n.text("Сохранённая рутина недоступна", "Saved routine unavailable")).font(.ui(.caption)).textSelection(.enabled)
                             }
                         }
-                        if run.status == .uncertain { Text(L10n.text("Результат этого запуска не подтверждён. Автоматического повтора не было; настройки расписания не изменились. Перед ручным повтором проверь результат.", "This run's outcome is unconfirmed. No automatic retry was made; schedule settings are unchanged. Check the outcome before retrying manually.")).font(.ui(.caption)).foregroundStyle(.orange) }
+                        if run.status == .uncertain { Text(L10n.text("Результат этого запуска не подтверждён. Автоматического повтора не было; настройки расписания не изменились. Перед ручным повтором проверь результат.", "This run's outcome is unconfirmed. No automatic retry was made; schedule settings are unchanged. Check the outcome before retrying manually.")).font(.ui(.caption)).foregroundStyle(DeskPalette.attention) }
                     }
                 }
             }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
@@ -263,7 +260,7 @@ struct JobEditor: View {
                         do { job.prompt = try job.routine?.prompt() ?? ""; validation = nil }
                         catch { job.prompt = ""; validation = error.localizedDescription }
                     }), axis: .vertical)
-                    if let issue = model.routineIssue(job) { Text(issue).foregroundStyle(.orange).font(.ui(.caption)) }
+                    if let issue = model.routineIssue(job) { Text(issue).foregroundStyle(DeskPalette.attention).font(.ui(.caption)) }
                     Button(L10n.text("Преобразовать в обычные инструкции", "Convert to plain instructions")) { job.routine = nil }
                 }
                 if job.engine == .codex {
@@ -275,7 +272,7 @@ struct JobEditor: View {
                 ScheduledBrowserImportEditor(policy: $job.browserSessionImport)
                 if job.engine == .claude {
                     if job.route != .direct {
-                        Text(model.routeCompatibilityIssue(job.route, agent: .claudeCode) ?? "").foregroundStyle(.orange).font(.ui(.caption))
+                        Text(model.routeCompatibilityIssue(job.route, agent: .claudeCode) ?? "").foregroundStyle(DeskPalette.attention).font(.ui(.caption))
                         Button(L10n.text("Работать напрямую", "Work directly")) { job.route = .direct }
                     }
                     Picker(L10n.text("Рассуждение", "Reasoning effort"), selection: $job.effort) {
@@ -345,7 +342,7 @@ struct JobEditor: View {
                     RoutineTextField(label: L10n.text("Инструкции", "Instructions"), text: $job.prompt).disabled(job.routine != nil)
                 }
             }.formStyle(.grouped).disabled(saving)
-            if let validation { Text(validation).foregroundStyle(.red).font(.ui(.caption)) }
+            if let validation { Text(validation).foregroundStyle(DeskPalette.problem).font(.ui(.caption)) }
             Divider()
             HStack {
                 if saving { ProgressView().uiSmallSpinner() }

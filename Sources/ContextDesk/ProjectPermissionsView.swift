@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import ContextCore
 import AgentContract
+import ContextTranscript
 
 /// Project defaults for chats and scheduled jobs, plus the folders outside the project a role may use.
 /// Declared here by the user; an agent, a phone or a schedule-control request can never change them.
@@ -82,7 +83,7 @@ struct ProjectPermissionsView: View {
                             if let saved = mcpServers[server.name], saved != server.fingerprint {
                                 Text(L10n.text("Запись в .mcp.json изменилась после одобрения. Сервер выключен, пока ты не одобришь его снова.",
                                                "The .mcp.json entry changed after approval. The server stays off until you approve it again."))
-                                    .font(.ui(.caption)).foregroundStyle(.orange)
+                                    .font(.ui(.caption)).foregroundStyle(DeskPalette.attention)
                             }
                         }
                     }
@@ -141,7 +142,7 @@ struct PermissionsLedgerView: View {
                     .font(.ui(.caption)).foregroundStyle(.secondary)
             }
             Section(L10n.text("Журнал за 7 дней", "Last 7 days")) {
-                if let issue { Text(issue).font(.ui(.caption)).foregroundStyle(.red) }
+                if let issue { Text(issue).font(.ui(.caption)).foregroundStyle(DeskPalette.problem) }
                 if daily.isEmpty { Text(L10n.text("Записей пока нет.", "No records yet.")).font(.ui(.caption)).foregroundStyle(.secondary) }
                 ForEach(summary, id: \.key) { entry in
                     LabeledContent(entry.key) { Text("\(entry.count)") }

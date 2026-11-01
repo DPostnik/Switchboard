@@ -61,7 +61,7 @@ struct AccountLimitsView: View {
         } else {
             if !connected { Label(L10n.text("Нет подключения. Данные могут быть устаревшими.", "Disconnected. Data may be out of date."), systemImage: "wifi.slash") }
             if let issue {
-                Label(issue, systemImage: "exclamationmark.circle").font(.ui(.callout)).foregroundStyle(.orange)
+                Label(issue, systemImage: "exclamationmark.circle").font(.ui(.callout)).foregroundStyle(DeskPalette.problem)
             }
             if let snapshot = limits {
                 if snapshot.ordinaryUsageAllowed == false {
@@ -75,7 +75,7 @@ struct AccountLimitsView: View {
                                 Text(bucket.name).font(.ui(.headline))
                                 if bucket.windows.isEmpty { Text(L10n.text("Данные о периодах лимита не переданы.", "No limit window data provided.")).foregroundStyle(.secondary) }
                                 ForEach(bucket.windows) { window in windowRow(window) }
-                            }.padding(16).background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 14))
+                            }.padding(16).background(DeskPalette.subtle, in: RoundedRectangle(cornerRadius: 14))
                         }
                     }
                 }.frame(maxHeight: .infinity, alignment: .top)
@@ -104,7 +104,7 @@ struct AccountLimitsView: View {
                 Text(window.remainingPercent.map { L10n.text("\($0)% осталось", "\($0)% remaining") } ?? L10n.text("Нет данных", "No data")).monospacedDigit()
             }
             if let remaining = window.remainingPercent {
-                ProgressView(value: Double(remaining), total: 100).tint(remaining <= 10 ? .orange : .blue)
+                ProgressView(value: Double(remaining), total: 100).tint(remaining <= 10 ? DeskPalette.attention : DeskPalette.accent)
                     .accessibilityLabel(L10n.text("\(window.title): осталось \(remaining)%", "\(window.title): \(remaining)% remaining"))
             }
             if let reset = window.resetsAt {

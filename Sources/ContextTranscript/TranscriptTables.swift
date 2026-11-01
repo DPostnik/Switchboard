@@ -23,30 +23,16 @@ extension NSAttributedString.Key {
         var options = options
         if wide { options.urlDisplayLimit = 24 }
         let size: CGFloat = wide ? 12 : 13.5
-        // Table borders ignore dynamic separator transparency; a translucent gray works in both appearances.
-        let border = NSColor(calibratedWhite: 0.5, alpha: 1)
         for (rowIndex, row) in model.rows.enumerated() {
             for (column, value) in row.enumerated() {
-                let cell = NSTextTableBlock(table: table, startingRow: rowIndex, rowSpan: 1,
-                                            startingColumn: column, columnSpan: 1)
+                let cell = TranscriptTableCell(table: table, startingRow: rowIndex, rowSpan: 1,
+                                               startingColumn: column, columnSpan: 1)
+                cell.rowCount = model.rows.count
                 cell.setContentWidth(100 / CGFloat(table.numberOfColumns), type: .percentageValueType)
                 cell.verticalAlignment = .topAlignment
                 cell.setWidth(8, type: .absoluteValueType, for: .padding)
                 cell.setWidth(5, type: .absoluteValueType, for: .padding, edge: .minY)
                 cell.setWidth(5, type: .absoluteValueType, for: .padding, edge: .maxY)
-                // A hairline frame around the table, a firmer line under the header, quiet row lines.
-                // Outer frame and row lines only; columns are separated by padding.
-                cell.setWidth(0.5, type: .absoluteValueType, for: .border)
-                cell.setBorderColor(border.withAlphaComponent(0.35))
-                if column > 0 { cell.setWidth(0, type: .absoluteValueType, for: .border, edge: .minX) }
-                if column < row.count - 1 { cell.setWidth(0, type: .absoluteValueType, for: .border, edge: .maxX) }
-                if rowIndex == 0 {
-                    cell.setWidth(1, type: .absoluteValueType, for: .border, edge: .maxY)
-                    cell.setBorderColor(border.withAlphaComponent(0.55), for: .maxY)
-                    cell.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.06)
-                } else if rowIndex % 2 == 0 {
-                    cell.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.035)
-                }
                 let style = NSMutableParagraphStyle()
                 style.textBlocks = [cell]
                 style.lineSpacing = 3
@@ -75,5 +61,47 @@ extension NSAttributedString.Key {
             guard let style = value as? NSParagraphStyle else { return }
             text.addAttribute(.paragraphStyle, value: style, range: cellRange)
         }
+    }
+}
+
+/// Draws its part of the table frame itself: a rounded 1 pt outer border, row separators and the header fill.
+/// Columns are separated by padding only. Interior sides are pushed far outside the cell before rounding,
+/// so only the table's own corners come out rounded.
+final class TranscriptTableCell: NSTextTableBlock {
+    var rowCount = 0
+    static let radius: CGFloat = 10
+
+    override func copy(with zone: NSZone? = nil) -> Any {
+        let copy = super.copy(with: zone)
+        (copy as? TranscriptTableCell)?.rowCount = rowCount
+        return copy
+    }
+
+    override func drawBackground(withFrame frameRect: NSRect, in controlView: NSView?, characterRange charRange: NSRange,
+                                 layoutManager: NSLayoutManager) {
+        let top = startingRow == 0, bottom = startingRow + rowSpan >= rowCount
+        let left = startingColumn == 0, right = startingColumn + columnSpan >= table.numberOfColumns
+        let far: CGFloat = 10_000
+        var outer = frameRect
+        if !left { outer.origin.x -= far; outer.size.width += far }
+        if !right { outer.size.width += far }
+        // Text views are flipped: the first row is at the smallest y.
+        let flipped = controlView?.isFlipped ?? true
+        if !(flipped ? top : bottom) { outer.origin.y -= far; outer.size.height += far }
+        if !(flipped ? bottom : top) { outer.size.height += far }
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: frameRect).addClip()
+        if top {
+            DeskPalette.ns.subtle.setFill()
+            NSBezierPath(roundedRect: outer, xRadius: Self.radius, yRadius: Self.radius).fill()
+        }
+        DeskPalette.ns.border.set()
+        let frame = NSBezierPath(roundedRect: outer.insetBy(dx: 0.5, dy: 0.5), xRadius: Self.radius - 0.5, yRadius: Self.radius - 0.5)
+        frame.lineWidth = 1
+        frame.stroke()
+        if !bottom {
+            NSRect(x: frameRect.minX, y: flipped ? frameRect.maxY - 1 : frameRect.minY, width: frameRect.width, height: 1).fill()
+        }
+        NSGraphicsContext.restoreGraphicsState()
     }
 }

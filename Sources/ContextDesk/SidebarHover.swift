@@ -17,13 +17,18 @@ import SwiftUI
 }
 
 /// Row fill: a non-clear `base` (selection, open menu) wins; otherwise the hover tint while the pointer is over the row.
+/// A `marked` row (the open chat) also gets a short moss bar at its leading edge.
 struct SidebarRowBackground: View {
     let hover: SidebarHover
     let rowID: String
     let base: Color
+    var marked = false
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 8)
+        RoundedRectangle(cornerRadius: 10)
             .fill(base == .clear && hover.isHovered(rowID) ? DeskPalette.rowHover : base)
+            .overlay(alignment: .leading) {
+                if marked { Capsule().fill(DeskPalette.accent).frame(width: .ui(3), height: .ui(16)).padding(.leading, .ui(4)) }
+            }
     }
 }

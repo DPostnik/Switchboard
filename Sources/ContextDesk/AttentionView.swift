@@ -62,7 +62,7 @@ struct AttentionView: View {
                     if item.isOpen {
                         Button { Task { await model.resolveAttention(item.id) } } label: {
                             Label(L10n.text("Решено", "Resolved"), systemImage: "checkmark")
-                        }.buttonStyle(DeskButtonStyle())
+                        }.buttonStyle(DeskButtonStyle(kind: .primary))
                     } else {
                         Button { Task { await model.reopenAttention(item.id) } } label: {
                             Label(L10n.text("Вернуть", "Reopen"), systemImage: "arrow.uturn.backward")
@@ -78,8 +78,8 @@ struct AttentionView: View {
             Spacer(minLength: 0)
         }
         .padding(16)
-        .background(item.isOpen ? tint.opacity(0.08) : DeskPalette.subtle, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(item.isOpen ? tint.opacity(0.45) : DeskPalette.border))
+        .background(!item.isOpen ? DeskPalette.subtle : item.kind == .blocker ? DeskPalette.attentionWash : DeskPalette.problemWash,
+                    in: RoundedRectangle(cornerRadius: 14))
     }
 
     private func meta(_ item: AttentionItem) -> String {
@@ -103,18 +103,19 @@ struct AttentionBanner: View {
         let count = model.openAttentionCount
         Button { model.openAttention() } label: {
             HStack(spacing: 10) {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.white)
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(DeskPalette.attention)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(L10n.text("Нужно решить: \(count)", "Needs your action: \(count)")).font(.ui(.callout).weight(.semibold)).foregroundStyle(.white)
+                    Text(L10n.text("Нужно решить: \(count)", "Needs your action: \(count)")).font(.ui(.callout).weight(.semibold))
                     if let latest = model.attention.open.first {
-                        Text(latest.text).font(.ui(.caption)).foregroundStyle(.white.opacity(0.9)).lineLimit(1)
+                        Text(latest.text).font(.ui(.caption)).opacity(0.85).lineLimit(1)
                     }
                 }
                 Spacer(minLength: 0)
-                Image(systemName: "chevron.right").font(.ui(.caption).weight(.semibold)).foregroundStyle(.white.opacity(0.9))
+                Image(systemName: "chevron.right").font(.ui(.caption).weight(.bold)).foregroundStyle(DeskPalette.attention)
             }
+            .foregroundStyle(DeskPalette.attentionInk)
             .padding(.horizontal, 12).padding(.vertical, 10)
-            .background(AttentionPalette.accent, in: RoundedRectangle(cornerRadius: 12))
+            .background(DeskPalette.attentionWash, in: RoundedRectangle(cornerRadius: 12))
             .contentShape(Rectangle())
         }
         .buttonStyle(PointerButtonStyle(base: .plain))
@@ -123,6 +124,6 @@ struct AttentionBanner: View {
 }
 
 enum AttentionPalette {
-    static let accent = Color(red: 0.86, green: 0.38, blue: 0.0)
-    static let problem = Color(red: 0.80, green: 0.16, blue: 0.16)
+    static let accent = DeskPalette.attention
+    static let problem = DeskPalette.problem
 }

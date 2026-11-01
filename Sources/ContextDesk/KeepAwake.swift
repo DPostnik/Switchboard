@@ -82,7 +82,7 @@ struct KeepAwakeSettings: View {
                 "While Switchboard is running, your Mac stays awake when idle, even with the window closed. This setting is saved. The display can sleep; closing the lid and manual sleep still work. Battery use may increase."))
                 .font(.ui(.caption)).foregroundStyle(.secondary)
             if let error = controller.error {
-                Text(error).font(.ui(.caption)).foregroundStyle(.red)
+                Text(error).font(.ui(.caption)).foregroundStyle(DeskPalette.problem)
                 Button(L10n.text("Повторить", "Retry")) { controller.setEnabled(controller.enabled) }
             } else if controller.assertionID != nil {
                 Text(L10n.text("Защита от автоматического сна активна", "Automatic sleep prevention is active"))

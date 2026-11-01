@@ -644,7 +644,7 @@ public struct NativeTranscript: NSViewRepresentable {
 
     /// Groups each request's tool calls behind one summary row. The row's text names the calls by id and text
     /// length only, so building and comparing it stays cheap on every update; their bodies come from `groups`
-    /// (keyed by the row's id) through `actionDetails` when the row is open.
+    /// (keyed by the row's id) through `renderActivity` when the row is open.
     static func groupActivities(_ items: [TranscriptItem], isWorking: Bool) -> (items: [TranscriptItem], groups: [String: [TranscriptItem]]) {
         var result: [TranscriptItem] = []
         var groups: [String: [TranscriptItem]] = [:]
@@ -687,23 +687,20 @@ public struct NativeTranscript: NSViewRepresentable {
         return (result, groups)
     }
 
-    /// The numbered tool calls shown by an open summary row.
-    static func actionDetails(_ actions: [TranscriptItem]) -> String {
-        actions.enumerated().map { "\($0.offset + 1). \($0.element.text)" }.joined(separator: "\n")
-    }
-
     private func render(_ item: TranscriptItem, expanded: Bool) -> NSAttributedString {
         renderCount += 1
         let result = NSMutableAttributedString()
         let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = item.kind == "activity" ? 1 : 4; paragraph.paragraphSpacing = item.kind == "activity" ? 2 : 0
+        paragraph.lineSpacing = 4; paragraph.paragraphSpacing = 0
         paragraph.lineBreakMode = .byWordWrapping
         if item.kind == "compaction" || item.kind == "refusal" {
             // A refusal is a stop notice from the safety classifier; a compaction tracks its own progress.
             let refusal = item.kind == "refusal"
             let active = !refusal && item.phase == "inProgress"
-            let tint: NSColor? = refusal ? .systemOrange : active ? .controlAccentColor : nil
-            let color = tint ?? NSColor.secondaryLabelColor
+            let tint: NSColor? = refusal ? DeskPalette.ns.attention : active ? DeskPalette.ns.accent : nil
+            let color = tint ?? DeskPalette.ns.muted
+            let wash: NSColor? = refusal ? DeskPalette.ns.attentionWash : active ? DeskPalette.ns.accentWash : nil
+            let textColor = refusal ? DeskPalette.ns.attentionInk : active ? DeskPalette.ns.accentDeep : color
             let symbol = refusal ? "exclamationmark.shield" : active ? "arrow.triangle.2.circlepath"
                 : item.phase == "completed" ? "checkmark.circle" : "minus.circle"
             let attachment = NSTextAttachment()
@@ -727,10 +724,10 @@ public struct NativeTranscript: NSViewRepresentable {
             paragraph.lineSpacing = 2
             result.addAttributes([
                 .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-                .foregroundColor: color, .paragraphStyle: paragraph,
+                .foregroundColor: textColor, .paragraphStyle: paragraph,
                 .compactionBadge: item.id
             ], range: NSRange(location: badgeStart, length: result.length - badgeStart))
-            if let tint { result.addAttribute(.badgeTint, value: tint, range: NSRange(location: badgeStart, length: result.length - badgeStart)) }
+            if let wash { result.addAttribute(.badgeTint, value: wash, range: NSRange(location: badgeStart, length: result.length - badgeStart)) }
             // Keep paragraph terminators outside the badge so it hugs its content.
             result.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: paragraph,
                 .font: NSFont.systemFont(ofSize: 12)]))
@@ -738,40 +735,48 @@ public struct NativeTranscript: NSViewRepresentable {
         }
         if item.kind == "loading" {
             let font = NSFont.systemFont(ofSize: 12)
-            result.append(NSAttributedString(string: "      " + item.text, attributes: [.font: font, .foregroundColor: NSColor.secondaryLabelColor]))
+            result.append(NSAttributedString(string: "      " + item.text, attributes: [.font: font, .foregroundColor: DeskPalette.ns.muted]))
             if let elapsed = item.phase {
                 result.append(NSAttributedString(string: (item.text.isEmpty ? "" : "  ") + elapsed, attributes: [
-                    .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular), .foregroundColor: NSColor.tertiaryLabelColor
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular), .foregroundColor: DeskPalette.ns.muted.withAlphaComponent(0.75)
                 ]))
             }
             result.append(NSAttributedString(string: "\n\n", attributes: [.font: font]))
             return result
         }
         if item.kind == "activity" {
-            let title = item.phase ?? L10n.text("Действия \(item.agentName ?? "Codex")", "\(item.agentName ?? "Codex") actions")
-            result.append(NSAttributedString(string: (expanded ? "▾ " : "▸ ") + title + (expanded ? "\n" : "\n\n"), attributes: [
-                .font: NSFont.systemFont(ofSize: 12, weight: .medium), .link: "contextdesk-action:" + item.id,
-                .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: paragraph
-            ]))
-            if !expanded { return result }
+            renderActivity(item, expanded: expanded, into: result)
         } else {
             if (item.kind == "user" && item.phase != nil) || (item.kind != "user" && item.showsAuthor) {
-                let title = item.kind == "user" ? item.phase ?? "" : (item.agentName ?? "Codex")
-                result.append(NSAttributedString(string: title + "\n", attributes: [
-                    .font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: NSColor.secondaryLabelColor,
+                let user = item.kind == "user"
+                let header = NSMutableAttributedString()
+                if !user {
+                    let avatar = NSTextAttachment()
+                    avatar.image = Self.assistantAvatar
+                    avatar.bounds = NSRect(x: 0, y: -5.5, width: 20, height: 20)
+                    header.append(NSAttributedString(attachment: avatar))
+                    header.append(NSAttributedString(string: "  "))
+                }
+                header.append(NSAttributedString(string: (user ? item.phase ?? "" : (item.agentName ?? "Codex")) + "\n"))
+                header.addAttributes([
+                    .font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: user ? DeskPalette.ns.muted : DeskPalette.ns.ink,
                     .responseHeader: true
-                ]))
+                ], range: NSRange(location: 0, length: header.length))
+                result.append(header)
             }
             if let timing = item.timing {
                 let open = expandedMetrics.contains(item.id)
-                result.append(NSAttributedString(string: (open ? "▾ " : "▸ ") + timing.label() + " · " + L10n.date(timing.completedAt) + "\n", attributes: [
-                    .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor,
-                    .link: "contextdesk-metrics:" + item.id, .responseHeader: true, .responseSeparator: true
-                ]))
+                let attributes: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.systemFont(ofSize: 11.5), .foregroundColor: DeskPalette.ns.muted,
+                    .link: "contextdesk-metrics:" + item.id, .responseHeader: true
+                ]
+                var pill = attributes; pill[.metricsPill] = true
+                result.append(NSAttributedString(string: (open ? "▾ " : "▸ ") + timing.label() + " · " + L10n.date(timing.completedAt), attributes: pill))
+                result.append(NSAttributedString(string: "\n", attributes: attributes))
                 if open {
                     let detail = timing.tokens?.detail() ?? L10n.text("Данные о токенах для этого запроса недоступны.", "Token data is unavailable for this request.")
                     result.append(NSAttributedString(string: detail + "\n", attributes: [
-                        .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor
+                        .font: NSFont.systemFont(ofSize: 12), .foregroundColor: DeskPalette.ns.muted
                     ]))
                 }
             }
@@ -780,15 +785,12 @@ public struct NativeTranscript: NSViewRepresentable {
             var markdown = TranscriptMarkdown(view: self, item: item, options: linkOptions,
                                               width: transcript.textContainer?.containerSize.width ?? 600)
             markdown.render(into: result)
-        } else {
-            // An open summary row shows its tool calls; a document's own activity item keeps its text.
-            let body = item.kind == "activity" ? actionGroups[item.id].map(Self.actionDetails) ?? item.text : item.text
-            for (index, block) in body.components(separatedBy: "```").enumerated() {
-                let isCode = index % 2 == 1 || item.kind == "activity"
+        } else if item.kind != "activity" {
+            for (index, block) in item.text.components(separatedBy: "```").enumerated() {
+                let isCode = index % 2 == 1
                 let font = isCode ? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular) : NSFont.systemFont(ofSize: 14)
                 let attributes: [NSAttributedString.Key: Any] = [
-                    .font: font, .foregroundColor: item.kind == "activity" ? NSColor.secondaryLabelColor : NSColor.labelColor,
-                    .paragraphStyle: paragraph
+                    .font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph
                 ]
                 // Code and tool output stay literal, including link-like text.
                 result.append(isCode ? NSAttributedString(string: block, attributes: attributes)
@@ -811,15 +813,81 @@ public struct NativeTranscript: NSViewRepresentable {
         return result
     }
 
+    /// A tool-call group as a soft card: the header toggles it; an open group lists one numbered row per call.
+    /// The card padding lies in the first and last paragraphs' spacing, inside their own line fragments.
+    private func renderActivity(_ item: TranscriptItem, expanded: Bool, into result: NSMutableAttributedString) {
+        let start = result.length
+        func style(before: CGFloat, after: CGFloat) -> NSMutableParagraphStyle {
+            let style = NSMutableParagraphStyle()
+            style.firstLineHeadIndent = 12; style.headIndent = 12; style.tailIndent = -16
+            style.lineSpacing = 1; style.lineBreakMode = .byWordWrapping
+            style.paragraphSpacingBefore = before; style.paragraphSpacing = after
+            return style
+        }
+        let font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        let title = item.phase ?? L10n.text("Действия \(item.agentName ?? "Codex")", "\(item.agentName ?? "Codex") actions")
+        let header = NSMutableAttributedString(attachment: { let icon = NSTextAttachment(); icon.image = Self.activityIcon
+            icon.bounds = NSRect(x: 0, y: -2.5, width: 14, height: 14); return icon }())
+        header.append(NSAttributedString(string: "  " + title, attributes: [.foregroundColor: DeskPalette.ns.ink]))
+        header.append(NSAttributedString(string: "  " + (expanded ? "▾" : "▸"), attributes: [.foregroundColor: DeskPalette.ns.muted]))
+        header.addAttributes([.font: font, .link: "contextdesk-action:" + item.id], range: NSRange(location: 0, length: header.length))
+        header.append(NSAttributedString(string: "\n", attributes: [.font: font]))
+        header.addAttribute(.paragraphStyle, value: style(before: 9, after: expanded ? 2 : 9), range: NSRange(location: 0, length: header.length))
+        result.append(header)
+        if expanded {
+            // An open summary row shows its tool calls; a document's own activity item keeps its text.
+            let steps = actionGroups[item.id].map { $0.enumerated().map { ("\($0.offset + 1). ", $0.element.text) } } ?? [("", item.text)]
+            let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            let row = style(before: 0, after: 2), first = style(before: 7, after: 2)
+            for (index, (number, text)) in steps.enumerated() {
+                // Tool output stays literal, including link-like text.
+                let step = NSMutableAttributedString(string: number, attributes: [.font: mono, .foregroundColor: DeskPalette.ns.accent])
+                step.append(NSAttributedString(string: text.replacingOccurrences(of: "```", with: ""),
+                                               attributes: [.font: mono, .foregroundColor: DeskPalette.ns.inkSoft]))
+                if index < steps.count - 1 { step.append(NSAttributedString(string: "\n", attributes: [.font: mono])) }
+                guard step.length > 0 else { continue }
+                step.addAttribute(.paragraphStyle, value: row, range: NSRange(location: 0, length: step.length))
+                step.addAttribute(.paragraphStyle, value: first, range: (step.string as NSString).paragraphRange(for: NSRange(location: 0, length: 0)))
+                step.addAttribute(.activityStep, value: index, range: NSRange(location: 0, length: 1))
+                result.append(step)
+            }
+            let last = (result.string as NSString).paragraphRange(for: NSRange(location: result.length - 1, length: 0))
+            if last.location > start, let style = (result.attribute(.paragraphStyle, at: last.location, effectiveRange: nil) as? NSParagraphStyle)?
+                .mutableCopy() as? NSMutableParagraphStyle {
+                style.paragraphSpacing = 9
+                result.addAttribute(.paragraphStyle, value: style, range: last)
+            }
+        }
+        result.addAttribute(.activityCard, value: item.id, range: NSRange(location: start, length: result.length - start))
+    }
+
+    /// Drawn once: a moss sparkle on a moss-wash circle before the assistant's name.
+    static let assistantAvatar: NSImage = {
+        let symbol = NSImage(systemSymbolName: "sparkle", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold).applying(.init(paletteColors: [DeskPalette.ns.accent])))
+        return NSImage(size: NSSize(width: 20, height: 20), flipped: false) { rect in
+            DeskPalette.ns.accentWash.setFill()
+            NSBezierPath(ovalIn: rect).fill()
+            if let symbol {
+                let size = symbol.size
+                symbol.draw(in: NSRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2, width: size.width, height: size.height))
+            }
+            return true
+        }
+    }()
+
+    static let activityIcon = NSImage(systemSymbolName: "wrench.and.screwdriver", accessibilityDescription: nil)?
+        .withSymbolConfiguration(.init(pointSize: 11, weight: .medium).applying(.init(paletteColors: [DeskPalette.ns.accent])))
+
     var linkOptions: TranscriptLinks.Options {
         TranscriptLinks.Options(chips: true, baseDirectory: projectPath.map { URL(fileURLWithPath: $0, isDirectory: true) }, source: documentURL)
     }
 
-    func copyControl(feedback: Bool?, description: String, hoverItemID: String? = nil, label: String? = nil,
+    func copyControl(feedback: Bool?, description: String, hoverItemID: String? = nil, label: String? = nil, tint: NSColor? = nil,
                      visible: (@MainActor @Sendable () -> Bool)? = nil, attributes: [NSAttributedString.Key: Any]) -> NSAttributedString {
         let feedbackText = feedback.map { $0 ? L10n.text("Скопировано", "Copied") : L10n.text("Не удалось скопировать", "Could not copy") }
         let description = feedbackText ?? description
-        let color: NSColor = feedback.map { $0 ? .systemGreen : .systemRed } ?? .secondaryLabelColor
+        let color: NSColor = feedback.map { $0 ? DeskPalette.ns.accent : DeskPalette.ns.problem } ?? tint ?? DeskPalette.ns.muted
         let symbol = feedback.map { $0 ? "checkmark" : "exclamationmark.circle" } ?? "doc.on.doc"
         let attachment = NSTextAttachment()
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
@@ -867,6 +935,23 @@ public struct NativeTranscript: NSViewRepresentable {
             header.minimumLineHeight = 24
             header.paragraphSpacing = outgoing ? 6 : 16
             text.addAttribute(.paragraphStyle, value: header, range: headerRange)
+        }
+        // The metrics pill's fill reaches 8 pt past its text; the indent keeps it on the column's edge.
+        text.enumerateAttribute(.metricsPill, in: range) { value, pillRange, _ in
+            guard value != nil, let pill = (text.attribute(.paragraphStyle, at: pillRange.location, effectiveRange: nil) as? NSParagraphStyle)?
+                .mutableCopy() as? NSMutableParagraphStyle else { return }
+            pill.firstLineHeadIndent += 8; pill.headIndent += 8; pill.paragraphSpacingBefore = 2; pill.lineSpacing = 0; pill.minimumLineHeight = 20
+            let string = text.string as NSString
+            let line = string.paragraphRange(for: pillRange)
+            text.addAttribute(.paragraphStyle, value: pill, range: line)
+            // The pill sits right under the author line.
+            guard line.location > range.location else { return }
+            let author = string.paragraphRange(for: NSRange(location: line.location - 1, length: 0))
+            guard text.attribute(.responseHeader, at: author.location, effectiveRange: nil) != nil,
+                  let style = (text.attribute(.paragraphStyle, at: author.location, effectiveRange: nil) as? NSParagraphStyle)?
+                    .mutableCopy() as? NSMutableParagraphStyle else { return }
+            style.paragraphSpacing = 2; style.lineSpacing = 0
+            text.addAttribute(.paragraphStyle, value: style, range: author)
         }
         text.enumerateAttribute(.messageCopy, in: range) { value, copyRange, _ in
             guard value != nil else { return }
@@ -1214,14 +1299,18 @@ private final class HoverAttachmentCell: NSTextAttachmentCell {
 
 extension NSAttributedString.Key {
     static let compactionBadge = NSAttributedString.Key("ContextDeskCompactionBadge")
-    /// The colour of a badge's fill and outline; badges without it are neutral.
+    /// The wash a badge is filled with; badges without it are neutral.
     static let badgeTint = NSAttributedString.Key("ContextDeskBadgeTint")
+    /// The "worked for" line of an answer, drawn as a capsule.
+    static let metricsPill = NSAttributedString.Key("ContextDeskMetricsPill")
+    /// A tool-call group drawn as a card; `activityStep` marks the first character of each listed call.
+    static let activityCard = NSAttributedString.Key("ContextDeskActivityCard")
+    static let activityStep = NSAttributedString.Key("ContextDeskActivityStep")
     static let quoteCard = NSAttributedString.Key("ContextDeskQuoteCard")
     static let quoteCopy = NSAttributedString.Key("ContextDeskQuoteCopy")
     static let quoteIndex = NSAttributedString.Key("ContextDeskQuoteIndex")
     static let messageCopy = NSAttributedString.Key("ContextDeskMessageCopy")
     static let responseHeader = NSAttributedString.Key("ContextDeskResponseHeader")
-    static let responseSeparator = NSAttributedString.Key("ContextDeskResponseSeparator")
     static let messageBubble = NSAttributedString.Key("ContextDeskMessageBubble")
     static let outgoingBubble = NSAttributedString.Key("ContextDeskOutgoingBubble")
 }
@@ -1230,6 +1319,19 @@ extension NSAttributedString.Key {
 private final class BubbleLayoutManager: NSLayoutManager {
     /// A user bubble reaches this far above and below its text, outside the text's line fragments.
     static let bubbleOverhang: CGFloat = 10
+    /// Hairline between tool calls in an open card, a step darker than its `subtle` fill.
+    static let stepRule = DeskPalette.ns.rgb(0xDDE1D6)
+    static let diffAdded = DeskPalette.ns.accent.withAlphaComponent(0.13)
+    static let diffRemoved = DeskPalette.ns.problem.withAlphaComponent(0.11)
+    static let lineNumberColor = DeskPalette.ns.muted.withAlphaComponent(0.75)
+    static func calloutWash(_ kind: String) -> NSColor {
+        switch kind {
+        case "warning": DeskPalette.ns.attentionWash
+        case "caution": DeskPalette.ns.problemWash
+        case "important": TranscriptMarkdown.Syntax.keyword.withAlphaComponent(0.09)
+        default: DeskPalette.ns.accentWash
+        }
+    }
     /// Paints user bubbles that reach into `dirtyRect`. Each bubble is drawn whole, so a rect that holds only
     /// its overhang (above the first message) or a part of it still shows the right shape.
     func drawBubbles(in dirtyRect: NSRect, origin: NSPoint) {
@@ -1251,7 +1353,56 @@ private final class BubbleLayoutManager: NSLayoutManager {
                               width: max(1, width - inset - 4), height: bounds.maxY + Self.bubbleOverhang - top)
             guard rect.intersects(dirtyRect) else { return }
             DeskPalette.outgoingBubble.setFill()
-            NSBezierPath(roundedRect: rect, xRadius: 18, yRadius: 18).fill()
+            Self.bubblePath(rect, radius: 20, tail: 6).fill()
+        }
+    }
+    /// A rounded rect in flipped coordinates whose bottom-trailing corner, the bubble's tail, is tighter.
+    static func bubblePath(_ rect: NSRect, radius: CGFloat, tail: CGFloat) -> NSBezierPath {
+        let r = min(radius, rect.height / 2, rect.width / 2), t = min(tail, r)
+        let path = NSBezierPath()
+        path.move(to: NSPoint(x: rect.minX + r, y: rect.minY))
+        path.appendArc(from: NSPoint(x: rect.maxX, y: rect.minY), to: NSPoint(x: rect.maxX, y: rect.maxY), radius: r)
+        path.appendArc(from: NSPoint(x: rect.maxX, y: rect.maxY), to: NSPoint(x: rect.minX, y: rect.maxY), radius: t)
+        path.appendArc(from: NSPoint(x: rect.minX, y: rect.maxY), to: NSPoint(x: rect.minX, y: rect.minY), radius: r)
+        path.appendArc(from: NSPoint(x: rect.minX, y: rect.minY), to: NSPoint(x: rect.maxX, y: rect.minY), radius: r)
+        path.close()
+        return path
+    }
+    /// Top and bottom of the text between two characters: the first line's ascender to the last line's descender.
+    private func textExtent(from first: Int, to last: Int, in storage: NSTextStorage) -> (top: CGFloat, bottom: CGFloat) {
+        func edges(_ character: Int) -> (CGFloat, CGFloat) {
+            let glyph = glyphIndexForCharacter(at: character)
+            guard glyph < numberOfGlyphs else { return (0, 0) }
+            let line = lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            let baseline = line.minY + location(forGlyphAt: glyph).y
+            let font = storage.attribute(.font, at: character, effectiveRange: nil) as? NSFont ?? .systemFont(ofSize: 12)
+            return (baseline - font.ascender, baseline - font.descender)
+        }
+        return (edges(first).0, edges(last).1)
+    }
+    /// Last character of `range` that is not a line break.
+    private func lastVisible(in range: NSRange, of storage: NSTextStorage) -> Int {
+        let string = storage.string as NSString
+        var index = NSMaxRange(range) - 1
+        while index > range.location, string.character(at: index) == 10 { index -= 1 }
+        return index
+    }
+    /// Capsules behind each line's part of `range`, sized from the font: `pad` wide beyond the text, `rise` above and below it.
+    private func fillRuns(_ range: NSRange, in storage: NSTextStorage, container: NSTextContainer, origin: NSPoint,
+                          pad: CGFloat, rise: CGFloat, radius: CGFloat?) {
+        let glyphs = glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        let font = storage.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont ?? .systemFont(ofSize: 13)
+        enumerateLineFragments(forGlyphRange: glyphs) { _, _, _, lineGlyphs, _ in
+            let part = NSIntersectionRange(lineGlyphs, glyphs)
+            guard part.length > 0 else { return }
+            let rect = self.boundingRect(forGlyphRange: part, in: container)
+            let baseline = self.location(forGlyphAt: part.location).y
+            let line = self.lineFragmentRect(forGlyphAt: part.location, effectiveRange: nil)
+            let height = font.ascender - font.descender + 2 * rise
+            let box = NSRect(x: origin.x + rect.minX - pad, y: origin.y + line.minY + baseline - font.ascender - rise,
+                             width: rect.width + 2 * pad, height: height)
+            let corner = radius ?? height / 2
+            NSBezierPath(roundedRect: box, xRadius: corner, yRadius: corner).fill()
         }
     }
     /// Selection follows the text line by line: it skips blank lines and the empty column, and stays inside user bubbles.
@@ -1316,21 +1467,14 @@ private final class BubbleLayoutManager: NSLayoutManager {
             let glyphs = glyphRange(forCharacterRange: fullRange, actualCharacterRange: nil)
             let bounds = boundingRect(forGlyphRange: glyphs, in: container)
             let rect = bounds.offsetBy(dx: origin.x, dy: origin.y).insetBy(dx: -10, dy: -6)
-            let tint = storage.attribute(.badgeTint, at: range.location, effectiveRange: nil) as? NSColor
-            let path = NSBezierPath(roundedRect: rect, xRadius: 9, yRadius: 9)
-            (tint?.withAlphaComponent(0.08) ?? NSColor.quaternaryLabelColor.withAlphaComponent(0.07)).setFill()
-            path.fill()
-            (tint?.withAlphaComponent(0.18) ?? NSColor.separatorColor.withAlphaComponent(0.35)).setStroke()
-            path.lineWidth = 0.5
-            path.stroke()
+            let wash = storage.attribute(.badgeTint, at: range.location, effectiveRange: nil) as? NSColor
+            (wash ?? DeskPalette.ns.subtle).setFill()
+            NSBezierPath(roundedRect: rect, xRadius: 10, yRadius: 10).fill()
         }
-        storage.enumerateAttribute(.responseSeparator, in: characters) { value, range, _ in
+        storage.enumerateAttribute(.metricsPill, in: characters) { value, range, _ in
             guard value != nil else { return }
-            let glyphs = glyphRange(forCharacterRange: range, actualCharacterRange: nil)
-            let bounds = boundingRect(forGlyphRange: glyphs, in: container)
-            NSColor.separatorColor.setFill()
-            NSRect(x: origin.x + container.lineFragmentPadding, y: origin.y + bounds.maxY + 6,
-                   width: max(1, container.containerSize.width - 2 * container.lineFragmentPadding), height: 1).fill()
+            DeskPalette.ns.subtle.setFill()
+            fillRuns(range, in: storage, container: container, origin: origin, pad: 8, rise: 3, radius: nil)
         }
         let whole = NSRange(location: 0, length: storage.length)
         let padding = container.lineFragmentPadding
@@ -1346,49 +1490,54 @@ private final class BubbleLayoutManager: NSLayoutManager {
             return (NSRect(x: origin.x + left, y: origin.y + bounds.minY - 2, width: max(1, right - left), height: bounds.height + 12), full)
         }
         var drawn = Set<String>()
+        storage.enumerateAttribute(.activityCard, in: characters) { value, range, _ in
+            guard let id = value as? String, drawn.insert("a" + id).inserted else { return }
+            var full = NSRange()
+            _ = storage.attribute(.activityCard, at: range.location, longestEffectiveRange: &full, in: whole)
+            let extent = textExtent(from: full.location, to: lastVisible(in: full, of: storage), in: storage)
+            let left = origin.x + padding, width = max(1, container.containerSize.width - 2 * padding)
+            let rect = NSRect(x: left, y: origin.y + extent.top - 7, width: width, height: extent.bottom - extent.top + 14)
+            DeskPalette.ns.subtle.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: 12, yRadius: 12).fill()
+            Self.stepRule.setFill()
+            storage.enumerateAttribute(.activityStep, in: NSIntersectionRange(full, characters)) { step, stepRange, _ in
+                guard step != nil else { return }
+                let top = textExtent(from: stepRange.location, to: stepRange.location, in: storage).top
+                NSRect(x: left, y: origin.y + top - 5, width: width, height: 1).fill()
+            }
+        }
         storage.enumerateAttribute(.quoteCard, in: characters) { value, range, _ in
             guard let index = value as? Int, drawn.insert("q\(index)@\(range.location)").inserted else { return }
-            let (rect, _) = card(.quoteCard, at: range.location, inset: 16)
-            let path = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 12, yRadius: 12)
-            NSColor.controlBackgroundColor.setFill(); path.fill()
-            NSColor.separatorColor.setStroke(); path.lineWidth = 1; path.stroke()
+            var full = NSRange()
+            _ = storage.attribute(.quoteCard, at: range.location, longestEffectiveRange: &full, in: whole)
+            // A bar along the quoted text only, not the spacer and copy rows above it.
+            var text = full.location
+            let string = storage.string as NSString
+            while text < NSMaxRange(full) - 1, storage.attribute(.quoteCopy, at: text, effectiveRange: nil) != nil
+                    || string.character(at: text) == 10 { text += 1 }
+            let extent = textExtent(from: text, to: lastVisible(in: full, of: storage), in: storage)
+            let style = storage.attribute(.paragraphStyle, at: full.location, effectiveRange: nil) as? NSParagraphStyle
+            DeskPalette.ns.quoteBar.setFill()
+            NSBezierPath(roundedRect: NSRect(x: origin.x + padding + (style?.firstLineHeadIndent ?? 16) - 16, y: origin.y + extent.top - 2,
+                                             width: 3, height: extent.bottom - extent.top + 4), xRadius: 1.5, yRadius: 1.5).fill()
         }
         storage.enumerateAttribute(.calloutCard, in: characters) { value, range, _ in
             guard let value = value as? String else { return }
             let (rect, _) = card(.calloutCard, at: range.location, inset: 16)
-            let color: NSColor = switch value.split(separator: "|").first.map(String.init) ?? "" {
-            case "tip": .systemGreen
-            case "important": .systemPurple
-            case "warning": .systemOrange
-            case "caution": .systemRed
-            default: .systemBlue
-            }
-            let path = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
-            color.withAlphaComponent(0.07).setFill(); path.fill()
-            NSGraphicsContext.saveGraphicsState()
-            path.addClip()
-            color.withAlphaComponent(0.85).setFill()
-            NSRect(x: rect.minX, y: rect.minY, width: 3, height: rect.height).fill()
-            NSGraphicsContext.restoreGraphicsState()
+            let kind = value.split(separator: "|").first.map(String.init) ?? ""
+            Self.calloutWash(kind).setFill()
+            NSBezierPath(roundedRect: rect, xRadius: 10, yRadius: 10).fill()
         }
         storage.enumerateAttribute(.codeCard, in: characters) { value, range, _ in
             guard value != nil else { return }
             let (rect, full) = card(.codeCard, at: range.location, inset: 14)
-            let path = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 10, yRadius: 10)
-            NSColor.textColor.withAlphaComponent(0.035).setFill(); path.fill()
-            NSColor.separatorColor.withAlphaComponent(0.6).setStroke(); path.lineWidth = 1; path.stroke()
-            // Hairline under the header row.
-            var header = NSRange()
-            if storage.attribute(.rightTabInset, at: full.location, longestEffectiveRange: &header, in: full) != nil {
-                let headerRect = boundingRect(forGlyphRange: glyphRange(forCharacterRange: header, actualCharacterRange: nil), in: container)
-                NSColor.separatorColor.withAlphaComponent(0.5).setFill()
-                NSRect(x: rect.minX + 1, y: origin.y + headerRect.maxY + 3, width: rect.width - 2, height: 0.5).fill()
-            }
+            let path = NSBezierPath(roundedRect: rect, xRadius: 12, yRadius: 12)
+            DeskPalette.ns.code.setFill(); path.fill()
             NSGraphicsContext.saveGraphicsState()
             path.addClip()
             storage.enumerateAttribute(.diffLine, in: NSIntersectionRange(full, characters)) { value, lineRange, _ in
                 guard let sign = value as? String else { return }
-                (sign == "+" ? NSColor.systemGreen : NSColor.systemRed).withAlphaComponent(0.11).setFill()
+                (sign == "+" ? Self.diffAdded : Self.diffRemoved).setFill()
                 let glyphs = glyphRange(forCharacterRange: lineRange, actualCharacterRange: nil)
                 enumerateLineFragments(forGlyphRange: glyphs) { lineRect, _, _, _, _ in
                     NSRect(x: rect.minX, y: origin.y + lineRect.minY, width: rect.width, height: lineRect.height).fill()
@@ -1404,7 +1553,7 @@ private final class BubbleLayoutManager: NSLayoutManager {
             let line = lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
             let baseline = location(forGlyphAt: glyph).y
             let style = storage.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle
-            let label = NSAttributedString(string: "\(number)", attributes: [.font: numberFont, .foregroundColor: NSColor.tertiaryLabelColor])
+            let label = NSAttributedString(string: "\(number)", attributes: [.font: numberFont, .foregroundColor: Self.lineNumberColor])
             let right = origin.x + padding + (style?.headIndent ?? 0) - 10
             label.draw(at: NSPoint(x: right - label.size().width, y: origin.y + line.minY + baseline - numberFont.ascender))
         }
@@ -1414,26 +1563,14 @@ private final class BubbleLayoutManager: NSLayoutManager {
             let bounds = boundingRect(forGlyphRange: glyphs, in: container)
             let style = storage.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle
             let left = padding + (style?.headIndent ?? 0)
-            NSColor.separatorColor.setFill()
+            DeskPalette.ns.border.setFill()
             NSRect(x: origin.x + left, y: origin.y + bounds.midY.rounded() - 0.5,
                    width: max(1, container.containerSize.width - padding - left), height: 1).fill()
         }
         storage.enumerateAttribute(.inlineChip, in: characters) { value, range, _ in
             guard let raw = value as? Int, let chip = TranscriptLinks.Chip(rawValue: raw), chip != .web else { return }
-            let glyphs = glyphRange(forCharacterRange: range, actualCharacterRange: nil)
-            let font = storage.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont ?? .systemFont(ofSize: 13)
-            (chip == .code ? NSColor.textColor.withAlphaComponent(0.06) : NSColor.controlAccentColor.withAlphaComponent(0.08)).setFill()
-            enumerateLineFragments(forGlyphRange: glyphs) { _, _, _, lineGlyphs, _ in
-                let part = NSIntersectionRange(lineGlyphs, glyphs)
-                guard part.length > 0 else { return }
-                let rect = self.boundingRect(forGlyphRange: part, in: container)
-                let baseline = self.location(forGlyphAt: part.location).y
-                let line = self.lineFragmentRect(forGlyphAt: part.location, effectiveRange: nil)
-                let top = line.minY + baseline - font.ascender - 1.5
-                let height = font.ascender - font.descender + 3
-                NSBezierPath(roundedRect: NSRect(x: origin.x + rect.minX - 3, y: origin.y + top, width: rect.width + 6, height: height),
-                             xRadius: 4, yRadius: 4).fill()
-            }
+            (chip == .code ? DeskPalette.ns.code : DeskPalette.ns.accentWash).setFill()
+            fillRuns(range, in: storage, container: container, origin: origin, pad: 3, rise: 1.5, radius: 5)
         }
         super.drawBackground(forGlyphRange: glyphsToShow, at: origin)
     }
@@ -1446,13 +1583,13 @@ private final class BubbleLayoutManager: NSLayoutManager {
         isBordered = false; title = ""; imagePosition = .imageOnly
         image = NSImage(systemSymbolName: "arrow.down", accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
-        contentTintColor = NSColor(white: 0.12, alpha: 1)
+        contentTintColor = DeskPalette.ns.ink
         wantsLayer = true
-        layer?.backgroundColor = NSColor.white.cgColor
-        layer?.borderColor = NSColor(white: 0.89, alpha: 1).cgColor
-        layer?.borderWidth = 1
-        layer?.shadowColor = NSColor.black.cgColor
-        layer?.shadowOpacity = 0.08; layer?.shadowRadius = 6; layer?.shadowOffset = CGSize(width: 0, height: -2)
+        layer?.backgroundColor = DeskPalette.ns.canvas.cgColor
+        // The token carries the shadow's alpha; a slightly firmer one keeps the small control visible on the canvas.
+        layer?.shadowColor = DeskPalette.ns.shadow.withAlphaComponent(1).cgColor
+        layer?.shadowOpacity = Float(DeskPalette.ns.shadow.alphaComponent * 1.6)
+        layer?.shadowRadius = 8; layer?.shadowOffset = CGSize(width: 0, height: -3)
         toolTip = L10n.text("К последнему сообщению", "Jump to latest")
         setAccessibilityLabel(L10n.text("К последнему сообщению", "Jump to latest"))
     }

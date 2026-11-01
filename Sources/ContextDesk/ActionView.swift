@@ -10,7 +10,8 @@ struct ActionView: View {
     @State private var submitting = false
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label(action.title, systemImage: "exclamationmark.bubble.fill").font(.ui(.headline)).foregroundStyle(.blue)
+            Label { Text(action.title).foregroundStyle(DeskPalette.ink) } icon: { Image(systemName: "exclamationmark.diamond.fill").foregroundStyle(DeskPalette.attention) }
+                .font(.ui(.headline))
             switch action.interaction.kind {
             case .questions(let fields):
                 questionFields(fields, onSubmit: { submitAnswers(fields) })
@@ -23,7 +24,7 @@ struct ActionView: View {
             case .link(let message, let url):
                 Text(message).textSelection(.enabled)
                 Link(L10n.text("Открыть страницу инструмента", "Open tool page"), destination: url).pointingHandCursor()
-                Button(L10n.text("Действие выполнено", "Action completed")) { submit(.completed) }
+                Button(L10n.text("Действие выполнено", "Action completed")) { submit(.completed) }.buttonStyle(DeskButtonStyle(kind: .primary))
                 declineButton
             case .unsupported(let message):
                 Text(message).textSelection(.enabled)
@@ -32,28 +33,29 @@ struct ActionView: View {
             case .approval(let canAllow):
                 if let reason = action.interaction.reason { Text(reason).textSelection(.enabled) }
                 DisclosureGroup(L10n.text("Детали запроса", "Request details")) {
-                    ScrollView { Text(action.interaction.details).font(.ui(.caption, design: .monospaced)).textSelection(.enabled) }.frame(maxHeight: 160)
+                    ScrollView { Text(action.interaction.details).font(.ui(.caption, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                        .frame(maxHeight: 160).padding(.horizontal, 10).padding(.vertical, 6).background(.white.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
                 }.disclosureGroupStyle(PointerDisclosureStyle())
                 if !canAllow { unsupportedMessage }
                 HStack {
                     declineButton
                     if canAllow {
                         if action.interaction.canAllowTurn {
-                            Button(L10n.text("Разрешить до конца хода", "Allow for this turn")) { submit(.allowTurn) }
+                            Button(L10n.text("Разрешить до конца хода", "Allow for this turn")) { submit(.allowTurn) }.buttonStyle(DeskButtonStyle())
                                 .help(L10n.text("Этот и следующие запросы того же инструмента в этом ходе", "This and later requests of the same tool in this turn"))
                         }
                         Button(L10n.text("Разрешить один раз", "Allow once")) { submit(.allowOnce) }
-                            .buttonStyle(PointerButtonStyle(base: .borderedProminent))
+                            .buttonStyle(DeskButtonStyle(kind: .primary))
                     }
                 }
             }
-            if let validation { Text(validation).font(.ui(.caption)).foregroundStyle(.red) }
-        }.textFieldStyle(.roundedBorder).controlSize(.large).padding(16).background(.blue.opacity(0.06), in: RoundedRectangle(cornerRadius: 12)).disabled(submitting)
+            if let validation { Text(validation).font(.ui(.caption)).foregroundStyle(DeskPalette.problem) }
+        }.textFieldStyle(.roundedBorder).controlSize(.large).padding(16).background(DeskPalette.attentionWash, in: RoundedRectangle(cornerRadius: 14)).disabled(submitting)
     }
     private var unsupportedMessage: some View {
         Text(L10n.text("Этот запрос нельзя подтвердить в приложении. Его можно отклонить и продолжить разговор.", "This request cannot be approved in the app. You can decline it and continue the conversation.")).font(.ui(.caption))
     }
-    private var declineButton: some View { Button(L10n.text("Отклонить", "Decline")) { submit(.deny) } }
+    private var declineButton: some View { Button(L10n.text("Отклонить", "Decline")) { submit(.deny) }.buttonStyle(DeskButtonStyle()) }
     private func questionFields(_ fields: [AgentInteraction.Field], onSubmit: @escaping () -> Void) -> some View {
         ForEach(fields) { field in
             Text(field.text).textSelection(.enabled)
@@ -71,7 +73,7 @@ struct ActionView: View {
     @ViewBuilder private func optionRow(_ option: AgentInteraction.Field.Option, selected: Bool, select: @escaping () -> Void) -> some View {
         Button(action: select) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle").foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle").foregroundStyle(selected ? DeskPalette.accent : Color.secondary)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(option.label).fontWeight(.medium).fixedSize(horizontal: false, vertical: true)
                     if let description = option.description {
@@ -81,18 +83,18 @@ struct ActionView: View {
                 Spacer(minLength: 0)
             }
             .padding(.vertical, 6).padding(.horizontal, 10)
-            .background(selected ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 8))
+            .background(selected ? DeskPalette.accentWash : .clear, in: RoundedRectangle(cornerRadius: 8))
             .contentShape(Rectangle())
         }.buttonStyle(PointerButtonStyle(base: .plain))
         if selected, let preview = option.preview {
             ScrollView {
                 Text(preview).font(.ui(.caption, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-            }.frame(maxHeight: 160).padding(8).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+            }.frame(maxHeight: 160).padding(8).background(.white.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
         }
     }
     private func answerButton(_ fields: [AgentInteraction.Field]) -> some View {
         Button(L10n.text("Ответить", "Submit answer")) { submitAnswers(fields) }
-            .buttonStyle(PointerButtonStyle(base: .borderedProminent))
+            .buttonStyle(DeskButtonStyle(kind: .primary))
     }
     private func submitAnswers(_ fields: [AgentInteraction.Field]) {
         guard !submitting else { return }

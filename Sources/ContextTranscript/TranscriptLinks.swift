@@ -173,7 +173,7 @@ extension NSAttributedString.Key {
                     result.append(link(content, url: withAnchor(url, parts.anchor), line: nil, style: style, options: options, keepText: true))
                 } else {
                     // A page that does not exist (yet) stays readable but quiet.
-                    style[.foregroundColor] = NSColor.secondaryLabelColor
+                    style[.foregroundColor] = DeskPalette.ns.muted
                     style[.underlineStyle] = NSUnderlineStyle.single.rawValue | NSUnderlineStyle.patternDot.rawValue
                     style[.toolTip] = L10n.text("Страница не найдена: \(parts.target)", "Page not found: \(parts.target)")
                     result.append(NSAttributedString(string: content, attributes: style))
@@ -182,7 +182,7 @@ extension NSAttributedString.Key {
             }
             if !isCode, let target = run.link, target.scheme == nil, target.relativeString.hasPrefix("#") {
                 style[.link] = "contextdesk-anchor:" + slug(String(target.relativeString.dropFirst()))
-                style[.foregroundColor] = NSColor.linkColor
+                style[.foregroundColor] = DeskPalette.ns.accentDeep
                 style[.toolTip] = L10n.text("Перейти к разделу", "Go to section")
                 result.append(NSAttributedString(string: content, attributes: style))
                 continue
@@ -225,9 +225,10 @@ extension NSAttributedString.Key {
         var style = style
         style[.link] = url
         style[.toolTip] = url.isFileURL ? url.path + (line ?? "") : url.scheme == chatScheme ? L10n.text("Открыть чат", "Open the chat") : url.absoluteString
-        style[.foregroundColor] = NSColor.linkColor
+        style[.foregroundColor] = DeskPalette.ns.accentDeep
         guard options.chips else {
             style[.underlineStyle] = NSUnderlineStyle.single.rawValue
+            style[.underlineColor] = DeskPalette.ns.accentDeep.withAlphaComponent(0.35)
             return NSAttributedString(string: text, attributes: style)
         }
         let result = NSMutableAttributedString()
@@ -248,7 +249,7 @@ extension NSAttributedString.Key {
             result.addAttributes(style, range: NSRange(location: 0, length: 1))
         } else {
             style[.underlineStyle] = NSUnderlineStyle.single.rawValue
-            style[.underlineColor] = NSColor.linkColor.withAlphaComponent(0.35)
+            style[.underlineColor] = DeskPalette.ns.accentDeep.withAlphaComponent(0.35)
             var title = text
             if text == url.absoluteString, text.count > options.urlDisplayLimit, let host = url.host {
                 let path = url.path.split(separator: "/").prefix(2).joined(separator: "/")
@@ -313,7 +314,7 @@ extension NSAttributedString.Key {
         for match in highlight?.matches(in: chunk.string, range: NSRange(location: 0, length: chunk.length)).reversed() ?? [] {
             guard chunk.attribute(.link, at: match.range.location, effectiveRange: nil) == nil else { continue }
             let inner = chunk.attributedSubstring(from: match.range(at: 1)).mutableCopy() as! NSMutableAttributedString
-            inner.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.32), range: NSRange(location: 0, length: inner.length))
+            inner.addAttribute(.backgroundColor, value: DeskPalette.ns.attention.withAlphaComponent(0.22), range: NSRange(location: 0, length: inner.length))
             chunk.replaceCharacters(in: match.range, with: inner)
         }
         let footnote = Self.footnoteExpression
@@ -322,7 +323,7 @@ extension NSAttributedString.Key {
             var style = chunk.attributes(at: match.range.location, effectiveRange: nil)
             style[.font] = NSFont.systemFont(ofSize: 10, weight: .semibold)
             style[.baselineOffset] = 5
-            style[.foregroundColor] = NSColor.controlAccentColor
+            style[.foregroundColor] = DeskPalette.ns.accentDeep
             chunk.replaceCharacters(in: match.range, with: NSAttributedString(string: (chunk.string as NSString).substring(with: match.range(at: 1)), attributes: style))
         }
     }

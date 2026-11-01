@@ -155,7 +155,7 @@ final class TableBox: NSObject {
             let open = view.expandedBlocks.contains(key)
             let title = summary.isEmpty ? L10n.text("Подробнее", "Details") : summary
             let line = NSMutableAttributedString(string: (open ? "▾ " : "▸ "), attributes: [
-                .font: NSFont.systemFont(ofSize: 13, weight: .medium), .foregroundColor: NSColor.secondaryLabelColor
+                .font: NSFont.systemFont(ofSize: 13, weight: .medium), .foregroundColor: DeskPalette.ns.muted
             ])
             line.append(inline(title, font: NSFont.systemFont(ofSize: 14, weight: .medium)))
             line.addAttributes([.link: "contextdesk-toggle:" + key], range: NSRange(location: 0, length: line.length))
@@ -167,10 +167,10 @@ final class TableBox: NSObject {
             renderProperties(properties, into: result, indent: indent, tail: tail)
         case .footnote(let label, let text):
             let line = NSMutableAttributedString(string: label, attributes: [
-                .font: NSFont.systemFont(ofSize: 10, weight: .semibold), .baselineOffset: 4, .foregroundColor: NSColor.controlAccentColor
+                .font: NSFont.systemFont(ofSize: 10, weight: .semibold), .baselineOffset: 4, .foregroundColor: DeskPalette.ns.accentDeep
             ])
             line.append(NSAttributedString(string: " "))
-            line.append(inline(text, font: NSFont.systemFont(ofSize: 12), color: .secondaryLabelColor))
+            line.append(inline(text, font: NSFont.systemFont(ofSize: 12), color: DeskPalette.ns.muted))
             append(line, to: result, style: paragraph(indent, tail) { $0.lineSpacing = 2 }, after: 4)
         }
     }
@@ -186,7 +186,7 @@ final class TableBox: NSObject {
         let sizes: [CGFloat] = [21, 18, 15.5, 14, 14, 14]
         let font = NSFont.systemFont(ofSize: sizes[min(level, 6) - 1], weight: level <= 1 ? .bold : .semibold)
         let line = NSMutableAttributedString(attributedString: inline(text, font: font,
-                                                                      color: level >= 4 ? .secondaryLabelColor : .labelColor))
+                                                                      color: level >= 4 ? DeskPalette.ns.muted : .labelColor))
         if let (key, source) = sectionCopy, !source.isEmpty {
             let index = copyIndex; copyIndex += 1
             let feedback = view.copyFeedback.flatMap { $0.id == item.id && $0.block == index ? $0.succeeded : nil }
@@ -213,7 +213,7 @@ final class TableBox: NSObject {
             attachment.image = NSImage(systemSymbolName: checked ? "checkmark.square.fill" : "square",
                                        accessibilityDescription: checked ? L10n.text("Выполнено", "Done") : L10n.text("Не выполнено", "Not done"))?
                 .withSymbolConfiguration(.init(pointSize: 13, weight: .regular)
-                    .applying(.init(paletteColors: [checked ? .controlAccentColor : .secondaryLabelColor])))
+                    .applying(.init(paletteColors: [checked ? DeskPalette.ns.accent : DeskPalette.ns.muted])))
             attachment.bounds = NSRect(x: 0, y: -2.5, width: 15, height: 15)
             line.append(NSAttributedString(attachment: attachment))
         } else {
@@ -222,17 +222,17 @@ final class TableBox: NSObject {
                 markerWidth = 18
                 let bullets = ["•", "◦", "▪︎"]
                 line.append(NSAttributedString(string: bullets[listItem.depth % bullets.count], attributes: [
-                    .font: NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.secondaryLabelColor
+                    .font: NSFont.systemFont(ofSize: 14), .foregroundColor: DeskPalette.ns.muted
                 ]))
             case .ordered(let number):
                 markerWidth = number >= 100 ? 36 : number >= 10 ? 28 : 22
                 line.append(NSAttributedString(string: "\(number).", attributes: [
-                    .font: NSFont.monospacedDigitSystemFont(ofSize: 14, weight: .regular), .foregroundColor: NSColor.secondaryLabelColor
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 14, weight: .regular), .foregroundColor: DeskPalette.ns.muted
                 ]))
             }
         }
         line.append(NSAttributedString(string: "\t", attributes: body))
-        line.append(inline(listItem.text, color: listItem.checked == true ? .secondaryLabelColor : .labelColor))
+        line.append(inline(listItem.text, color: listItem.checked == true ? DeskPalette.ns.muted : .labelColor))
         let textIndent = level + markerWidth
         let style = paragraph(level, tail) {
             $0.headIndent = textIndent
@@ -258,7 +258,7 @@ final class TableBox: NSObject {
 
         // Header: language on the left, copy on the right.
         let header = NSMutableAttributedString(string: code.language ?? L10n.text("код", "code"), attributes: [
-            .font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: NSColor.secondaryLabelColor
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: DeskPalette.ns.muted
         ])
         header.append(NSAttributedString(string: "\t", attributes: [.font: NSFont.systemFont(ofSize: 11)]))
         let copyText = code.copyText
@@ -269,7 +269,7 @@ final class TableBox: NSObject {
             description: commandsOnly ? L10n.text("Скопировать команды без приглашения и вывода", "Copy the commands without prompts or output")
                                       : L10n.text("Скопировать код", "Copy the code"),
             label: commandsOnly ? L10n.text("Копировать команды", "Copy commands") : L10n.text("Копировать", "Copy"),
-            attributes: [.link: "contextdesk-block-copy", .blockCopy: copyText, .quoteIndex: index]))
+            tint: DeskPalette.ns.accentDeep, attributes: [.link: "contextdesk-block-copy", .blockCopy: copyText, .quoteIndex: index]))
         let headerRange = append(header, to: result, style: paragraph(indent + pad, tail - pad) {
             $0.lineSpacing = 0; $0.minimumLineHeight = 22
         }, after: 8, before: 6)
@@ -284,19 +284,20 @@ final class TableBox: NSObject {
                 let length = (line as NSString).length
                 let range = NSRange(location: location, length: length)
                 if line.hasPrefix("+"), !line.hasPrefix("+++") {
-                    codeText.addAttributes([.diffLine: "+", .foregroundColor: NSColor.systemGreen.blended(withFraction: 0.35, of: .labelColor) ?? .labelColor], range: range)
+                    codeText.addAttributes([.diffLine: "+", .foregroundColor: DeskPalette.ns.accentDeep], range: range)
                 } else if line.hasPrefix("-"), !line.hasPrefix("---") {
-                    codeText.addAttributes([.diffLine: "-", .foregroundColor: NSColor.systemRed.blended(withFraction: 0.35, of: .labelColor) ?? .labelColor], range: range)
+                    codeText.addAttributes([.diffLine: "-", .foregroundColor: DeskPalette.ns.problemInk], range: range)
                 } else if line.hasPrefix("@@") {
-                    codeText.addAttribute(.foregroundColor, value: NSColor.systemPurple, range: range)
+                    codeText.addAttribute(.foregroundColor, value: Syntax.keyword, range: range)
                 } else if line.hasPrefix("+++") || line.hasPrefix("---") || line.hasPrefix("diff ") || line.hasPrefix("index ") {
-                    codeText.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: range)
+                    codeText.addAttribute(.foregroundColor, value: DeskPalette.ns.muted, range: range)
                 }
                 location += length + 1
             }
         } else {
             for token in SyntaxHighlighter.tokens(in: text, language: code.language) where NSMaxRange(token.range) <= codeText.length {
                 codeText.addAttribute(.foregroundColor, value: Self.color(token.kind), range: token.range)
+                if token.kind == .comment, let italic = Syntax.commentFont { codeText.addAttribute(.font, value: italic, range: token.range) }
             }
         }
         if numbered {
@@ -322,7 +323,7 @@ final class TableBox: NSObject {
             let title = expanded ? L10n.text("Свернуть", "Collapse")
                                  : L10n.text("Показать ещё \(hidden) \(Self.russianLines(hidden))", "Show \(hidden) more \(hidden == 1 ? "line" : "lines")")
             let toggle = NSAttributedString(string: (expanded ? "▴ " : "▾ ") + title, attributes: [
-                .font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: NSColor.controlAccentColor,
+                .font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: DeskPalette.ns.accentDeep,
                 .link: "contextdesk-toggle:" + key
             ])
             append(toggle, to: result, style: paragraph(indent + pad, tail - pad) { $0.lineSpacing = 0 }, after: 0)
@@ -344,6 +345,10 @@ final class TableBox: NSObject {
             label: L10n.text("Копировать", "Copy"), attributes: controlAttributes))
         var body = NSMutableAttributedString()
         renderBlocks(text, into: body, indent: indent + pad, tail: tail - pad)
+        // Quoted prose is a shade quieter than the answer; links and other colours stay.
+        body.enumerateAttribute(.foregroundColor, in: NSRange(location: 0, length: body.length)) { value, range, _ in
+            if value as? NSColor == .labelColor { body.addAttribute(.foregroundColor, value: DeskPalette.ns.inkSoft, range: range) }
+        }
         // The control sits at the trailing edge of the first line when that line leaves room for it;
         // otherwise it gets its own row above the text so it never overlaps the text.
         let string = body.string as NSString
@@ -395,7 +400,14 @@ final class TableBox: NSObject {
         attachment.bounds = NSRect(x: 0, y: -2.5, width: 15, height: 15)
         line.append(NSAttributedString(attachment: attachment))
         line.append(NSAttributedString(string: "  ", attributes: body))
-        line.append(inline(callout.title ?? title, font: NSFont.systemFont(ofSize: 13, weight: .semibold), color: color))
+        // The icon keeps the kind's hue; the title uses its darker ink so it reads on the wash.
+        let titleColor: NSColor = switch callout.kind {
+        case .warning: DeskPalette.ns.attentionInk
+        case .caution: DeskPalette.ns.problemInk
+        case .important: color
+        default: DeskPalette.ns.accentDeep
+        }
+        line.append(inline(callout.title ?? title, font: NSFont.systemFont(ofSize: 13, weight: .semibold), color: titleColor))
         append(line, to: result, style: paragraph(indent + pad, tail - pad) { $0.lineSpacing = 0 }, after: 4, before: 10)
         renderBlocks(callout.body, into: result, indent: indent + pad, tail: tail - pad)
         trimTrailingSpacing(result, from: start, to: 0)
@@ -414,17 +426,17 @@ final class TableBox: NSObject {
         result.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 4), .paragraphStyle: spacer, .blockParagraphStyle: spacer]))
         for (number, property) in properties.enumerated() {
             let line = NSMutableAttributedString(string: property.name + "\t", attributes: [
-                .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor
+                .font: NSFont.systemFont(ofSize: 12), .foregroundColor: DeskPalette.ns.muted
             ])
             let isTags = ["tags", "tag", "aliases"].contains(property.name.lowercased())
             if property.values.isEmpty {
-                line.append(NSAttributedString(string: "—", attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.tertiaryLabelColor]))
+                line.append(NSAttributedString(string: "—", attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: DeskPalette.ns.muted]))
             }
             for (offset, value) in property.values.enumerated() {
                 if offset > 0 { line.append(NSAttributedString(string: isTags ? "  " : ", ", attributes: [.font: NSFont.systemFont(ofSize: 13)])) }
                 if isTags {
                     line.append(NSAttributedString(string: (property.name.lowercased() == "aliases" ? "" : "#") + value.trimmingCharacters(in: CharacterSet(charactersIn: "#")), attributes: [
-                        .font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: NSColor.controlAccentColor,
+                        .font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: DeskPalette.ns.accentDeep,
                         .inlineChip: TranscriptLinks.Chip.file.rawValue
                     ]))
                 } else {
@@ -454,10 +466,10 @@ final class TableBox: NSObject {
             if toolbar.length > 0 { toolbar.append(NSAttributedString(string: "   ", attributes: [.font: small])) }
             let attachment = NSTextAttachment()
             attachment.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-                .withSymbolConfiguration(.init(pointSize: 10, weight: .medium).applying(.init(paletteColors: [.secondaryLabelColor])))
+                .withSymbolConfiguration(.init(pointSize: 10, weight: .medium).applying(.init(paletteColors: [DeskPalette.ns.muted])))
             attachment.bounds = NSRect(x: 0, y: -1.5, width: 12, height: 12)
             let part = NSMutableAttributedString(attachment: attachment)
-            part.append(NSAttributedString(string: " " + title, attributes: [.font: small, .foregroundColor: NSColor.secondaryLabelColor]))
+            part.append(NSAttributedString(string: " " + title, attributes: [.font: small, .foregroundColor: DeskPalette.ns.muted]))
             part.addAttributes([.link: link, .tableData: box, .quoteIndex: index, .toolTip: tooltip], range: NSRange(location: 0, length: part.length))
             toolbar.append(part)
         }
@@ -470,7 +482,7 @@ final class TableBox: NSObject {
         }
         if let feedback {
             toolbar.insert(NSAttributedString(string: (feedback ? "✓ " + L10n.text("Скопировано", "Copied") : L10n.text("Не удалось скопировать", "Could not copy")) + "   ",
-                                              attributes: [.font: small, .foregroundColor: feedback ? NSColor.systemGreen : NSColor.systemRed]), at: 0)
+                                              attributes: [.font: small, .foregroundColor: feedback ? DeskPalette.ns.accent : DeskPalette.ns.problem]), at: 0)
         }
         append(toolbar, to: result, style: paragraph(indent, tail) { $0.alignment = .right; $0.lineSpacing = 0 }, after: 4, before: 4)
         let start = result.length
@@ -483,7 +495,7 @@ final class TableBox: NSObject {
             let title = limited ? L10n.text("Показать все \(total) \(Self.russianLines(total))", "Show all \(total) rows")
                                 : L10n.text("Свернуть до \(Self.tableRowLimit) строк", "Collapse to \(Self.tableRowLimit) rows")
             append(NSAttributedString(string: (limited ? "▾ " : "▴ ") + title, attributes: [
-                .font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: NSColor.controlAccentColor,
+                .font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: DeskPalette.ns.accentDeep,
                 .link: "contextdesk-toggle:" + tableKey
             ]), to: result, style: paragraph(indent, tail) { $0.lineSpacing = 0 }, after: 0, before: 6)
         }
@@ -511,7 +523,7 @@ final class TableBox: NSObject {
                                range: NSRange(location: 0, length: line.length))
             append(line, to: result, style: paragraph(indent, tail) { $0.lineSpacing = 0 }, after: alt.isEmpty ? 10 : 2, before: 4)
             if !alt.isEmpty {
-                append(NSAttributedString(string: alt, attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor]),
+                append(NSAttributedString(string: alt, attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: DeskPalette.ns.muted]),
                        to: result, style: paragraph(indent, tail), after: 10)
             }
             return
@@ -520,13 +532,13 @@ final class TableBox: NSObject {
         let line = NSMutableAttributedString()
         let attachment = NSTextAttachment()
         attachment.image = NSImage(systemSymbolName: "photo", accessibilityDescription: L10n.text("Изображение", "Image"))?
-            .withSymbolConfiguration(.init(pointSize: 12, weight: .regular).applying(.init(paletteColors: [.secondaryLabelColor])))
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .regular).applying(.init(paletteColors: [DeskPalette.ns.muted])))
         attachment.bounds = NSRect(x: 0, y: -2, width: 15, height: 13)
         line.append(NSAttributedString(attachment: attachment))
         let title = alt.isEmpty ? (url?.lastPathComponent ?? source) : alt
         var style = body
-        if let url { style[.link] = url; style[.foregroundColor] = NSColor.linkColor; style[.toolTip] = url.absoluteString }
-        else { style[.foregroundColor] = NSColor.secondaryLabelColor; style[.toolTip] = L10n.text("Изображение не найдено: ", "Image not found: ") + source }
+        if let url { style[.link] = url; style[.foregroundColor] = DeskPalette.ns.accentDeep; style[.toolTip] = url.absoluteString }
+        else { style[.foregroundColor] = DeskPalette.ns.muted; style[.toolTip] = L10n.text("Изображение не найдено: ", "Image not found: ") + source }
         line.append(NSAttributedString(string: " " + title, attributes: style))
         append(line, to: result, style: paragraph(indent, tail), after: 10)
     }
@@ -539,22 +551,22 @@ final class TableBox: NSObject {
         let open = view.expandedBlocks.contains(key)
         let title = (open ? "▾ " : "▸ ") + L10n.text("Источники · \(sources.count)", "Sources · \(sources.count)")
         append(NSAttributedString(string: title, attributes: [
-            .font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: NSColor.secondaryLabelColor,
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: DeskPalette.ns.muted,
             .link: "contextdesk-toggle:" + key
         ]), to: result, style: paragraph(0, -4) { $0.lineSpacing = 0 }, after: open ? 4 : 6, before: 4)
         guard open else { return }
         for (number, source) in sources.enumerated() {
             let line = NSMutableAttributedString(string: "\(number + 1).\t", attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular), .foregroundColor: NSColor.tertiaryLabelColor
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular), .foregroundColor: DeskPalette.ns.muted
             ])
             let host = source.url.host?.replacingOccurrences(of: #"^www\."#, with: "", options: .regularExpression) ?? source.url.absoluteString
             line.append(NSAttributedString(string: host, attributes: [
-                .font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: NSColor.linkColor,
+                .font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: DeskPalette.ns.accentDeep,
                 .link: source.url, .toolTip: source.url.absoluteString
             ]))
             if let title = source.title, title != host, title != source.url.absoluteString {
                 line.append(NSAttributedString(string: " — " + title, attributes: [
-                    .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor
+                    .font: NSFont.systemFont(ofSize: 12), .foregroundColor: DeskPalette.ns.muted
                 ]))
             }
             append(line, to: result, style: paragraph(4, -4) {
@@ -669,26 +681,39 @@ final class TableBox: NSObject {
         result.addAttributes([.paragraphStyle: style, .blockParagraphStyle: style], range: last)
     }
 
+    /// Earthy syntax colours for the light "sage" code cards.
+    enum Syntax {
+        static let keyword = DeskPalette.ns.rgb(0x7A5A9C)
+        static let type = DeskPalette.ns.rgb(0x2F6F8F)
+        static let comment = DeskPalette.ns.rgb(0x9AA192)
+        /// Fonts are immutable; the value is built once.
+        nonisolated(unsafe) static let commentFont: NSFont? = {
+            let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            let italic = NSFontManager.shared.convert(mono, toHaveTrait: .italicFontMask)
+            return italic.fontDescriptor.symbolicTraits.contains(.italic) ? italic : nil
+        }()
+    }
+
     static func color(_ kind: SyntaxHighlighter.Kind) -> NSColor {
         switch kind {
-        case .keyword: .systemPink
-        case .string: .systemRed
-        case .comment: .secondaryLabelColor
-        case .number: .systemIndigo
-        case .type: .systemTeal
-        case .key: .systemBlue
-        case .variable: .systemTeal
-        case .attribute: .systemOrange
+        case .keyword: Syntax.keyword
+        case .string: DeskPalette.ns.accent
+        case .comment: Syntax.comment
+        case .number: DeskPalette.ns.problem
+        case .type: Syntax.type
+        case .key: Syntax.type
+        case .variable: DeskPalette.ns.browser
+        case .attribute: DeskPalette.ns.attention
         }
     }
 
     static func calloutStyle(_ kind: MarkdownCallout.Kind) -> (String, NSColor, String) {
         switch kind {
-        case .note: ("info.circle.fill", .systemBlue, L10n.text("Заметка", "Note"))
-        case .tip: ("lightbulb.fill", .systemGreen, L10n.text("Совет", "Tip"))
-        case .important: ("exclamationmark.bubble.fill", .systemPurple, L10n.text("Важно", "Important"))
-        case .warning: ("exclamationmark.triangle.fill", .systemOrange, L10n.text("Внимание", "Warning"))
-        case .caution: ("xmark.octagon.fill", .systemRed, L10n.text("Осторожно", "Caution"))
+        case .note: ("info.circle.fill", DeskPalette.ns.accent, L10n.text("Заметка", "Note"))
+        case .tip: ("lightbulb.fill", DeskPalette.ns.accent, L10n.text("Совет", "Tip"))
+        case .important: ("exclamationmark.bubble.fill", Syntax.keyword, L10n.text("Важно", "Important"))
+        case .warning: ("exclamationmark.triangle.fill", DeskPalette.ns.attention, L10n.text("Внимание", "Warning"))
+        case .caution: ("xmark.octagon.fill", DeskPalette.ns.problem, L10n.text("Осторожно", "Caution"))
         }
     }
 

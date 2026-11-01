@@ -48,7 +48,7 @@ struct HandoffEditor: View {
                     DisclosureGroup(L10n.text("Предпросмотр черновика", "Preview draft")) {
                         Text((try? handoff.prompt()) ?? L10n.text("Укажи цель; размер передачи ограничен 128 КиБ.", "Enter a goal; handoff size is limited to 128 KiB.")).font(.ui(.caption).monospaced()).textSelection(.enabled)
                     }
-                    if let error = model.error { Text(error).foregroundStyle(.red).font(.ui(.caption)) }
+                    if let error = model.error { Text(error).foregroundStyle(DeskPalette.problem).font(.ui(.caption)) }
                 }
             }
             HStack {
@@ -61,8 +61,19 @@ struct HandoffEditor: View {
             }
         }.padding(24).frame(width: 680, height: 740).interactiveDismissDisabled(model.creatingHandoff)
     }
-    private func field(_ label: String, text: Binding<String>) -> some View {
-        VStack(alignment: .leading) { Text(label).font(.ui(.callout).bold()); TextEditor(text: text).frame(minHeight: 65).border(.gray.opacity(0.25)) }
+    private func field(_ label: String, text: Binding<String>) -> some View { HandoffField(label: label, text: text) }
+}
+
+private struct HandoffField: View {
+    let label: String
+    @Binding var text: String
+    @FocusState private var focused: Bool
+    var body: some View {
+        VStack(alignment: .leading) {
+            Text(label).font(.ui(.callout).bold())
+            TextEditor(text: $text).scrollContentBackground(.hidden).padding(6).frame(minHeight: 65).focused($focused)
+                .modifier(DeskFieldChrome(focused: focused))
+        }
     }
 }
 
@@ -143,7 +154,7 @@ struct RoutineLibrary: View {
                         }.padding(1)
                     }
                 }
-                if let error = model.error { RoutineNotice(icon: "exclamationmark.triangle", text: error).foregroundStyle(.red) }
+                if let error = model.error { RoutineNotice(icon: "exclamationmark.triangle", text: error).foregroundStyle(DeskPalette.problem) }
             }.padding(24)
         }.frame(width: 780, height: 660).background(DeskPalette.canvas)
             .task { await model.loadRoutines() }
@@ -253,7 +264,7 @@ struct RoutineEditor: View {
             }.disabled(saving)
             Divider()
             VStack(alignment: .leading, spacing: 12) {
-                if let issue { Label(issue, systemImage: "exclamationmark.triangle").foregroundStyle(.red).font(.ui(.caption)).textSelection(.enabled) }
+                if let issue { Label(issue, systemImage: "exclamationmark.triangle").foregroundStyle(DeskPalette.problem).font(.ui(.caption)).textSelection(.enabled) }
                 HStack {
                     if saving { ProgressView().uiSmallSpinner() }
                     Spacer()
@@ -299,8 +310,7 @@ struct RoutineTextField: View {
             Text(label).font(.ui(.callout).weight(.medium))
             TextEditor(text: $text).font(.ui(.body)).scrollContentBackground(.hidden)
                 .padding(8).frame(minHeight: 88).focused($focused).accessibilityLabel(label)
-                .background(DeskPalette.subtle, in: RoundedRectangle(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(focused ? DeskPalette.focusBorder : DeskPalette.border))
+                .modifier(DeskFieldChrome(focused: focused))
         }
     }
 }

@@ -125,7 +125,7 @@ $ swift test
     #expect(storage.attribute(.backgroundColor, at: location(of: "выделенным", in: view), effectiveRange: nil) != nil)
     // Keywords are colored, numbers right-aligned in tables.
     let keyword = location(of: "struct", in: view)
-    #expect(storage.attribute(.foregroundColor, at: keyword, effectiveRange: nil) as? NSColor == .systemPink)
+    #expect(storage.attribute(.foregroundColor, at: keyword, effectiveRange: nil) as? NSColor == TranscriptMarkdown.color(.keyword))
     let number = location(of: "1 200", in: view)
     #expect((storage.attribute(.paragraphStyle, at: number, effectiveRange: nil) as? NSParagraphStyle)?.alignment == .right)
     // Ten-line code blocks would be numbered; this six-line one is not.

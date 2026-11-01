@@ -82,7 +82,9 @@ import ContextCore
     #expect(assistant.tailIndent == -4)
     _ = view.textView(view.transcript, clickedOnLink: "contextdesk-action:tool", at: 0)
     let actionIndex = (storage.string as NSString).range(of: "1. Проверяю").location
-    #expect(storage.attribute(.foregroundColor, at: actionIndex, effectiveRange: nil) as? NSColor == .secondaryLabelColor)
+    #expect(storage.attribute(.foregroundColor, at: actionIndex, effectiveRange: nil) as? NSColor == DeskPalette.ns.accent)
+    #expect(storage.attribute(.foregroundColor, at: actionIndex + 3, effectiveRange: nil) as? NSColor == DeskPalette.ns.inkSoft)
+    #expect(storage.attribute(NSAttributedString.Key("ContextDeskActivityCard"), at: actionIndex, effectiveRange: nil) as? String == "tool")
     let action = try #require(storage.attribute(.paragraphStyle, at: actionIndex, effectiveRange: nil) as? NSParagraphStyle)
     #expect(action.lineSpacing < assistant.lineSpacing)
     if let path = ProcessInfo.processInfo.environment["SWITCHBOARD_RENDER_PATH"] {
@@ -307,7 +309,7 @@ import ContextCore
     #expect(try await store.loadTimings(threadID: "t").isEmpty)
 }
 
-@Test @MainActor func timedAnswerRendersWithSeparatorAndFullWidth() throws {
+@Test @MainActor func timedAnswerRendersWithMetricsPillAndFullWidth() throws {
     let view = TranscriptScrollView()
     view.frame = NSRect(x: 0, y: 0, width: 760, height: 400)
     let timing = ResponseTiming(startedAt: Date(timeIntervalSince1970: 100), completedAt: Date(timeIntervalSince1970: 167))
@@ -317,7 +319,7 @@ import ContextCore
     #expect(view.transcript.string.contains(L10n.date(timing.completedAt)))
     let storage = try #require(view.transcript.textStorage)
     let timingIndex = (storage.string as NSString).range(of: timing.label()).location
-    #expect(storage.attribute(NSAttributedString.Key("ContextDeskResponseSeparator"), at: timingIndex, effectiveRange: nil) as? Bool == true)
+    #expect(storage.attribute(NSAttributedString.Key("ContextDeskMetricsPill"), at: timingIndex, effectiveRange: nil) as? Bool == true)
     if let path = ProcessInfo.processInfo.environment["SWITCHBOARD_RENDER_PATH"] {
         view.drawsBackground = true
         view.backgroundColor = .windowBackgroundColor
@@ -341,7 +343,8 @@ import ContextCore
     text.cacheDisplay(in: band, to: bitmap)
     let color = try #require(bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2)?.usingColorSpace(.deviceRGB))
     #expect(color.alphaComponent > 0.9)
-    #expect(abs(color.redComponent - 0.95) < 0.03)
+    let bubble = try #require(DeskPalette.ns.outgoingBubble.usingColorSpace(.deviceRGB))
+    #expect(abs(color.redComponent - bubble.redComponent) < 0.03)
 }
 
 @Test @MainActor func copyMessageWritesOnlyItsFullSourceTextAndTracksUpdates() throws {

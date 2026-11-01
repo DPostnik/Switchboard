@@ -31,7 +31,7 @@ struct ScheduledBrowserImportEditor: View {
             if let policy {
                 Text(L10n.text("Разрешено после сохранения задания: ", "Allowed when the task is saved: ") + (policy.coversAnySite ? L10n.text("любой сайт", "any site") : policy.site) + " · " + policy.profile).font(.ui(.caption))
             }
-            if let error { Text(error).font(.ui(.caption)).foregroundStyle(.red) }
+            if let error { Text(error).font(.ui(.caption)).foregroundStyle(DeskPalette.problem) }
         }.task {
             if let policy {
                 anySite = policy.coversAnySite

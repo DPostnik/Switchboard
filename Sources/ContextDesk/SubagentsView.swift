@@ -25,7 +25,7 @@ struct SubagentsBar: View {
                     }
                     if agents.count > 4 { Text("+\(agents.count - 4)").foregroundStyle(.secondary) }
                     Spacer(minLength: 0)
-                    Text(L10n.text("Показать", "Show")).foregroundStyle(.blue)
+                    Text(L10n.text("Показать", "Show")).fontWeight(.medium).foregroundStyle(DeskPalette.accentDeep)
                 }.font(.ui(.callout)).contentShape(Rectangle())
             }
             .buttonStyle(PointerButtonStyle(base: .plain))
@@ -53,8 +53,8 @@ struct SubagentStatusIcon: View {
     var body: some View {
         switch status {
         case .running: ProgressView().controlSize(.mini).frame(width: 12, height: 12)
-        case .completed: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-        case .failed: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+        case .completed: Image(systemName: "checkmark.circle.fill").foregroundStyle(DeskPalette.accent)
+        case .failed: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(DeskPalette.attention)
         case .stopped: Image(systemName: "stop.circle").foregroundStyle(.secondary)
         }
     }
@@ -191,7 +191,7 @@ private struct SubagentDetail: View {
                                 Text(L10n.text("Итоговый отчёт", "Final report")).font(.ui(.caption).weight(.semibold)).foregroundStyle(.secondary)
                                 Text(report).font(.ui(.callout)).textSelection(.enabled)
                             }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
-                                .background(.green.opacity(0.07), in: RoundedRectangle(cornerRadius: 8)).id("report")
+                                .background(DeskPalette.accentWash, in: RoundedRectangle(cornerRadius: 8)).id("report")
                         }
                         Color.clear.frame(height: 1).id("end")
                             .background(GeometryReader { end in
@@ -241,7 +241,7 @@ private struct SubagentStepView: View {
                 .background(DeskPalette.subtle, in: RoundedRectangle(cornerRadius: 6))
         case .result:
             Text(step.text.isEmpty ? L10n.text("(пустой результат)", "(empty result)") : step.text)
-                .font(.ui(.caption2, design: .monospaced)).foregroundStyle(step.isError ? .orange : .secondary)
+                .font(.ui(.caption2, design: .monospaced)).foregroundStyle(step.isError ? DeskPalette.problem : .secondary)
                 .lineLimit(6).textSelection(.enabled).padding(.leading, 22).frame(maxWidth: .infinity, alignment: .leading)
         }
     }

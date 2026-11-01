@@ -105,7 +105,7 @@ struct ChromeCookieImportView: View {
                                "Cookies verified: \(result.verified). Skipped: \(result.skipped). Unverified: \(result.unverified). Open the site in this chat’s browser to check your sign-in."))
                     .textSelection(.enabled)
             }
-            if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
+            if let error { Text(error).foregroundStyle(DeskPalette.problem).textSelection(.enabled) }
             HStack {
                 Button(L10n.text("Обновить профили", "Refresh profiles")) { loadProfiles() }
                     .disabled(loading || importing)
@@ -114,7 +114,7 @@ struct ChromeCookieImportView: View {
                 Button(L10n.text("Закрыть", "Close")) { dismiss() }.disabled(importing)
                     .keyboardShortcut(.cancelAction)
                 Button(L10n.text("Импортировать", "Import")) { start() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.borderedProminent).tint(DeskPalette.accent)
                     .disabled(importing || loading || selection.isEmpty || result != nil)
             }
         }
