@@ -20,8 +20,8 @@ struct PermissionsLedgerView: View {
                         Text(role.summary).font(.ui(.caption)).foregroundStyle(.secondary)
                     }
                 }
-                Text(L10n.text("Роль чата выбирается в композере; роли проекта и папки вне проекта — в меню проекта «Разрешения…».",
-                               "A chat's role is chosen in the composer; project defaults and folders outside the project are in the project menu under Permissions…"))
+                Text(L10n.text("Роль чата выбирается в композере; роли проекта и папки вне проекта — в меню проекта «Настройки проекта…».",
+                               "A chat's role is chosen in the composer; project defaults and folders outside the project are in the project menu under Project settings…"))
                     .font(.ui(.caption)).foregroundStyle(.secondary)
             }
             Section(L10n.text("Журнал за 7 дней", "Last 7 days")) {
