@@ -4,6 +4,10 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Added
+
+- Protocol drift diagnostics: events, item types and fields from Codex or Claude Code that the adapter does not recognize are counted by name (never content) instead of disappearing silently; Settings → Accounts shows a one-line summary per agent and the first occurrence of each is written to the system log (category compatibility).
+
 ## [1.1.0] - 2026-11-01
 
 ### Added

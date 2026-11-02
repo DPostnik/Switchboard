@@ -1592,6 +1592,7 @@ struct SettingsView: View {
                 if model.authenticated { Button(L10n.text("Выйти из аккаунта этого приложения", "Sign out of this app")) { Task { await model.logout() } }.disabled(model.anyBusy) }
                 else { Button(L10n.text("Войти через ChatGPT", "Sign in with ChatGPT")) { Task { await model.login() } }.disabled(!model.connected) }
                 Button(L10n.text("Переподключить Codex", "Reconnect Codex")) { Task { await model.connect() } }.disabled(model.connecting || model.anyBusy)
+                EngineCompatibilityRows(agent: .codex)
             }
             Section(L10n.text("Подписка Claude", "Claude subscription")) {
                 Text(model.claudeAuthenticated ? L10n.text("Вход выполнен", "Signed in") : L10n.text("Вход не выполнен", "Not signed in"))
@@ -1603,6 +1604,7 @@ struct SettingsView: View {
                 if model.claudeAuthenticated {
                     Button(L10n.text("Выйти из Claude в этом приложении", "Sign out of Claude in this app")) { Task { await model.logoutClaude() } }.disabled(model.anyBusy)
                 }
+                EngineCompatibilityRows(agent: .claudeCode)
             }
             Section(L10n.text("Советник Claude", "Claude advisor")) {
                 Picker(L10n.text("Советник", "Advisor"), selection: Binding(get: { model.state.claudeAdvisor ?? "" }, set: { model.selectClaudeAdvisor($0) })) {

@@ -10,6 +10,8 @@ public actor ClaudeIntegration: AgentIntegration {
     private var context = AgentContext(connection: .appClaude, accountRevision: UUID())
     private var home: URL?
     private var executable: URL?
+    /// The connected CLI's version, for drift records.
+    private var engineVersion: String?
     private var signedIn = false
     private var accountIdentity: String?
     private var sessions: [String: Session] = [:]
@@ -112,6 +114,7 @@ public actor ClaudeIntegration: AgentIntegration {
             let (code, version) = try await ClaudeProfile.command(executable: binary, home: configuration.home, arguments: ["--version"])
             guard code == 0, String(decoding: version, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == ClaudeJobRunner.version + " (Claude Code)" else { return .rejected(.incompatibleContract) }
             home = configuration.home; executable = binary
+            engineVersion = ClaudeProtocolSurface.version(fromVersionOutput: String(decoding: version, as: UTF8.self))
             browserResources = configuration.browserEnabled ? configuration.resources : nil
             userChrome = configuration.userChromeEnabled
             context = .init(connection: .appClaude, accountRevision: UUID())
@@ -136,7 +139,7 @@ public actor ClaudeIntegration: AgentIntegration {
         backgroundTasks.removeAll(); waiting.removeAll(); wireArguments.removeAll(); warm.removeAll(); pendingSaves.removeAll()
         for id in subagents.keys { sink.yield(.init(session: reference(id), payload: .subagents([]))) }
         subagents.removeAll()
-        home = nil; executable = nil; signedIn = false; accountIdentity = nil; browserResources = nil; userChrome = false; wireGrants.removeAll()
+        home = nil; executable = nil; engineVersion = nil; signedIn = false; accountIdentity = nil; browserResources = nil; userChrome = false; wireGrants.removeAll()
         context = .init(connection: .appClaude, accountRevision: UUID())
     }
     public func account() async -> AgentResult<AgentAccountInfo> {
@@ -558,6 +561,8 @@ public actor ClaudeIntegration: AgentIntegration {
     }
     private func receive(_ value: JSONValue, session id: String, wire: ClaudeWire) async {
         guard wires[id] === wire else { return }
+        // Names only; the frame itself is handled unchanged below.
+        ClaudeProtocolSurface.record(value, version: engineVersion)
         if let native = value["session_id"].string, native != id { await wire.close(); return }
         if subagents[id, default: .init()].observe(value) { publishSubagents(id) }
         if sessions[id]?.active != nil { limitStops[id, default: .init()].observe(value) }

@@ -121,6 +121,8 @@ import ContextCore
     }
     private func emit(_ value: JSONValue) {
         let method = value["method"].string ?? "", p = value["params"]
+        // Names only; the message itself is delivered unchanged.
+        CodexProtocolSurface.record(value, userAgent: serverUserAgent)
         var requestToken: UUID?
         if value["id"] != .null {
             let id = value["id"]
