@@ -42,7 +42,8 @@ enum CodexProtocolSurface {
     ]
     /// Notifications `CodexEventDecoder.notification` drops without a non-empty `threadId`.
     static let sessionBoundNotifications: Set<String> = [
-        "thread/tokenUsage/updated", "turn/started", "turn/completed", "item/started", "item/completed", "item/agentMessage/delta"
+        "thread/tokenUsage/updated", "turn/started", "turn/completed", "item/started", "item/completed", "item/agentMessage/delta",
+        "turn/plan/updated"
     ]
 
     // What the adapter actually uses. CompatibilitySnapshotTests checks it against Tests/Fixtures/compat/codex-<version>.json
@@ -84,6 +85,7 @@ enum CodexProtocolSurface {
         "notification:item/started": ["threadId", "turnId", "item"],
         "notification:item/completed": ["threadId", "turnId", "item"],
         "notification:item/agentMessage/delta": ["threadId", "turnId", "itemId", "delta"],
+        "notification:turn/plan/updated": ["threadId", "turnId", "plan.*.step", "plan.*.status", "explanation"],
         "notification:item/reasoning/summaryTextDelta": ["threadId", "turnId", "itemId", "delta", "summaryIndex"],
         "notification:item/reasoning/textDelta": ["threadId", "turnId", "itemId", "delta", "contentIndex"],
         "notification:serverRequest/resolved": ["threadId", "requestId"],
@@ -98,11 +100,14 @@ enum CodexProtocolSurface {
         "item:userMessage": ["id", "content.*.type", "content.*.text"],
         "item:agentMessage": ["id", "text", "phase"],
         "item:contextCompaction": ["id"],
-        "item:commandExecution": ["id", "command", "status", "aggregatedOutput", "exitCode", "durationMs"],
+        "item:commandExecution": ["id", "command", "status", "aggregatedOutput", "exitCode", "durationMs", "cwd",
+                                  "commandActions.*.type", "commandActions.*.path", "commandActions.*.query"],
         "item:reasoning": ["id", "summary", "content"],
-        "item:fileChange": ["id", "status", "changes.*.path"],
-        "item:mcpToolCall": ["id", "server", "tool"],
-        "item:webSearch": ["id", "query"]
+        "item:fileChange": ["id", "status", "changes.*.path", "changes.*.diff", "changes.*.kind.type", "changes.*.kind.move_path"],
+        "item:mcpToolCall": ["id", "server", "tool", "status", "arguments", "result.content", "error.message"],
+        "item:dynamicToolCall": ["id", "tool", "namespace", "status", "arguments", "success"],
+        "item:webSearch": ["id", "query", "action.type", "action.query", "action.queries", "action.url", "action.pattern"],
+        "item:imageView": ["id", "path"]
     ]
 
     /// Drift in one inbound message, as (category, name). Missing-field names are `method:path`.

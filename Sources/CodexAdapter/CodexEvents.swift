@@ -16,9 +16,10 @@ extension AgentTurnCompletion {
         case "failed": status = .failed
         default: status = .uncertain
         }
+        let usageLimit = CodexDecoding.usageLimitStop(turn: raw)
         self.init(id: id, status: status, hasError: raw["error"] != .null,
                   error: raw["error"]["message"].string, history: CodexHistoryTurn(raw),
-                  usageLimit: CodexDecoding.usageLimitStop(turn: raw))
+                  usageLimit: usageLimit, stopReason: CodexDecoding.stopReason(turn: raw, status: status, usageLimit: usageLimit != nil))
     }
 }
 
@@ -172,7 +173,7 @@ enum CodexEventDecoder {
     static func notification(_ raw: JSONValue) -> CodexEvent? {
         let p = raw["params"], method = raw["method"].string ?? ""
         let session = p["threadId"].string.map { AgentSessionReference(connection: .originalCodex, nativeID: $0) }
-        if ["thread/tokenUsage/updated", "turn/started", "turn/completed", "item/started", "item/completed", "item/agentMessage/delta"].contains(method) {
+        if CodexProtocolSurface.sessionBoundNotifications.contains(method) {
             guard let session, !session.nativeID.isEmpty else { return nil }
         }
         let payload: CodexEvent.Payload
@@ -196,6 +197,9 @@ enum CodexEventDecoder {
             payload = .item(item)
         case "item/agentMessage/delta":
             guard let id = p["itemId"].string else { return nil }; payload = .delta(turn: p["turnId"].string, item: id, text: p["delta"].string ?? "")
+        case "turn/plan/updated":
+            guard let turn = p["turnId"].string, !turn.isEmpty else { return nil }
+            payload = .plan(turn: turn, CodexToolCalls.plan(p))
         case "error": payload = .diagnostic(p["error"]["message"].string ?? p["message"].string ?? L10n.text("Ошибка Codex", "Codex error"))
         default: return nil
         }

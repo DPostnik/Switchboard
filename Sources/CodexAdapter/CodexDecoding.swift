@@ -38,6 +38,14 @@ enum CodexDecoding {
         guard turn["status"].string != "interrupted", turn["error"]["codexErrorInfo"].string == "usageLimitExceeded" else { return nil }
         return AgentUsageLimitStop(resetsAt: nil)
     }
+    /// Why a turn ended: a usage limit, an interrupt, a context window too small for the turn
+    /// (`codexErrorInfo` "contextWindowExceeded", as ACP max tokens), any other error as a failure, else the end of the turn.
+    static func stopReason(turn: JSONValue, status: AgentExecutionOutcome, usageLimit: Bool) -> AgentStopReason? {
+        if usageLimit { return .usageLimit }
+        if status == .cancelled { return .cancelled }
+        if turn["error"]["codexErrorInfo"].string == "contextWindowExceeded" { return .maxTokens }
+        return AgentStopReason.implied(by: status)
+    }
     static func tokenCounters(_ raw: JSONValue) -> TokenCounters? {
         guard let input = raw["inputTokens"].int, let cached = raw["cachedInputTokens"].int,
               let output = raw["outputTokens"].int, input >= 0, cached >= 0, cached <= input,
@@ -54,7 +62,14 @@ enum CodexDecoding {
                     durationSeconds: duration ?? fallback?.durationSeconds, tokens: fallback?.tokens, changes: fallback?.changes)
     }
 
+    /// A native item as a transcript item; calls also carry their structured form (`CodexToolCalls`).
     static func transcriptItem(_ raw: JSONValue) -> TranscriptItem? {
+        guard var item = plainItem(raw) else { return nil }
+        if item.kind == "activity" { item.toolCall = CodexToolCalls.toolCall(raw) }
+        return item
+    }
+
+    private static func plainItem(_ raw: JSONValue) -> TranscriptItem? {
         guard let id = raw["id"].string, let type = raw["type"].string else { return nil }
         switch type {
         case "userMessage":
@@ -70,6 +85,12 @@ enum CodexDecoding {
             return text.isEmpty ? nil : TranscriptItem(id: id, kind: ActivityDetail.thinkingKind, text: text)
         case "fileChange": return TranscriptItem(id: id, kind: "activity", text: L10n.text("Изменение файлов · \(raw["status"].string ?? "")", "File changes · \(raw["status"].string ?? "")"))
         case "mcpToolCall": return TranscriptItem(id: id, kind: "activity", text: raw["tool"].string ?? L10n.text("Вызов инструмента", "Calling tool"))
+        case "dynamicToolCall": return TranscriptItem(id: id, kind: "activity", text: raw["tool"].string ?? L10n.text("Вызов инструмента", "Calling tool"))
+        case "webSearch":
+            let query = raw["query"].string ?? raw["action"]["query"].string ?? raw["action"]["url"].string ?? ""
+            return TranscriptItem(id: id, kind: "activity", text: L10n.text("Поиск в интернете · \(query)", "Web search · \(query)"))
+        case "imageView":
+            return TranscriptItem(id: id, kind: "activity", text: L10n.text("Просмотр изображения · \(raw["path"].string ?? "")", "View image · \(raw["path"].string ?? "")"))
         default: return nil
         }
     }

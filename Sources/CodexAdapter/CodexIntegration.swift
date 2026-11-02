@@ -22,6 +22,8 @@ public actor CodexIntegration: AgentIntegration {
     private var cancelledGenerations = Set<UUID>()
     private var generations: [UUID: ArchiveSummaryRunner] = [:]
     private var interactionContexts: [UUID: AgentContext] = [:]
+    /// The last model list `models()` returned; it names the choices of the model and effort config options.
+    private var knownModels: [AgentModelInfo] = []
     public init(client: CodexClient = CodexClient()) {
         self.client = client
         let pair = AsyncStream<AgentEvent>.makeStream(); events = pair.stream; sink = pair.continuation
@@ -92,7 +94,7 @@ public actor CodexIntegration: AgentIntegration {
         interactionContexts.removeAll(); turnContexts.removeAll(); finishedTurns.removeAll()
         for runner in generations.values { await runner.stop() }
         await client.stop()
-        routes = [.direct]; providerArguments = []; sessionRoutes.removeAll()
+        routes = [.direct]; providerArguments = []; sessionRoutes.removeAll(); knownModels = []
         browserProfilesEnabled = false
     }
     private func current() async throws -> AgentDescriptor {
@@ -143,7 +145,11 @@ public actor CodexIntegration: AgentIntegration {
             return result
         }
     }
-    public func models() async -> AgentResult<[AgentModelInfo]> { await perform(readOnly: true) { try await self.client.models() } }
+    public func models() async -> AgentResult<[AgentModelInfo]> {
+        let result = await perform(readOnly: true) { try await self.client.models() }
+        if case .success(let models) = result { knownModels = models }
+        return result
+    }
     public func limits() async -> AgentResult<AccountLimits> { await perform(readOnly: true) { try await self.client.limits() } }
     public func configure(_ tools: AgentToolConfiguration, context: AgentContext) async -> AgentResult<Void> {
         guard tools.servers.isEmpty else { return .rejected(.unsupported(.toolRegistration)) }
@@ -202,6 +208,9 @@ public actor CodexIntegration: AgentIntegration {
                     permissions: self.access(request.permissions), model: request.model.model, effort: request.model.effort ?? "")
                 guard let turn, !turn.isEmpty else { throw ClientFailure(L10n.text("Не получен ID запуска", "No turn ID received")) }
                 self.turnContexts[session, default: [:]][turn] = request.model.context
+                // The turn's model and effort as the session's settings; no request is made for them.
+                self.sink.yield(.init(session: session, payload: .configOptions(AgentConfigOption.modelAndEffort(
+                    models: self.knownModels, model: request.model.model, effort: request.model.effort))))
                 let handle = AgentExecutionHandle(context: request.model.context, requestID: request.id, session: session, turnID: turn)
                 return handle
             }
