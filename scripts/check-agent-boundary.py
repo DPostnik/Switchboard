@@ -34,14 +34,14 @@ for folder in ['ContextCore', 'ContextDesk', 'ContextTranscript']:
         if folder == 'ContextDesk':
             if re.search(r'\b(?:CodexClient|ArchiveSummaryRunner|BrowserConfiguration)\b|\.providerArguments\s*\(', source):
                 failures.append(f'{path}: application bypasses AgentIntegration')
-            if path.name != 'AgentIntegrationFactory.swift' and re.search(r'import\s+(?:CodexAdapter|ClaudeAdapter)', source):
+            if path.name != 'AgentIntegrationFactory.swift' and re.search(r'import\s+(?:CodexAdapter|ClaudeAdapter|ACPAdapter)', source):
                 failures.append(f'{path}: adapter import outside the composition root')
         if folder == 'ContextCore':
             if re.search(r'\["(?:tokenUsage|inputTokens|cachedInputTokens|outputTokens|rateLimitsByLimitId|rateLimits|durationMs|turns)"\]', source):
                 failures.append(f'{path}: native Codex decoder in shared core')
             if re.search(r'\bCodexDecoding\b', source):
                 failures.append(f'{path}: native decoder bypasses adapter')
-        if folder != 'ContextDesk' and re.search(r'import\s+(?:CodexAdapter|ClaudeAdapter)', source):
+        if folder != 'ContextDesk' and re.search(r'import\s+(?:CodexAdapter|ClaudeAdapter|ACPAdapter)', source):
             failures.append(f'{path}: adapter dependency in shared core/transcript')
 if '.target(name: "CodexAdapter", dependencies: ["AgentContract", "ContextCore"]),' not in package:
     failures.append('CodexAdapter must depend only on AgentContract and ContextCore')
@@ -49,6 +49,15 @@ if (root / 'Sources/ContextCore/CodexConnection.swift').exists():
     failures.append('Native transport must live in CodexAdapter')
 if '.target(name: "ClaudeAdapter", dependencies: ["AgentContract", "ContextCore"]),' not in package:
     failures.append('ClaudeAdapter must depend only on AgentContract and ContextCore')
+if '.target(name: "ACPAdapter", dependencies: ["AgentContract", "ContextCore"]),' not in package:
+    failures.append('ACPAdapter must depend only on AgentContract and ContextCore')
+for path in sorted((root / 'Sources/ACPAdapter').glob('*.swift')):
+    if re.search(r'import\s+(?:CodexAdapter|ClaudeAdapter|ContextTranscript|ContextDesk)\b', path.read_text()):
+        failures.append(f'{path.name}: ACPAdapter depends on another adapter or the app')
+for folder in ['ContextCore', 'ContextTranscript', 'ContextDesk', 'CodexAdapter', 'ClaudeAdapter']:
+    for path in sorted((root / 'Sources' / folder).glob('*.swift')):
+        if re.search(r'\bACP(?:Connection|Integration|LaunchProfile)\b|\bGeminiProfile\b', path.read_text()) and path.name != 'AgentIntegrationFactory.swift':
+            failures.append(f'{path}: ACP adapter type outside the adapter/composition root')
 if (root / 'Sources/ContextCore/ClaudeJobRunner.swift').exists():
     failures.append('Native Claude runner must live in ClaudeAdapter')
 if (root / 'Sources/ContextCore/ClaudeModels.swift').exists():

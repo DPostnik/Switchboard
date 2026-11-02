@@ -43,12 +43,23 @@ def claude_candidates():
     return [str(HOME / '.local/bin/claude'), '/opt/homebrew/bin/claude', '/usr/local/bin/claude'] + path
 
 
-# One entry per agent; a Gemini entry joins here once its adapter and live test exist.
+def gemini_candidates():
+    # Same order as GeminiProfile.candidates: the app-owned install, Homebrew, then PATH.
+    path = [f'{p}/gemini' for p in os.environ.get('PATH', '').split(':') if p.startswith('/')]
+    return [str(HOME / 'Library/Application Support/Switchboard/gemini/cli/node_modules/.bin/gemini'),
+            '/opt/homebrew/bin/gemini', '/usr/local/bin/gemini'] + path
+
+
+# One entry per agent.
 AGENTS = {
     'codex': {'candidates': codex_candidates, 'version': re.compile(r'^codex-cli (\S+)$'), 'npm': '@openai/codex',
               'live': ('SWITCHBOARD_CODEX_COMPATIBILITY_LIVE', 'CodexCompatibilityTests')},
     'claude': {'candidates': claude_candidates, 'version': re.compile(r'^(\S+) \(Claude Code\)$'), 'npm': '@anthropic-ai/claude-code',
                'live': ('SWITCHBOARD_CLAUDE_COMPATIBILITY_LIVE', 'ClaudeCompatibilityTests')},
+    # The live test runs the installed CLI (SWITCHBOARD_GEMINI_EXECUTABLE) with a fresh isolated home: initialize and an
+    # auth-required session/new, no sign-in and no prompt.
+    'gemini': {'candidates': gemini_candidates, 'version': re.compile(r'^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)$'), 'npm': '@google/gemini-cli',
+               'live': ('SWITCHBOARD_GEMINI_COMPATIBILITY_LIVE', 'ACPIntegrationTests')},
 }
 
 
@@ -59,7 +70,8 @@ def verified_versions(root):
     listed = re.search(r'static let supportedVersions = \[([^\]]*)\]', codex)[1]
     versions = re.findall(r'"([^"]+)"', listed) + ([current] if 'currentVersion' in listed else [])
     claude = re.search(r'static let pinnedVersion = "([^"]+)"', (root / 'Sources/ClaudeAdapter/ClaudeModels.swift').read_text())[1]
-    return {'codex': sorted(set(versions)), 'claude': [claude]}
+    gemini = re.search(r'static let verifiedVersions = \[([^\]]*)\]', (root / 'Sources/ACPAdapter/GeminiProfile.swift').read_text())[1]
+    return {'codex': sorted(set(versions)), 'claude': [claude], 'gemini': sorted(set(re.findall(r'"([^"]+)"', gemini)))}
 
 
 def branch(version):
@@ -77,15 +89,19 @@ def classify(version, verified):
     return 'same-minor' if own and any(branch(v) == own for v in verified) else 'unsupported'
 
 
+def executable(agent):
+    return next((c for c in AGENTS[agent]['candidates']() if os.path.isfile(c) and os.access(c, os.X_OK)), None)
+
+
 def installed(agent, timeout=20):
     spec = AGENTS[agent]
-    binary = next((c for c in spec['candidates']() if os.path.isfile(c) and os.access(c, os.X_OK)), None)
+    binary = executable(agent)
     if not binary:
         return None
     with tempfile.TemporaryDirectory(prefix='compat-') as temp:
         # A throwaway profile: `--version` must not touch the user's or the app's CLI state.
         env = {k: v for k, v in os.environ.items() if k in ('PATH', 'HOME', 'USER', 'LANG', 'TMPDIR')}
-        env.update(CODEX_HOME=temp, CLAUDE_CONFIG_DIR=temp, DISABLE_AUTOUPDATER='1')
+        env.update(CODEX_HOME=temp, CLAUDE_CONFIG_DIR=temp, DISABLE_AUTOUPDATER='1', GEMINI_CLI_HOME=temp, GEMINI_CLI_NO_RELAUNCH='true')
         try:
             out = subprocess.run([binary, '--version'], capture_output=True, text=True, timeout=timeout, env=env, cwd=temp).stdout.strip()
         except (OSError, subprocess.SubprocessError):
@@ -114,6 +130,8 @@ def on_ac_power():
 def run_live(agent, worktree, timeout=900):
     variable, test = AGENTS[agent]['live']
     env = dict(os.environ, **{variable: '1'})
+    if agent == 'gemini' and executable(agent):
+        env['SWITCHBOARD_GEMINI_EXECUTABLE'] = executable(agent)
     try:
         code = subprocess.run(['zsh', 'scripts/test.sh', '--filter', test], cwd=worktree, env=env, timeout=timeout).returncode
     except subprocess.TimeoutExpired:

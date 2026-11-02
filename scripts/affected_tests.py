@@ -21,8 +21,10 @@ DECL = re.compile(
 PATH_TESTS = {
     'Sources/CodexAdapter/': ['CompatibilitySnapshotTests'],
     'Sources/ClaudeAdapter/': ['CompatibilitySnapshotTests'],
-    'Tests/Fixtures/compat/': ['CompatibilitySnapshotTests'],
-    'scripts/compat-snapshot.py': ['CompatibilitySnapshotTests'],
+    'Sources/ACPAdapter/': ['ACPSnapshotTests', 'ACPIntegrationTests'],
+    'Tests/Fixtures/compat/': ['CompatibilitySnapshotTests', 'ACPSnapshotTests'],
+    'Tests/Fixtures/acp/': ['ACPIntegrationTests'],
+    'scripts/compat-snapshot.py': ['CompatibilitySnapshotTests', 'ACPSnapshotTests'],
 }
 COMMON = {'body', 'init', 'main', 'description', 'hash', 'encode', 'decode', 'value', 'state', 'title', 'text', 'name', 'path', 'items', 'error', 'result', 'update', 'start', 'stop', 'reset', 'load', 'save', 'Self'}
 

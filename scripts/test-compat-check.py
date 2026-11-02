@@ -9,7 +9,7 @@ compat = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(compat)
 
 NOW = datetime.datetime(2026, 11, 2, 3, 40, tzinfo=datetime.timezone.utc)
-VERIFIED = {'codex': ['0.158.0-alpha.2.1', '0.159.0', '0.160.0'], 'claude': ['2.1.292']}
+VERIFIED = {'codex': ['0.158.0-alpha.2.1', '0.159.0', '0.160.0'], 'claude': ['2.1.292'], 'gemini': ['0.66.0']}
 
 
 class CompatCheckTests(unittest.TestCase):
@@ -27,6 +27,15 @@ class CompatCheckTests(unittest.TestCase):
         verified = compat.verified_versions(compat.ROOT)
         self.assertIn('0.160.0', verified['codex'])
         self.assertEqual(len(verified['claude']), 1)
+        self.assertEqual(verified['gemini'], ['0.66.0'])
+
+    def test_gemini_versions_follow_the_same_policy(self):
+        self.assertEqual(compat.classify('0.66.3', VERIFIED['gemini']), 'same-minor')
+        self.assertEqual(compat.classify('0.67.0', VERIFIED['gemini']), 'unsupported')
+        self.assertEqual(compat.AGENTS['gemini']['version'].match('0.66.0')[1], '0.66.0')
+        self.assertIsNone(compat.AGENTS['gemini']['version'].match('gemini 0.66.0'))
+        line, findings, _ = compat.evaluate({}, VERIFIED, {'gemini': '0.66.1'}, {}, lambda a, v: 'passed', NOW)
+        self.assertIn('gemini 0.66.1 same-minor, live tests passed', line)
 
     def test_live_tests_run_once_per_new_unverified_version(self):
         calls = []
