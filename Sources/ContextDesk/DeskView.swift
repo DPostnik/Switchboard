@@ -1648,10 +1648,10 @@ struct SettingsView: View {
     private var accountsSettings: some View {
         Form {
             ForEach(model.agentIDs, id: \.self) { id in accountSection(id) }
-            if model.firstAgent(with: .catalogModels) != nil {
+            if let catalog = model.modelCatalog(model.firstAgent(with: .catalogModels)) {
                 Section(L10n.text("Советник Claude", "Claude advisor")) {
                     Picker(L10n.text("Советник", "Advisor"), selection: Binding(get: { model.state.claudeAdvisor ?? "" }, set: { model.selectClaudeAdvisor($0) })) {
-                        ForEach(ClaudeAdvisor.options, id: \.id) { Text($0.name).tag($0.id) }
+                        ForEach(catalog.advisors, id: \.id) { Text($0.title).tag($0.id) }
                     }
                     Text(L10n.text("Более сильная модель, с которой Claude советуется перед выбором подхода, при повторяющейся ошибке и перед завершением; только для чатов и задач на более слабой модели (Sonnet и Haiku получают Opus, Opus — только Fable). Советы расходуют лимиты подписки, Fable может списывать кредиты; действует со следующего сообщения.",
                                    "A stronger model Claude consults before choosing an approach, on a recurring error and before finishing; only for chats and jobs on a weaker model (Sonnet and Haiku get Opus, Opus gets only Fable). Advice counts toward subscription limits, Fable may use credits; takes effect from the next message."))

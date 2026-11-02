@@ -58,7 +58,7 @@ def verified_versions(root):
     current = re.search(r'static let currentVersion = "([^"]+)"', codex)[1]
     listed = re.search(r'static let supportedVersions = \[([^\]]*)\]', codex)[1]
     versions = re.findall(r'"([^"]+)"', listed) + ([current] if 'currentVersion' in listed else [])
-    claude = re.search(r'static let pinnedVersion = "([^"]+)"', (root / 'Sources/ContextCore/ClaudeModels.swift').read_text())[1]
+    claude = re.search(r'static let pinnedVersion = "([^"]+)"', (root / 'Sources/ClaudeAdapter/ClaudeModels.swift').read_text())[1]
     return {'codex': sorted(set(versions)), 'claude': [claude]}
 
 

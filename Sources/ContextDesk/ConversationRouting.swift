@@ -35,35 +35,39 @@ extension DeskModel {
     var currentAgentConnected: Bool { agentState(currentAgent).connected }
     var currentAgentAuthenticated: Bool { agentState(currentAgent).authenticated }
 
+    /// The app's model catalog of an agent with `catalogModels` (the adapter's, through the composition root).
+    func modelCatalog(_ agent: AgentConnectionID?) -> AgentModelCatalog? {
+        traits(agent).contains(.catalogModels) ? profile(agent)?.modelCatalog?() : nil
+    }
     /// The agent's default model setting as stored: a catalog agent keeps its own (possibly empty) setting.
+    /// `SavedState.claudeModel`, `claudeEffort` and `claudeAdvisor` are the stored settings of the catalog agent.
     func defaultModelSetting(_ agent: AgentConnectionID) -> String {
-        traits(agent).contains(.catalogModels) ? state.claudeModel ?? "" : state.model
+        modelCatalog(agent) != nil ? state.claudeModel ?? "" : state.model
     }
     /// The default model a new message uses; a catalog agent resolves an unset setting to the app default.
     func resolvedDefaultModel(_ agent: AgentConnectionID) -> String {
-        traits(agent).contains(.catalogModels) ? ClaudeModel.resolved(state.claudeModel) : state.model
+        modelCatalog(agent)?.resolveModel(state.claudeModel) ?? state.model
     }
     /// The default effort of a new chat on a catalog agent.
     func resolvedDefaultEffort(_ agent: AgentConnectionID) -> String {
-        traits(agent).contains(.catalogModels) ? ClaudeEffort.resolved(state.claudeEffort) : draftEffort
+        modelCatalog(agent)?.resolveEffort(state.claudeEffort) ?? draftEffort
     }
     /// Model and effort a queued app message (continuation, Telegram reply) is sent with on the chat's own agent.
     func dispatchModel(_ chat: Chat) -> String {
-        traits(chat.nativeSession?.connection).contains(.catalogModels) ? ClaudeModel.resolved(chat.model) : chat.model
+        modelCatalog(chat.nativeSession?.connection)?.resolveModel(chat.model) ?? chat.model
     }
     func dispatchEffort(_ chat: Chat) -> String {
-        traits(chat.nativeSession?.connection).contains(.catalogModels)
-            ? ClaudeEffort.resolved(chat.effort ?? state.claudeEffort) : chat.effort ?? "medium"
+        modelCatalog(chat.nativeSession?.connection)?.resolveEffort(chat.effort ?? state.claudeEffort) ?? chat.effort ?? "medium"
     }
     var currentModel: String {
         // A catalog agent has an app default, so a blank value never reaches the CLI as "its own choice".
-        if traits(currentAgent).contains(.catalogModels) { return ClaudeModel.resolved(selectedChat?.model ?? state.claudeModel) }
+        if let catalog = modelCatalog(currentAgent) { return catalog.resolveModel(selectedChat?.model ?? state.claudeModel) }
         return selectedChat?.model ?? state.model
     }
     /// The effort the composer sends with: the catalog level, or the selected model's free-form effort.
-    var currentEffort: String { traits(currentAgent).contains(.catalogModels) ? claudeEffort : effort }
+    var currentEffort: String { modelCatalog(currentAgent) != nil ? claudeEffort : effort }
     func selectCurrentModel(_ value: String) {
-        if traits(currentAgent).contains(.catalogModels) {
+        if modelCatalog(currentAgent) != nil {
             if let index = state.chats.firstIndex(where: { $0.id == chatID }) { state.chats[index].model = value }
             else { state.claudeModel = value }
             saveAgentChoice()
@@ -71,9 +75,12 @@ extension DeskModel {
     }
     /// A catalog agent keeps its own effort so another agent's default never leaks into its session.
     /// An unset or blank value resolves to the app default level.
-    var claudeEffort: String { ClaudeEffort.resolved(selectedChat?.effort ?? state.claudeEffort) }
+    var claudeEffort: String {
+        let configured = selectedChat?.effort ?? state.claudeEffort
+        return (modelCatalog(currentAgent) ?? modelCatalog(firstAgent(with: .catalogModels)))?.resolveEffort(configured) ?? configured ?? ""
+    }
     func selectClaudeEffort(_ value: String) {
-        guard traits(currentAgent).contains(.catalogModels), ClaudeEffort.isDispatchable(value) else { return }
+        guard let catalog = modelCatalog(currentAgent), catalog.isDispatchableEffort(value) else { return }
         if let index = state.chats.firstIndex(where: { $0.id == chatID }) { state.chats[index].effort = value }
         else { state.claudeEffort = value }
         saveAgentChoice()

@@ -1,10 +1,11 @@
 import Foundation
 import AgentContract
+import ContextCore
 
 /// The exact Claude Code build this app was verified on, checked before it dispatches anything.
 ///
-/// Declared here, not in the adapter, so model and effort gating can consult it without the
-/// application or core depending on the native runner. Model gating stays on the pinned build.
+/// Declared with the model catalog in the adapter; the app reaches the catalog through the composition root
+/// (`AgentIntegrationFactory.claudeCatalog`). Model gating stays on the pinned build.
 /// Connection follows `AgentVersionPolicy` (user decision 2026-11-02): the pinned build connects normally,
 /// another 2.1.x build connects as unverified with a warning and drift diagnostics, anything else is rejected.
 public enum ClaudeRuntime {

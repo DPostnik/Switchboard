@@ -1,5 +1,6 @@
 import AppKit
 import ContextCore
+import ClaudeAdapter
 import SwiftUI
 import Testing
 @testable import ContextDesk

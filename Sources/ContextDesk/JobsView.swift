@@ -146,7 +146,7 @@ struct JobsView: View {
                 if !model.traits(model.connection(for: job.engine)).contains(.catalogModels) {
                     Text(L10n.text("Каждый запуск создаёт новый чат с ролью задания (не выше роли проекта для заданий).", "Each run creates a new chat with the job's role (never above the project's job role).")).font(.ui(.caption)).foregroundStyle(.secondary)
                 } else {
-                    Text(L10n.text("Claude Code использует существующий вход и правила разрешений CLI. Новые запросы разрешений отклоняются; результат сохраняется здесь. Проверенная версия \(AgentIntegrationFactory.claudeVersion); другие версии \(ClaudeRuntime.branch).x запускаются как непроверенные.", "Claude Code uses existing CLI sign-in and permission rules. New permission requests are denied; results are saved here. Verified version \(AgentIntegrationFactory.claudeVersion); other \(ClaudeRuntime.branch).x versions run as unverified.")).font(.ui(.caption)).foregroundStyle(.secondary)
+                    Text(L10n.text("Claude Code использует существующий вход и правила разрешений CLI. Новые запросы разрешений отклоняются; результат сохраняется здесь. Проверенная версия \(AgentIntegrationFactory.claudeVersion); другие версии \(AgentIntegrationFactory.claudeBranch).x запускаются как непроверенные.", "Claude Code uses existing CLI sign-in and permission rules. New permission requests are denied; results are saved here. Verified version \(AgentIntegrationFactory.claudeVersion); other \(AgentIntegrationFactory.claudeBranch).x versions run as unverified.")).font(.ui(.caption)).foregroundStyle(.secondary)
                 }
                 }
                 RoutineCard {
@@ -199,7 +199,8 @@ struct JobEditor: View {
         self._mode = State(initialValue: job.schedule.once != nil ? "once" : job.schedule.rule.isEmpty ? "manual" : "rule")
     }
     /// The job's agent picks models from the app catalog (Claude) or takes a route and free-form effort (Codex).
-    private var catalogModels: Bool { model.traits(model.connection(for: job.engine)).contains(.catalogModels) }
+    private var catalog: AgentModelCatalog? { model.modelCatalog(model.connection(for: job.engine)) }
+    private var catalogModels: Bool { catalog != nil }
     private var optimizerPlugins: Bool { model.traits(model.connection(for: job.engine)).contains(.optimizerPlugins) }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -213,9 +214,9 @@ struct JobEditor: View {
                     ForEach(model.agentIDs.compactMap { model.profile($0) }, id: \.engine) { Text($0.productName).tag($0.engine) }
                 }
                     .onChange(of: job.engine) { _, engine in
-                        let catalog = model.traits(model.connection(for: engine)).contains(.catalogModels)
-                        job.model = catalog ? ClaudeModel.defaultID : ""
-                        job.effort = catalog ? ClaudeEffort.defaultLevel.rawValue : ""
+                        let catalog = model.modelCatalog(model.connection(for: engine))
+                        job.model = catalog?.defaultModel ?? ""
+                        job.effort = catalog?.defaultEffort.id ?? ""
                         job.route = .direct; job.acceptsExternalPolicy = nil; job.browserSessionImport = nil
                     }
                 Picker(L10n.text("Проект", "Project"), selection: $job.projectID) {
@@ -236,11 +237,11 @@ struct JobEditor: View {
                         Menu(L10n.text("Выбрать", "Choose")) {
                             Button(L10n.text("Как в CLI", "CLI default")) { job.model = "" }
                             Divider()
-                            ForEach(ClaudeModel.current) { entry in
+                            ForEach(catalog?.current ?? []) { entry in
                                 Button(entry.menuTitle) { job.model = entry.id }
                             }
                             Menu(L10n.text("Предыдущие поколения", "Previous generations")) {
-                                ForEach(ClaudeModel.previous) { entry in
+                                ForEach(catalog?.previous ?? []) { entry in
                                     Button(entry.menuTitle) { job.model = entry.id }
                                 }
                             }
@@ -283,7 +284,7 @@ struct JobEditor: View {
                     }
                     Picker(L10n.text("Рассуждение", "Reasoning effort"), selection: $job.effort) {
                         Text(L10n.text("Как в CLI", "CLI default")).tag("")
-                        ForEach(ClaudeEffort.allCases, id: \.rawValue) { level in Text(level.title).tag(level.rawValue) }
+                        ForEach(catalog?.efforts ?? [], id: \.id) { level in Text(level.title).tag(level.id) }
                     }
                     Text(L10n.text("Claude работает в профиле Claude приложения, как обычный чат: каждый запуск появляется чатом, который можно продолжить. Разрешения задаёт режим доступа проекта; при полном доступе действия коннекторов claude.ai (Gmail, Calendar…) выполняются без подтверждения. Нужен вход по подписке Claude в настройках.", "Claude runs in the app's Claude profile like a regular chat: each run appears as a chat you can continue. The project's access mode sets permissions; with full access, claude.ai connector actions (Gmail, Calendar…) run without approval. Requires signing in with your Claude subscription in settings.")).font(.ui(.caption)).frame(maxWidth: 460, alignment: .leading).fixedSize(horizontal: false, vertical: true)
                 }

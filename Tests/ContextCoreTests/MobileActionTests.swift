@@ -1,6 +1,7 @@
 @_spi(NativeProtocol) import CodexAdapter
 import AgentContract
 import ContextCore
+import ClaudeAdapter
 import Foundation
 import Testing
 @testable import ContextDesk

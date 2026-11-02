@@ -103,7 +103,7 @@ public enum ActivityRetention {
     }
 
     /// A Claude tool call is recorded as its name on the first line and the JSON object of its input after it.
-    static func parsedCall(_ text: String) -> (name: String, input: [String: Any])? {
+    public static func parsedCall(_ text: String) -> (name: String, input: [String: Any])? {
         let parts = text.split(separator: "\n", maxSplits: 1).map(String.init)
         guard parts.count == 2, !parts[0].contains(" "), let input = parsedObject(parts[1]) else { return nil }
         return (parts[0], input)

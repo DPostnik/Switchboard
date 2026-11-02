@@ -36,8 +36,8 @@ extension DeskModel {
 
     /// The chat's own model; an empty one falls back to its own agent's default, never to another agent's model.
     func generationModel(for chat: Chat) -> String {
-        guard let agent = chat.nativeSession?.connection, traits(agent).contains(.catalogModels) else { return chat.model.isEmpty ? state.model : chat.model }
-        return ClaudeModel.resolved(chat.model.isEmpty ? state.claudeModel : chat.model)
+        guard let catalog = modelCatalog(chat.nativeSession?.connection) else { return chat.model.isEmpty ? state.model : chat.model }
+        return catalog.resolveModel(chat.model.isEmpty ? state.claudeModel : chat.model)
     }
 
     /// Stops in-flight summary work owned by one agent after its account or connection changed.

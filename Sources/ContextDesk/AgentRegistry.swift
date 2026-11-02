@@ -15,8 +15,8 @@ struct AgentAppTraits: OptionSet, Sendable {
     static let sharedEngine = Self(rawValue: 1 << 1)
     /// Requests can run through the app's optimizer plugins (process plugin v1); new chats take the default route.
     static let optimizerPlugins = Self(rawValue: 1 << 2)
-    /// Models come from the app's catalog (`ClaudeModel`) with fixed effort levels and the advisor setting, instead of
-    /// the engine's model discovery and the free-form efforts of the selected model.
+    /// Models come from the app's catalog (`AgentProfile.modelCatalog`) with fixed effort levels and the advisor setting,
+    /// instead of the engine's model discovery and the free-form efforts of the selected model.
     static let catalogModels = Self(rawValue: 1 << 3)
     /// Chats can get the app's chat-directory and chat-search tools; chat search runs on this agent.
     static let chatDirectory = Self(rawValue: 1 << 4)
@@ -54,6 +54,51 @@ struct AgentProfile: Sendable {
     let routineCapabilities: Set<AgentCapability>?
     /// Copy of the agent's section in Settings → Accounts.
     let accountCopy: AgentAccountCopy
+    /// The app's model catalog for an agent with `catalogModels`, built on each call so its copy follows the language.
+    let modelCatalog: (@Sendable () -> AgentModelCatalog)?
+}
+
+/// Selectable models, effort levels and advisors of an agent whose engine lists no models. The adapter owns the
+/// catalog; the composition root hands it to the app in this neutral form.
+struct AgentModelCatalog: Sendable {
+    struct Entry: Identifiable, Sendable {
+        let id: String
+        let name: String
+        /// Name and reasoning mode, as the menus show it.
+        let menuTitle: String
+        /// False for superseded generations the provider still serves.
+        let isCurrent: Bool
+        /// Why the verified engine cannot run the model; nil when it can.
+        let requirementNote: String?
+    }
+    struct Level: Sendable {
+        let id: String
+        let title: String
+    }
+    let entries: [Entry]
+    /// The model of a message when none is chosen.
+    let defaultModel: String
+    let efforts: [Level]
+    let defaultEffort: Level
+    /// Advisor choices; an empty ID means none.
+    let advisors: [Level]
+    /// An unset or blank model means the default; any other identifier is kept verbatim.
+    let resolveModel: @Sendable (String?) -> String
+    /// An unset, blank or unknown effort means the default level.
+    let resolveEffort: @Sendable (String?) -> String
+    /// True for an effort the adapter may forward: empty (engine default) or a known level.
+    let isDispatchableEffort: @Sendable (String?) -> Bool
+    /// Label of a configured model; an unknown identifier is shown verbatim.
+    let title: @Sendable (String) -> String
+    let reasoningTitle: @Sendable (String) -> String?
+    let requirementNote: @Sendable (String) -> String?
+    /// The advisor attached to a message on `mainModel` for the advisor setting, or nil.
+    let advisor: @Sendable (_ setting: String?, _ mainModel: String) -> String?
+    var current: [Entry] { entries.filter(\.isCurrent) }
+    var previous: [Entry] { entries.filter { !$0.isCurrent } }
+    /// Catalog models the verified engine can run.
+    var runnable: [Entry] { entries.filter { $0.requirementNote == nil } }
+    func effortTitle(_ id: String) -> String? { efforts.first { $0.id == id }?.title }
 }
 
 /// Settings → Accounts copy of one agent; the layout follows `AgentAppTraits.sharedEngine`.

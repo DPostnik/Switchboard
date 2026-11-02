@@ -3,14 +3,17 @@ import AgentContract
 
 /// Shell commands and thinking in the activity history (AUD-007, 2026-11-01): which calls are commands, what they ran,
 /// how they ended and how much of their output the transcript shows. Pure functions over `TranscriptItem`; the adapters
-/// record the outcome fields (`exitCode`, `failed`, `seconds`, `tool`) and `ActivityRetention` keeps them through capping
-/// and archive reduction.
+/// record the outcome fields (`exitCode`, `failed`, `seconds`, `tool`) in this neutral form (the Claude rules live in
+/// `ClaudeAdapter`) and `ActivityRetention` keeps them through capping and archive reduction. Reading stays here because
+/// stored transcripts of both agents keep their recorded shapes: a Codex `commandExecution` call, a Claude `Bash` call
+/// with JSON input, and results from before the outcome fields existed.
 public enum ActivityDetail {
     /// Item kind of Claude thinking and Codex reasoning text.
     public static let thinkingKind = "thinking"
     /// `tool` of a Codex `commandExecution` call item, whose text is the command line.
     public static let codexCommandTool = "commandExecution"
     /// Claude tools that run a shell command; the `command` field of their input is the command line.
+    /// Kept for reading stored Claude transcripts.
     static let claudeShellTools = ["Bash", "PowerShell"]
     static let resultSuffix = ":result"
     /// The transcript shows at most the last `outputLineLimit` lines within `outputByteLimit` of a command's output.
@@ -85,22 +88,11 @@ public enum ActivityDetail {
     }
 
     /// Claude's Bash result reports a non-zero exit as an error whose text starts with "Exit code N"
-    /// (Claude Code 2.1.x; a clean run is not an error and names no code).
-    static func leadingExitCode(_ text: String) -> Int? {
+    /// (Claude Code 2.1.x; a clean run is not an error and names no code). Also read from stored results.
+    public static func leadingExitCode(_ text: String) -> Int? {
         guard text.hasPrefix("Exit code ") else { return nil }
         let digits = text.dropFirst("Exit code ".count).prefix { $0.isNumber || $0 == "-" }
         return Int(digits)
-    }
-
-    /// Outcome fields of a Claude tool result. Only shell calls get them: an error result is its leading exit code, or
-    /// a failure without one (tool error, denied or interrupted); a clean result is exit 0. A backgrounded command has
-    /// not finished when its result arrives, so it only records an error.
-    public static func claudeOutcome(call: TranscriptItem?, result text: String, isError: Bool) -> (exitCode: Int?, failed: Bool?) {
-        guard let call, isShellCall(call) else { return (nil, nil) }
-        let background = ActivityRetention.parsedCall(call.text)?.input["run_in_background"] as? Bool == true
-        if background { return (nil, isError ? true : nil) }
-        if let code = leadingExitCode(text) { return (code, nil) }
-        return isError ? (nil, true) : (0, nil)
     }
 
     public static func label(_ outcome: Outcome) -> String {

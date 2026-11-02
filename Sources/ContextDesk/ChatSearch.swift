@@ -87,7 +87,7 @@ extension DeskModel {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty, canStartChatSearch, let agent = chatSearchAgent, let client = client(agent),
               let project = projectID.flatMap({ id in state.projects.first { $0.id == id } }) ?? selectedProject ?? state.projects.first else { return }
-        let model = ClaudeModel.catalog.first { $0.id == Self.chatSearchModel && $0.isSupported() }?.id ?? resolvedDefaultModel(agent)
+        let model = modelCatalog(agent)?.runnable.first { $0.id == Self.chatSearchModel }?.id ?? resolvedDefaultModel(agent)
         let effort = resolvedDefaultEffort(agent)
         let role = roleCatalog.role(AgentRoleID.reader) ?? project.chatRole(roleCatalog)
         do {

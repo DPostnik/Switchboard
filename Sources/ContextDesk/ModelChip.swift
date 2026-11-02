@@ -16,7 +16,8 @@ struct ModelChip: View {
     @State private var draft = ""
 
     /// The current agent offers the app's model catalog (Claude) instead of the engine's model list.
-    private var claude: Bool { model.traits(model.currentAgent).contains(.catalogModels) }
+    private var catalog: AgentModelCatalog? { model.modelCatalog(model.currentAgent) }
+    private var claude: Bool { catalog != nil }
     private var newChat: Bool { model.chatID == nil }
     /// Codex lists its models only once connected; until then the chip has no model to show.
     private var showsModels: Bool { claude || !model.models.isEmpty }
@@ -28,34 +29,34 @@ struct ModelChip: View {
     }
 
     private var modelTitle: String {
-        if claude { return ClaudeModel.title(for: model.currentModel) }
+        if let catalog { return catalog.title(model.currentModel) }
         guard showsModels else { return model.currentAgentName }
         if model.currentModel.isEmpty { return L10n.text("Авто", "Auto") }
         return model.models.first { $0.id == model.currentModel }?.displayName ?? model.currentModel
     }
 
     private var effortTitle: String? {
-        if claude { return ClaudeEffort(rawValue: model.claudeEffort)?.title ?? model.claudeEffort }
+        if let catalog { return catalog.effortTitle(model.claudeEffort) ?? model.claudeEffort }
         guard showsModels, !model.supportedEfforts.isEmpty else { return nil }
         return model.effort.isEmpty ? L10n.text("Авто", "Auto") : model.effort
     }
 
     private var help: String {
         var lines: [String] = []
-        if claude {
-            let fallback = ClaudeModel.title(for: ClaudeModel.defaultID)
+        if let catalog {
+            let fallback = catalog.title(catalog.defaultModel)
             lines.append(L10n.text("Модель Claude для новых сообщений. По умолчанию — \(fallback).",
                                    "Claude model for new messages. Default is \(fallback)."))
             let configured = model.currentModel.trimmingCharacters(in: .whitespacesAndNewlines)
             if !configured.isEmpty {
                 lines.append(L10n.text("Выбрано: ", "Selected: ") + configured)
-                if let reasoning = ClaudeModel.reasoningTitle(for: configured) { lines.append(reasoning) }
-                if let note = ClaudeModel.requirementNote(for: configured) {
+                if let reasoning = catalog.reasoningTitle(configured) { lines.append(reasoning) }
+                if let note = catalog.requirementNote(configured) {
                     lines.append(L10n.text("Недоступно: ", "Unavailable: ") + note)
                 }
             }
-            lines.append(L10n.text("Усилие рассуждения Claude для новых сообщений. По умолчанию — \(ClaudeEffort.defaultLevel.title.lowercased()). Низкое усилие экономит токены на простых задачах и подагентах.",
-                                   "Claude reasoning effort for new messages. Default is \(ClaudeEffort.defaultLevel.title.lowercased()). Low effort saves tokens on simple tasks and sub-agents."))
+            lines.append(L10n.text("Усилие рассуждения Claude для новых сообщений. По умолчанию — \(catalog.defaultEffort.title.lowercased()). Низкое усилие экономит токены на простых задачах и подагентах.",
+                                   "Claude reasoning effort for new messages. Default is \(catalog.defaultEffort.title.lowercased()). Low effort saves tokens on simple tasks and sub-agents."))
         } else {
             lines.append(L10n.text("Модель и усилие рассуждения Codex для новых сообщений.",
                                    "Codex model and reasoning effort for new messages."))
@@ -70,7 +71,7 @@ struct ModelChip: View {
         Group {
             if entering {
                 TextField(L10n.text("Модель Claude", "Claude model"), text: $draft,
-                          prompt: Text(ClaudeModel.title(for: ClaudeModel.defaultID)))
+                          prompt: Text(catalog.map { $0.title($0.defaultModel) } ?? ""))
                     .onSubmit { commit() }
                     .onExitCommand { entering = false }
                     // The field replaces the menu the user just chose from, so typing can start at once.
@@ -92,11 +93,11 @@ struct ModelChip: View {
     }
 
     @ViewBuilder private var menu: some View {
-        if claude {
+        if let catalog {
             Section {
-                ForEach(ClaudeModel.current) { entry($0) }
+                ForEach(catalog.current) { entry($0) }
                 Menu(L10n.text("Предыдущие поколения", "Previous generations")) {
-                    ForEach(ClaudeModel.previous) { entry($0) }
+                    ForEach(catalog.previous) { entry($0) }
                 }
                 Button(L10n.text("Другая модель…", "Other model…")) {
                     draft = model.currentModel
@@ -106,8 +107,8 @@ struct ModelChip: View {
             Section {
                 Picker(L10n.text("Рассуждение", "Reasoning"),
                        selection: Binding(get: { model.claudeEffort }, set: { model.selectClaudeEffort($0) })) {
-                    ForEach(ClaudeEffort.allCases, id: \.rawValue) { level in
-                        Text(level.title).tag(level.rawValue)
+                    ForEach(catalog.efforts, id: \.id) { level in
+                        Text(level.title).tag(level.id)
                     }
                 }.pickerStyle(.inline).labelsHidden()
             } header: { Text(L10n.text("Рассуждение", "Reasoning")) }
@@ -143,8 +144,8 @@ struct ModelChip: View {
         }
     }
 
-    private func entry(_ item: ClaudeModel) -> some View {
-        let note = item.requirementNote()
+    private func entry(_ item: AgentModelCatalog.Entry) -> some View {
+        let note = item.requirementNote
         return Toggle(note.map { item.menuTitle + " · " + $0 } ?? item.menuTitle,
                       isOn: Binding(get: { model.currentModel == item.id }, set: { _ in model.selectCurrentModel(item.id) }))
             .disabled(note != nil)

@@ -1722,7 +1722,7 @@ private struct ChatRunState: Equatable {
             await prepareTurnCheckpoint(chatID: id, projectPath: workingDirectory)
             let submittedTurn = try await client.send(outgoing, to: sessionForChat(id), projectPath: workingDirectory,
                                                           permissions: access, model: selectedModel, effort: selectedEffort,
-                                                          advisor: ClaudeAdvisor.attached(state.claudeAdvisor, mainModel: selectedModel),
+                                                          advisor: modelCatalog(threadID.flatMap { connectionOfChat($0) } ?? newConnection)?.advisor(state.claudeAdvisor, selectedModel),
                                                           kind: scheduledRun == nil ? .interactive : .scheduled, conversation: ConversationID(id),
                                                           chatDirectory: chatDirectoryArguments(for: id))
             if threadID == nil && scheduledRun == nil {
@@ -2121,7 +2121,7 @@ private struct ChatRunState: Equatable {
     private func remoteNewChatModels(_ id: AgentConnectionID) -> [RemoteModelOption] {
         guard let tag = profile(id)?.remoteAgent else { return [] }
         if traits(id).contains(.catalogModels) {
-            return ClaudeModel.catalog.filter { $0.isSupported() }.map { RemoteModelOption(id: $0.id, name: $0.name, agent: tag) }
+            return (modelCatalog(id)?.runnable ?? []).map { RemoteModelOption(id: $0.id, name: $0.name, agent: tag) }
         }
         return agentState(id).models.map { RemoteModelOption(id: $0.id, name: $0.displayName, agent: tag) }
     }

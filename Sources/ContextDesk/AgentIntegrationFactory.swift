@@ -33,7 +33,7 @@ enum AgentIntegrationFactory {
                       "Codex limits are shared across all apps on your account. Each chat’s context usage is shown next to the message field.")
         }, limitsSignIn: {
             L10n.text("Войди в ChatGPT в настройках приложения, чтобы увидеть лимиты.", "Sign in with ChatGPT in the app’s settings to see your limits.")
-        }, handoffSignIn: nil))
+        }, handoffSignIn: nil), modelCatalog: nil)
 
     static let claudeProfile = AgentProfile(
         connection: .appClaude, engine: .claude, name: "Claude", productName: "Claude Code",
@@ -62,7 +62,24 @@ enum AgentIntegrationFactory {
             L10n.text("Войди в Claude в настройках приложения, чтобы увидеть лимиты.", "Sign in to Claude in the app’s settings to see your limits.")
         }, handoffSignIn: {
             L10n.text("Сначала войди по подписке Claude в настройках.", "First sign in with your Claude subscription in settings.")
-        }))
+        }), modelCatalog: { claudeCatalog })
+
+    /// The Claude adapter's model, effort and advisor catalog in the app's neutral form.
+    static var claudeCatalog: AgentModelCatalog {
+        AgentModelCatalog(
+            entries: ClaudeModel.catalog.map { .init(id: $0.id, name: $0.name, menuTitle: $0.menuTitle, isCurrent: $0.isCurrent, requirementNote: $0.requirementNote()) },
+            defaultModel: ClaudeModel.defaultID,
+            efforts: ClaudeEffort.allCases.map { .init(id: $0.rawValue, title: $0.title) },
+            defaultEffort: .init(id: ClaudeEffort.defaultLevel.rawValue, title: ClaudeEffort.defaultLevel.title),
+            advisors: ClaudeAdvisor.options.map { .init(id: $0.id, title: $0.name) },
+            resolveModel: { ClaudeModel.resolved($0) }, resolveEffort: { ClaudeEffort.resolved($0) },
+            isDispatchableEffort: { ClaudeEffort.isDispatchable($0) },
+            title: { ClaudeModel.title(for: $0) }, reasoningTitle: { ClaudeModel.reasoningTitle(for: $0) },
+            requirementNote: { ClaudeModel.requirementNote(for: $0) },
+            advisor: { ClaudeAdvisor.attached($0, mainModel: $1) })
+    }
+    /// The verified Claude Code build and the branch other builds connect on as unverified, for job copy.
+    static let claudeBranch = ClaudeRuntime.branch
 
     /// The registered connections with their integrations and homes. Tests replace integrations and homes here.
     static func registrations(codex: any AgentIntegration = codex(), claude: any AgentIntegration = claude(),

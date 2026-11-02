@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import AgentContract
+import ClaudeAdapter
 @testable import ContextCore
 @testable import ContextDesk
 
@@ -53,7 +54,8 @@ private let thirdProfile = AgentProfile(
     noLimitsNotice: nil, browserImportTool: "browser_import_session", remoteAgent: "third",
     restartRequester: (key: "thirdSession", environment: "THIRD_SESSION_ID"), routineCapabilities: nil,
     accountCopy: AgentAccountCopy(section: { "Third" }, signIn: { "Sign in" }, signOut: { "Sign out" }, note: nil,
-                                  limitsScope: { "Third limits" }, limitsSignIn: { "Sign in to see limits" }, handoffSignIn: nil))
+                                  limitsScope: { "Third limits" }, limitsSignIn: { "Sign in to see limits" }, handoffSignIn: nil),
+    modelCatalog: nil)
 
 @MainActor private func model(root: URL, third: ThirdAgent) -> DeskModel {
     let agents = AgentIntegrationFactory.registrations(summaryHome: root.appendingPathComponent("codex"), claudeHome: root.appendingPathComponent("claude"))
@@ -142,4 +144,24 @@ private let thirdProfile = AgentProfile(
     #expect(!model.agentState(thirdConnection).connected && !model.agentState(thirdConnection).authenticated)
     #expect(model.pending.isEmpty)
     await model.shutdown()
+}
+
+@Test @MainActor func claudeCatalogReachesTheAppInNeutralForm() throws {
+    let model = DeskModel(summaryResources: nil)
+    #expect(model.modelCatalog(.originalCodex) == nil)
+    let catalog = try #require(model.modelCatalog(.appClaude))
+    #expect(catalog.entries.map(\.id) == ClaudeModel.catalog.map(\.id))
+    #expect(catalog.entries.map(\.menuTitle) == ClaudeModel.catalog.map(\.menuTitle))
+    #expect(catalog.runnable.map(\.id) == ClaudeModel.catalog.filter { $0.isSupported() }.map(\.id))
+    #expect(catalog.current.map(\.id) == ClaudeModel.current.map(\.id) && catalog.previous.map(\.id) == ClaudeModel.previous.map(\.id))
+    #expect(catalog.defaultModel == ClaudeModel.defaultID && catalog.resolveModel(" ") == ClaudeModel.defaultID && catalog.resolveModel("custom") == "custom")
+    #expect(catalog.efforts.map(\.id) == ClaudeEffort.allCases.map(\.rawValue) && catalog.defaultEffort.id == ClaudeEffort.defaultLevel.rawValue)
+    #expect(catalog.resolveEffort("bogus") == "medium" && catalog.isDispatchableEffort("") && !catalog.isDispatchableEffort("bogus"))
+    #expect(catalog.advisors.map(\.id) == ClaudeAdvisor.options.map(\.id))
+    #expect(catalog.advisor("opus", "claude-sonnet-5-5") == "opus" && catalog.advisor("opus", "claude-opus-5-5") == nil)
+    #expect(catalog.title("") == ClaudeModel.title(for: "") && catalog.requirementNote("claude-opus-5-5") == nil)
+    // The composer's catalog values for a Claude chat and the Codex defaults stay apart.
+    model.state.claudeModel = nil; model.state.model = "codex-default"
+    #expect(model.resolvedDefaultModel(.appClaude) == ClaudeModel.defaultID && model.resolvedDefaultModel(.originalCodex) == "codex-default")
+    #expect(model.defaultModelSetting(.appClaude) == "" && model.defaultModelSetting(.originalCodex) == "codex-default")
 }
