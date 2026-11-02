@@ -58,7 +58,8 @@ private let thirdProfile = AgentProfile(
     modelCatalog: nil)
 
 @MainActor private func model(root: URL, third: ThirdAgent) -> DeskModel {
-    let agents = AgentIntegrationFactory.registrations(summaryHome: root.appendingPathComponent("codex"), claudeHome: root.appendingPathComponent("claude"))
+    let agents = AgentIntegrationFactory.registrations(summaryHome: root.appendingPathComponent("codex"), claudeHome: root.appendingPathComponent("claude"),
+                                                       geminiHome: root.appendingPathComponent("gemini"))
         + [AgentRegistration(profile: thirdProfile, integration: third, home: root.appendingPathComponent("third"),
                              generationHome: root.appendingPathComponent("third"), generationExecutable: nil)]
     return DeskModel(agents: agents, store: AppStore(file: root.appendingPathComponent("state.sqlite")),
@@ -69,9 +70,12 @@ private let thirdProfile = AgentProfile(
 
 @Test @MainActor func registryKeepsTheFactoryOrderAndProfiles() {
     let model = DeskModel(summaryResources: nil)
-    #expect(model.agentIDs == [.originalCodex, .appClaude])
+    let gemini = AgentIntegrationFactory.geminiProfile.connection
+    #expect(model.agentIDs == [.originalCodex, .appClaude, gemini])
     #expect(model.agentIDs == AgentIntegrationFactory.profiles.map(\.connection))
-    #expect(model.agentName(.originalCodex) == "Codex" && model.agentName(.appClaude) == "Claude")
+    #expect(model.agentName(.originalCodex) == "Codex" && model.agentName(.appClaude) == "Claude" && model.agentName(gemini) == "Gemini")
+    #expect(model.traits(gemini) == [.sharedEngine, .sessionModels] && model.profile(gemini)?.productName == "Gemini CLI")
+    #expect(model.profile(gemini)?.systemImage != nil && model.profile(gemini)?.remoteAgent == nil && model.profile(gemini)?.restartRequester == nil)
     #expect(model.connection(for: .codex) == .originalCodex && model.connection(for: .claude) == .appClaude)
     #expect(model.connection(for: JobEngine(rawValue: "unknown")) == nil)
     // Only the factory's traits tell agents apart.
@@ -102,7 +106,7 @@ private let thirdProfile = AgentProfile(
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     let third = ThirdAgent()
     let model = model(root: root, third: third)
-    #expect(model.agentIDs == [.originalCodex, .appClaude, thirdConnection])
+    #expect(model.agentIDs == [.originalCodex, .appClaude, AgentIntegrationFactory.geminiProfile.connection, thirdConnection])
     model.state.model = "codex-default"
 
     await model.connect(thirdConnection)
@@ -164,4 +168,72 @@ private let thirdProfile = AgentProfile(
     model.state.claudeModel = nil; model.state.model = "codex-default"
     #expect(model.resolvedDefaultModel(.appClaude) == ClaudeModel.defaultID && model.resolvedDefaultModel(.originalCodex) == "codex-default")
     #expect(model.defaultModelSetting(.appClaude) == "" && model.defaultModelSetting(.originalCodex) == "codex-default")
+}
+
+/// Counts connects; stands in for Gemini when its CLI is missing.
+private actor CountingAgent: AgentIntegration {
+    nonisolated let events: AsyncStream<AgentEvent>
+    private(set) var connects = 0
+    init() { events = AsyncStream { $0.finish() } }
+    func optimizerEnvironment(home: URL) async -> AgentResult<[String: String]> { .rejected(.routeUnavailable) }
+    func connect(_ configuration: AgentConnectionConfiguration) async -> AgentResult<AgentDescriptor> { connects += 1; return .unavailable }
+    func descriptor() async -> AgentResult<AgentDescriptor> { .unavailable }
+    func disconnect() async {}
+    func observe(sessions: [AgentSessionReference]) async {}
+    func account() async -> AgentResult<AgentAccountInfo> { .unavailable }
+    func authenticate(_ action: AgentAuthenticationAction) async -> AgentResult<AgentAuthenticationStep> { .unavailable }
+    func models() async -> AgentResult<[AgentModelInfo]> { .unavailable }
+    func limits() async -> AgentResult<AccountLimits> { .unavailable }
+    func configure(_ tools: AgentToolConfiguration, context: AgentContext) async -> AgentResult<Void> { .unavailable }
+    func prepare(_ request: AgentExecutionRequest) async -> AgentResult<AgentSessionReference> { .unavailable }
+    func submit(_ request: AgentExecutionRequest) async -> AgentResult<AgentExecutionHandle> { .unavailable }
+    func cancel(_ execution: AgentExecutionHandle) async -> AgentResult<AgentCancellation> { .unavailable }
+    func answer(_ id: UUID, session: AgentSessionReference, context: AgentContext, response: AgentInteractionResponse) async -> AgentResult<Void> { .unavailable }
+    func rejectInteraction(_ id: UUID) async {}
+    func history(_ session: AgentSessionReference, context: AgentContext) async -> AgentResult<[AgentHistoryTurn]> { .unavailable }
+    func summarySource(_ session: AgentSessionReference, context: AgentContext) async -> AgentResult<AgentSummarySource> { .unavailable }
+    func rename(_ session: AgentSessionReference, title: String, context: AgentContext) async -> AgentResult<Void> { .unavailable }
+    func setArchived(_ archived: Bool, session: AgentSessionReference, context: AgentContext) async -> AgentResult<Void> { .unavailable }
+    func delete(_ session: AgentSessionReference, context: AgentContext) async -> AgentResult<Void> { .unavailable }
+    func generate(_ request: AgentGenerationRequest, environment: AgentGenerationEnvironment,
+                  willStart: @escaping @Sendable () async throws -> Void) async -> AgentResult<AgentGenerationOutput> { .unavailable }
+    func cancelGeneration(_ id: UUID) async {}
+}
+
+private final class Flag: @unchecked Sendable { var value = false }
+
+@Test @MainActor func geminiIsListedInSettingsButStartsNothingWithoutItsCLI() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("registry-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let installed = Flag(), counting = CountingAgent()
+    var profile = AgentIntegrationFactory.geminiProfile
+    let copy = try #require(profile.installation)
+    profile.installation = AgentInstallation(isInstalled: { installed.value }, missing: copy.missing, hint: copy.hint)
+    let gemini = profile.connection
+    let agents = AgentIntegrationFactory.registrations(gemini: counting, geminiProfile: profile, summaryHome: root.appendingPathComponent("codex"),
+                                                       claudeHome: root.appendingPathComponent("claude"), geminiHome: root.appendingPathComponent("gemini"))
+    let model = DeskModel(agents: agents, store: AppStore(file: root.appendingPathComponent("state.sqlite")),
+                          capabilityLedger: CapabilityLedger(file: root.appendingPathComponent("ledger.sqlite")),
+                          pluginDirectory: root.appendingPathComponent("plugins"), summaryResources: nil,
+                          summaryHome: root.appendingPathComponent("codex"), jobStore: JobStore(file: root.appendingPathComponent("jobs.json")))
+    // Registered (Settings lists it and stored chats keep routing to it) but not selectable, and nothing starts.
+    #expect(model.agentIDs.contains(gemini) && !model.selectableAgentIDs.contains(gemini) && !model.agentState(gemini).installed)
+    #expect(copy.missing() == L10n.text("Gemini CLI не установлен", "Gemini CLI not installed"))
+    #expect(copy.hint().contains("gemini-cli") && profile.accountLine(model.agentState(gemini)).contains("Gemini"))
+    model.state.defaultConnection = gemini
+    #expect(model.currentAgent == .originalCodex)
+    model.selectAgent(gemini)
+    await model.connect(gemini)
+    await model.login(gemini)
+    #expect(await counting.connects == 0 && !model.agentState(gemini).connected)
+    // Gemini runs no scheduled jobs yet.
+    #expect(!profile.scheduledJobs && AgentIntegrationFactory.scheduled[profile.engine] == nil)
+    // Once the CLI appears, a check lists it and a connect starts it.
+    installed.value = true
+    model.refreshInstallations()
+    #expect(model.selectableAgentIDs.contains(gemini) && model.currentAgent == gemini)
+    await model.connect(gemini)
+    #expect(await counting.connects == 1)
+    await model.shutdown()
 }

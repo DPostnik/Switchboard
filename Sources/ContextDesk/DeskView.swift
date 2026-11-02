@@ -1619,18 +1619,34 @@ struct SettingsView: View {
         }.formStyle(.grouped)
     }
 
-    /// One registered agent's account. A shared engine signs in through a browser page and reconnects as a whole; a
-    /// per-chat engine signs in in a terminal and checks the result when asked.
+    /// One registered agent's account. A shared engine signs in through a browser page (or a flow the agent runs itself)
+    /// and reconnects as a whole; a per-chat engine signs in in a terminal and checks the result when asked. An agent whose
+    /// CLI is missing shows how to install it and starts nothing.
     @ViewBuilder private func accountSection(_ id: AgentConnectionID) -> some View {
         if let profile = model.profile(id) {
             let agent = model.agentState(id), copy = profile.accountCopy
-            Section(copy.section()) {
-                if profile.traits.contains(.sharedEngine) {
-                    LabeledContent(L10n.text("Аккаунт", "Account"), value: agent.accountLabel)
-                    if agent.authenticated { Button(copy.signOut()) { Task { await model.logout(id) } }.disabled(model.anyBusy) }
-                    else { Button(copy.signIn()) { Task { await model.login(id) } }.disabled(!agent.connected) }
+            Section {
+                if let installation = profile.installation, !agent.installed {
+                    Label(installation.missing(), systemImage: "exclamationmark.circle").font(.ui(.callout))
+                    Text(installation.hint()).font(.ui(.caption)).foregroundStyle(.secondary).textSelection(.enabled)
+                    Button(L10n.text("Проверить снова", "Check again")) { model.refreshInstallations() }
+                } else if profile.traits.contains(.sharedEngine) {
+                    LabeledContent(L10n.text("Аккаунт", "Account"), value: agent.signingIn
+                        ? L10n.text("Ждёт входа в браузере…", "Waiting for sign-in in the browser…") : agent.accountLabel)
+                    if let note = copy.note { Text(note()).font(.ui(.caption)).foregroundStyle(.secondary) }
+                    if agent.authenticated {
+                        if agent.canSignOut { Button(copy.signOut()) { Task { await model.logout(id) } }.disabled(model.anyBusy) }
+                        else {
+                            Text(L10n.text("\(profile.productName) не предлагает выход из аккаунта.", "\(profile.productName) offers no sign-out."))
+                                .font(.ui(.caption)).foregroundStyle(.secondary)
+                        }
+                    } else {
+                        // An agent that connects on first use connects on the way to signing in.
+                        Button(copy.signIn()) { Task { await model.login(id) } }
+                            .disabled(agent.signingIn || agent.connecting || (!agent.connected && profile.traits.contains(.connectsAtLaunch)))
+                    }
                     Button(L10n.text("Переподключить \(profile.name)", "Reconnect \(profile.name)")) { Task { await model.connect(id) } }
-                        .disabled(agent.connecting || model.anyBusy)
+                        .disabled(agent.connecting || agent.signingIn || model.anyBusy)
                 } else {
                     Text(agent.authenticated ? L10n.text("Вход выполнен", "Signed in") : L10n.text("Вход не выполнен", "Not signed in"))
                     if let note = copy.note { Text(note()).font(.ui(.caption)).foregroundStyle(.secondary) }
@@ -1640,7 +1656,9 @@ struct SettingsView: View {
                     }.disabled(agent.connecting)
                     if agent.authenticated { Button(copy.signOut()) { Task { await model.logout(id) } }.disabled(model.anyBusy) }
                 }
-                EngineCompatibilityRows(agent: id.agent, name: profile.productName, engine: agent.descriptor?.engine)
+                if agent.installed { EngineCompatibilityRows(agent: id.agent, name: profile.productName, engine: agent.descriptor?.engine) }
+            } header: {
+                if let symbol = profile.systemImage { Label(copy.section(), systemImage: symbol) } else { Text(copy.section()) }
             }
         }
     }
@@ -1659,6 +1677,8 @@ struct SettingsView: View {
                 }
             }
         }.formStyle(.grouped)
+            // A CLI installed or removed since launch shows up here.
+            .onAppear { model.refreshInstallations() }
     }
 
     private var browserSettings: some View {

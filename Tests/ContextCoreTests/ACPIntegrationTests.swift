@@ -3,6 +3,7 @@ import Testing
 import AgentContract
 @testable import ACPAdapter
 @testable import ContextCore
+@testable import ContextDesk
 
 /// A fake ACP v1 agent: one JSON-RPC message per line on stdio. Behavior comes from `<home>/fixture.json` (version,
 /// capabilities, auth methods) and from the prompt text; every inbound message is appended to `<home>/received.jsonl`.
@@ -155,7 +156,7 @@ private struct ACPFixture {
     let drift = CompatibilityDrift(logging: false)
     let profile: ACPLaunchProfile
 
-    init(_ config: [String: Any] = [:], cancelGrace: Duration = .seconds(30)) throws {
+    init(_ config: [String: Any] = [:], cancelGrace: Duration = .seconds(30), connection: AgentConnectionID? = nil) throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("acp-" + UUID().uuidString)
         home = root.appendingPathComponent("home"); project = root.appendingPathComponent("project")
         executable = root.appendingPathComponent("fake-acp")
@@ -163,10 +164,11 @@ private struct ACPFixture {
         try ("#!" + fixturePython + "\n" + fakeAgent).write(to: executable, atomically: true, encoding: .utf8)
         try installFixtureExecutable(at: executable)
         try JSONSerialization.data(withJSONObject: config).write(to: home.appendingPathComponent("fixture.json"))
-        let agent = AgentID(rawValue: "fake-acp")
+        let agent = connection?.agent ?? AgentID(rawValue: "fake-acp")
+        let found = executable.path
         profile = ACPLaunchProfile(
-            agent: agent, connection: AgentConnectionID(agent: agent, id: UUID()), productName: "Fake ACP", arguments: ["--acp"],
-            candidates: { _, _ in [] },
+            agent: agent, connection: connection ?? AgentConnectionID(agent: agent, id: UUID()), productName: "Fake ACP", arguments: ["--acp"],
+            candidates: { _, _ in [found] },
             environment: { home, _, inherited in
                 var result = inherited.filter { !$0.key.hasPrefix("ACP_") }; result["ACP_FIXTURE_HOME"] = home.path; return result
             },
@@ -318,8 +320,7 @@ private func waitFor(_ condition: @escaping () async -> Bool) async throws {
     defer { reader.cancel() }
     let session = try await adapter.prepare(fixture.request(descriptor)).value()
     let handle = try await adapter.submit(fixture.request(descriptor, prompt: "structured", session: session)).value()
-    // The commands sent right after session/new, before the app knew the chat, are repeated when the turn starts.
-    try await waitFor { await events.commands().count >= 3 }
+    try await waitFor { await events.commands().contains { $0.first?.name == "memory" } }
     try await waitFor { await events.options().contains { $0.contains { $0.category == .mode } } }
     // One call updated in place by its ID: pending, in progress, completed with its diff; text output in the result item.
     let edit = try #require(await events.calls()["e1"])
@@ -614,4 +615,85 @@ func geminiLiveHandshakeWithoutSignIn() async throws {
     #expect(FileManager.default.fileExists(atPath: home.appendingPathComponent(".gemini/settings.json").path))
     #expect(drift.snapshot().isEmpty, "\(drift.snapshot().map(\.key.name))")
     print("gemini-live: version \(descriptor.engine?.version ?? "?") initialize ok, session/new auth-required, drift \(drift.snapshot().count)")
+}
+
+// Stage D wiring: the Gemini registration in the app, driven by the fake ACP agent under Gemini's connection.
+
+@MainActor private func geminiModel(_ fixture: ACPFixture, store: AppStore) -> DeskModel {
+    var profile = AgentIntegrationFactory.geminiProfile
+    profile.installation = AgentInstallation(isInstalled: { true }, missing: { "" }, hint: { "" })
+    let agents = AgentIntegrationFactory.registrations(
+        gemini: ACPIntegration(profile: fixture.profile, drift: fixture.drift, clientVersion: "test"), geminiProfile: profile,
+        summaryHome: fixture.root.appendingPathComponent("codex"), claudeHome: fixture.root.appendingPathComponent("claude"), geminiHome: fixture.home)
+    return DeskModel(agents: agents, store: store, capabilityLedger: CapabilityLedger(file: fixture.root.appendingPathComponent("ledger.sqlite")),
+                     pluginDirectory: fixture.root.appendingPathComponent("plugins"), summaryResources: nil,
+                     summaryHome: fixture.root.appendingPathComponent("codex"), jobStore: JobStore(file: fixture.root.appendingPathComponent("jobs.json")))
+}
+
+@MainActor private func settle(_ condition: @escaping @MainActor () -> Bool) async throws {
+    for _ in 0..<1500 where !condition() { try await Task.sleep(for: .milliseconds(10)) }
+    try #require(condition())
+}
+
+@Test @MainActor func geminiChatSignsInRoutesStructuredItemsAndReopensFromItsRecord() async throws {
+    let gemini = AgentIntegrationFactory.geminiProfile.connection
+    let fixture = try ACPFixture(connection: gemini)
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let store = AppStore(file: fixture.root.appendingPathComponent("store.sqlite"))
+    let model = geminiModel(fixture, store: store)
+    #expect(model.selectableAgentIDs.contains(gemini) && model.traits(gemini).isSuperset(of: [.sharedEngine, .sessionModels]))
+    await model.startEventLoops()
+    await model.connect(gemini)
+    #expect(model.agentState(gemini).connected && !model.agentState(gemini).authenticated)
+    #expect(model.agentState(gemini).descriptor?.engine?.version == "1.0.0")
+    // Sign-in is the agent's own authenticate; the fake offers no logout, so sign-out is hidden.
+    await model.login(gemini)
+    #expect(model.agentState(gemini).authenticated && !model.agentState(gemini).canSignOut && !model.agentState(gemini).signingIn)
+    #expect(fixture.received().contains { $0["method"].string == "authenticate" && $0["params"]["methodId"].string == "login" })
+
+    let project = Project(path: fixture.project.path)
+    model.state.projects = [project]; model.projectID = project.id; model.state.model = "codex-default"
+    model.selectAgent(gemini)
+    #expect(model.currentAgent == gemini)
+    // A new Gemini chat keeps its own default model; Codex's setting is untouched.
+    model.selectModel("deep")
+    #expect(model.state.agentModels?[gemini.agent.rawValue] == "deep" && model.state.model == "codex-default" && model.currentModel == "deep")
+    #expect(model.currentEffort == "")
+    model.draft = "stream"
+    #expect(model.canSend)
+    await model.send()
+    try await settle { model.state.chats.count == 1 && !model.isBusy(threadID: model.state.chats[0].id) && model.items.contains { $0.kind == "assistant" } }
+    let chat = model.state.chats[0]
+    #expect(chat.nativeSession?.connection == gemini && chat.model == "deep" && chat.effort == "")
+    #expect(fixture.received().first { $0["method"].string == "session/set_config_option" }?["params"]["value"].string == "deep")
+    // Structured calls and the turn's plan reach the transcript; commands and models come from the session.
+    #expect(model.items.contains { $0.toolCall?.id == "t1" && $0.toolCall?.kind == .read && $0.toolCall?.status == .completed })
+    #expect(model.items.contains { $0.kind == AgentPlan.itemKind && $0.plan?.entries.map(\.content) == ["Look", "Answer"] })
+    try await settle { model.sessionCommands[chat.id]?.map(\.name) == ["memory"] }
+    #expect(model.sessionConfigOptions[chat.id]?.first?.category == .model)
+    try await settle { model.agentState(gemini).models.map(\.id) == ["fast", "deep"] }
+    #expect(model.error == nil)
+    await model.flushPersist()
+    await model.shutdown()
+
+    // A new app process: the stored chat reopens from the adapter's record and continues through session/load.
+    let reopened = geminiModel(fixture, store: store)
+    reopened.state = try await store.load()
+    await reopened.startEventLoops()
+    await reopened.connect(gemini)
+    #expect(reopened.agentState(gemini).authenticated)
+    // The models of the last session are remembered for new chats before any session exists.
+    #expect(reopened.agentState(gemini).models.map(\.id) == ["fast", "deep"])
+    let stored = try #require(reopened.state.chats.first)
+    reopened.projectID = project.id
+    await reopened.openChat(stored)
+    #expect(reopened.items.first?.text == "stream" && reopened.items.contains { $0.toolCall?.id == "t1" })
+    #expect(reopened.items.contains { $0.kind == AgentPlan.itemKind })
+    reopened.draft = "again"
+    #expect(reopened.canSend)
+    await reopened.send()
+    try await settle { !reopened.isBusy(threadID: stored.id) && reopened.items.filter { $0.kind == "user" }.count == 2 }
+    #expect(fixture.methods().filter { $0 == "session/load" }.count == 1 && fixture.methods().filter { $0 == "session/new" }.count == 1)
+    #expect(reopened.state.chats.count == 1 && reopened.error == nil)
+    await reopened.shutdown()
 }

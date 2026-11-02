@@ -26,7 +26,7 @@ struct RestartContinuation: Codable, Equatable {
     static func requesterInfo(environment: [String: String]) -> [String: String] {
         var info: [String: String] = [:]
         for profile in requesterOrder {
-            if let id = environment[profile.restartRequester.environment], valid(id) { info[profile.restartRequester.key] = id }
+            if let requester = profile.restartRequester, let id = environment[requester.environment], valid(id) { info[requester.key] = id }
         }
         return info
     }
@@ -36,7 +36,7 @@ struct RestartContinuation: Codable, Equatable {
     /// The requester must be an existing, unarchived chat of the matching agent.
     static func chatID(requestedBy info: [AnyHashable: Any]?, in chats: [Chat]) -> String? {
         for profile in requesterOrder {
-            guard let id = info?[profile.restartRequester.key] as? String, valid(id) else { continue }
+            guard let key = profile.restartRequester?.key, let id = info?[key] as? String, valid(id) else { continue }
             let session = AgentSessionReference(connection: profile.connection, nativeID: id)
             if let chat = chats.first(where: { $0.nativeSession == session && !$0.isArchived }) { return chat.id }
         }

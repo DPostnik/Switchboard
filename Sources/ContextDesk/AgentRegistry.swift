@@ -24,6 +24,21 @@ struct AgentAppTraits: OptionSet, Sendable {
     static let remoteChatSettings = Self(rawValue: 1 << 5)
     /// The adapter keeps the session history files itself, so the tool bodies of archived chats can be reduced through it.
     static let adapterHistory = Self(rawValue: 1 << 6)
+    /// Models come from the agent's sessions (ACP config options), reported again whenever a session changes them, and
+    /// new chats keep a default model of their own (`SavedState.agentModels`) instead of sharing `SavedState.model`.
+    /// Efforts are sent only when the selected model lists them.
+    static let sessionModels = Self(rawValue: 1 << 7)
+}
+
+/// Whether an agent's CLI is present, for agents the app does not ship or install itself. A missing CLI keeps the agent
+/// out of the agent pickers and starts no process; Settings → Accounts lists it with this copy.
+struct AgentInstallation: Sendable {
+    /// Looks for the executable (file checks only, never runs it).
+    let isInstalled: @Sendable () -> Bool
+    /// Status line while the CLI is missing ("Gemini CLI not installed").
+    let missing: @Sendable () -> String
+    /// How to install it.
+    let hint: @Sendable () -> String
 }
 
 /// Copy and identifiers of one agent: the presentation table. Only the composition root fills it.
@@ -46,16 +61,24 @@ struct AgentProfile: Sendable {
     let noLimitsNotice: (@Sendable () -> String)?
     /// Name of the browser session-import tool as the agent sees it in a scheduled run.
     let browserImportTool: String
-    /// Tag of the agent's new-chat models in the phone protocol (`RemoteModelOption.agent`).
-    let remoteAgent: String
-    /// Key and environment variable through which the agent's CLI names its session in a restart request.
-    let restartRequester: (key: String, environment: String)
+    /// Tag of the agent's new-chat models in the phone protocol (`RemoteModelOption.agent`); nil keeps the agent off the
+    /// phone's new-chat list (the phone app knows only the tags it shipped with).
+    let remoteAgent: String?
+    /// Key and environment variable through which the agent's CLI names its session in a restart request; nil when the
+    /// CLI exports no session ID.
+    let restartRequester: (key: String, environment: String)?
     /// Capabilities a routine is checked against for this agent's jobs; nil uses the connected descriptor's.
     let routineCapabilities: Set<AgentCapability>?
     /// Copy of the agent's section in Settings → Accounts.
     let accountCopy: AgentAccountCopy
     /// The app's model catalog for an agent with `catalogModels`, built on each call so its copy follows the language.
     let modelCatalog: (@Sendable () -> AgentModelCatalog)?
+    /// Set for an agent whose CLI the user installs; nil when the app always has the agent.
+    var installation: AgentInstallation? = nil
+    /// SF Symbol beside the agent's name in pickers and its Settings section; nil shows the name alone.
+    var systemImage: String? = nil
+    /// The agent runs scheduled jobs (as chats of its connection). Off keeps it out of the job editor and the scheduler.
+    var scheduledJobs = true
 }
 
 /// Selectable models, effort levels and advisors of an agent whose engine lists no models. The adapter owns the
@@ -144,6 +167,12 @@ struct AgentConnectionState {
     var limits: AccountLimits?
     var limitsError: String?
     var refreshingLimits = false
+    /// The agent offers sign-out (`AgentAccountInfo.canSignOut`).
+    var canSignOut = true
+    /// A sign-in the agent runs itself is in progress (for example Gemini CLI waiting for the browser).
+    var signingIn = false
+    /// The agent's CLI is present; false keeps it out of pickers and starts no process.
+    var installed = true
 }
 
 /// The parts of a connection that are not published: its client, generation runner and tasks.

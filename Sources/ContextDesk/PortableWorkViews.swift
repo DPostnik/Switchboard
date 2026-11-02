@@ -20,7 +20,7 @@ struct HandoffEditor: View {
                     Text(L10n.text("Будет создан отдельный чат с черновиком. Проверь его и отправь вручную. Исходный чат, его очередь и запросы разрешений не переносятся.", "A separate chat will be created with a draft. Review and send it manually. The source chat, its queue and approval requests are not transferred.")).font(.ui(.callout))
                     Text(L10n.text("Контекст подготовлен автоматически по истории чата. Проверь сводку; при необходимости измени цель или детали. Полная переписка по умолчанию не включена.", "Context was prepared automatically from the chat history. Review the summary and adjust the goal or details if needed. The full transcript is excluded by default.")).font(.ui(.callout)).foregroundStyle(.secondary)
                     Picker(L10n.text("Агент нового чата", "New chat agent"), selection: Binding(get: { agent }, set: { pickedAgent = $0 })) {
-                        ForEach(model.agentIDs, id: \.self) { id in Text(model.agentName(id)).tag(id) }
+                        ForEach(model.selectableAgentIDs, id: \.self) { id in Text(model.agentName(id)).tag(id) }
                     }
                     if !model.agentState(agent).authenticated, let hint = model.profile(agent)?.accountCopy.handoffSignIn {
                         Text(hint()).font(.ui(.caption))

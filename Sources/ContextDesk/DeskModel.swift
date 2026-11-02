@@ -257,6 +257,16 @@ private struct ChatRunState: Equatable {
     /// Name of the agent that owns a session; an unknown agent shows its raw ID, never another agent's name.
     func agentName(_ connection: AgentConnectionID?) -> String { profile(connection)?.name ?? connection?.agent.rawValue ?? "" }
     var anyAgentConnecting: Bool { agentStates.values.contains { $0.connecting } }
+    /// Agents new chats, jobs and limits may pick: every registered one whose CLI is present.
+    var selectableAgentIDs: [AgentConnectionID] { agentIDs.filter { agentState($0).installed } }
+    /// Looks for the CLIs the user installs (file checks only); a found or removed CLI updates its agent.
+    func refreshInstallations() {
+        for id in agentIDs {
+            guard let installation = profile(id)?.installation else { continue }
+            let installed = installation.isInstalled()
+            if agentState(id).installed != installed { agentStates[id]?.installed = installed }
+        }
+    }
     /// A connection serving optimizer plugins is connecting: plugin settings wait for it.
     var connecting: Bool { agentIDs.contains { traits($0).contains(.optimizerPlugins) && agentState($0).connecting } }
     @Published private(set) var isBootstrapping = true {
@@ -343,7 +353,11 @@ private struct ChatRunState: Equatable {
             ids.append(registration.connection); slots[registration.connection] = AgentConnectionSlot(registration)
         }
         self.agentIDs = ids; self.slots = slots
-        self.agentStates = Dictionary(uniqueKeysWithValues: ids.map { ($0, AgentConnectionState()) })
+        self.agentStates = Dictionary(uniqueKeysWithValues: ids.map { id in
+            var state = AgentConnectionState()
+            state.installed = slots[id]?.profile.installation?.isInstalled() ?? true
+            return (id, state)
+        })
         self.store = store
         self.capabilityLedger = capabilityLedger
         self.pluginDirectory = pluginDirectory
@@ -407,6 +421,7 @@ private struct ChatRunState: Equatable {
         await loadAttention()
         await startPullRequests()
         await startEventLoops()
+        refreshInstallations()
         for id in agentIDs where traits(id).contains(.connectsAtLaunch) { await connect(id); step(agentName(id)) }
         // Scheduled tasks run as chats of their agent's connection, so enabled ones need it connected too.
         let jobEngines = Set((try? await jobStore.load())?.jobs.filter(\.enabled).map(\.engine) ?? [])
@@ -513,8 +528,16 @@ private struct ChatRunState: Equatable {
     /// optimizer plugins it serves; a per-chat engine waits only for its own chats and keeps their processes.
     func connect(_ id: AgentConnectionID) async {
         guard let slot = slots[id], !agentState(id).connecting else { return }
+        // An agent whose CLI is missing starts no process.
+        if let installation = slot.profile.installation {
+            let installed = installation.isInstalled()
+            if agentState(id).installed != installed { agentStates[id]?.installed = installed }
+            guard installed else { return }
+        }
         let traits = slot.profile.traits, shared = traits.contains(.sharedEngine)
-        if shared { guard !anyBusy else { return } }
+        // A running shared engine (or the one serving optimizer plugins) restarts only when the whole app is idle; a first
+        // connection of another shared engine has nothing to stop and waits only for its own chats.
+        if shared && (agentState(id).connected || traits.contains(.optimizerPlugins)) { guard !anyBusy else { return } }
         else { guard !state.chats.contains(where: { $0.nativeSession?.connection == id && isBusy(threadID: $0.id) }) else { return } }
         if traits.contains(.optimizerPlugins) { refreshPlugins() }
         agentStates[id]?.connecting = true; agentStates[id]?.connected = false
@@ -574,8 +597,11 @@ private struct ChatRunState: Equatable {
         }
     }
     /// Reconnects every connection whose single engine process reads app settings (the browser) only at start.
+    /// One that connects on first use and is not connected yet starts nothing.
     func reconnectSharedEngines() async {
-        for id in agentIDs where traits(id).contains(.sharedEngine) { await connect(id) }
+        for id in agentIDs where traits(id).contains(.sharedEngine) && (traits(id).contains(.connectsAtLaunch) || agentState(id).connected) {
+            await connect(id)
+        }
     }
     /// Every 5 s for every plugin. A plugin that stops pauses its chats' queues; with one of them busy the host
     /// connection is stopped too, and nothing is retried.
@@ -619,6 +645,7 @@ private struct ChatRunState: Equatable {
             let result = try await slot.client.account()
             if shared { clearConnectionError() }
             agentStates[id]?.authenticated = result.authenticated
+            agentStates[id]?.canSignOut = result.canSignOut
             agentStates[id]?.accountLabel = slot.profile.accountLabel(result)
         } catch let failure as AgentOperationFailure where shared && failure.rejection == .staleContext {
             // An account event superseded this metadata request. Never publish its obsolete result.
@@ -657,9 +684,13 @@ private struct ChatRunState: Equatable {
                   "\(name) disconnected. Reconnect; the message will not be sent again automatically.")
     }
     /// Starts the agent's own sign-in: a browser page, or a terminal in the app's profile for a CLI sign-in.
+    /// An agent that runs the sign-in itself (an ACP agent's `authenticate`) answers only when it is done; meanwhile the
+    /// account shows that it waits for the browser.
     func login(_ id: AgentConnectionID) async {
-        guard let slot = slots[id] else { return }
+        guard let slot = slots[id], !agentState(id).signingIn else { return }
         if !agentState(id).connected { await connect(id) }
+        agentStates[id]?.signingIn = true
+        defer { agentStates[id]?.signingIn = false }
         do {
             switch try await slot.client.integration.authenticate(.beginSignIn).value() {
             case .openURL(let url):
@@ -667,7 +698,9 @@ private struct ChatRunState: Equatable {
                 agentStates[id]?.accountLabel = L10n.text("Заверши вход в браузере", "Finish signing in in your browser")
             case .openLocalSignIn(let url):
                 guard NSWorkspace.shared.open(url) else { throw ConversationIdentity.unavailable }
-            case .complete, .externalCLIRequired:
+            case .complete:
+                await refreshAccount(id)
+            case .externalCLIRequired:
                 throw ConversationIdentity.unavailable
             }
         } catch { self.error = error.localizedDescription }
@@ -685,13 +718,21 @@ private struct ChatRunState: Equatable {
         guard let client = client(id) else { return }
         do {
             let models = try await client.models()
-            agentStates[id]?.models = models
+            if agentState(id).models != models { agentStates[id]?.models = models }
             if ownsDefaultModelSetting(id), !models.contains(where: { $0.id == state.model }) {
                 state.model = (models.first { $0.isDefault } ?? models.first)?.id ?? ""
+            }
+            // A session-models agent's default that its sessions no longer offer falls back to the agent's own default.
+            let configured = defaultModelSetting(id)
+            if traits(id).contains(.sessionModels), !models.isEmpty, !configured.isEmpty, !models.contains(where: { $0.id == configured }) {
+                setDefaultModelSetting("", agent: id)
             }
             persist()
         } catch let failure as AgentOperationFailure where failure.rejection == .staleContext {
             return
+        } catch let failure as AgentOperationFailure where failure.rejection == .unsupported(.modelDiscovery) && traits(id).contains(.sessionModels) {
+            // No session has reported models yet; the first one does (`.configOptions`).
+            agentStates[id]?.models = []
         } catch { self.error = error.localizedDescription }
     }
     func selectModel(_ model: String) {
@@ -699,6 +740,9 @@ private struct ChatRunState: Equatable {
         if let index = state.chats.firstIndex(where: { $0.id == chatID }) {
             state.chats[index].model = model
             state.chats[index].effort = "medium"
+        } else if traits(currentAgent).contains(.sessionModels) {
+            setDefaultModelSetting(model, agent: currentAgent)
+            draftEffort = "medium"
         } else {
             state.model = model
             draftEffort = "medium"
@@ -2257,7 +2301,7 @@ private struct ChatRunState: Equatable {
     func saveAgentChoice() { persist() }
     /// The agent of new chats. One that does not connect at launch connects when it is chosen.
     func selectAgent(_ agent: AgentConnectionID) {
-        guard chatID == nil, !sending, isRegistered(agent) else { return }
+        guard chatID == nil, !sending, isRegistered(agent), agentState(agent).installed else { return }
         // Browser profiles belong to one agent; a picked profile does not carry over.
         if state.defaultConnection != agent { newChatBrowserProfiles.removeAll() }
         state.defaultConnection = agent; persist()
@@ -2506,6 +2550,8 @@ private struct ChatRunState: Equatable {
             guard let thread else { return }
             sessionCommands[thread] = list
         case .configOptions(let options):
+            // A session-models agent lists the models its sessions report.
+            if traits.contains(.sessionModels), options.contains(where: { $0.category == .model }) { await refreshModels(id) }
             guard let thread else { return }
             sessionConfigOptions[thread] = options
         case .plan: break // Converted to an item above.

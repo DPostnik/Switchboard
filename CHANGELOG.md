@@ -14,6 +14,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 - Codex web searches, image views and dynamic tool calls now appear among a chat's actions instead of being dropped.
 - Structured actions: in an open actions card, Codex and Claude file reads, edits, searches, web fetches, sub-agents and MCP tools show a kind icon, a short title, a status badge (running, awaiting approval, denied, failed, done) and their files as links that open like other file links; an edit opens to its inline diff. Chats saved earlier keep their old rows.
 - Agent plans: the plan Codex updates and the Claude to-do list (TodoWrite) appear in the conversation as a compact checklist with progress, updated in place as the turn goes on.
+- Gemini CLI support via ACP, shown when the CLI is installed (app-owned install, Homebrew or PATH; otherwise Settings → Accounts says "Gemini CLI not installed" and nothing starts): sign in with Google from Settings → Accounts (the CLI runs the browser sign-in in a separate Switchboard profile, your ~/.gemini is unchanged), new chats on Gemini with its own default model from the session's model list, structured tool calls and plans in the transcript, and saved Gemini chats reopen and continue.
 
 ### Changed
 

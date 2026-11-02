@@ -33,7 +33,7 @@ struct AccountLimitsView: View {
                     .buttonStyle(PointerButtonStyle(base: .plain)).help(L10n.text("Закрыть", "Close")).keyboardShortcut(.cancelAction)
             }
             Picker(L10n.text("Провайдер", "Provider"), selection: Binding(get: { selected }, set: { agent = $0 })) {
-                ForEach(model.agentIDs, id: \.self) { id in Text(model.profile(id)?.productName ?? model.agentName(id)).tag(id) }
+                ForEach(model.selectableAgentIDs, id: \.self) { id in Text(model.profile(id)?.productName ?? model.agentName(id)).tag(id) }
             }.pickerStyle(.segmented).labelsHidden().pointingHandCursor()
             Text(profile?.accountCopy.limitsScope() ?? "")
                 .font(.ui(.callout)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)

@@ -27,9 +27,12 @@ extension DeskModel {
     }
     func chatConnected(_ id: String) -> Bool { agentState(connectionOfChat(id)).connected }
     func chatAuthenticated(_ id: String) -> Bool { agentState(connectionOfChat(id)).authenticated }
-    /// The selected chat's connection, else the agent chosen for new chats, else the first registered one.
+    /// The selected chat's connection, else the agent chosen for new chats (while its CLI is present), else the first
+    /// registered one.
     var currentAgent: AgentConnectionID {
-        selectedChat?.nativeSession?.connection ?? state.defaultConnection ?? agentIDs.first ?? .unregistered
+        if let connection = selectedChat?.nativeSession?.connection { return connection }
+        if let chosen = state.defaultConnection, !isRegistered(chosen) || agentState(chosen).installed { return chosen }
+        return agentIDs.first ?? .unregistered
     }
     var currentAgentName: String { agentName(currentAgent) }
     var currentAgentConnected: Bool { agentState(currentAgent).connected }
@@ -42,11 +45,24 @@ extension DeskModel {
     /// The agent's default model setting as stored: a catalog agent keeps its own (possibly empty) setting.
     /// `SavedState.claudeModel`, `claudeEffort` and `claudeAdvisor` are the stored settings of the catalog agent.
     func defaultModelSetting(_ agent: AgentConnectionID) -> String {
-        modelCatalog(agent) != nil ? state.claudeModel ?? "" : state.model
+        if traits(agent).contains(.sessionModels) { return state.agentModels?[agent.agent.rawValue] ?? "" }
+        return modelCatalog(agent) != nil ? state.claudeModel ?? "" : state.model
+    }
+    /// A session-models agent's own default model (empty keeps the agent's default).
+    func setDefaultModelSetting(_ model: String, agent: AgentConnectionID) {
+        var models = state.agentModels ?? [:]
+        models[agent.agent.rawValue] = model.isEmpty ? nil : model
+        state.agentModels = models.isEmpty ? nil : models
     }
     /// The default model a new message uses; a catalog agent resolves an unset setting to the app default.
     func resolvedDefaultModel(_ agent: AgentConnectionID) -> String {
-        modelCatalog(agent)?.resolveModel(state.claudeModel) ?? state.model
+        if traits(agent).contains(.sessionModels) { return defaultModelSetting(agent) }
+        return modelCatalog(agent)?.resolveModel(state.claudeModel) ?? state.model
+    }
+    /// The effort sent to a session-models agent: only one the model lists, else none (the agent's own default).
+    func sessionEffort(_ effort: String?, model: String, agent: AgentConnectionID?) -> String {
+        guard let effort, let listed = agentState(agent).models.first(where: { $0.id == model })?.efforts, listed.contains(effort) else { return "" }
+        return effort
     }
     /// The default effort of a new chat on a catalog agent.
     func resolvedDefaultEffort(_ agent: AgentConnectionID) -> String {
@@ -57,15 +73,23 @@ extension DeskModel {
         modelCatalog(chat.nativeSession?.connection)?.resolveModel(chat.model) ?? chat.model
     }
     func dispatchEffort(_ chat: Chat) -> String {
-        modelCatalog(chat.nativeSession?.connection)?.resolveEffort(chat.effort ?? state.claudeEffort) ?? chat.effort ?? "medium"
+        let agent = chat.nativeSession?.connection
+        if traits(agent).contains(.sessionModels) { return sessionEffort(chat.effort, model: chat.model, agent: agent) }
+        return modelCatalog(agent)?.resolveEffort(chat.effort ?? state.claudeEffort) ?? chat.effort ?? "medium"
     }
     var currentModel: String {
         // A catalog agent has an app default, so a blank value never reaches the CLI as "its own choice".
         if let catalog = modelCatalog(currentAgent) { return catalog.resolveModel(selectedChat?.model ?? state.claudeModel) }
+        if traits(currentAgent).contains(.sessionModels) { return selectedChat?.model ?? defaultModelSetting(currentAgent) }
         return selectedChat?.model ?? state.model
     }
-    /// The effort the composer sends with: the catalog level, or the selected model's free-form effort.
-    var currentEffort: String { modelCatalog(currentAgent) != nil ? claudeEffort : effort }
+    /// The effort the composer sends with: the catalog level, the selected model's free-form effort, or for a
+    /// session-models agent only an effort its model lists.
+    var currentEffort: String {
+        if modelCatalog(currentAgent) != nil { return claudeEffort }
+        if traits(currentAgent).contains(.sessionModels) { return sessionEffort(effort, model: currentModel, agent: currentAgent) }
+        return effort
+    }
     func selectCurrentModel(_ value: String) {
         if modelCatalog(currentAgent) != nil {
             if let index = state.chats.firstIndex(where: { $0.id == chatID }) { state.chats[index].model = value }

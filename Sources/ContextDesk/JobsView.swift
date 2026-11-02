@@ -211,7 +211,9 @@ struct JobEditor: View {
                 Section(L10n.text("Основное", "Basics")) {
                 TextField(L10n.text("Название", "Name"), text: $job.name)
                 Picker(L10n.text("Исполнитель", "Agent"), selection: $job.engine) {
-                    ForEach(model.agentIDs.compactMap { model.profile($0) }, id: \.engine) { Text($0.productName).tag($0.engine) }
+                    ForEach(model.agentIDs.compactMap { model.profile($0) }.filter { $0.scheduledJobs || $0.engine == job.engine }, id: \.engine) {
+                        Text($0.productName).tag($0.engine)
+                    }
                 }
                     .onChange(of: job.engine) { _, engine in
                         let catalog = model.modelCatalog(model.connection(for: engine))

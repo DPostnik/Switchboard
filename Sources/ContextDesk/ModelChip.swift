@@ -9,6 +9,9 @@ import ContextCore
 /// selectable: the CLI rejects it before any turn runs.
 ///
 /// Codex: the models the server lists, plus "Auto"; efforts come from the selected model.
+///
+/// Gemini (session models): the models its sessions report (the last list is remembered for new chats), plus "Auto"
+/// for the agent's own default; a reasoning level only when the model lists one.
 struct ModelChip: View {
     @ObservedObject var model: DeskModel
     @State private var entering = false
@@ -58,8 +61,13 @@ struct ModelChip: View {
             lines.append(L10n.text("Усилие рассуждения Claude для новых сообщений. По умолчанию — \(catalog.defaultEffort.title.lowercased()). Низкое усилие экономит токены на простых задачах и подагентах.",
                                    "Claude reasoning effort for new messages. Default is \(catalog.defaultEffort.title.lowercased()). Low effort saves tokens on simple tasks and sub-agents."))
         } else {
-            lines.append(L10n.text("Модель и усилие рассуждения Codex для новых сообщений.",
-                                   "Codex model and reasoning effort for new messages."))
+            let name = model.currentAgentName
+            lines.append(L10n.text("Модель и усилие рассуждения \(name) для новых сообщений.",
+                                   "\(name) model and reasoning effort for new messages."))
+            if model.traits(model.currentAgent).contains(.sessionModels) && model.models.isEmpty {
+                lines.append(L10n.text("Список моделей появится после первого чата с \(name); до тех пор используется модель агента по умолчанию.",
+                                       "The model list appears after the first \(name) chat; until then the agent's default model is used."))
+            }
         }
         lines.append(newChat
             ? L10n.text("Провайдер нового чата", "Provider for the new chat") + ": " + model.currentAgentName
@@ -138,7 +146,10 @@ struct ModelChip: View {
         if newChat {
             Section {
                 Picker(L10n.text("Агент", "Agent"), selection: Binding(get: { model.currentAgent }, set: { model.selectAgent($0) })) {
-                    ForEach(model.agentIDs, id: \.self) { id in Text(model.agentName(id)).tag(id) }
+                    ForEach(model.selectableAgentIDs, id: \.self) { id in
+                        if let symbol = model.profile(id)?.systemImage { Label(model.agentName(id), systemImage: symbol).tag(id) }
+                        else { Text(model.agentName(id)).tag(id) }
+                    }
                 }.pickerStyle(.inline).labelsHidden()
             } header: { Text(L10n.text("Агент", "Agent")) }
         }

@@ -32,7 +32,9 @@ public enum GeminiProfile {
     /// Variables removed from the inherited environment: anything that selects another account, key, endpoint or state folder.
     static let removedPrefixes = ["GEMINI_", "GOOGLE_", "CODE_ASSIST_", "OTEL_", "OTLP_"]
     static let removedKeys: Set<String> = [
-        "GCLOUD_PROJECT", "CLOUD_SHELL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "SANDBOX", "SEATBELT_PROFILE"
+        "GCLOUD_PROJECT", "CLOUD_SHELL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "SANDBOX", "SEATBELT_PROFILE",
+        // Either one makes the CLI's Google sign-in non-interactive, which fails under ACP instead of opening the browser.
+        "NO_BROWSER", "CI"
     ]
 
     static func environment(home: URL, executable: URL, inherited: [String: String]) -> [String: String] {

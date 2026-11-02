@@ -11,7 +11,8 @@ import ContextCore
 /// History: the app keeps its own record per session (`ACPSessionStore`) in the agent's app home, because v1 agents need
 /// not list or replay sessions. Turn content outside a running turn (for example a `session/load` replay) is not surfaced;
 /// session state is: commands (`AgentCommand`) and config options (`AgentConfigOption`, also from the older `models` list
-/// Gemini CLI 0.66.0 reports, changed through `session/set_model`) whenever the agent reports them, repeated when a turn starts.
+/// Gemini CLI 0.66.0 reports, changed through `session/set_model`) whenever the agent reports them, repeated when a turn starts
+/// (commands also when it ends).
 /// Permissions: role profiles whose prompts the app can answer (`ask`, or `blocked`, which refuses every prompt) and the
 /// external policy with prompts denied. The agent applies its own rules first; the app never selects `allow_always` or
 /// `reject_always`, which would persist decisions inside the agent beyond the role.
@@ -584,6 +585,8 @@ public actor ACPIntegration: AgentIntegration {
             }
         }
         sink.yield(.init(session: session, payload: .status(turn: turn.id, text: nil)))
+        // Repeated at the end too: a list that arrived during the turn's start may have preceded the app's chat.
+        if let list = commands[id] { sink.yield(.init(session: session, payload: .commands(list))) }
         sink.yield(.init(session: session, payload: .completed(.init(id: turn.id, status: outcome, hasError: outcome != .completed && outcome != .cancelled,
                                                                     error: error, history: history, stopReason: stopReason))))
     }
