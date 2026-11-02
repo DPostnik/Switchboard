@@ -71,6 +71,9 @@ actor ACPConnection {
         case message(JSONValue)
         /// A stdout line that is not a JSON-RPC message; counted as drift by name only.
         case malformed(String)
+        /// The response to a request dispatched with `ordered: true`, in stream order: every notification the agent sent
+        /// before it (a turn's `session/update`s before its `session/prompt` result) has already been delivered.
+        case response(id: JSONValue, result: Result<JSONValue, ACPTransportError>)
         /// The process ended or the connection was stopped. `status` is the exit status when the process exited.
         case closed(status: Int32?, reason: String?)
     }
@@ -89,6 +92,8 @@ actor ACPConnection {
     /// Responses that arrived before their caller started waiting (`dispatch` then `response`).
     private var early: [JSONValue: Result<JSONValue, ACPTransportError>] = [:]
     private var dispatchedIDs = Set<JSONValue>()
+    /// Requests whose response is delivered as an ordered `.response` event instead of to a waiting caller.
+    private var orderedIDs = Set<JSONValue>()
     private var timeouts: [JSONValue: Task<Void, Never>] = [:]
     private var reader: Task<Void, Never>?
     /// Last stderr line before the process exited during startup, for the failure diagnostic only; never logged or stored.
@@ -145,14 +150,16 @@ actor ACPConnection {
         return try await response(id)
     }
 
-    /// Writes a request and returns its id once the bytes are written; `response(_:)` then waits for the answer.
-    func dispatch(_ method: String, params: JSONValue, timeout: Duration?, closeOnTimeout: Bool = false) throws -> JSONValue {
+    /// Writes a request and returns its id once the bytes are written; `response(_:)` then waits for the answer, or with
+    /// `ordered` the answer arrives as a `.response` event after everything the agent sent before it. A closed connection
+    /// sends no `.response` for ordered requests: its `.closed` event settles them.
+    func dispatch(_ method: String, params: JSONValue, timeout: Duration?, closeOnTimeout: Bool = false, ordered: Bool = false) throws -> JSONValue {
         guard isRunning else { throw ACPTransportError.notConnected }
         sequence += 1
         let id = JSONValue.number(Double(sequence))
-        dispatchedIDs.insert(id)
+        if ordered { orderedIDs.insert(id) } else { dispatchedIDs.insert(id) }
         do { try send(.object(["jsonrpc": .string("2.0"), "id": id, "method": .string(method), "params": params])) }
-        catch { dispatchedIDs.remove(id); throw ACPTransportError.writeFailed }
+        catch { dispatchedIDs.remove(id); orderedIDs.remove(id); throw ACPTransportError.writeFailed }
         if let timeout {
             timeouts[id] = Task { [weak self] in
                 do { try await Task.sleep(for: timeout) } catch { return }
@@ -212,7 +219,7 @@ actor ACPConnection {
             }
             if message["method"].string != nil { sink.yield(.message(message)); continue }
             let id = message["id"]
-            guard id != .null, dispatchedIDs.contains(id) else {
+            guard id != .null, dispatchedIDs.contains(id) || orderedIDs.contains(id) else {
                 sink.yield(.malformed(id == .null ? "frame-without-method-or-id" : "response-to-unknown-id")); continue
             }
             timeouts.removeValue(forKey: id)?.cancel()
@@ -226,6 +233,7 @@ actor ACPConnection {
     }
 
     private func resolve(_ id: JSONValue, _ result: Result<JSONValue, ACPTransportError>) {
+        if orderedIDs.remove(id) != nil { sink.yield(.response(id: id, result: result)); return }
         if let continuation = pending.removeValue(forKey: id) {
             dispatchedIDs.remove(id)
             continuation.resume(with: result.mapError { $0 as any Error })
@@ -266,6 +274,7 @@ actor ACPConnection {
         let waiting = pending; pending.removeAll()
         for id in dispatchedIDs where waiting[id] == nil && early[id] == nil { early[id] = .failure(.closed) }
         for (id, continuation) in waiting { dispatchedIDs.remove(id); continuation.resume(throwing: ACPTransportError.closed) }
+        orderedIDs.removeAll()
         process = nil; outputPipe = nil; errorPipe = nil
         sink.yield(.closed(status: status, reason: reason))
         sink.finish()

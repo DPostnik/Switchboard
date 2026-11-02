@@ -49,6 +49,10 @@ public actor ACPIntegration: AgentIntegration {
     /// The role of each session's running turn, for prompts the role refuses without asking.
     private var sessionProfiles: [String: AgentPermissionProfile] = [:]
     private var finishedTurns = Set<String>()
+    /// Running `session/prompt` requests by JSON-RPC id: session and turn. Their responses arrive in stream order.
+    private var prompts: [JSONValue: (session: String, turn: String)] = [:]
+    /// A prompt response processed while `submit` was still between dispatch and registering it (actor reentrancy).
+    private var unclaimed: [JSONValue: Result<JSONValue, ACPTransportError>] = [:]
     /// Known updates and requests that the current contract cannot carry yet, by `update:<kind>` or `request:<method>`.
     private(set) var unsurfaced: [String: Int] = [:]
 
@@ -143,6 +147,7 @@ public actor ACPIntegration: AgentIntegration {
     private func lost(reason: String?) {
         let error = reason ?? L10n.text("Процесс агента завершился. Проверь историю перед новой отправкой; повторов не было.",
                                         "The agent process ended. Review history before sending again; nothing was retried.")
+        prompts.removeAll(); unclaimed.removeAll()
         for id in Array(turns.keys) { finish(id, outcome: .uncertain, error: error) }
         for id in Array(permissions.keys) { permissions[id] = nil; sink.yield(.init(session: nil, payload: .resolved(id))) }
         live.removeAll(); busy.removeAll()
@@ -159,6 +164,9 @@ public actor ACPIntegration: AgentIntegration {
             sink.yield(.init(session: nil, payload: .disconnected))
         case .malformed(let name):
             drift.record(profile.agent, version: engine?.version, .frameType, name)
+        case .response(let id, let result):
+            guard let prompt = prompts.removeValue(forKey: id) else { unclaimed[id] = result; return }
+            completed(prompt.session, turn: prompt.turn, result: result.mapError { $0 as any Error })
         case .message(let message):
             ACPProtocolSurface.record(message, agent: profile.agent, version: engine?.version, into: drift)
             let method = message["method"].string ?? ""
@@ -412,13 +420,12 @@ public actor ACPIntegration: AgentIntegration {
             sink.yield(.init(session: session, payload: .item(prompt)))
             delivered = true
             let params = try ACPCodec.encode(ACPPromptRequest(sessionId: id, prompt: [.text(request.prompt)]))
-            // A turn has no deadline; a cancelled one that does not answer is closed by `cancel`.
-            let requestID = try await transport.dispatch("session/prompt", params: params, timeout: nil)
-            Task { [weak self] in
-                let result: Result<JSONValue, any Error>
-                do { result = .success(try await transport.response(requestID)) } catch { result = .failure(error) }
-                await self?.completed(id, turn: turn, result: result)
-            }
+            // A turn has no deadline; a cancelled one that does not answer is closed by `cancel`. The response comes as an
+            // ordered event, so every update the agent sent for the turn is applied before it completes.
+            let requestID = try await transport.dispatch("session/prompt", params: params, timeout: nil, ordered: true)
+            if let early = unclaimed.removeValue(forKey: requestID), transport === self.transport {
+                completed(id, turn: turn, result: early.mapError { $0 as any Error })
+            } else { prompts[requestID] = (id, turn) }
             return .success(handle)
         } catch {
             guard delivered else { return failure(error) }

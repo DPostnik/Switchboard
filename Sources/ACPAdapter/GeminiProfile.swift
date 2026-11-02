@@ -7,6 +7,8 @@ import ContextCore
 /// Isolation, verified against the 0.66.0 bundle (`homedir()` in the core chunk) and docs/reference/configuration.md:
 /// `GEMINI_CLI_HOME` replaces the home directory for all user-level state, so settings, OAuth credentials, sessions and
 /// history live in `<home>/.gemini/` (home = `~/Library/Application Support/Switchboard/gemini/`), never in `~/.gemini`.
+/// Checked live on 0.66.0 with `HOME` and `GEMINI_CLI_HOME` pointing at different folders: `initialize` and `session/new`
+/// wrote `projects.json`, `history/` and `tmp/<project>/chats/` only under `GEMINI_CLI_HOME`, nothing under `HOME`.
 /// `GEMINI_FORCE_FILE_STORAGE=true` keeps OAuth tokens in that folder instead of the shared login Keychain. Inherited API
 /// keys, Google Cloud credentials, endpoint overrides, system settings paths and trust overrides are removed, as the
 /// Codex adapter removes `OPENAI_API_KEY`. A project's own `.env` file can still set variables for that project
