@@ -2,7 +2,8 @@ import AppKit
 import ContextCore
 import UserNotifications
 
-/// `Switchboard --nightly-tests-report <failed|flaky> <summary>`, called by scripts/nightly-tests.sh.
+/// `Switchboard --nightly-tests-report <failed|flaky|compat> <summary>`, called by scripts/nightly-tests.sh
+/// (`compat` by scripts/compat-check.py, whose output is part of the same log).
 /// The running app posts the notification (a bare CLI process has no notification permission), so a click
 /// opens the run's log instead of Script Editor. The click opens only the fixed log path below; nothing in
 /// the request selects a file. Same-login-session channel, like the restart request.
@@ -19,6 +20,7 @@ enum NightlyTestsReport {
         switch result {
         case "failed": content.title = L10n.text("Ночные тесты Switchboard не прошли", "Switchboard nightly tests failed")
         case "flaky": content.title = L10n.text("Ночные тесты Switchboard: нестабильные тесты", "Switchboard nightly tests: flaky tests")
+        case "compat": content.title = L10n.text("Совместимость CLI агентов: нужна проверка", "Agent CLI compatibility: check needed")
         default: return nil
         }
         content.subtitle = L10n.text("Нажми, чтобы открыть лог", "Click to open the log")
@@ -32,7 +34,7 @@ enum NightlyTestsReport {
     @MainActor static func run(arguments: [String]) -> Bool {
         guard arguments.dropFirst().first == "--nightly-tests-report" else { return false }
         guard arguments.count == 4, content(result: arguments[2], summary: arguments[3]) != nil else {
-            fputs("usage: Switchboard --nightly-tests-report <failed|flaky> <summary>\n", stderr)
+            fputs("usage: Switchboard --nightly-tests-report <failed|flaky|compat> <summary>\n", stderr)
             exit(2)
         }
         let bundle = Bundle.main.bundleURL.standardizedFileURL

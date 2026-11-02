@@ -73,6 +73,8 @@ import Testing
     import sys,json,pathlib,argparse
     p=argparse.ArgumentParser()
     p.add_argument('--root');p.add_argument('--environment');p.add_argument('--language');p.add_argument('--max-browsers');p.add_argument('--profile-lease')
+    # The role's browser rights (BrowserLaunchPolicy.arguments) are always passed.
+    p.add_argument('--import-scope');p.add_argument('--allow-eval',action='store_true');p.add_argument('--allow-upload',action='store_true')
     a=p.parse_args()
     with (pathlib.Path(a.root)/'launches.jsonl').open('a') as f: f.write(json.dumps({'environment':a.environment,'lease':a.profile_lease})+'\n')
     for line in sys.stdin:

@@ -39,4 +39,9 @@ if [[ $result != passed ]]; then
   [[ -x $app ]] && "$app" --nightly-tests-report "$result" "$commit: $summary" >/dev/null 2>&1 ||
   osascript -e "display notification \"$commit: ${summary//\"/}\" with title \"Switchboard: nightly tests $result\"" >/dev/null 2>&1
 fi
+# Upstream agent CLI check (seconds; skipped on battery). Live no-inference tests only for a newly installed,
+# unverified version and only when the suite built and passed. Writes compat-status next to latest-status.
+live=(); [[ $code != 0 ]] && live=(--no-live)
+{ echo; echo "Compatibility check, $(date)"; } >>"$log"
+[[ -f "$WORK/scripts/compat-check.py" ]] && python3 -I "$WORK/scripts/compat-check.py" --worktree "$WORK" --app "$REPO/build/Switchboard.app/Contents/MacOS/Switchboard" $live >>"$log" 2>&1
 exit $code
