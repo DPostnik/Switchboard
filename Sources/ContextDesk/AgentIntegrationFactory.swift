@@ -68,7 +68,8 @@ enum AgentIntegrationFactory {
 
     /// Gemini CLI over ACP (stage D): one `gemini --acp` process serves every Gemini chat; models come from the session's
     /// model option; sign-in is the agent's own `authenticate` (Google account in the browser). Listed only when the CLI is
-    /// found: the app-owned install (`<GeminiProfile.home>/cli`), then Homebrew, then PATH.
+    /// found: the catalog install (`<root>/agents/gemini`, Settings → Accounts → Install Gemini CLI), the earlier
+    /// app-owned folder (`<GeminiProfile.home>/cli`), then Homebrew, then PATH.
     static let geminiProfile = AgentProfile(
         connection: GeminiProfile.connection, engine: JobEngine(rawValue: "gemini"), name: "Gemini", productName: "Gemini CLI",
         traits: [.sharedEngine, .sessionModels],
@@ -100,9 +101,15 @@ enum AgentIntegrationFactory {
             isInstalled: { (try? GeminiProfile.profile.executable(home: GeminiProfile.home)) != nil },
             missing: { L10n.text("Gemini CLI не установлен", "Gemini CLI not installed") },
             hint: {
-                L10n.text("Установи Gemini CLI (например, brew install gemini-cli или npm install -g @google/gemini-cli), затем нажми «Проверить снова». Проверенная версия: \(GeminiProfile.verifiedVersions.joined(separator: ", ")).",
-                          "Install Gemini CLI (for example brew install gemini-cli or npm install -g @google/gemini-cli), then click Check again. Verified version: \(GeminiProfile.verifiedVersions.joined(separator: ", ")).")
-            }),
+                L10n.text("«Установить Gemini CLI» ставит его из каталога агентов ACP в папку Switchboard (нужен Node.js с npm, например brew install node). Если Gemini CLI уже установлен иначе (brew install gemini-cli), нажми «Проверить снова». Проверенная версия: \(GeminiProfile.verifiedVersions.joined(separator: ", ")).",
+                          "Install Gemini CLI puts it into Switchboard's own folder from the ACP agent catalog (needs Node.js with npm, for example brew install node). If you installed Gemini CLI another way (brew install gemini-cli), click Check again. Verified version: \(GeminiProfile.verifiedVersions.joined(separator: ", ")).")
+            },
+            catalog: AgentCatalogLink(
+                id: GeminiProfile.catalogID, verifiedVersions: GeminiProfile.verifiedVersions,
+                fallback: AgentCatalogEntry(id: GeminiProfile.catalogID, name: "Gemini CLI", version: GeminiProfile.verifiedVersions.last ?? "0.66.0",
+                                            description: "Google's official CLI for Gemini",
+                                            distribution: .init(npx: .init(package: "@google/gemini-cli", version: GeminiProfile.verifiedVersions.last, args: ["--acp"]))),
+                checkEnvironment: GeminiProfile.installCheckEnvironment)),
         // Scheduled runs on Gemini are not verified yet: every unattended prompt would be refused.
         systemImage: "sparkles", scheduledJobs: false)
 

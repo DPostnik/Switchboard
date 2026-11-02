@@ -39,6 +39,20 @@ struct AgentInstallation: Sendable {
     let missing: @Sendable () -> String
     /// How to install it.
     let hint: @Sendable () -> String
+    /// The agent's entry in the ACP agent catalog; set when Settings may install, update and remove it there.
+    var catalog: AgentCatalogLink? = nil
+}
+
+/// How an agent installs from the ACP agent catalog (`AgentCatalogInstaller`), filled by the composition root.
+struct AgentCatalogLink: Sendable {
+    /// Registry id ("gemini").
+    let id: String
+    /// Builds the adapter was verified on: the catalog version is installed only when `AgentVersionPolicy` accepts it.
+    let verifiedVersions: [String]
+    /// Used when the catalog cannot be fetched and has no cached copy (a pinned npm package of a verified version).
+    let fallback: AgentCatalogEntry
+    /// Extra variables for the installer's `--version` check (`$CHECK_HOME` is the throwaway home).
+    let checkEnvironment: [String: String]
 }
 
 /// Copy and identifiers of one agent: the presentation table. Only the composition root fills it.

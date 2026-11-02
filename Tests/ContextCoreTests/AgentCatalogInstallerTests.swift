@@ -4,57 +4,6 @@ import CryptoKit
 @testable import ACPAdapter
 @testable import ContextCore
 
-private let sharedLauncher = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-    .appendingPathComponent("Fixtures/fixture-launcher").path
-
-/// A fake `npm` (Python): logs its arguments, then lays out `node_modules/<package>` with a `bin` like npm does. The
-/// agent's command is a hard link to the shared, already-assessed fixture launcher (its script is `<path>.fixture`), so
-/// no freshly written executable runs. FAKE_NPM_MODE: ok, fail, badcheck (the agent exits 1), nonode.
-private let fakeNPM = """
-import json, os, sys
-args = sys.argv[1:]
-with open(os.environ["FAKE_NPM_LOG"], "a") as log:
-    log.write(json.dumps(args) + "\\n")
-mode = os.environ.get("FAKE_NPM_MODE", "ok")
-if mode == "fail":
-    print("npm ERR! code E404", file=sys.stderr); sys.exit(1)
-if mode == "nonode":
-    print("env: node: No such file or directory", file=sys.stderr); sys.exit(127)
-prefix = args[args.index("--prefix") + 1]
-name, version = args[-1].rsplit("@", 1)
-binary = os.environ.get("FAKE_NPM_BIN", "agent")
-package = os.path.join(prefix, "node_modules", *name.split("/"))
-os.makedirs(package, exist_ok=True)
-with open(os.path.join(package, "package.json"), "w") as f:
-    json.dump({"name": name, "version": version, "bin": {binary: "cli.js"}}, f)
-bins = os.path.join(prefix, "node_modules", ".bin")
-os.makedirs(bins, exist_ok=True)
-command = os.path.join(bins, binary)
-os.link(os.environ["FAKE_LAUNCHER"], command)
-with open(command + ".fixture", "w") as f:
-    f.write("#!/bin/sh\\n" + ("exit 1\\n" if mode == "badcheck" else 'echo "' + version + '"\\n'))
-"""
-
-private struct NPMFixture {
-    let root: URL, npm: URL, log: URL
-    init() throws {
-        root = try catalogTemporaryDirectory()
-        npm = root.appendingPathComponent("npm")
-        log = root.appendingPathComponent("npm.log")
-        try ("#!" + fixturePython + "\n" + fakeNPM).write(to: npm, atomically: true, encoding: .utf8)
-        try installFixtureExecutable(at: npm)
-    }
-    func environment(mode: String = "ok", bin: String = "agent") -> [String: String] {
-        ["PATH": "/usr/bin:/bin", "FAKE_NPM_LOG": log.path, "FAKE_NPM_MODE": mode, "FAKE_NPM_BIN": bin, "FAKE_LAUNCHER": sharedLauncher,
-         "npm_config_global": "true"]
-    }
-    var calls: [[String]] {
-        ((try? String(contentsOf: log, encoding: .utf8)) ?? "").split(separator: "\n").compactMap {
-            try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String]
-        }
-    }
-}
-
 private func npxEntry(_ id: String = "sample", version: String = "1.2.3", package: String = "@scope/sample-cli") -> AgentCatalogEntry {
     AgentCatalogEntry(id: id, name: "Sample", version: version, distribution: .init(npx: .init(package: package, version: version, args: ["--acp"])))
 }

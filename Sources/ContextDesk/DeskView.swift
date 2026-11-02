@@ -1656,6 +1656,9 @@ struct SettingsView: View {
                     }.disabled(agent.connecting)
                     if agent.authenticated { Button(copy.signOut()) { Task { await model.logout(id) } }.disabled(model.anyBusy) }
                 }
+                if let link = profile.installation?.catalog {
+                    AgentCatalogInstallRows(model: model, catalog: model.agentCatalog, id: id, link: link, productName: profile.productName)
+                }
                 if agent.installed { EngineCompatibilityRows(agent: id.agent, name: profile.productName, engine: agent.descriptor?.engine) }
             } header: {
                 if let symbol = profile.systemImage { Label(copy.section(), systemImage: symbol) } else { Text(copy.section()) }
@@ -1666,6 +1669,8 @@ struct SettingsView: View {
     private var accountsSettings: some View {
         Form {
             ForEach(model.agentIDs, id: \.self) { id in accountSection(id) }
+            AgentCatalogSection(catalog: model.agentCatalog,
+                                linkedIDs: Set(model.agentIDs.compactMap { model.profile($0)?.installation?.catalog?.id }))
             if let catalog = model.modelCatalog(model.firstAgent(with: .catalogModels)) {
                 Section(L10n.text("Советник Claude", "Claude advisor")) {
                     Picker(L10n.text("Советник", "Advisor"), selection: Binding(get: { model.state.claudeAdvisor ?? "" }, set: { model.selectClaudeAdvisor($0) })) {
@@ -1677,8 +1682,9 @@ struct SettingsView: View {
                 }
             }
         }.formStyle(.grouped)
-            // A CLI installed or removed since launch shows up here.
+            // A CLI installed or removed since launch shows up here; catalog updates are checked at most once a day.
             .onAppear { model.refreshInstallations() }
+            .task { await model.agentCatalog.checkForUpdatesIfDue() }
     }
 
     private var browserSettings: some View {

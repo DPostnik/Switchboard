@@ -115,6 +115,8 @@ private struct ChatRunState: Equatable {
     let telegram = TelegramBridge()
     /// Branch and changes per project folder (`GitStatusStore`).
     let gitStatus = GitStatusStore()
+    /// The ACP agent catalog and the agents installed from it (`<root>/agents`); no I/O until Settings asks.
+    var agentCatalog = AgentCatalogController()
     /// Pull request badges and the per-chat PR watch (`PullRequestStore`).
     let pullRequests: PullRequestStore
     /// Latest messages per chat for the chat directory, reloaded when the chat changes.
@@ -266,6 +268,14 @@ private struct ChatRunState: Equatable {
             let installed = installation.isInstalled()
             if agentState(id).installed != installed { agentStates[id]?.installed = installed }
         }
+    }
+    /// Stops an agent's engine before its CLI is removed; its chats show it disconnected until it connects again.
+    func stopAgent(_ id: AgentConnectionID) async {
+        guard let slot = slots[id] else { return }
+        slot.historyBackfillTask?.cancel()
+        await slot.client.stop()
+        agentStates[id]?.connected = false; agentStates[id]?.authenticated = false
+        resetAgentState(id)
     }
     /// A connection serving optimizer plugins is connecting: plugin settings wait for it.
     var connecting: Bool { agentIDs.contains { traits($0).contains(.optimizerPlugins) && agentState($0).connecting } }
