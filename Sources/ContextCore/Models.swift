@@ -220,6 +220,8 @@ public enum Locations {
     }
     public static var codexHome: URL { root.appendingPathComponent("codex", isDirectory: true) }
     public static var claudeHome: URL { root.appendingPathComponent("claude", isDirectory: true) }
+    /// Agents installed from the ACP agent catalog and the catalog cache (`AgentCatalogStore`, `AgentCatalogInstaller`).
+    public static var agentsHome: URL { root.appendingPathComponent("agents", isDirectory: true) }
     public static var automations: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/automations") }
 
 }
