@@ -13,18 +13,23 @@ extension TranscriptScrollView {
     enum ActivityStep {
         case tool(TranscriptItem)
         case command(call: TranscriptItem, result: TranscriptItem?)
+        /// A call with its structured form (`AgentToolCall`, stage C) and its result.
+        case call(TranscriptItem, AgentToolCall, result: TranscriptItem?)
     }
 
-    /// The rows of an activity card: a shell command takes its result into its own row; other calls and results keep
-    /// a row each. Uses only id and prefix checks, so the grouping pass can count rows on every update.
+    /// The rows of an activity card: a shell command takes its result into its own row, and so does a structured
+    /// call; other calls and results (items stored before the structured model) keep a row each. Uses only id and
+    /// prefix checks, so the grouping pass can count rows on every update.
     static func activitySteps(_ actions: [TranscriptItem]) -> [ActivityStep] {
         let commands = Set(actions.lazy.filter(ActivityDetail.isShellCall).map(\.id))
-        guard !commands.isEmpty else { return actions.map { .tool($0) } }
-        let folded = Set(commands.map(ActivityDetail.resultID(of:)))
+        let structured = Set(actions.lazy.filter { $0.toolCall != nil && !commands.contains($0.id) }.map(\.id))
+        guard !commands.isEmpty || !structured.isEmpty else { return actions.map { .tool($0) } }
+        let folded = Set(commands.union(structured).map(ActivityDetail.resultID(of:)))
         var results: [String: TranscriptItem] = [:]
         for item in actions where folded.contains(item.id) { results[item.id] = item }
         return actions.compactMap { item in
             if commands.contains(item.id) { return .command(call: item, result: results[ActivityDetail.resultID(of: item.id)]) }
+            if structured.contains(item.id), let call = item.toolCall { return .call(item, call, result: results[ActivityDetail.resultID(of: item.id)]) }
             return folded.contains(item.id) ? nil : .tool(item)
         }
     }
@@ -32,6 +37,7 @@ extension TranscriptScrollView {
     /// One line of a summary row's text: what decides whether the open card must be drawn again.
     static func activityKey(_ item: TranscriptItem) -> String {
         "\(item.id) \(item.text.utf8.count)" + (item.exitCode.map { " \($0)" } ?? "") + (item.failed == true ? " !" : "")
+            + (item.toolCall.map { " " + $0.status.rawValue } ?? "")
     }
 
     /// Adds a thinking item to the grouped rows: it joins the thinking row right before it, otherwise starts one.
@@ -60,7 +66,7 @@ extension TranscriptScrollView {
         detailLinkPrefix + ([action, row] + (target.map { [$0] } ?? [])).joined(separator: separator)
     }
 
-    private static func detailKey(_ action: String, _ target: String) -> String { action + separator + target }
+    static func detailKey(_ action: String, _ target: String) -> String { action + separator + target }
 
     // MARK: Thinking row
 
@@ -111,6 +117,8 @@ extension TranscriptScrollView {
             switch step {
             case .tool(let action): part = toolStep(number: number, text: action.text, row: row, first: first)
             case .command(let call, let outcome): part = commandStep(number: number, call: call, result: outcome, rowID: item.id, index: index, row: row, first: first)
+            case .call(let action, let call, let outcome):
+                part = callStep(number: number, item: action, call: call, result: outcome, rowID: item.id, row: row, first: first)
             }
             guard part.length > 0 else { continue }
             if index < steps.count - 1 {
@@ -122,8 +130,8 @@ extension TranscriptScrollView {
         }
     }
 
-    private static let stepFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-    private static let outputFont = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)
+    static let stepFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    static let outputFont = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)
 
     /// A call or result as before: its number and its whole text. Tool output stays literal, including link-like text.
     private func toolStep(number: String, text: String, row: NSParagraphStyle, first: NSParagraphStyle) -> NSMutableAttributedString {
@@ -147,6 +155,10 @@ extension TranscriptScrollView {
         if let outcome = ActivityDetail.outcome(result) {
             line.append(NSAttributedString(string: "  ", attributes: [.font: Self.stepFont]))
             line.append(Self.badge(outcome))
+        } else if result == nil, let status = call.toolCall?.status, status != .inProgress, status != .completed {
+            // Waiting for approval, denied or stopped before it ran.
+            line.append(NSAttributedString(string: "  ", attributes: [.font: Self.stepFont]))
+            line.append(Self.statusBadge(status))
         }
         if let seconds = result?.seconds, seconds >= 1, seconds.isFinite, seconds < 1e7 {
             line.append(NSAttributedString(string: " · " + ResponseTiming.duration(Int(seconds.rounded())), attributes: [
@@ -159,6 +171,8 @@ extension TranscriptScrollView {
                                 .toolTip: open ? L10n.text("Скрыть вывод", "Hide output") : L10n.text("Показать вывод", "Show output")],
                                range: NSRange(location: 0, length: line.length))
         }
+        // A command Codex parsed as reading or searching names its files; they open like file links.
+        if let call = call.toolCall, call.kind != .execute { appendLocations(call.locations, to: line) }
         line.addAttribute(.paragraphStyle, value: first, range: NSRange(location: 0, length: line.length))
         guard open, let result else { return line }
         let output = ActivityDetail.output(result)
@@ -196,7 +210,7 @@ extension TranscriptScrollView {
     }
 
     /// Success is a quiet moss check; a non-zero exit or a failure is a clay label.
-    private static func badge(_ outcome: ActivityDetail.Outcome) -> NSAttributedString {
+    static func badge(_ outcome: ActivityDetail.Outcome) -> NSAttributedString {
         let description = ActivityDetail.label(outcome)
         guard outcome != .succeeded else {
             let icon = NSTextAttachment()
@@ -220,7 +234,7 @@ extension TranscriptScrollView {
         guard parts.count >= 2, previous.contains(where: { $0.id == parts[1] }) else { return }
         let action = parts[0], rowID = parts[1], target = parts.count > 2 ? parts[2] : rowID
         switch action {
-        case "thinking", "output":
+        case "thinking", "output", "call":
             let key = Self.detailKey(action, target)
             if expandedDetails.contains(key) { expandedDetails.remove(key) } else { expandedDetails.insert(key) }
             rerenderItem(id: rowID)

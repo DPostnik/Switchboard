@@ -11,8 +11,9 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 - Code editor integration, as in T3 Code: files from answers, the preview, the new file tree and turn changes open in your editor at the right line (VS Code, Cursor, Zed, Windsurf, VSCodium, Xcode, Sublime Text and JetBrains IDEs are detected; choose one in Settings → General → Code editor), ⌘-click on a file in a chat opens it there, and the project menu offers "Open in VS Code" for the whole folder.
 - Comments on turn changes: in the turn changes window, click a line number (Shift-click for a range), write what should change and "Add to message" puts the file, lines, the quoted diff and your comment into the chat's message for the agent; nothing is sent until you send it.
 - Project file tree: the folder button in the chat toolbar (⇧⌘E) shows the chat folder's files in the side panel (git's view without ignored files, or a walk that skips hidden and build folders), with search, preview on click, "Add to message", "Open in" and drag into the composer.
-
 - Codex web searches, image views and dynamic tool calls now appear among a chat's actions instead of being dropped.
+- Structured actions: in an open actions card, Codex and Claude file reads, edits, searches, web fetches, sub-agents and MCP tools show a kind icon, a short title, a status badge (running, awaiting approval, denied, failed, done) and their files as links that open like other file links; an edit opens to its inline diff. Chats saved earlier keep their old rows.
+- Agent plans: the plan Codex updates and the Claude to-do list (TodoWrite) appear in the conversation as a compact checklist with progress, updated in place as the turn goes on.
 
 ### Changed
 

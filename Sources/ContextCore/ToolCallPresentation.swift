@@ -24,6 +24,24 @@ public enum ToolCallText {
     public static func fetch(_ url: String) -> String { L10n.text("Загрузка \(url)", "Fetch \(url)") }
     public static var plan: String { L10n.text("Обновление плана", "Update plan") }
 
+    /// The status badge of a call row.
+    public static func status(_ status: AgentToolCall.Status) -> String {
+        switch status {
+        case .pending: L10n.text("ожидает", "pending")
+        case .inProgress: L10n.text("выполняется", "running")
+        case .completed: L10n.text("готово", "done")
+        case .failed: L10n.text("ошибка", "failed")
+        case .awaitingApproval: L10n.text("ждёт разрешения", "awaiting approval")
+        case .rejected: L10n.text("отклонено", "denied")
+        case .cancelled: L10n.text("остановлено", "stopped")
+        }
+    }
+
+    /// The header of a plan checklist: "Plan · 2 of 5".
+    public static func planHeader(done: Int, total: Int) -> String {
+        L10n.text("План · \(done) из \(total)", "Plan · \(done) of \(total)")
+    }
+
     /// A one-line compact JSON summary of a call's input, at most `limit` characters; nil for an empty input.
     public static func inputSummary(_ input: JSONValue, limit: Int = 200) -> String? {
         if case .object(let object) = input, object.isEmpty { return nil }

@@ -79,6 +79,9 @@ public struct NativeTranscript: NSViewRepresentable {
         /// A thinking block's stop adds its duration without changing its text.
         var lastSeconds: Double?
         var totalLength: Int
+        /// Structured call statuses and plan entries (an approval or a result moves a call that is no longer the last
+        /// item; a plan entry's status changes without changing the text length).
+        var callStates: Int
         var isWorking: Bool
     }
     private(set) var copyFeedback: (id: String, succeeded: Bool, block: Int?)?
@@ -86,7 +89,7 @@ public struct NativeTranscript: NSViewRepresentable {
     private(set) var expandedBlocks: Set<String> = []
     /// Answer section under the pointer; its heading shows a copy control.
     private(set) var hoveredSection: String?
-    private var projectPath: String?
+    private(set) var projectPath: String?
     /// Previews a file the user clicked in an answer (URL and optional line); without it files open externally.
     public var onOpenFile: ((URL, Int?) -> Void)?
     /// Quotes the selected text into the chat with its numbered code lines, if any; nil hides the menu item.
@@ -656,6 +659,7 @@ public struct NativeTranscript: NSViewRepresentable {
     }
 
     private func headline(of activity: TranscriptItem) -> String {
+        if let title = activity.toolCall?.title, !title.isEmpty { return ActivityDetail.oneLine(title, limit: 120) }
         let length = activity.text.utf8.count
         if let memo = headlineMemo, memo.id == activity.id, memo.length == length { return memo.headline }
         let line = Self.activityHeadline(activity.text)
@@ -667,9 +671,16 @@ public struct NativeTranscript: NSViewRepresentable {
     /// streaming delta changes the last item's length, an appended item the count, a finished turn the flag. A
     /// middle item that changes without changing the total length keeps the previous grouping until the next change.
     private func groupedItems(_ items: [TranscriptItem], conversationID: String?, isWorking: Bool) -> [TranscriptItem] {
+        var totalLength = 0, calls = Hasher()
+        for (index, item) in items.enumerated() {
+            totalLength += item.text.utf8.count
+            if let status = item.toolCall?.status { calls.combine(index); calls.combine(status) }
+            // A plan entry that moves from in progress to done keeps the text length.
+            if let plan = item.plan { calls.combine(index); calls.combine(plan.checklist) }
+        }
         let key = GroupingKey(conversationID: conversationID, count: items.count, lastID: items.last?.id,
                               lastLength: items.last?.text.utf8.count ?? 0, lastSeconds: items.last?.seconds,
-                              totalLength: items.reduce(0) { $0 + $1.text.utf8.count }, isWorking: isWorking)
+                              totalLength: totalLength, callStates: calls.finalize(), isWorking: isWorking)
         if let memo = groupingMemo, memo.key == key {
             actionGroups = memo.groups
             return memo.items
@@ -781,6 +792,8 @@ public struct NativeTranscript: NSViewRepresentable {
             renderActivity(item, expanded: expanded, into: result)
         } else if item.kind == ActivityDetail.thinkingKind {
             renderThinking(item, into: result)
+        } else if item.kind == AgentPlan.itemKind, let plan = item.plan {
+            renderPlan(plan, id: item.id, into: result)
         } else {
             if (item.kind == "user" && item.phase != nil) || (item.kind != "user" && item.showsAuthor) {
                 let user = item.kind == "user"
@@ -828,7 +841,7 @@ public struct NativeTranscript: NSViewRepresentable {
             var markdown = TranscriptMarkdown(view: self, item: item, options: linkOptions,
                                               width: transcript.textContainer?.containerSize.width ?? 600)
             markdown.render(into: result)
-        } else if item.kind != "activity" && item.kind != ActivityDetail.thinkingKind {
+        } else if item.kind != "activity" && item.kind != ActivityDetail.thinkingKind && !(item.kind == AgentPlan.itemKind && item.plan != nil) {
             for (index, block) in item.text.components(separatedBy: "```").enumerated() {
                 let isCode = index % 2 == 1
                 let font = isCode ? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular) : NSFont.systemFont(ofSize: 14)
