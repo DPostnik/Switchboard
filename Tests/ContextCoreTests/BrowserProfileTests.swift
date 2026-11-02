@@ -2,6 +2,7 @@ import CryptoKit
 import Foundation
 import Testing
 import AgentContract
+import CodexAdapter
 @testable import ContextCore
 
 private struct ProfileFixture {

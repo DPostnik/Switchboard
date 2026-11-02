@@ -318,6 +318,12 @@ public actor CodexIntegration: AgentIntegration {
     }
 }
 
+extension AgentPermissionSupport {
+    /// Codex runs role profiles through its sandbox and approval policy. It has no shell-off mode, command text
+    /// inspection, per-connector control, writable folder inside a read-only sandbox or path to the user's Chrome.
+    public static let codexProjectPolicy = Self(roleProfiles: true, enforced: [.sandboxedShell, .networkOffWithShell, .promptsWithoutSandbox])
+}
+
 private struct IntegrationRejection: LocalizedError {
     let reason: AgentRejection
     init(_ reason: AgentRejection) { self.reason = reason }

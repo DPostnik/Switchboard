@@ -115,35 +115,87 @@ public enum AgentPermissionIntent: Codable, Hashable, Sendable {
     public var profile: AgentPermissionProfile? { if case .profile(let value, _) = self { return value }; return nil }
 }
 
-public enum AgentPermissionSupport: String, Codable, Sendable {
-    case codexProjectPolicy, externalPolicyOnly, claudeRestrictedFiles
+/// A role requirement that not every engine can enforce exactly. An adapter declares the ones it enforces; the app shows
+/// the rest as approximations of the role (`AgentPermissionSupport.approximations`) instead of downgrading silently.
+public enum AgentPermissionRule: String, Codable, CaseIterable, Sendable {
+    /// No shell at all (`shell == .off`).
+    case shellOff
+    /// Shell commands inside an engine sandbox (`shell == .sandboxed`).
+    case sandboxedShell
+    /// Shell on with the network off.
+    case networkOffWithShell
+    /// Command text inspection before a command runs.
+    case commandInspection
+    /// Some connectors only, or connectors with write prompts (neither `off` nor `all`).
+    case selectedConnectors
+    /// A writable research folder inside an otherwise read-only role.
+    case scratchInReadOnly
+    /// Driving the user's own Chrome (`browser == .appAndUserChrome`).
+    case userChrome
+    /// Approval prompts while the filesystem is unrestricted.
+    case promptsWithoutSandbox
+
+    /// The role dimension an unenforced rule approximates.
+    public var dimension: AgentPermissionDimension {
+        switch self {
+        case .shellOff, .sandboxedShell: .shell
+        case .networkOffWithShell: .network
+        case .commandInspection: .commandInspection
+        case .selectedConnectors: .connectors
+        case .scratchInReadOnly: .scratch
+        case .userChrome: .browser
+        case .promptsWithoutSandbox: .approvals
+        }
+    }
+
+    /// True when the profile asks for this requirement.
+    public func applies(to profile: AgentPermissionProfile) -> Bool {
+        switch self {
+        case .shellOff: profile.shell == .off
+        case .sandboxedShell: profile.shell == .sandboxed
+        case .networkOffWithShell: profile.shell == .on && !profile.network
+        case .commandInspection: !profile.commandInspection.isEmpty
+        case .selectedConnectors: profile.connectors != .off && profile.connectors != .all
+        case .scratchInReadOnly: profile.scratch != nil && profile.filesystem == .readOnly
+        case .userChrome: profile.browser == .appAndUserChrome
+        case .promptsWithoutSandbox: profile.filesystem == .unrestricted && profile.approvals != .never
+        }
+    }
+}
+
+/// Which permission requests an engine takes and which role requirements it enforces. Described by capabilities, not by
+/// engine name: each adapter declares its own value (the Codex and Claude presets live in their adapters).
+public struct AgentPermissionSupport: Codable, Hashable, Sendable {
+    /// Takes app role profiles (`AgentPermissionIntent.profile`).
+    public let roleProfiles: Bool
+    /// Takes the external CLI's own policy with new prompts denied (`.externalPolicyDenyPrompts`).
+    public let externalPolicy: Bool
+    /// Rules enforced exactly; every other rule a profile asks for is reported as an approximation.
+    public let enforced: Set<AgentPermissionRule>
+
+    public init(roleProfiles: Bool, externalPolicy: Bool = false, enforced: Set<AgentPermissionRule> = []) {
+        self.roleProfiles = roleProfiles; self.externalPolicy = externalPolicy; self.enforced = enforced
+    }
+
+    /// Runs only under the external CLI's policy; the app enforces no role dimension.
+    public static let externalPolicyOnly = Self(roleProfiles: false, externalPolicy: true)
 
     public func accepts(_ intent: AgentPermissionIntent) -> Bool {
-        switch (self, intent) {
-        case (.externalPolicyOnly, .externalPolicyDenyPrompts): return true
-        case (.externalPolicyOnly, _), (_, .externalPolicyDenyPrompts): return false
-        case (.codexProjectPolicy, .profile(let profile, _)), (.claudeRestrictedFiles, .profile(let profile, _)):
-            // Unrestricted execution with prompts is not a role either engine runs; it would silently become "never".
-            return !(profile.filesystem == .unrestricted && profile.approvals != .never)
+        switch intent {
+        case .externalPolicyDenyPrompts: return externalPolicy
+        case .profile(let profile, _):
+            // Unrestricted execution with prompts is not a role any engine runs; it would silently become "never".
+            return roleProfiles && !(profile.filesystem == .unrestricted && profile.approvals != .never)
         }
     }
 
     /// Dimensions this engine cannot enforce as requested; the app shows them instead of downgrading silently.
     public func approximations(_ profile: AgentPermissionProfile) -> [AgentPermissionDimension] {
+        guard roleProfiles else { return AgentPermissionDimension.allCases }
         let effective = profile.effective
         var result: [AgentPermissionDimension] = []
-        switch self {
-        case .externalPolicyOnly: return AgentPermissionDimension.allCases
-        case .codexProjectPolicy:
-            if effective.shell == .off { result.append(.shell) }
-            if !effective.commandInspection.isEmpty { result.append(.commandInspection) }
-            if effective.connectors != .off && effective.connectors != .all { result.append(.connectors) }
-            if effective.scratch != nil, effective.filesystem == .readOnly { result.append(.scratch) }
-            if effective.browser == .appAndUserChrome { result.append(.browser) }
-        case .claudeRestrictedFiles:
-            if effective.shell == .sandboxed { result.append(.shell) }
-            if effective.shell == .on, !effective.network { result.append(.network) }
-            if effective.filesystem == .unrestricted, effective.approvals != .never { result.append(.approvals) }
+        for rule in AgentPermissionRule.allCases where !enforced.contains(rule) && rule.applies(to: effective) {
+            if !result.contains(rule.dimension) { result.append(rule.dimension) }
         }
         return result
     }

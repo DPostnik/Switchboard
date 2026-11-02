@@ -2,6 +2,14 @@ import Foundation
 import ContextCore
 import AgentContract
 
+extension AgentPermissionSupport {
+    /// Claude enforces roles with its tool set, settings rules, the app's answers and a command hook. It has no OS sandbox
+    /// (a sandboxed shell becomes no shell), cannot keep the network off while the shell runs and never prompts without
+    /// restrictions.
+    public static let claudeRestrictedFiles = Self(roleProfiles: true,
+        enforced: [.shellOff, .commandInspection, .selectedConnectors, .scratchInReadOnly, .userChrome])
+}
+
 /// Role encoding for the Claude CLI. Claude has no OS sandbox here, so a role is layered: the tool set,
 /// settings rules, the app's `can_use_tool` answers and a `PreToolUse` hook for command text (plan 4.5).
 struct ClaudeLaunchPolicy: Equatable {

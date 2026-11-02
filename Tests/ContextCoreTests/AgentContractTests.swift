@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import AgentContract
+import CodexAdapter
 
 private func context(_ agent: AgentID = .codex) -> AgentContext {
     AgentContext(connection: AgentConnectionID(agent: agent, id: UUID()), accountRevision: UUID())
