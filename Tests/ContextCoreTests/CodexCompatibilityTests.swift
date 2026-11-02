@@ -6,12 +6,36 @@ import Testing
 
 @Test func codexVersionGateUsesOnlyTheEngineProductToken() {
     for agent in ["context_desk/0.160.0 (Mac OS; arm64)", "context_desk/0.159.2 (Mac OS; arm64)", "context_desk/0.159.0 (Mac OS; arm64)", "codex/0.158.0-alpha.2.1 fixture"] {
+        #expect(CodexProtocolCompatibility.verdict(userAgent: agent) == .verified)
+        #expect(CodexProtocolCompatibility.engine(userAgent: agent)?.verified == true)
+    }
+    // Same major.minor as a verified build: accepted as unverified (user decision 2026-11-02).
+    for (agent, nearest) in [("codex/0.160.1 fixture", "0.160.0"), ("codex/0.160.0-dev fixture", "0.160.0"), ("codex/0.159.1 fixture", "0.159.2"),
+                             ("codex/0.159.0-dev fixture", "0.159.2"), ("codex/0.158.3 fixture", "0.158.0-alpha.2.1")] {
+        #expect(CodexProtocolCompatibility.verdict(userAgent: agent) == .sameMinor(nearest: nearest))
+        let engine = CodexProtocolCompatibility.engine(userAgent: agent)
+        #expect(engine?.verified == false && engine?.nearestVerified == nearest)
         #expect(CodexProtocolCompatibility.accepts(userAgent: agent))
     }
-    for agent in ["", "0.160.0", "/0.160.0", "codex/0.160.1 fixture", "codex/0.160.0-dev fixture", "codex/0.159.1 fixture", "codex/0.159.0-dev fixture",
-                  "codex/999.0 client/0.159.0 fixture"] {
+    for agent in ["", "0.160.0", "/0.160.0", "codex/0.161.0 fixture", "codex/1.160.0 fixture", "codex/0.157.9 fixture", "codex/0.160 fixture",
+                  "codex/0.160.00 fixture", "codex/0.160.0- fixture", "codex/999.0 client/0.159.0 fixture"] {
         #expect(!CodexProtocolCompatibility.accepts(userAgent: agent))
+        #expect(CodexProtocolCompatibility.engine(userAgent: agent) == nil)
     }
+}
+
+@Test func agentVersionPolicyAcceptsExactAndSameBranchVersionsOnly() {
+    let verified = ["2.1.292"]
+    #expect(AgentVersionPolicy.evaluate("2.1.292", verified: verified) == .verified)
+    #expect(AgentVersionPolicy.evaluate("2.1.316", verified: verified) == .sameMinor(nearest: "2.1.292"))
+    #expect(AgentVersionPolicy.evaluate("2.1.0", verified: verified) == .sameMinor(nearest: "2.1.292"))
+    #expect(AgentVersionPolicy.evaluate("2.1.300-beta.1", verified: verified) == .sameMinor(nearest: "2.1.292"))
+    for version in ["2.2.0", "3.1.292", "2.0.292", "2.1", "2.1.x", "02.1.292", "2.1.292.1", "2.1.292-", "2.1.292-beta_1", " 2.1.292", ""] {
+        #expect(AgentVersionPolicy.evaluate(version, verified: verified) == .rejected, "\(version)")
+    }
+    // The nearest verified build on a branch is the newest patch.
+    #expect(AgentVersionPolicy.evaluate("0.159.7", verified: ["0.159.0", "0.159.2", "0.160.0"]) == .sameMinor(nearest: "0.159.2"))
+    #expect(AgentVersionPolicy.evaluate("1.0.0", verified: []) == .rejected)
 }
 
 /// Explicit opt-in: uses a temporary unauthenticated home and never sends a model turn.

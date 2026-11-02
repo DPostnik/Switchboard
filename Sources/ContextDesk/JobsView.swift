@@ -146,7 +146,7 @@ struct JobsView: View {
                 if job.engine == .codex {
                     Text(L10n.text("Каждый запуск создаёт новый чат с ролью задания (не выше роли проекта для заданий).", "Each run creates a new chat with the job's role (never above the project's job role).")).font(.ui(.caption)).foregroundStyle(.secondary)
                 } else {
-                    Text(L10n.text("Claude Code использует существующий вход и правила разрешений CLI. Новые запросы разрешений отклоняются; результат сохраняется здесь. Требуется версия \(AgentIntegrationFactory.claudeVersion).", "Claude Code uses existing CLI sign-in and permission rules. New permission requests are denied; results are saved here. Version \(AgentIntegrationFactory.claudeVersion) is required.")).font(.ui(.caption)).foregroundStyle(.secondary)
+                    Text(L10n.text("Claude Code использует существующий вход и правила разрешений CLI. Новые запросы разрешений отклоняются; результат сохраняется здесь. Проверенная версия \(AgentIntegrationFactory.claudeVersion); другие версии \(ClaudeRuntime.branch).x запускаются как непроверенные.", "Claude Code uses existing CLI sign-in and permission rules. New permission requests are denied; results are saved here. Verified version \(AgentIntegrationFactory.claudeVersion); other \(ClaudeRuntime.branch).x versions run as unverified.")).font(.ui(.caption)).foregroundStyle(.secondary)
                 }
                 }
                 RoutineCard {

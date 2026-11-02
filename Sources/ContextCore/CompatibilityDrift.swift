@@ -48,6 +48,7 @@ public final class CompatibilityDrift: Sendable {
     static let overflowName = "(more)"
 
     private let entries = OSAllocatedUnfairLock(initialState: [Key: Entry]())
+    private let unverified = OSAllocatedUnfairLock(initialState: Set<String>())
     private let logger: Logger?
 
     public init(logging: Bool = true) {
@@ -72,6 +73,13 @@ public final class CompatibilityDrift: Sendable {
         logger?.notice("Protocol drift: agent=\(key.agent.rawValue, privacy: .public) version=\(key.version, privacy: .public) category=\(key.category.rawValue, privacy: .public) name=\(key.name, privacy: .public)")
         NotificationCenter.default.post(name: Self.changed, object: self)
         return true
+    }
+
+    /// Logs once per process that an unverified (same-branch) engine version was accepted.
+    public func noteUnverified(_ agent: AgentID, version: String) {
+        let key = "\(agent.rawValue) \(Self.clean(version, limit: 40, empty: "unknown"))"
+        guard unverified.withLock({ $0.insert(key).inserted }) else { return }
+        logger?.notice("Unverified engine version connected: agent=\(agent.rawValue, privacy: .public) version=\(Self.clean(version, limit: 40, empty: "unknown"), privacy: .public)")
     }
 
     /// Records of one agent (or all), most frequent first.

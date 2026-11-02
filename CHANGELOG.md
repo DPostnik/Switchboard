@@ -9,6 +9,10 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 - Protocol drift diagnostics: events, item types and fields from Codex or Claude Code that the adapter does not recognize are counted by name (never content) instead of disappearing silently; Settings → Accounts shows a one-line summary per agent and the first occurrence of each is written to the system log (category compatibility).
 - Nightly agent CLI check: after the nightly tests, on AC power only, Switchboard compares the installed Codex and Claude Code with the verified versions and the latest published ones (npm, at most once a day), runs the no-inference live tests only for a newly installed unverified version, writes compat-status beside latest-status and notifies once per new problem or version.
 
+### Changed
+
+- Agent CLI version policy: besides the exact verified builds, Codex and Claude Code versions on the same major.minor branch (for example Codex 0.160.x, Claude Code 2.1.x) now connect as unverified, with a warning beside the agent name in the sidebar and in Settings → Accounts and drift diagnostics shown there; other versions are still rejected.
+
 ## [1.1.0] - 2026-11-01
 
 ### Added

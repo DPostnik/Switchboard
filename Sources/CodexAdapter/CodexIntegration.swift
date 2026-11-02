@@ -80,12 +80,13 @@ public actor CodexIntegration: AgentIntegration {
     public func descriptor() async -> AgentResult<AgentDescriptor> {
         guard await client.transport.isRunning else { return .unavailable }
         let version = await client.transport.serverUserAgent ?? ""
-        guard CodexProtocolCompatibility.accepts(userAgent: version) else { return .rejected(.incompatibleContract) }
+        guard let engine = CodexProtocolCompatibility.engine(userAgent: version) else { return .rejected(.incompatibleContract) }
+        if !engine.verified { CompatibilityDrift.shared.noteUnverified(.codex, version: engine.version) }
         let epoch = await client.transport.accountEpoch
         return .success(AgentDescriptor(context: .init(connection: .originalCodex, accountRevision: epoch), identityMode: .appOwnedHome,
             capabilities: Set<AgentCapability>([.interactiveSessions, .scheduledExecution, .isolatedGeneration, .history, .archive, .streaming,
                            .approvals, .userQuestions, .interruption, .authenticationManagement, .modelDiscovery,
-                           .usage, .accountLimits, .workflowRegistration]).union(browserProfilesEnabled ? [.browserProfiles] : []), permissions: .codexProjectPolicy, routes: routes))
+                           .usage, .accountLimits, .workflowRegistration]).union(browserProfilesEnabled ? [.browserProfiles] : []), permissions: .codexProjectPolicy, routes: routes, engine: engine))
     }
     public func disconnect() async {
         interactionContexts.removeAll(); turnContexts.removeAll(); finishedTurns.removeAll()

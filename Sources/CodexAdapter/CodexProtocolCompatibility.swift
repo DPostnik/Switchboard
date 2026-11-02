@@ -1,6 +1,10 @@
 import Foundation
+import AgentContract
 
-/// Exact engine builds checked against the adapter contract; never accept a version range.
+/// Engine builds checked against the adapter contract, and the connection policy for others
+/// (`AgentVersionPolicy`, user decision 2026-11-02): an exact verified build connects normally; a build on the
+/// same major.minor branch (for example 0.160.x) connects as unverified, with a warning in the app and drift
+/// diagnostics; any other version is rejected before anything is dispatched.
 enum CodexProtocolCompatibility {
     static let currentVersion = "0.160.0"
     static let supportedVersions = ["0.158.0-alpha.2.1", "0.159.0", "0.159.2", currentVersion]
@@ -15,7 +19,19 @@ enum CodexProtocolCompatibility {
         return version.isEmpty ? nil : version
     }
 
-    static func accepts(userAgent: String) -> Bool {
-        version(userAgent: userAgent).map(supportedVersions.contains) ?? false
+    static func verdict(userAgent: String) -> AgentVersionPolicy.Verdict {
+        version(userAgent: userAgent).map { AgentVersionPolicy.evaluate($0, verified: supportedVersions) } ?? .rejected
+    }
+
+    static func accepts(userAgent: String) -> Bool { verdict(userAgent: userAgent) != .rejected }
+
+    /// The engine as the descriptor reports it; nil when the version is rejected.
+    static func engine(userAgent: String) -> AgentEngineVersion? {
+        guard let version = version(userAgent: userAgent) else { return nil }
+        switch AgentVersionPolicy.evaluate(version, verified: supportedVersions) {
+        case .verified: return AgentEngineVersion(version: version, verified: true)
+        case .sameMinor(let nearest): return AgentEngineVersion(version: version, verified: false, nearestVerified: nearest)
+        case .rejected: return nil
+        }
     }
 }

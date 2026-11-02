@@ -37,13 +37,35 @@ private func contractFixture(version: String = "0.159.0", disconnect: Bool = fal
     return (root, executable)
 }
 
-@Test(arguments: ["999.0", "0.159.1", "0.159.0-alpha.1", "0.159.00", "999.0 metadata/0.159.0"])
+@Test(arguments: ["999.0", "0.161.0", "1.159.0", "0.159.00", "999.0 metadata/0.159.0"])
 func contractRuntimeRejectsUnverifiedVersionsBeforeSessionDispatch(version: String) async throws {
     let (root, executable) = try contractFixture(version: version)
     defer { try? FileManager.default.removeItem(at: root) }
     let integration: any AgentIntegration = CodexIntegration()
     if case .rejected(.incompatibleContract) = await integration.connect(.init(executable: executable, home: root)) {} else { Issue.record("Unverified version accepted") }
     if case .unavailable = await integration.descriptor() {} else { Issue.record("Rejected connection left usable") }
+}
+
+/// Same major.minor as a verified build: connects, and the descriptor marks the engine unverified for the warning.
+@Test(arguments: ["0.159.1", "0.159.0-alpha.1", "0.160.9"])
+func contractRuntimeConnectsSameBranchVersionsAsUnverified(version: String) async throws {
+    let (root, executable) = try contractFixture(version: version)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let integration: any AgentIntegration = CodexIntegration()
+    guard case .success(let descriptor) = await integration.connect(.init(executable: executable, home: root)) else {
+        Issue.record("Same-branch version rejected"); return
+    }
+    #expect(descriptor.engine?.version == version)
+    #expect(descriptor.engine?.verified == false)
+    #expect(descriptor.engine?.nearestVerified != nil)
+    await integration.disconnect()
+    let (verifiedRoot, verifiedExecutable) = try contractFixture(version: "0.159.0")
+    defer { try? FileManager.default.removeItem(at: verifiedRoot) }
+    guard case .success(let verified) = await integration.connect(.init(executable: verifiedExecutable, home: verifiedRoot)) else {
+        Issue.record("Verified version rejected"); return
+    }
+    #expect(verified.engine == AgentEngineVersion(version: "0.159.0", verified: true))
+    await integration.disconnect()
 }
 
 @Test func contractRuntimeBindsPreparedWorkToAccountAndChecksTransportAtWrite() async throws {

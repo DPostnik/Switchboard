@@ -212,6 +212,10 @@ struct DeskView: View {
     private var sidebarDock: some View {
         let jobs = model.showingJobs && !model.showingArchive && !model.showingAttention
         let account = model.currentAgent == .appClaude ? (model.claudeAuthenticated ? L10n.text("Claude · подключён", "Claude · connected") : L10n.text("Claude · вход не выполнен", "Claude · not signed in")) : (model.connecting ? L10n.text("Подключение…", "Connecting…") : model.accountLabel)
+        let versionWarning = model.currentAgent == .appClaude
+            ? EngineCompatibility.warning(name: "Claude Code", engine: model.claudeDescriptor?.engine)
+            : EngineCompatibility.warning(name: "Codex", engine: model.agentDescriptor?.engine)
+        let status = versionWarning.map { account + "\n" + $0 } ?? account
         return HStack(spacing: .ui(2)) {
             Button { model.openSchedule() } label: {
                 Image(systemName: "calendar")
@@ -246,11 +250,14 @@ struct DeskView: View {
                 Circle().fill(!model.currentAgentConnected ? DeskPalette.muted : model.currentAgentAuthenticated ? DeskPalette.accent : DeskPalette.attention)
                     .frame(width: .ui(6), height: .ui(6))
                 Text(model.currentAgentName).font(.ui(.caption)).foregroundStyle(.secondary).lineLimit(1)
+                if versionWarning != nil {
+                    Image(systemName: "exclamationmark.triangle.fill").font(.ui(.caption2)).foregroundStyle(DeskPalette.attention)
+                }
             }
             .padding(.horizontal, .ui(6))
-            .help(account)
+            .help(status)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(account)
+            .accessibilityLabel(status)
         }
         .padding(.horizontal, .ui(10)).padding(.bottom, .ui(10))
     }
@@ -1592,7 +1599,7 @@ struct SettingsView: View {
                 if model.authenticated { Button(L10n.text("Выйти из аккаунта этого приложения", "Sign out of this app")) { Task { await model.logout() } }.disabled(model.anyBusy) }
                 else { Button(L10n.text("Войти через ChatGPT", "Sign in with ChatGPT")) { Task { await model.login() } }.disabled(!model.connected) }
                 Button(L10n.text("Переподключить Codex", "Reconnect Codex")) { Task { await model.connect() } }.disabled(model.connecting || model.anyBusy)
-                EngineCompatibilityRows(agent: .codex)
+                EngineCompatibilityRows(agent: .codex, name: "Codex", engine: model.agentDescriptor?.engine)
             }
             Section(L10n.text("Подписка Claude", "Claude subscription")) {
                 Text(model.claudeAuthenticated ? L10n.text("Вход выполнен", "Signed in") : L10n.text("Вход не выполнен", "Not signed in"))
@@ -1604,7 +1611,7 @@ struct SettingsView: View {
                 if model.claudeAuthenticated {
                     Button(L10n.text("Выйти из Claude в этом приложении", "Sign out of Claude in this app")) { Task { await model.logoutClaude() } }.disabled(model.anyBusy)
                 }
-                EngineCompatibilityRows(agent: .claudeCode)
+                EngineCompatibilityRows(agent: .claudeCode, name: "Claude Code", engine: model.claudeDescriptor?.engine)
             }
             Section(L10n.text("Советник Claude", "Claude advisor")) {
                 Picker(L10n.text("Советник", "Advisor"), selection: Binding(get: { model.state.claudeAdvisor ?? "" }, set: { model.selectClaudeAdvisor($0) })) {

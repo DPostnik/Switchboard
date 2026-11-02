@@ -1,7 +1,37 @@
 @testable import ClaudeAdapter
 import ContextCore
+import AgentContract
 import Foundation
 import Testing
+
+/// Version policy at connect: the pinned build is verified, another 2.1.x connects as unverified, others are rejected.
+@Test(arguments: [("2.1.292", true as Bool?), ("2.1.316", false), ("2.2.0", nil), ("0.0.0", nil)])
+func claudeAdapterAppliesTheVersionPolicyAtConnect(version: String, verified: Bool?) async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let executable = root.appendingPathComponent("claude.py")
+    try Data(#"""
+    #!\#(fixturePython)
+    import sys,json
+    if '--version' in sys.argv: print('VERSION (Claude Code)'); sys.exit(0)
+    if sys.argv[1:3] == ['auth','status']: print(json.dumps({'loggedIn':False})); sys.exit(0)
+    sys.exit(3)
+    """#.replacingOccurrences(of: "VERSION", with: version).utf8).write(to: executable)
+    try installFixtureExecutable(at: executable)
+    let integration = ClaudeIntegration(browserRoot: root.appendingPathComponent("browser"))
+    let result = await integration.connect(.init(executable: executable, home: root.appendingPathComponent("home")))
+    switch (result, verified) {
+    case (.success(let descriptor), .some(let verified)):
+        #expect(descriptor.engine?.version == version)
+        #expect(descriptor.engine?.verified == verified)
+        #expect(descriptor.engine?.nearestVerified == (verified ? nil : ClaudeRuntime.pinnedVersion))
+    case (.rejected(.incompatibleContract), nil):
+        if case .unavailable = await integration.descriptor() {} else { Issue.record("Rejected connection left usable") }
+    default: Issue.record("Unexpected result for \(version)")
+    }
+    await integration.disconnect()
+}
 
 /// Explicit opt-in (`SWITCHBOARD_CLAUDE_COMPATIBILITY_LIVE=1`, run by scripts/compat-check.py for a newly installed
 /// version): the installed CLI in a fresh, signed-out `CLAUDE_CONFIG_DIR` answers `--version` and a stream-json

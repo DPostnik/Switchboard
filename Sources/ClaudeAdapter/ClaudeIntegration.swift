@@ -10,8 +10,9 @@ public actor ClaudeIntegration: AgentIntegration {
     private var context = AgentContext(connection: .appClaude, accountRevision: UUID())
     private var home: URL?
     private var executable: URL?
-    /// The connected CLI's version, for drift records.
-    private var engineVersion: String?
+    /// The connected CLI's version, for drift records and the descriptor.
+    private var engine: AgentEngineVersion?
+    private var engineVersion: String? { engine?.version }
     private var signedIn = false
     private var accountIdentity: String?
     private var sessions: [String: Session] = [:]
@@ -112,9 +113,9 @@ public actor ClaudeIntegration: AgentIntegration {
             let binary = try configuration.executable ?? ClaudeJobRunner.executable()
             try FileManager.default.createDirectory(at: configuration.home, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let (code, version) = try await ClaudeProfile.command(executable: binary, home: configuration.home, arguments: ["--version"])
-            guard code == 0, String(decoding: version, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == ClaudeJobRunner.version + " (Claude Code)" else { return .rejected(.incompatibleContract) }
-            home = configuration.home; executable = binary
-            engineVersion = ClaudeProtocolSurface.version(fromVersionOutput: String(decoding: version, as: UTF8.self))
+            guard code == 0, let engine = ClaudeRuntime.engine(versionOutput: String(decoding: version, as: UTF8.self)) else { return .rejected(.incompatibleContract) }
+            if !engine.verified { CompatibilityDrift.shared.noteUnverified(.claudeCode, version: engine.version) }
+            home = configuration.home; executable = binary; self.engine = engine
             browserResources = configuration.browserEnabled ? configuration.resources : nil
             userChrome = configuration.userChromeEnabled
             context = .init(connection: .appClaude, accountRevision: UUID())
@@ -127,7 +128,7 @@ public actor ClaudeIntegration: AgentIntegration {
         var capabilities: Set<AgentCapability> = [.interactiveSessions, .scheduledExecution, .isolatedGeneration, .history, .streaming, .usage, .approvals, .userQuestions, .interruption, .authenticationManagement, .accountLimits, .archive]
         if browserResources != nil { capabilities.insert(.browserProfiles) }
         return .success(.init(context: context, identityMode: .appOwnedHome, capabilities: capabilities,
-            permissions: .claudeRestrictedFiles, routes: [.direct]))
+            permissions: .claudeRestrictedFiles, routes: [.direct], engine: engine))
     }
     public func observe(sessions: [AgentSessionReference]) {}
     public func disconnect() async {
@@ -139,7 +140,7 @@ public actor ClaudeIntegration: AgentIntegration {
         backgroundTasks.removeAll(); waiting.removeAll(); wireArguments.removeAll(); warm.removeAll(); pendingSaves.removeAll()
         for id in subagents.keys { sink.yield(.init(session: reference(id), payload: .subagents([]))) }
         subagents.removeAll()
-        home = nil; executable = nil; engineVersion = nil; signedIn = false; accountIdentity = nil; browserResources = nil; userChrome = false; wireGrants.removeAll()
+        home = nil; executable = nil; engine = nil; signedIn = false; accountIdentity = nil; browserResources = nil; userChrome = false; wireGrants.removeAll()
         context = .init(connection: .appClaude, accountRevision: UUID())
     }
     public func account() async -> AgentResult<AgentAccountInfo> {

@@ -79,12 +79,14 @@ public struct AgentDescriptor: Sendable {
     public let permissions: AgentPermissionSupport
     /// Only routes verified and available on this connection. Never add fallback routes.
     public let routes: Set<AgentRoute>
+    /// The connected engine build; nil when the adapter does not identify one.
+    public let engine: AgentEngineVersion?
 
     public init(version: Int = Self.contractVersion, context: AgentContext,
                 identityMode: AgentIdentityMode, capabilities: Set<AgentCapability>,
-                permissions: AgentPermissionSupport, routes: Set<AgentRoute>) {
+                permissions: AgentPermissionSupport, routes: Set<AgentRoute>, engine: AgentEngineVersion? = nil) {
         self.version = version; self.context = context; self.identityMode = identityMode
-        self.capabilities = capabilities; self.permissions = permissions; self.routes = routes
+        self.capabilities = capabilities; self.permissions = permissions; self.routes = routes; self.engine = engine
     }
 
     public func validate(_ request: AgentExecutionRequest) -> AgentRejection? {

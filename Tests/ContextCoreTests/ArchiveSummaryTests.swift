@@ -405,7 +405,7 @@ func chatTitleRunnerPreservesRouteAndIsolation(mode: String) async throws {
 @Test func summaryRejectsUnverifiedEngineBeforeDispatch() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
-    let executable = try fixture(root, version: "0.159.1")
+    let executable = try fixture(root, version: "0.161.0")
     do {
         _ = try await ArchiveSummaryRunner().title(firstMessage: "Synthetic title", model: "fixture",
             route: .direct, executable: executable, home: root,

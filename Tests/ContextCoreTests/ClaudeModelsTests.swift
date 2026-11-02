@@ -1,5 +1,6 @@
 import Foundation
 import ContextCore
+import AgentContract
 import Testing
 @testable import ClaudeAdapter
 
@@ -39,6 +40,16 @@ import Testing
 @Test func claudeMenuTitleNamesTheModelAndItsReasoning() {
     let opus = ClaudeModel.entry(for: "claude-opus-5-5")
     #expect(opus?.menuTitle == "Opus 5.5 · " + ClaudeModel.Reasoning.always.title)
+}
+
+@Test func claudeRuntimeConnectsPinnedAndSameBranchVersionsOnly() {
+    #expect(ClaudeRuntime.verifiedVersions == [ClaudeRuntime.pinnedVersion])
+    #expect(ClaudeRuntime.branch == "2.1")
+    #expect(ClaudeRuntime.engine(versionOutput: "2.1.292 (Claude Code)\n") == AgentEngineVersion(version: "2.1.292", verified: true))
+    #expect(ClaudeRuntime.engine(versionOutput: "2.1.316 (Claude Code)") == AgentEngineVersion(version: "2.1.316", verified: false, nearestVerified: "2.1.292"))
+    for output in ["2.2.0 (Claude Code)", "3.0.0 (Claude Code)", "2.1.292", "2.1.292 (Other)", "(Claude Code)", "2.1.x (Claude Code)", ""] {
+        #expect(ClaudeRuntime.engine(versionOutput: output) == nil, "\(output)")
+    }
 }
 
 @Test func claudeVersionComparisonOrdersDottedComponentsNumerically() {

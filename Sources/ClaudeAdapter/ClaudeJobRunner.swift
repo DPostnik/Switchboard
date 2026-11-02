@@ -189,9 +189,11 @@ public actor ClaudeJobRunner: AgentScheduledExecutor {
                     willStart: @escaping @Sendable () async throws -> Void = {}) async throws -> (JobRunStatus, String) {
         let executable = try executable ?? Self.executable()
         let (_, versionData) = try await capture(executable: executable, arguments: ["--version"], cwd: cwd, prompt: "", timeout: 15)
-        guard String(decoding: versionData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == Self.version + " (Claude Code)" else {
-            throw ClientFailure(L10n.text("Для заданий требуется проверенная версия Claude Code \(Self.version).", "Scheduled tasks require the verified Claude Code version \(Self.version)."))
+        guard let engine = ClaudeRuntime.engine(versionOutput: String(decoding: versionData, as: UTF8.self)) else {
+            throw ClientFailure(L10n.text("Для заданий нужен Claude Code \(Self.version) или другая версия \(ClaudeRuntime.branch).x.",
+                                          "Scheduled tasks need Claude Code \(Self.version) or another \(ClaudeRuntime.branch).x version."))
         }
+        if !engine.verified { CompatibilityDrift.shared.noteUnverified(.claudeCode, version: engine.version) }
         try Task.checkCancellation()
         guard !stopped else { throw CancellationError() }
         var lease = try reserveBrowser(runID: runID, project: cwd.path)

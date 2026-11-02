@@ -1,11 +1,29 @@
 import Foundation
+import AgentContract
 
-/// The exact Claude Code build this app verifies before it dispatches anything.
+/// The exact Claude Code build this app was verified on, checked before it dispatches anything.
 ///
 /// Declared here, not in the adapter, so model and effort gating can consult it without the
-/// application or core depending on the native runner.
+/// application or core depending on the native runner. Model gating stays on the pinned build.
+/// Connection follows `AgentVersionPolicy` (user decision 2026-11-02): the pinned build connects normally,
+/// another 2.1.x build connects as unverified with a warning and drift diagnostics, anything else is rejected.
 public enum ClaudeRuntime {
     public static let pinnedVersion = "2.1.292"
+    public static let verifiedVersions = [pinnedVersion]
+    /// The pinned build's major.minor, e.g. "2.1"; other versions on this branch connect as unverified.
+    public static var branch: String { pinnedVersion.split(separator: ".").prefix(2).joined(separator: ".") }
+
+    /// The engine for `claude --version` output ("2.1.292 (Claude Code)"); nil when the policy rejects it.
+    public static func engine(versionOutput: String) -> AgentEngineVersion? {
+        let text = versionOutput.trimmingCharacters(in: .whitespacesAndNewlines), suffix = " (Claude Code)"
+        guard text.hasSuffix(suffix) else { return nil }
+        let version = String(text.dropLast(suffix.count))
+        switch AgentVersionPolicy.evaluate(version, verified: verifiedVersions) {
+        case .verified: return AgentEngineVersion(version: version, verified: true)
+        case .sameMinor(let nearest): return AgentEngineVersion(version: version, verified: false, nearestVerified: nearest)
+        case .rejected: return nil
+        }
+    }
 
     /// Numeric dotted-component comparison. A non-numeric component sorts as 0.
     public static func version(_ lhs: String, isAtLeast rhs: String) -> Bool {
