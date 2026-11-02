@@ -129,6 +129,8 @@ private func interactiveFixture(_ root: URL) throws -> URL {
             with (home/'controls').open('a') as f: f.write(json.dumps({'request':value['request'],'pid':os.getpid()})+'\n')
             if value['request']['subtype']=='stop_task' and (home/'refuse-stop').exists():
                 out({'type':'control_response','response':{'subtype':'error','request_id':value['request_id'],'error':'Task is busy'}}); continue
+            if value['request']['subtype']=='apply_flag_settings' and (home/'refuse-flags').exists():
+                out({'type':'control_response','response':{'subtype':'error','request_id':value['request_id'],'error':'Model switch blocked'}}); continue
             if value['request']['subtype']=='initialize' and (home/'own-turn').exists():
                 # A resumed CLI runs a turn of its own (a notification about the previous process's tasks) before it answers.
                 (home/'own-turn').unlink()
@@ -290,10 +292,10 @@ private func waitFor(_ condition: @escaping () async -> Bool) async throws {
 }
 private func interactiveRequest(context: AgentContext, root: URL, session: AgentSessionReference? = nil, prompt: String = "hello", id: UUID = UUID(),
                                 fullAccess: Bool = false, kind: AgentExecutionRequest.Kind = .interactive, model: String = "",
-                                role: AgentPermissionProfile? = nil) -> AgentExecutionRequest {
+                                effort: String? = nil, role: AgentPermissionProfile? = nil) -> AgentExecutionRequest {
     .init(id: id, conversation: ConversationID(), session: session, kind: kind, prompt: prompt, projectPath: root.path,
           permissions: role.map { .profile($0, root: root.path) } ?? (fullAccess ? .unrestricted(approval: .never) : .workspaceWrite(root: root.path, network: false, approval: .ask)),
-          model: .init(context: context, model: model), route: .direct)
+          model: .init(context: context, model: model, effort: effort), route: .direct)
 }
 
 @Test func claudeEditorWritesInsideTheProjectWithoutAsking() async throws {
@@ -877,6 +879,60 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     #expect(await events.subagents().last?.first?.status == .running)
     #expect(await events.diagnostics().isEmpty)
     await adapter.disconnect()
+}
+
+@Test(arguments: [false, true]) func claudeModelChangeDuringBackgroundTasksKeepsTheirCLI(refused: Bool) async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    func lines(_ name: String) throws -> [JSONValue] {
+        try String(contentsOf: home.appendingPathComponent(name), encoding: .utf8).split(separator: "\n")
+            .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+    }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "background-hang",
+                                                    model: "claude-opus-5-5", effort: "high")).value()
+    try await waitFor { await events.completionCount() == 1 }
+    if refused { try Data().write(to: home.appendingPathComponent("refuse-flags")) }
+    // A different effort and model would need another launch; the running sub-agent keeps its CLI instead.
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session,
+                                                    model: "claude-sonnet-5-5", effort: "medium")).value()
+    try await waitFor { await events.completionCount() == 2 }
+    let submitted = try lines("submitted")
+    #expect(submitted.count == 2 && Set(submitted.map { $0["pid"] }).count == 1)
+    #expect(try String(contentsOf: home.appendingPathComponent("launches"), encoding: .utf8).split(separator: "\n").count == 1)
+    let applied = try lines("controls").filter { $0["request"]["subtype"].string == "apply_flag_settings" }
+    #expect(applied.map { $0["request"]["settings"] } == [.object(["model": .string("claude-sonnet-5-5"), "effortLevel": .string("medium")])])
+    #expect(await events.subagents().last?.first?.status == .running)
+    let effort = await events.configOptions().last?.first { $0.id == "effort" }?.current
+    #expect(effort == (refused ? "high" : "medium"))
+    #expect(await events.diagnostics().count == (refused ? 1 : 0))
+    if refused {
+        // Once the tasks are done, the next message launches with the new selection.
+        try FileManager.default.removeItem(at: home.appendingPathComponent("refuse-flags"))
+        _ = try await adapter.stopTasks(nil, session: session, context: descriptor.context).value()
+        try await waitFor { await events.subagents().last?.first?.status != .running }
+        _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session,
+                                                        model: "claude-sonnet-5-5", effort: "medium")).value()
+        try await waitFor { await events.completionCount() == 3 }
+        let last = try #require(try lines("submitted").last?["args"].array.compactMap(\.string))
+        #expect(last[try #require(last.firstIndex(of: "--effort")) + 1] == "medium")
+        #expect(try String(contentsOf: home.appendingPathComponent("launches"), encoding: .utf8).split(separator: "\n").count == 2)
+    }
+    await adapter.disconnect()
+}
+
+@Test func claudeLiveSelectionSendsOnlyChangedParts() {
+    let old = (model: "claude-opus-5-5", effort: Optional("high"), advisor: Optional("claude-fable-5-1"))
+    #expect(ClaudeIntegration.liveSelection(from: old, to: old) == .object([:]))
+    #expect(ClaudeIntegration.liveSelection(from: old, to: (model: "claude-opus-5-5", effort: nil, advisor: "")) ==
+            .object(["effortLevel": .null, "advisorModel": .null]))
+    #expect(ClaudeIntegration.liveSelection(from: (model: "", effort: nil, advisor: nil), to: old) ==
+            .object(["model": .string("claude-opus-5-5"), "effortLevel": .string("high"), "advisorModel": .string("claude-fable-5-1")]))
 }
 
 @Test @MainActor func claudeScheduledJobRunsAsAChatThatCanBeContinued() async throws {

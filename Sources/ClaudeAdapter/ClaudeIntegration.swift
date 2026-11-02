@@ -276,10 +276,11 @@ public actor ClaudeIntegration: AgentIntegration {
             // restarting, which would end them: the attended approval rules are applied to the live process first.
             // `--chrome` cannot be added live, so that CLI stays without the user's Chrome until it is replaced.
             var adopted = false
+            var selection = (model: request.model.model, effort: request.model.effort, advisor: request.model.advisor)
             if let current = wires[id], !scheduled, !(backgroundTasks[id] ?? []).isEmpty {
-                func variant(scheduled: Bool, userChrome: Bool) throws -> [String] {
-                    try Self.arguments(id: id, resumed: true, permissions: profile, model: request.model.model, effort: request.model.effort,
-                                       advisor: request.model.advisor, chatDirectory: request.chatDirectory, scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
+                func variant(scheduled: Bool, userChrome: Bool, model: String? = nil, effort: String?? = nil, advisor: String?? = nil) throws -> [String] {
+                    try Self.arguments(id: id, resumed: true, permissions: profile, model: model ?? request.model.model, effort: effort ?? request.model.effort,
+                                       advisor: advisor ?? request.model.advisor, chatDirectory: request.chatDirectory, scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                        projectAgents: ProjectAgents.argument(projectPath: record.cwd), projectServers: projectServers,
                                        home: home, userChrome: userChrome)
                 }
@@ -291,6 +292,28 @@ public actor ClaudeIntegration: AgentIntegration {
                     guard wires[id] === current else { return .rejected(.staleContext) }
                     scheduledWires.remove(id); wireArguments[id] = live; adopted = true
                 } else { adopted = !scheduledWires.contains(id) && wireArguments[id] == live }
+                // Only the model, effort or advisor changed: they are switched in the live CLI, which a restart would
+                // take down with its sub-agents. A refused switch keeps the old ones until the tasks are done.
+                if !adopted, !scheduledWires.contains(id), let old = launchSettings[id],
+                   let chrome = try [userChrome, false].first(where: {
+                       wireArguments[id] == (try variant(scheduled: false, userChrome: $0, model: old.model, effort: old.effort, advisor: old.advisor))
+                   }) {
+                    let switched: Bool
+                    do {
+                        _ = try await current.control(.object(["subtype": .string("apply_flag_settings"),
+                                                               "settings": Self.liveSelection(from: old, to: selection)]))
+                        switched = true
+                    } catch is ClaudeControlRefusal { switched = false }
+                    guard wires[id] === current else { return .rejected(.staleContext) }
+                    if switched { wireArguments[id] = try variant(scheduled: false, userChrome: chrome) }
+                    else {
+                        selection = old
+                        sink.yield(.init(session: reference(id), payload: .diagnostic(L10n.text(
+                            "Claude не принял новую модель или уровень рассуждения на ходу. Пока работают фоновые задачи, этот ответ идёт с прежними; новые применятся к следующему сообщению после их завершения.",
+                            "Claude did not accept the new model or reasoning level live. While background tasks run, this reply uses the previous ones; the new ones apply to the next message after the tasks finish."))))
+                    }
+                    adopted = true
+                }
             }
             // A CLI kept for background tasks was started with its own model, permissions and approval rules
             // (scheduled turns have none); a different launch stops it and resumes in a fresh one.
@@ -335,9 +358,9 @@ public actor ClaudeIntegration: AgentIntegration {
             let turn = request.id.uuidString
             let prompt = Self.decorated(TranscriptItem(id: "user:" + turn, kind: "user", text: request.prompt), turn: turn)
             sessions[id]?.active = turn; sessions[id]?.sent = true; sessions[id]?.current = [prompt]; limitStops[id] = nil
-            launchSettings[id] = (request.model.model, request.model.effort, request.model.advisor)
+            launchSettings[id] = selection
             sink.yield(.init(session: reference(id), payload: .configOptions(ClaudeToolCalls.configOptions(
-                model: request.model.model, effort: request.model.effort, advisor: request.model.advisor))))
+                model: selection.model, effort: selection.effort, advisor: selection.advisor))))
             pendingSaves.remove(id)
             try save(id) // Durable uncertain claim, including the prompt, before a byte of the user turn is sent.
             delivered = true
@@ -358,6 +381,19 @@ public actor ClaudeIntegration: AgentIntegration {
             if let wire = wires.removeValue(forKey: id) { await wire.close() }
             return failed(error, uncertain: delivered)
         }
+    }
+    /// `apply_flag_settings` for the parts of a launch's model selection that changed; null returns a part to the CLI default.
+    /// It also overrides the launch's `--model` and `--effort` (verified live on Claude Code 2.1.292 with `get_settings`).
+    static func liveSelection(from old: (model: String, effort: String?, advisor: String?),
+                              to new: (model: String, effort: String?, advisor: String?)) -> JSONValue {
+        func value(_ text: String?) -> JSONValue { text.map(JSONValue.string) ?? .null }
+        func nonEmpty(_ text: String?) -> String? { text.flatMap { $0.isEmpty ? nil : $0 } }
+        var settings: [String: JSONValue] = [:]
+        if new.model != old.model { settings["model"] = value(nonEmpty(new.model)) }
+        let effort = ClaudeEffort.accepted(new.effort)?.rawValue
+        if effort != ClaudeEffort.accepted(old.effort)?.rawValue { settings["effortLevel"] = value(effort) }
+        if nonEmpty(new.advisor) != nonEmpty(old.advisor) { settings["advisorModel"] = value(nonEmpty(new.advisor)) }
+        return .object(settings)
     }
     /// Asks the CLI for `tool_use_summary` progress lines (a small extra model call per tool batch).
     static let sessionEnvironment = ["CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES": "1"]

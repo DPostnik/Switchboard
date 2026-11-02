@@ -21,6 +21,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Fixed
 
+- A Claude chat whose sub-agents or other background tasks are still running no longer stops them when the next message uses a different model, reasoning level or advisor: the change is applied to the running Claude Code process; if Claude Code refuses it, the reply keeps the previous settings with a note and the new ones apply once the tasks are done.
 - A Claude chat's queued messages can be resumed or sent now while Codex is disconnected; the queue buttons follow the chat's own agent.
 
 ## [1.1.0] - 2026-11-01
