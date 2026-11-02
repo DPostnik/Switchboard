@@ -45,6 +45,66 @@ enum CodexProtocolSurface {
         "thread/tokenUsage/updated", "turn/started", "turn/completed", "item/started", "item/completed", "item/agentMessage/delta"
     ]
 
+    // What the adapter actually uses. CompatibilitySnapshotTests checks it against Tests/Fixtures/compat/codex-<version>.json
+    // (scripts/compat-snapshot.py) for every supported version that has a snapshot; keep both lists in step with the code.
+
+    /// Supported versions verified before snapshots existed; no binary is installed to generate them. New versions need one.
+    static let versionsWithoutSnapshot: Set<String> = ["0.158.0-alpha.2.1", "0.159.0", "0.159.2"]
+    /// Client requests the adapter sends (`CodexClient`, `CodexConnection`, `ArchiveSummaryRunner`).
+    static let requests: Set<String> = [
+        "initialize", "account/read", "account/login/start", "account/logout", "model/list", "account/rateLimits/read",
+        "skills/extraRoots/set", "thread/start", "thread/resume", "turn/start", "turn/interrupt", "thread/name/set",
+        "thread/archive", "thread/unarchive", "thread/delete", "thread/read", "config/read", "mcpServerStatus/list"
+    ]
+    /// Root -> field paths the decoders read. Roots: `response:<request>`, `notification:<method>`,
+    /// `serverRequest:<method>` (params) and `item:<thread item type>`; `*` steps into a map value or array element.
+    /// Not listed: `item/fileChange/requestApproval` `changes`, which 0.160.0 no longer sends (`grantRoot` is read first).
+    static let reads: [String: [String]] = [
+        "response:initialize": ["userAgent"],
+        "response:account/read": ["account", "account.planType"],
+        "response:account/login/start": ["authUrl"],
+        "response:model/list": ["data.*.model", "data.*.displayName", "data.*.isDefault", "data.*.defaultReasoningEffort",
+                                "data.*.supportedReasoningEfforts.*.reasoningEffort"],
+        "response:account/rateLimits/read": ["rateLimitsByLimitId.*.limitName", "rateLimits.limitId", "rateLimits.limitName",
+                                             "rateLimits.primary.usedPercent", "rateLimits.primary.windowDurationMins",
+                                             "rateLimits.primary.resetsAt", "rateLimits.secondary", "ordinaryUsageAllowed"],
+        "response:thread/start": ["thread.id", "thread.ephemeral", "thread.environments", "sandbox.type", "modelProvider", "model"],
+        "response:turn/start": ["turn.id"],
+        "response:thread/read": ["thread.id", "thread.turns.*.id", "thread.turns.*.status", "thread.turns.*.items",
+                                 "thread.turns.*.startedAt", "thread.turns.*.completedAt", "thread.turns.*.durationMs"],
+        "response:config/read": ["config", "config.mcp_servers"],
+        "response:mcpServerStatus/list": ["data", "nextCursor"],
+        "notification:account/login/completed": ["success", "error"],
+        "notification:error": ["error.message"],
+        "notification:thread/tokenUsage/updated": ["threadId", "turnId", "tokenUsage.total.inputTokens", "tokenUsage.total.cachedInputTokens",
+                                                   "tokenUsage.total.outputTokens", "tokenUsage.last.totalTokens", "tokenUsage.modelContextWindow"],
+        "notification:turn/started": ["threadId", "turn.id"],
+        "notification:turn/completed": ["threadId", "turn.id", "turn.status", "turn.error.message", "turn.error.codexErrorInfo",
+                                        "turn.startedAt", "turn.completedAt", "turn.durationMs", "turn.items"],
+        "notification:item/started": ["threadId", "turnId", "item"],
+        "notification:item/completed": ["threadId", "turnId", "item"],
+        "notification:item/agentMessage/delta": ["threadId", "turnId", "itemId", "delta"],
+        "notification:item/reasoning/summaryTextDelta": ["threadId", "turnId", "itemId", "delta", "summaryIndex"],
+        "notification:item/reasoning/textDelta": ["threadId", "turnId", "itemId", "delta", "contentIndex"],
+        "notification:serverRequest/resolved": ["threadId", "requestId"],
+        "notification:account/updated": [], "notification:account/rateLimits/updated": [],
+        "serverRequest:item/commandExecution/requestApproval": ["threadId", "turnId", "kind", "availableDecisions", "command", "reason"],
+        "serverRequest:item/fileChange/requestApproval": ["threadId", "turnId", "grantRoot", "reason"],
+        "serverRequest:item/permissions/requestApproval": ["threadId", "turnId", "reason", "permissions.network.enabled",
+                                                           "permissions.fileSystem.read", "permissions.fileSystem.write"],
+        "serverRequest:item/tool/requestUserInput": ["threadId", "turnId", "questions.*.id", "questions.*.question", "questions.*.isSecret",
+                                                     "questions.*.options.*.label", "questions.*.options.*.description"],
+        "serverRequest:mcpServer/elicitation/request": ["threadId", "turnId", "message", "mode", "url", "requestedSchema"],
+        "item:userMessage": ["id", "content.*.type", "content.*.text"],
+        "item:agentMessage": ["id", "text", "phase"],
+        "item:contextCompaction": ["id"],
+        "item:commandExecution": ["id", "command", "status", "aggregatedOutput", "exitCode", "durationMs"],
+        "item:reasoning": ["id", "summary", "content"],
+        "item:fileChange": ["id", "status", "changes.*.path"],
+        "item:mcpToolCall": ["id", "server", "tool"],
+        "item:webSearch": ["id", "query"]
+    ]
+
     /// Drift in one inbound message, as (category, name). Missing-field names are `method:path`.
     /// Only fields the decoders depend on are checked; the list is short on purpose.
     static func drift(_ raw: JSONValue) -> [(CompatibilityDrift.Category, String)] {

@@ -16,6 +16,14 @@ DECL = re.compile(
     r'^(?P<indent>\s*)(?:@\w+(?:\([^)]*\))?\s+)*'
     r'(?:(?:public|internal|private|fileprivate|package|open|final|static|class|nonisolated|override|mutating|convenience|required|indirect|lazy|weak|unowned)(?:\([^)]*\))?\s+)*'
     r'(?P<kind>struct|class|enum|actor|protocol|extension|func|var|let|init|typealias)\b\s*(?P<name>[A-Za-z_]\w*)?')
+# Tests that read data or follow code by path rather than by declaration name: an adapter change, a new
+# protocol snapshot or a snapshot script change re-checks the declared protocol surface (cheap, no processes).
+PATH_TESTS = {
+    'Sources/CodexAdapter/': ['CompatibilitySnapshotTests'],
+    'Sources/ClaudeAdapter/': ['CompatibilitySnapshotTests'],
+    'Tests/Fixtures/compat/': ['CompatibilitySnapshotTests'],
+    'scripts/compat-snapshot.py': ['CompatibilitySnapshotTests'],
+}
 COMMON = {'body', 'init', 'main', 'description', 'hash', 'encode', 'decode', 'value', 'state', 'title', 'text', 'name', 'path', 'items', 'error', 'result', 'update', 'start', 'stop', 'reset', 'load', 'save', 'Self'}
 
 
@@ -85,6 +93,9 @@ def select(base='HEAD'):
     names = set()
     tracked = set(git('ls-files').split())
     for f in files:
+        for prefix, stems in PATH_TESTS.items():
+            if f == prefix or (prefix.endswith('/') and f.startswith(prefix)):
+                selected.update(stem for stem in stems if (TESTS / (stem + '.swift')).exists())
         if not Path(f).is_file():
             continue
         if f.startswith('Sources/') and f.endswith('.swift'):

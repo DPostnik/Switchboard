@@ -1,0 +1,9 @@
+{
+  "agent": "claude-code",
+  "version": "2.1.292",
+  "source": "@anthropic-ai/claude-agent-sdk@0.3.292 sdk.d.ts (claudeCodeVersion 2.1.292): StdoutMessage, SDKControlRequestInner",
+  "frameTypes": ["active_goal", "assistant", "auth_status", "control_cancel_request", "control_request", "control_response", "conversation_reset", "keep_alive", "prompt_suggestion", "rate_limit_event", "result", "stream_event", "system", "tool_progress", "tool_use_summary", "user"],
+  "systemSubtypes": ["api_retry", "background_tasks_changed", "commands_changed", "compact_boundary", "control_request_progress", "elicitation_complete", "files_persisted", "hook_progress", "hook_response", "hook_started", "informational", "init", "local_command_output", "memory_recall", "mirror_error", "model_refusal_fallback", "model_refusal_no_fallback", "notification", "permission_denied", "plugin_install", "session_state_changed", "status", "task_notification", "task_progress", "task_started", "task_updated", "thinking_tokens", "worker_shutting_down"],
+  "resultSubtypes": ["error_during_execution", "error_max_budget_usd", "error_max_structured_output_retries", "error_max_turns", "success"],
+  "controlRequestSubtypes": ["apply_flag_settings", "background_tasks", "can_use_tool", "cancel_async_message", "elicitation", "file_suggestions", "get_binary_version", "get_context_usage", "get_hooks_listing", "get_session_cost", "get_settings", "get_task_output", "get_usage", "hook_callback", "initialize", "interrupt", "list_models", "list_permission_rules", "mcp_call", "mcp_message", "mcp_read_resource", "mcp_reconnect", "mcp_set_servers", "mcp_status", "mcp_toggle", "read_file", "register_repo_root", "reload_output_styles", "reload_plugins", "reload_skills", "rename_session", "request_user_dialog", "rewind_files", "seed_read_state", "set_color", "set_max_thinking_tokens", "set_model", "set_permission_mode", "stop_task", "update_settings"]
+}

@@ -33,6 +33,22 @@ enum ClaudeProtocolSurface {
     /// CLI-to-app control requests that obtain an answer; every other subtype closes the process.
     static let answeredControlRequests: Set<String> = ["can_use_tool", "hook_callback"]
 
+    // What the adapter actually uses; CompatibilitySnapshotTests checks it against Tests/Fixtures/compat/claude-<pinned>.json
+    // (scripts/compat-snapshot.py). Keep these lists in step with `ClaudeIntegration`, `ClaudeSubagentTracker`,
+    // `ClaudeLimitStop`, `ClaudeWire`, `ClaudeLimits`, `ClaudeGeneration` and `ClaudeJobRunner`.
+
+    /// Frame types a decoder reads.
+    static let readFrameTypes: Set<String> = [
+        "assistant", "command_lifecycle", "control_request", "control_response", "rate_limit_event", "result", "stream_event",
+        "system", "tool_use_summary", "user"
+    ]
+    static let readSystemSubtypes: Set<String> = [
+        "background_tasks_changed", "compact_boundary", "init", "task_notification", "task_progress", "task_started", "task_updated"
+    ]
+    static let readResultSubtypes: Set<String> = ["success"]
+    /// Control requests the app sends to the CLI.
+    static let sentControlRequests: Set<String> = ["apply_flag_settings", "get_usage", "initialize", "interrupt", "stop_task"]
+
     /// Drift in one frame, as (category, name). Missing-field names are `frame:path`.
     /// Only fields the decoders depend on are checked; the list is short on purpose.
     static func drift(_ frame: JSONValue) -> [(CompatibilityDrift.Category, String)] {
