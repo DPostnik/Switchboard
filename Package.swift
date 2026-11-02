@@ -17,9 +17,11 @@ let package = Package(
         .target(name: "ContextCore", dependencies: ["AgentContract", "CSQLite", "TOMLDecoder"]),
         .target(name: "ClaudeAdapter", dependencies: ["AgentContract", "ContextCore"]),
         .target(name: "CodexAdapter", dependencies: ["AgentContract", "ContextCore"]),
+        // Generic Agent Client Protocol v1 client (Gemini CLI first); wired into the app by AgentIntegrationFactory only.
+        .target(name: "ACPAdapter", dependencies: ["AgentContract", "ContextCore"]),
         .target(name: "ContextTranscript", dependencies: ["ContextCore"]),
         .executableTarget(name: "ContextDesk", dependencies: ["ContextCore", "ContextTranscript", "CodexAdapter", "ClaudeAdapter", "FringeProtocol"]),
         .executableTarget(name: "ContextProbe", dependencies: ["ContextCore", "CodexAdapter"]),
-        .testTarget(name: "ContextCoreTests", dependencies: ["AgentContract", "ContextCore", "CodexAdapter", "ClaudeAdapter", "ContextTranscript", "ContextDesk", "FringeProtocol"])
+        .testTarget(name: "ContextCoreTests", dependencies: ["AgentContract", "ContextCore", "CodexAdapter", "ClaudeAdapter", "ACPAdapter", "ContextTranscript", "ContextDesk", "FringeProtocol"])
     ]
 )

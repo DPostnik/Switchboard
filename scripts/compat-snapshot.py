@@ -15,6 +15,11 @@ Run by hand when a new engine version is verified; never at runtime, in tests or
       tarball in memory (nothing is extracted or executed) and writes claude-<version>.json: the frame types,
       system and result subtypes and control request subtypes of `StdoutMessage`.
 
+  python3 -I scripts/compat-snapshot.py acp --schema <checkout>/schema/v1
+      Reads (as JSON data, nothing executed) the ACP v1 schema release of an agent-client-protocol checkout and
+      writes acp-v1-<schema version>.json: agent and client methods with params/response types, session/update kinds,
+      the properties of every type reachable from them, and the unstable additions reachable from the same roots.
+
 The Swift test CompatibilitySnapshotTests checks the adapters' declared protocol surface against these files.
 """
 import argparse
@@ -41,7 +46,7 @@ def write(name, index):
     for i, key in enumerate(keys):
         value = index[key]
         comma = ',' if i < len(keys) - 1 else ''
-        if isinstance(value, dict) and value and all(isinstance(v, (dict, list, str)) for v in value.values()) and key in ('clientRequests', 'serverRequests', 'notifications', 'itemTypes', 'types'):
+        if isinstance(value, dict) and value and all(isinstance(v, (dict, list, str)) for v in value.values()) and key in ('clientRequests', 'serverRequests', 'notifications', 'itemTypes', 'types', 'agentMethods', 'clientMethods', 'protocolMethods', 'sessionUpdates', 'unstableTypes'):
             lines.append(f'  {json.dumps(key)}: {{')
             inner = sorted(value)
             for j, k in enumerate(inner):
@@ -230,13 +235,76 @@ def claude(args):
     })
 
 
+# --- ACP ----------------------------------------------------------------------------------------
+
+def acp(args):
+    """Index of one ACP v1 schema release, read from a checkout of agentclientprotocol/agent-client-protocol.
+
+    Only `schema/v1/{Cargo.toml,meta.json,schema.json,schema.unstable.json}` are read as data; nothing is executed.
+    """
+    folder = Path(args.schema)
+    version = re.search(r'^version = "([^"]+)"', (folder / 'Cargo.toml').read_text(), re.M)[1]
+    meta = json.loads((folder / 'meta.json').read_text())
+    definitions = json.loads((folder / 'schema.json').read_text())['$defs']
+    def methods(side):
+        """method -> {params, response} for one side; notifications carry only params."""
+        found = {}
+        for name, schema in definitions.items():
+            if schema.get('x-side') != side or 'x-method' not in schema:
+                continue
+            entry = found.setdefault(schema['x-method'], {'params': None})
+            if name.endswith('Response'):
+                entry['response'] = name
+            elif name.endswith('Request') or name.endswith('Notification'):
+                entry['params'] = name
+        for entry in found.values():
+            if entry['params'] and entry['params'].endswith('Notification'):
+                entry['notification'] = True
+        return found
+    agent, client, protocol = methods('agent'), methods('client'), methods('protocol')
+    declared = set(meta['agentMethods'].values()) | set(meta['clientMethods'].values()) | set(meta['protocolMethods'].values())
+    if declared != set(agent) | set(client) | set(protocol):
+        sys.exit(f'meta.json and schema.json disagree: {sorted(declared ^ (set(agent) | set(client) | set(protocol)))}')
+    updates = {}
+    for variant in definitions['SessionUpdate']['oneOf']:
+        kind = variant['properties']['sessionUpdate']['const']
+        updates[kind] = sorted(refs(variant))[0]
+    roots = {v for m in (agent, client, protocol) for e in m.values() for k, v in e.items() if k in ('params', 'response') and v}
+    roots |= set(updates.values())
+    def walk(defs, start):
+        types, queue = {}, sorted(start)
+        while queue:
+            name = queue.pop()
+            if name in types or name not in defs:
+                continue
+            types[name] = properties(defs[name])
+            queue.extend(r for v in types[name].values() for r in v if r not in types)
+        return types
+    types = walk(definitions, roots)
+    # Unstable additions reachable from the same roots: what an agent may already send beyond the stable schema.
+    unstable_meta = json.loads((folder / 'meta.unstable.json').read_text())
+    unstable_defs = json.loads((folder / 'schema.unstable.json').read_text())['$defs']
+    unstable = {name: value for name, value in walk(unstable_defs, roots).items() if types.get(name) != value}
+    def extra(key):
+        return sorted(set(unstable_meta.get(key, {}).values()) - set(meta.get(key, {}).values()))
+    write(f'acp-v1-{version}.json', {
+        'agent': 'acp', 'version': version, 'protocolVersion': meta['version'],
+        'source': f'agent-client-protocol schema/v1 {version}: schema.json, meta.json (unstable additions from schema.unstable.json)',
+        'agentMethods': agent, 'clientMethods': client, 'protocolMethods': protocol,
+        'sessionUpdates': updates, 'types': types,
+        'unstableAgentMethods': extra('agentMethods'), 'unstableClientMethods': extra('clientMethods'),
+        'unstableTypes': unstable,
+    })
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest='agent', required=True)
     c = sub.add_parser('codex'); c.add_argument('--binary')
     k = sub.add_parser('claude'); k.add_argument('--version', required=True); k.add_argument('--sdk')
+    a = sub.add_parser('acp'); a.add_argument('--schema', required=True, help='schema/v1 folder of an ACP checkout')
     args = parser.parse_args()
-    codex(args) if args.agent == 'codex' else claude(args)
+    {'codex': codex, 'claude': claude, 'acp': acp}[args.agent](args)
 
 
 if __name__ == '__main__':

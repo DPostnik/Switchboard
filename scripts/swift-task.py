@@ -216,7 +216,8 @@ def main():
             base += ['-Onone', '-enable-testing'] if args.task == 'test' else ['-O']
             modules = [('AgentContract', 'Sources/AgentContract'), ('FringeProtocol', 'Sources/FringeProtocol'), ('TOMLDecoder', '.build/checkouts/TOMLDecoder/Sources/TOMLDecoder'), ('ContextCore', 'Sources/ContextCore'), ('CodexAdapter', 'Sources/CodexAdapter'), ('ClaudeAdapter', 'Sources/ClaudeAdapter'), ('ContextTranscript', 'Sources/ContextTranscript')]
             if args.task == 'test':
-                modules.append(('ContextDesk', 'Sources/ContextDesk'))
+                # The app does not link ACPAdapter yet; only the tests use it.
+                modules += [('ACPAdapter', 'Sources/ACPAdapter'), ('ContextDesk', 'Sources/ContextDesk')]
             for name, folder in modules:
                 if args.task == 'build' or args.verbose:
                     print(f'Compiling {name}', flush=True)
@@ -231,7 +232,7 @@ def main():
                 # New Testing releases also expose a CInt-returning overload. Keep
                 # the process-exiting entry point, including its failing exit status.
                 runner.write_text('import Testing\n@main struct Runner { static func main() async { let _: Never = await Testing.__swiftPMEntryPoint() } }\n')
-                execute(base + test_flags + ['-module-name', 'ContextCoreTests'] + sources('Tests/ContextCoreTests') + [runner, '-lContextDesk'] + libraries + ['-o', work / 'Tests'])
+                execute(base + test_flags + ['-module-name', 'ContextCoreTests'] + sources('Tests/ContextCoreTests') + [runner, '-lContextDesk', '-lACPAdapter'] + libraries + ['-o', work / 'Tests'])
                 run_tests(execute, [work / 'Tests'], filters)
     if args.task == 'build':
         digest = hashlib.sha256()
