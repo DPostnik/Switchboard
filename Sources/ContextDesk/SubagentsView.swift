@@ -11,14 +11,15 @@ struct SubagentsBar: View {
 
     var body: some View {
         let agents = model.subagents[chatID] ?? []
+        let stalled = model.stalledSubagents[chatID] ?? []
         if !agents.isEmpty {
             Button { showing.toggle() } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "person.2").foregroundStyle(.secondary)
-                    Text(Self.summary(agents)).foregroundStyle(.secondary)
+                    Text(Self.summary(agents, stalled: stalled)).foregroundStyle(.secondary)
                     ForEach(agents.prefix(4)) { agent in
                         HStack(spacing: 4) {
-                            SubagentStatusIcon(status: agent.status)
+                            SubagentStatusIcon(status: agent.status, stalled: stalled.contains(agent.id))
                             Text(agent.title).lineLimit(1).truncationMode(.tail)
                         }.padding(.horizontal, 7).padding(.vertical, 3).frame(maxWidth: 180)
                             .background(DeskPalette.subtle, in: Capsule())
@@ -30,18 +31,20 @@ struct SubagentsBar: View {
             }
             .buttonStyle(PointerButtonStyle(base: .plain))
             .help(L10n.text("Посмотреть, чем заняты подагенты", "See what the sub-agents are doing"))
-            .accessibilityLabel(Self.summary(agents))
+            .accessibilityLabel(Self.summary(agents, stalled: stalled))
             .popover(isPresented: $showing, arrowEdge: .top) { SubagentsPanel(model: model, chatID: chatID) }
             .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 24).padding(.vertical, 6)
         }
     }
 
-    static func summary(_ agents: [AgentSubagent]) -> String {
+    static func summary(_ agents: [AgentSubagent], stalled: Set<String> = []) -> String {
         let running = agents.filter { $0.status == .running }.count
+        let silent = agents.filter { $0.status == .running && stalled.contains($0.id) }.count
         let done = agents.filter { $0.status == .completed }.count
         let failed = agents.count - running - done
         var parts = [L10n.text("Подагенты", "Sub-agents") + ":"]
         if running > 0 { parts.append(L10n.text("работают \(running)", "\(running) running")) }
+        if silent > 0 { parts.append(L10n.text("без ответа \(silent)", "\(silent) not responding")) }
         if done > 0 { parts.append(L10n.text("готово \(done)", "\(done) done")) }
         if failed > 0 { parts.append(L10n.text("прервано \(failed)", "\(failed) stopped")) }
         return parts.joined(separator: " ")
@@ -50,13 +53,20 @@ struct SubagentsBar: View {
 
 struct SubagentStatusIcon: View {
     let status: AgentSubagent.Status
+    var stalled = false
     var body: some View {
         switch status {
+        case .running where stalled: Image(systemName: "exclamationmark.circle").foregroundStyle(DeskPalette.attention)
         case .running: ProgressView().controlSize(.mini).frame(width: 12, height: 12)
         case .completed: Image(systemName: "checkmark.circle.fill").foregroundStyle(DeskPalette.accent)
         case .failed: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(DeskPalette.attention)
         case .stopped: Image(systemName: "stop.circle").foregroundStyle(.secondary)
         }
+    }
+    /// Shown for a running sub-agent that has been silent longer than `SubagentWatch` allows.
+    static func silentLine(_ agent: AgentSubagent) -> String {
+        let time = agent.lastActivityAt.formatted(date: .omitted, time: .shortened)
+        return L10n.text("Нет ответа с \(time)", "No response since \(time)")
     }
     static func title(_ status: AgentSubagent.Status) -> String {
         switch status {
@@ -76,19 +86,20 @@ struct SubagentsPanel: View {
 
     var body: some View {
         let agents = model.subagents[chatID] ?? []
+        let stalled = model.stalledSubagents[chatID] ?? []
         let selected = agents.first { $0.id == selection } ?? agents.first { $0.status == .running } ?? agents.first
         HStack(spacing: 0) {
             ScrollView {
                 VStack(spacing: 4) {
                     ForEach(agents) { agent in
-                        Button { selection = agent.id } label: { SubagentRow(agent: agent) }
+                        Button { selection = agent.id } label: { SubagentRow(agent: agent, stalled: stalled.contains(agent.id)) }
                             .buttonStyle(PointerButtonStyle(base: .plain))
                             .background(agent.id == selected?.id ? DeskPalette.selection : Color.clear, in: RoundedRectangle(cornerRadius: 8))
                     }
                 }.padding(8)
             }.frame(width: 250).background(DeskPalette.sidebar)
             Divider()
-            if let selected { SubagentDetail(model: model, chatID: chatID, agent: selected).id(selected.id) }
+            if let selected { SubagentDetail(model: model, chatID: chatID, agent: selected, stalled: stalled.contains(selected.id)).id(selected.id) }
             else {
                 Text(L10n.text("Подагентов нет", "No sub-agents")).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -98,12 +109,17 @@ struct SubagentsPanel: View {
 
 private struct SubagentRow: View {
     let agent: AgentSubagent
+    let stalled: Bool
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            SubagentStatusIcon(status: agent.status).padding(.top, 2)
+            SubagentStatusIcon(status: agent.status, stalled: stalled).padding(.top, 2)
             VStack(alignment: .leading, spacing: 3) {
                 Text(agent.title).font(.ui(.callout).weight(.medium)).lineLimit(2)
-                Text(agent.activity ?? SubagentStatusIcon.title(agent.status)).font(.ui(.caption)).foregroundStyle(.secondary).lineLimit(2)
+                if stalled {
+                    Text(SubagentStatusIcon.silentLine(agent)).font(.ui(.caption)).foregroundStyle(DeskPalette.attention).lineLimit(2)
+                } else {
+                    Text(agent.activity ?? SubagentStatusIcon.title(agent.status)).font(.ui(.caption)).foregroundStyle(.secondary).lineLimit(2)
+                }
                 SubagentElapsed(agent: agent).font(.ui(.caption2)).foregroundStyle(.tertiary)
             }
             Spacer(minLength: 0)
@@ -136,6 +152,7 @@ private struct SubagentDetail: View {
     @ObservedObject var model: DeskModel
     let chatID: String
     let agent: AgentSubagent
+    let stalled: Bool
     @State private var showingPrompt = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The list follows new steps only while the user is at (or near) its end.
@@ -149,7 +166,7 @@ private struct SubagentDetail: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                SubagentStatusIcon(status: agent.status)
+                SubagentStatusIcon(status: agent.status, stalled: stalled)
                 Text(agent.title).font(.ui(.headline)).lineLimit(2).textSelection(.enabled)
                 Spacer(minLength: 0)
                 Text(SubagentStatusIcon.title(agent.status)).font(.ui(.caption)).foregroundStyle(.secondary)
@@ -167,6 +184,13 @@ private struct SubagentDetail: View {
                 if let type = agent.type { Text(type) }
                 SubagentElapsed(agent: agent)
             }.font(.ui(.caption)).foregroundStyle(.secondary)
+            if stalled {
+                Label(SubagentStatusIcon.silentLine(agent) + ". " + L10n.text(
+                    "Подагент мог зависнуть. Основной агент получит сообщение об этом, когда освободится.",
+                    "The sub-agent may be stuck. The main agent gets a message about it once it is free."),
+                      systemImage: "exclamationmark.circle")
+                    .font(.ui(.callout)).foregroundStyle(DeskPalette.attention).lineLimit(3)
+            }
             if let activity = agent.activity {
                 Label(activity, systemImage: "ellipsis.circle").font(.ui(.callout)).lineLimit(2)
             }

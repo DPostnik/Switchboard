@@ -80,6 +80,8 @@ private struct ChatRunState: Equatable {
     let orphanProcesses = OrphanProcessController()
     /// Wall-clock checks for armed "continue after limit reset" requests (`LimitResumeScheduling`).
     let limitResumeClock = LimitResumeClock()
+    /// Checks for sub-agents that stopped reporting (`SubagentWatching`).
+    let subagentWatch = SubagentWatchClock()
     private var remoteDeliveryResults: [String: Bool] = [:]
     private var configuringRemoteChats: Set<String> = []
     /// Chat ID -> last stored messages sent to the phone, keyed by store revision and native session.
@@ -287,6 +289,8 @@ private struct ChatRunState: Equatable {
     @Published private(set) var backgroundWaits: [String: Int] = [:]
     /// Thread ID -> sub-agents its agent delegated to (running ones and those finished since the last user message).
     @Published private(set) var subagents: [String: [AgentSubagent]] = [:]
+    /// Thread ID -> running sub-agents silent longer than `SubagentWatch` allows; set by `SubagentWatching`.
+    @Published var stalledSubagents: [String: Set<String>] = [:]
     /// Thread ID -> the commands and the settings its agent session last reported (ACP-shaped, stage C). Kept for the
     /// composer; not published because no view shows them yet (the composer has no command list, and the model and
     /// effort chips still come from the agent's model catalog).
@@ -2326,7 +2330,7 @@ private struct ChatRunState: Equatable {
     private func resetAgentState(_ agent: AgentConnectionID) {
         let ids = Set(state.chats.filter { $0.nativeSession?.connection == agent }.map(\.id))
         clearAgentInteractions(agent)
-        for id in ids { runs[id] = nil; backgroundWaits[id] = nil; subagents[id] = nil; loadedThreads.remove(id) }
+        for id in ids { runs[id] = nil; backgroundWaits[id] = nil; subagents[id] = nil; stalledSubagents[id] = nil; loadedThreads.remove(id) }
     }
     private func clearAgentInteractions(_ agent: AgentConnectionID) {
         let actions = pending.filter { $0.interaction.session.connection == agent }
@@ -2556,6 +2560,9 @@ private struct ChatRunState: Equatable {
             guard let thread else { return }
             let agents = list.isEmpty ? nil : list
             if subagents[thread] != agents { subagents[thread] = agents }
+            // A marked sub-agent that reported again loses its mark at once; the loop runs while any sub-agent does.
+            if stalledSubagents[thread] != nil { markStalledSubagents(thread) }
+            if list.contains(where: { $0.status == .running }) { startSubagentWatch() }
         case .commands(let list):
             guard let thread else { return }
             sessionCommands[thread] = list

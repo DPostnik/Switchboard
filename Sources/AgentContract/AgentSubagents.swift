@@ -13,6 +13,14 @@ public struct AgentSubagent: Identifiable, Sendable, Equatable {
             self.id = id; self.kind = kind; self.text = text; self.isError = isError
         }
     }
+    /// A tool call the sub-agent made that has no result yet.
+    public struct PendingTool: Sendable, Equatable {
+        public let id: String
+        public let name: String
+        /// The call's own time limit, when its input declares one.
+        public let timeout: TimeInterval?
+        public init(id: String, name: String, timeout: TimeInterval? = nil) { self.id = id; self.name = name; self.timeout = timeout }
+    }
     public let id: String
     public var title: String
     /// Engine agent type, e.g. `general-purpose`.
@@ -33,11 +41,16 @@ public struct AgentSubagent: Identifiable, Sendable, Equatable {
     /// Most recent messages, tool calls and results, oldest first; earlier ones are dropped (`droppedSteps`).
     public var steps: [Step]
     public var droppedSteps: Int
+    /// When the engine last reported anything from this sub-agent; engines may coarsen it to limit updates.
+    public var lastActivityAt: Date
+    /// Tool calls still waiting for their result, oldest first.
+    public var pendingTools: [PendingTool]
     public init(id: String, title: String, type: String?, prompt: String, background: Bool, depth: Int, status: Status = .running,
                 activity: String? = nil, startedAt: Date, endedAt: Date? = nil, toolUses: Int? = nil, tokens: Int? = nil,
-                report: String? = nil, steps: [Step] = [], droppedSteps: Int = 0) {
+                report: String? = nil, steps: [Step] = [], droppedSteps: Int = 0, lastActivityAt: Date? = nil, pendingTools: [PendingTool] = []) {
         self.id = id; self.title = title; self.type = type; self.prompt = prompt; self.background = background; self.depth = depth
         self.status = status; self.activity = activity; self.startedAt = startedAt; self.endedAt = endedAt
         self.toolUses = toolUses; self.tokens = tokens; self.report = report; self.steps = steps; self.droppedSteps = droppedSteps
+        self.lastActivityAt = lastActivityAt ?? startedAt; self.pendingTools = pendingTools
     }
 }

@@ -6,6 +6,9 @@ import AgentContract
 /// and the sub-agents' own messages (`parent_tool_use_id` = the Agent tool call that started them).
 struct ClaudeSubagentTracker {
     static let stepLimit = 150, textLimit = 2000, resultLimit = 800, agentLimit = 24
+    /// Frames without visible content (streamed output, tool progress) move `lastActivityAt` at most this often,
+    /// so token streaming does not republish the list.
+    static let activityGranularity: TimeInterval = 30
     private(set) var agents: [AgentSubagent] = []
     /// Agent tool call ID -> task ID.
     private var calls: [String: String] = [:]
@@ -24,13 +27,16 @@ struct ClaudeSubagentTracker {
                     append(.init(id: (value["message"]["id"].string ?? UUID().uuidString) + ":text", kind: .text, text: Self.clip(text, Self.textLimit)), to: index)
                     changed = true
                 case "tool_use":
-                    let name = part["name"].string ?? ""
-                    append(.init(id: part["id"].string ?? UUID().uuidString, kind: .tool, text: Self.toolLine(name, input: part["input"])), to: index)
+                    let name = part["name"].string ?? "", call = part["id"].string ?? UUID().uuidString
+                    append(.init(id: call, kind: .tool, text: Self.toolLine(name, input: part["input"])), to: index)
+                    if !agents[index].pendingTools.contains(where: { $0.id == call }) {
+                        agents[index].pendingTools.append(.init(id: call, name: name, timeout: Self.timeout(part["input"])))
+                    }
                     changed = true
                 default: break
                 }
             }
-            return changed
+            return touch(index, now: now, changed: changed)
         case "user":
             guard let index = index(call: value["parent_tool_use_id"].string) else { return false }
             var changed = false
@@ -38,18 +44,29 @@ struct ClaudeSubagentTracker {
                 let text = ClaudeIntegration.toolResultText(part["content"])
                 append(.init(id: (part["tool_use_id"].string ?? UUID().uuidString) + ":result", kind: .result,
                              text: Self.clip(text, Self.resultLimit), isError: part["is_error"].bool == true), to: index)
+                agents[index].pendingTools.removeAll { $0.id == part["tool_use_id"].string }
                 changed = true
             }
-            return changed
-        default: return false
+            return touch(index, now: now, changed: changed)
+        default:
+            // Streamed output, tool progress and API retries of a sub-agent show that it is alive.
+            guard let index = index(call: value["parent_tool_use_id"].string) else { return false }
+            return touch(index, now: now, changed: false)
         }
+    }
+    /// Records activity; without other changes only once per `activityGranularity`. Returns true when the list changed.
+    private mutating func touch(_ index: Int, now: Date, changed: Bool) -> Bool {
+        guard agents[index].status == .running else { return changed }
+        guard changed || now.timeIntervalSince(agents[index].lastActivityAt) >= Self.activityGranularity else { return false }
+        agents[index].lastActivityAt = max(agents[index].lastActivityAt, now)
+        return true
     }
     var runningIDs: [String] { agents.filter { $0.status == .running }.map(\.id) }
     /// The CLI is gone: sub-agents still running will not report anymore.
     mutating func stopRunning(now: Date = Date()) -> Bool {
         var changed = false
         for index in agents.indices where agents[index].status == .running {
-            agents[index].status = .stopped; agents[index].endedAt = now; agents[index].activity = nil; changed = true
+            agents[index].status = .stopped; agents[index].endedAt = now; agents[index].activity = nil; agents[index].pendingTools = []; changed = true
         }
         return changed
     }
@@ -76,6 +93,7 @@ struct ClaudeSubagentTracker {
             if let index = agents.firstIndex(where: { $0.id == task }) {
                 // A background sub-agent resumes when its own background work finishes.
                 agents[index].status = .running; agents[index].endedAt = nil; agents[index].activity = nil
+                agents[index].pendingTools = []; agents[index].lastActivityAt = now
                 return true
             }
             agents.append(.init(id: task, title: Self.clip(Self.line(value["description"].string ?? ""), 200), type: value["subagent_type"].string,
@@ -87,6 +105,7 @@ struct ClaudeSubagentTracker {
             guard let index = agents.firstIndex(where: { $0.id == task }) else { return false }
             if let text = value["description"].string.map(Self.line), !text.isEmpty { agents[index].activity = Self.clip(text, 200) }
             usage(value["usage"], index: index)
+            if agents[index].status == .running { agents[index].lastActivityAt = max(agents[index].lastActivityAt, now) }
             return true
         case "task_updated":
             guard let index = agents.firstIndex(where: { $0.id == task }), let status = Self.status(value["patch"]["status"].string) else { return false }
@@ -102,7 +121,7 @@ struct ClaudeSubagentTracker {
         }
     }
     private mutating func finish(_ index: Int, status: AgentSubagent.Status, now: Date) {
-        agents[index].status = status; agents[index].activity = nil
+        agents[index].status = status; agents[index].activity = nil; agents[index].pendingTools = []
         if agents[index].endedAt == nil { agents[index].endedAt = now }
     }
     private mutating func usage(_ usage: JSONValue, index: Int) {
@@ -126,6 +145,11 @@ struct ClaudeSubagentTracker {
         case "killed", "stopped", "cancelled", "canceled", "aborted": .stopped
         default: nil
         }
+    }
+    /// A tool call's own time limit in seconds: `timeout` (Bash) or `timeout_ms`, both in milliseconds.
+    static func timeout(_ input: JSONValue) -> TimeInterval? {
+        guard let milliseconds = input["timeout"].int ?? input["timeout_ms"].int, milliseconds > 0 else { return nil }
+        return TimeInterval(milliseconds) / 1000
     }
     /// One line for a tool call: its name and the most telling input field.
     static func toolLine(_ name: String, input: JSONValue) -> String {
