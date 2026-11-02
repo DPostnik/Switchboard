@@ -18,7 +18,7 @@ extension DeskModel {
                 record.status == .ready ? record.parts.flatMap { [$0.content.overview] + $0.content.activities.map(\.goal) }.joined(separator: "\n") : nil
             } ?? ""
             return .init(id: chat.id, projectID: project.id.uuidString, project: project.name, projectPath: project.path, title: chat.title,
-                         agent: chat.nativeSession?.connection == .appClaude ? "Claude" : "Codex", archived: chat.isArchived,
+                         agent: agentName(chat.nativeSession?.connection), archived: chat.isArchived,
                          updated: chat.updated, summary: summary, session: chat.nativeSession)
         }
     }
@@ -69,7 +69,9 @@ extension DeskModel {
         Task { await openChat(chat) }
     }
 
-    var canStartChatSearch: Bool { claudeConnected && claudeAuthenticated }
+    /// Chat search runs on the agent that hosts the chat-directory tools.
+    var chatSearchAgent: AgentConnectionID? { firstAgent(with: .chatDirectory) }
+    var canStartChatSearch: Bool { agentState(chatSearchAgent).connected && agentState(chatSearchAgent).authenticated }
 
     func prepareChatSearchRecipe() throws {
         guard !FileManager.default.fileExists(atPath: chatSearchRecipe.path),
@@ -83,15 +85,15 @@ extension DeskModel {
     /// Opens a Claude chat with read-only access and the chat tools, and sends the request to it.
     func startChatSearch(query: String, projectID: UUID?) async {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty, canStartChatSearch,
+        guard !query.isEmpty, canStartChatSearch, let agent = chatSearchAgent, let client = client(agent),
               let project = projectID.flatMap({ id in state.projects.first { $0.id == id } }) ?? selectedProject ?? state.projects.first else { return }
-        let model = ClaudeModel.catalog.first { $0.id == Self.chatSearchModel && $0.isSupported() }?.id ?? ClaudeModel.resolved(state.claudeModel)
-        let effort = ClaudeEffort.resolved(state.claudeEffort)
+        let model = ClaudeModel.catalog.first { $0.id == Self.chatSearchModel && $0.isSupported() }?.id ?? resolvedDefaultModel(agent)
+        let effort = resolvedDefaultEffort(agent)
         let role = roleCatalog.role(AgentRoleID.reader) ?? project.chatRole(roleCatalog)
         do {
             try prepareChatSearchRecipe()
             refreshChatSearchIndex()
-            let session = try await claudeConnection.createSession(projectPath: project.path, permissions: role.profile(for: project), model: model, route: .direct)
+            let session = try await client.createSession(projectPath: project.path, permissions: role.profile(for: project), model: model, route: .direct)
             guard ConversationIdentity.appID(for: session.nativeID, in: state, connection: session.connection) == nil else { throw ConversationIdentity.invalidStorage }
             var chat = Chat(session: session, projectID: project.id, title: L10n.text("Поиск: ", "Search: ") + String(query.prefix(60)), model: model)
             chat.effort = effort; chat.route = .direct

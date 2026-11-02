@@ -51,7 +51,7 @@ import Testing
     project.defaultChatAccessMode = .standard
     model.state.projects = [project]; model.connected = true; model.authenticated = true
     model.state.model = "fixture-model"; model.projectID = project.id; model.draft = "Desktop draft"
-    model.models = [AgentModelInfo(id: "fixture-model", displayName: "Model A", defaultEffort: "medium"),
+    model.codexModels = [AgentModelInfo(id: "fixture-model", displayName: "Model A", defaultEffort: "medium"),
                     AgentModelInfo(id: "fixture-alternate", displayName: "Model B", defaultEffort: "low")]
     await integration.observe(sessions: [.init(connection: .originalCodex, nativeID: "existing")])
     let reader = Task { @MainActor in

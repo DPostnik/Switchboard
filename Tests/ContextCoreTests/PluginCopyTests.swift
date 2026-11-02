@@ -19,9 +19,9 @@ import ContextCore
     model.state.defaultRoute = route
     #expect(model.routeMessage(route, language: .english).contains("Apply selection"))
     #expect(model.routeMessage(route, language: .russian).contains("Применить выбор"))
-    model.connecting = true
+    model.agentStates[.originalCodex]?.connecting = true
     #expect(model.routeMessage(route, language: .english) == "Connecting…")
-    model.connecting = false
+    model.agentStates[.originalCodex]?.connecting = false
     try FileManager.default.removeItem(at: folder)
     model.refreshPlugins()
     #expect(model.defaultRoute == route)

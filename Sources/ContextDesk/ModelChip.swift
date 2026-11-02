@@ -15,7 +15,8 @@ struct ModelChip: View {
     @FocusState private var fieldFocused: Bool
     @State private var draft = ""
 
-    private var claude: Bool { model.currentAgent == .appClaude }
+    /// The current agent offers the app's model catalog (Claude) instead of the engine's model list.
+    private var claude: Bool { model.traits(model.currentAgent).contains(.catalogModels) }
     private var newChat: Bool { model.chatID == nil }
     /// Codex lists its models only once connected; until then the chip has no model to show.
     private var showsModels: Bool { claude || !model.models.isEmpty }
@@ -101,7 +102,7 @@ struct ModelChip: View {
                     draft = model.currentModel
                     entering = true
                 }
-            } header: { Text("Claude") }
+            } header: { Text(model.currentAgentName) }
             Section {
                 Picker(L10n.text("Рассуждение", "Reasoning"),
                        selection: Binding(get: { model.claudeEffort }, set: { model.selectClaudeEffort($0) })) {
@@ -119,7 +120,7 @@ struct ModelChip: View {
                     }
                     ForEach(model.models, id: \.self) { entry in Text(entry.displayName).tag(entry.id) }
                 }.pickerStyle(.inline).labelsHidden()
-            } header: { Text("Codex") }
+            } header: { Text(model.currentAgentName) }
             if !model.supportedEfforts.isEmpty {
                 Section {
                     Picker(L10n.text("Рассуждение", "Reasoning"), selection: Binding(get: { model.effort }, set: { model.effort = $0 })) {
@@ -136,8 +137,7 @@ struct ModelChip: View {
         if newChat {
             Section {
                 Picker(L10n.text("Агент", "Agent"), selection: Binding(get: { model.currentAgent }, set: { model.selectAgent($0) })) {
-                    Text("Codex").tag(AgentConnectionID.originalCodex)
-                    Text("Claude").tag(AgentConnectionID.appClaude)
+                    ForEach(model.agentIDs, id: \.self) { id in Text(model.agentName(id)).tag(id) }
                 }.pickerStyle(.inline).labelsHidden()
             } header: { Text(L10n.text("Агент", "Agent")) }
         }

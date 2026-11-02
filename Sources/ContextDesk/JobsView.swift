@@ -91,7 +91,7 @@ struct JobsView: View {
                 Task { refreshing = true; await model.refreshJobs(); refreshing = false }
             }.disabled(refreshing)
             Button(L10n.text("Создать", "New task"), systemImage: "plus") {
-                var job = ManagedJob(); job.projectID = model.projectID; job.model = model.currentAgent == .originalCodex ? model.currentModel : model.state.model; job.effort = model.currentAgent == .originalCodex ? model.effort : ""; job.route = model.defaultRoute; editing = job
+                var job = ManagedJob(); job.projectID = model.projectID; let current = model.profile(model.currentAgent)?.engine == job.engine; job.model = current ? model.currentModel : model.state.model; job.effort = current ? model.effort : ""; job.route = model.defaultRoute; editing = job
             }.disabled(!model.schedulerReady)
         }
     }
@@ -143,7 +143,7 @@ struct JobsView: View {
                         Text(role.title + (role.profile.audit ? " · " + L10n.text("аудит", "audit") : "")).textSelection(.enabled)
                     }
                 }
-                if job.engine == .codex {
+                if !model.traits(model.connection(for: job.engine)).contains(.catalogModels) {
                     Text(L10n.text("Каждый запуск создаёт новый чат с ролью задания (не выше роли проекта для заданий).", "Each run creates a new chat with the job's role (never above the project's job role).")).font(.ui(.caption)).foregroundStyle(.secondary)
                 } else {
                     Text(L10n.text("Claude Code использует существующий вход и правила разрешений CLI. Новые запросы разрешений отклоняются; результат сохраняется здесь. Проверенная версия \(AgentIntegrationFactory.claudeVersion); другие версии \(ClaudeRuntime.branch).x запускаются как непроверенные.", "Claude Code uses existing CLI sign-in and permission rules. New permission requests are denied; results are saved here. Verified version \(AgentIntegrationFactory.claudeVersion); other \(ClaudeRuntime.branch).x versions run as unverified.")).font(.ui(.caption)).foregroundStyle(.secondary)
@@ -198,6 +198,9 @@ struct JobEditor: View {
         self.model = model; self._job = State(initialValue: job)
         self._mode = State(initialValue: job.schedule.once != nil ? "once" : job.schedule.rule.isEmpty ? "manual" : "rule")
     }
+    /// The job's agent picks models from the app catalog (Claude) or takes a route and free-form effort (Codex).
+    private var catalogModels: Bool { model.traits(model.connection(for: job.engine)).contains(.catalogModels) }
+    private var optimizerPlugins: Bool { model.traits(model.connection(for: job.engine)).contains(.optimizerPlugins) }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(L10n.text("Настройка задания", "Task setup")).font(.ui(.title2).bold())
@@ -206,10 +209,13 @@ struct JobEditor: View {
             Form {
                 Section(L10n.text("Основное", "Basics")) {
                 TextField(L10n.text("Название", "Name"), text: $job.name)
-                Picker(L10n.text("Исполнитель", "Agent"), selection: $job.engine) { ForEach(JobEngine.known, id: \.self) { Text($0.title).tag($0) } }
+                Picker(L10n.text("Исполнитель", "Agent"), selection: $job.engine) {
+                    ForEach(model.agentIDs.compactMap { model.profile($0) }, id: \.engine) { Text($0.productName).tag($0.engine) }
+                }
                     .onChange(of: job.engine) { _, engine in
-                        job.model = engine == .claude ? ClaudeModel.defaultID : ""
-                        job.effort = engine == .claude ? ClaudeEffort.defaultLevel.rawValue : ""
+                        let catalog = model.traits(model.connection(for: engine)).contains(.catalogModels)
+                        job.model = catalog ? ClaudeModel.defaultID : ""
+                        job.effort = catalog ? ClaudeEffort.defaultLevel.rawValue : ""
                         job.route = .direct; job.acceptsExternalPolicy = nil; job.browserSessionImport = nil
                     }
                 Picker(L10n.text("Проект", "Project"), selection: $job.projectID) {
@@ -226,7 +232,7 @@ struct JobEditor: View {
                 }
                 HStack {
                     TextField(L10n.text("Модель", "Model"), text: $job.model, prompt: Text(L10n.text("По умолчанию", "Default")))
-                    if job.engine == .claude {
+                    if catalogModels {
                         Menu(L10n.text("Выбрать", "Choose")) {
                             Button(L10n.text("Как в CLI", "CLI default")) { job.model = "" }
                             Divider()
@@ -263,16 +269,16 @@ struct JobEditor: View {
                     if let issue = model.routineIssue(job) { Text(issue).foregroundStyle(DeskPalette.attention).font(.ui(.caption)) }
                     Button(L10n.text("Преобразовать в обычные инструкции", "Convert to plain instructions")) { job.routine = nil }
                 }
-                if job.engine == .codex {
+                if optimizerPlugins {
                     Picker(L10n.text("Маршрут", "Route"), selection: $job.route) { ForEach(model.availableRoutes, id: \.self) { route in
                         Text(model.routeTitle(route)).tag(route).disabled(model.routeCompatibilityIssue(route) != nil)
                     } }
                     TextField(L10n.text("Рассуждение", "Reasoning effort"), text: $job.effort, prompt: Text(L10n.text("По умолчанию", "Default")))
                 }
                 ScheduledBrowserImportEditor(policy: $job.browserSessionImport)
-                if job.engine == .claude {
+                if catalogModels {
                     if job.route != .direct {
-                        Text(model.routeCompatibilityIssue(job.route, agent: .claudeCode) ?? "").foregroundStyle(DeskPalette.attention).font(.ui(.caption))
+                        Text(model.routeCompatibilityIssue(job.route, agent: job.engine.agentID) ?? "").foregroundStyle(DeskPalette.attention).font(.ui(.caption))
                         Button(L10n.text("Работать напрямую", "Work directly")) { job.route = .direct }
                     }
                     Picker(L10n.text("Рассуждение", "Reasoning effort"), selection: $job.effort) {

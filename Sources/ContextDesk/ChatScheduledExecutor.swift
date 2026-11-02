@@ -11,12 +11,11 @@ import ContextCore
     private let project: Project
     private var consumed = false
     private var stopped = false
-    init(model: DeskModel, agent: AgentConnectionID = .originalCodex, job: ManagedJob, run: JobRun, project: Project) {
+    init(model: DeskModel, agent: AgentConnectionID, job: ManagedJob, run: JobRun, project: Project) {
         self.model = model; self.agent = agent; self.job = job; self.run = run; self.project = project
     }
-    private var client: AgentClient { agent == .appClaude ? model.claudeConnection : model.connection }
     func descriptor() async -> AgentResult<AgentDescriptor> {
-        guard model.scheduledAgentReady(agent), model.routeIsAvailable(job.route) else { return .unavailable }
+        guard model.scheduledAgentReady(agent), model.routeIsAvailable(job.route), let client = model.client(agent) else { return .unavailable }
         return await client.integration.descriptor()
     }
     func execute(_ request: AgentExecutionRequest,
@@ -46,7 +45,7 @@ import ContextCore
     func stop() async {
         stopped = true
         guard let current = model.jobLedger.runs.first(where: { $0.id == run.id }),
-              let thread = current.threadID, let turn = current.turnID else { return }
+              let thread = current.threadID, let turn = current.turnID, let client = model.client(agent) else { return }
         do { try await client.interrupt(model.sessionForChat(thread), turn: turn) }
         catch { model.error = error.localizedDescription }
     }

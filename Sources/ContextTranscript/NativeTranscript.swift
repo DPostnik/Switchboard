@@ -713,7 +713,7 @@ public struct NativeTranscript: NSViewRepresentable {
                 inserted = true
                 // A command and its result share one row.
                 let count = activitySteps(actions).count
-                let summary = L10n.text("Действия \(first.agentName ?? "Codex") · \(count)", "\(first.agentName ?? "Codex") actions · \(count)")
+                let summary = L10n.text("Действия \(first.speakerName) · \(count)", "\(first.speakerName) actions · \(count)")
                 groups[first.id] = actions
                 result.append(TranscriptItem(id: first.id, kind: "activity",
                                              text: actions.map(activityKey).joined(separator: "\n"), phase: summary))
@@ -792,7 +792,7 @@ public struct NativeTranscript: NSViewRepresentable {
                     header.append(NSAttributedString(attachment: avatar))
                     header.append(NSAttributedString(string: "  "))
                 }
-                header.append(NSAttributedString(string: (user ? item.phase ?? "" : (item.agentName ?? "Codex")) + "\n"))
+                header.append(NSAttributedString(string: (user ? item.phase ?? "" : (item.speakerName)) + "\n"))
                 header.addAttributes([
                     .font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: user ? DeskPalette.ns.muted : DeskPalette.ns.ink,
                     .responseHeader: true
@@ -868,7 +868,7 @@ public struct NativeTranscript: NSViewRepresentable {
             return style
         }
         let font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        let title = item.phase ?? L10n.text("Действия \(item.agentName ?? "Codex")", "\(item.agentName ?? "Codex") actions")
+        let title = item.phase ?? L10n.text("Действия \(item.speakerName)", "\(item.speakerName) actions")
         let header = NSMutableAttributedString(attachment: { let icon = NSTextAttachment(); icon.image = Self.activityIcon
             icon.bounds = NSRect(x: 0, y: -2.5, width: 14, height: 14); return icon }())
         header.append(NSAttributedString(string: "  " + title, attributes: [.foregroundColor: DeskPalette.ns.ink]))

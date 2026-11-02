@@ -211,10 +211,9 @@ struct DeskView: View {
     /// Pages and status in one row: schedule, archive, usage, settings, then the account.
     private var sidebarDock: some View {
         let jobs = model.showingJobs && !model.showingArchive && !model.showingAttention
-        let account = model.currentAgent == .appClaude ? (model.claudeAuthenticated ? L10n.text("Claude · подключён", "Claude · connected") : L10n.text("Claude · вход не выполнен", "Claude · not signed in")) : (model.connecting ? L10n.text("Подключение…", "Connecting…") : model.accountLabel)
-        let versionWarning = model.currentAgent == .appClaude
-            ? EngineCompatibility.warning(name: "Claude Code", engine: model.claudeDescriptor?.engine)
-            : EngineCompatibility.warning(name: "Codex", engine: model.agentDescriptor?.engine)
+        let agent = model.currentAgent, agentState = model.agentState(agent)
+        let account = model.profile(agent)?.accountLine(agentState) ?? agentState.accountLabel
+        let versionWarning = EngineCompatibility.warning(name: model.profile(agent)?.productName ?? model.currentAgentName, engine: agentState.descriptor?.engine)
         let status = versionWarning.map { account + "\n" + $0 } ?? account
         return HStack(spacing: .ui(2)) {
             Button { model.openSchedule() } label: {
@@ -513,7 +512,7 @@ struct DeskView: View {
                 copyToPasteboard(ChatReference.text(chat, projectPath: model.state.projects.first { $0.id == chat.projectID }?.path))
             },
         ]
-        if chat.nativeSession?.connection == .appClaude {
+        if model.traits(chat.nativeSession?.connection).contains(.chatDirectory) {
             agents.append(SidebarMenuAction(title: chat.chatDirectoryAccess == true
                 ? L10n.text("Закрыть доступ к другим чатам", "Remove access to other chats")
                 : L10n.text("Дать доступ к другим чатам", "Give access to other chats")) { model.toggleChatDirectory(chat.id) })
@@ -1023,12 +1022,13 @@ struct ChatView: View {
         VStack(spacing: 0) {
             if !model.currentAgentAuthenticated {
                 HStack {
-                    Text(model.currentAgent == .appClaude ? L10n.text("Войди по подписке Claude в отдельный профиль приложения.", "Sign in with your Claude subscription in the app’s separate profile.") : L10n.text("Войди через ChatGPT, чтобы начать чат.", "Sign in with ChatGPT to start a chat.")).font(.ui(.callout))
+                    Text(model.profile(model.currentAgent)?.signInPrompt() ?? "").font(.ui(.callout))
                     Spacer()
                     Button(model.currentAgentConnected ? L10n.text("Войти", "Sign in") : L10n.text("Подключиться", "Connect")) { Task { await model.loginCurrentAgent() } }
-                        .buttonStyle(DeskButtonStyle()).disabled(model.connecting || model.claudeConnecting)
-                    if model.currentAgent == .appClaude && model.claudeConnected {
-                        Button(L10n.text("Проверить вход", "Check sign-in")) { Task { await model.refreshClaudeAccount() } }
+                        .buttonStyle(DeskButtonStyle()).disabled(model.anyAgentConnecting)
+                    // A per-chat engine signs in in a terminal; the app learns the result when asked.
+                    if !model.traits(model.currentAgent).contains(.sharedEngine) && model.currentAgentConnected {
+                        Button(L10n.text("Проверить вход", "Check sign-in")) { Task { await model.refreshAccount(model.currentAgent) } }
                     }
                 }.padding()
             }
@@ -1119,7 +1119,7 @@ struct ChatView: View {
                     }
                     ComposerPullRequestChip(model: model)
                     Spacer()
-                    ContextRing(usage: model.currentUsage, claude: model.currentAgent == .appClaude)
+                    ContextRing(usage: model.currentUsage, agentName: model.currentAgentName)
                     SendControl(model: model, composer: model.composer, reduceMotion: reduceMotion)
                 }.padding(.horizontal, .ui(8)).padding(.bottom, .ui(8))
             }.background(RoundedRectangle(cornerRadius: 20).fill(DeskPalette.canvas).shadow(color: DeskPalette.shadow, radius: 14, y: 4))
@@ -1170,8 +1170,7 @@ struct ChatView: View {
                     .keyboardShortcut("e", modifiers: [.command, .shift])
                 }
                 if let chat = model.selectedChat {
-                    if model.state.browserEnabled == true, let session = chat.nativeSession,
-                       [.originalCodex, .appClaude].contains(session.connection) {
+                    if model.state.browserEnabled == true, let session = chat.nativeSession, model.isRegistered(session.connection) {
                         ChatBrowserControls(session: session, project: model.selectedWorkingDirectory ?? "",
                                             busy: model.isBusy(threadID: chat.id) || model.isChangingChat(chat.id),
                                             ownerName: model.browserProfileOwnerName) { action in
@@ -1188,7 +1187,7 @@ struct ChatView: View {
                         Label(L10n.text("Передать контекст…", "Hand off context…"), systemImage: "arrowshape.turn.up.right")
                     }.pointingHandCursor().help(L10n.text("Передать контекст в новый чат", "Hand off context to a new chat"))
                         .disabled(model.loadingChat || model.creatingHandoff || model.preparingHandoff || model.isBusy(threadID: chat.id))
-                } else if model.state.browserEnabled == true, [.originalCodex, .appClaude].contains(model.currentAgent), let project = model.selectedProject,
+                } else if model.state.browserEnabled == true, model.isRegistered(model.currentAgent), let project = model.selectedProject,
                           model.newChatWorkspaces[project.id] == nil { // A worktree chat starts with its own browser profile.
                     NewChatBrowserProfilePicker(project: project.path, connection: model.currentAgent, ownerName: model.browserProfileOwnerName, selection: Binding(
                         get: { model.newChatBrowserProfiles[project.id] },
@@ -1358,7 +1357,7 @@ struct MessageRow: View {
             if item.kind == "user" { Spacer(minLength: 70) }
             else { Image(systemName: "sparkle").font(.ui(.title3)).padding(.top, 4).accessibilityHidden(true) }
             VStack(alignment: .leading, spacing: 10) {
-                Text(item.kind == "user" ? L10n.text("Ты", "You") : (item.agentName ?? "Codex")).font(.ui(.caption).weight(.semibold)).foregroundStyle(.secondary)
+                Text(item.kind == "user" ? L10n.text("Ты", "You") : (item.speakerName)).font(.ui(.caption).weight(.semibold)).foregroundStyle(.secondary)
                 MessageText(text: item.text)
                 Button {
                     NSPasteboard.general.clearContents(); NSPasteboard.general.setString(item.text, forType: .string)
@@ -1374,7 +1373,7 @@ struct MessageRow: View {
 
 struct UsageDetail: View {
     let usage: UsageSnapshot?
-    var claude = false
+    var agentName = TranscriptItem.legacyAgentName
     /// Until the window is reported, the occupied size alone is still a measurement.
     static func footer(_ usage: UsageSnapshot?, language: AppLanguage = L10n.language) -> String {
         if let percent = ContextRing.percent(usage) { return L10n.text("Контекст ≈\(percent)", "Context ≈\(percent)", language: language) }
@@ -1462,7 +1461,7 @@ struct UsageDetail: View {
                 }
                 Text(L10n.text("Обновлено в \(Self.time(usage.measuredAt))", "Updated at \(Self.time(usage.measuredAt))"))
                     .font(.ui(.caption)).foregroundStyle(.secondary)
-            } else { Text(claude ? L10n.text("Показатели появятся после ответа Claude.", "Metrics will appear after Claude responds.") : L10n.text("Показатели появятся после ответа Codex.", "Metrics will appear after Codex responds.")) }
+            } else { Text(L10n.text("Показатели появятся после ответа \(agentName).", "Metrics will appear after \(agentName) responds.")) }
             Text(L10n.text("Процент — оценка, а не порог сжатия. Кэш входит во вход. Это не расход лимита подписки.", "The percentage is an estimate, not the compaction threshold. Cached tokens are part of input. This is not subscription usage."))
                 .font(.ui(.caption)).foregroundStyle(.tertiary)
         }
@@ -1620,34 +1619,44 @@ struct SettingsView: View {
         }.formStyle(.grouped)
     }
 
+    /// One registered agent's account. A shared engine signs in through a browser page and reconnects as a whole; a
+    /// per-chat engine signs in in a terminal and checks the result when asked.
+    @ViewBuilder private func accountSection(_ id: AgentConnectionID) -> some View {
+        if let profile = model.profile(id) {
+            let agent = model.agentState(id), copy = profile.accountCopy
+            Section(copy.section()) {
+                if profile.traits.contains(.sharedEngine) {
+                    LabeledContent(L10n.text("Аккаунт", "Account"), value: agent.accountLabel)
+                    if agent.authenticated { Button(copy.signOut()) { Task { await model.logout(id) } }.disabled(model.anyBusy) }
+                    else { Button(copy.signIn()) { Task { await model.login(id) } }.disabled(!agent.connected) }
+                    Button(L10n.text("Переподключить \(profile.name)", "Reconnect \(profile.name)")) { Task { await model.connect(id) } }
+                        .disabled(agent.connecting || model.anyBusy)
+                } else {
+                    Text(agent.authenticated ? L10n.text("Вход выполнен", "Signed in") : L10n.text("Вход не выполнен", "Not signed in"))
+                    if let note = copy.note { Text(note()).font(.ui(.caption)).foregroundStyle(.secondary) }
+                    Button(copy.signIn()) { Task { await model.login(id) } }.disabled(model.anyBusy || agent.connecting)
+                    Button(L10n.text("Проверить вход", "Check sign-in")) {
+                        Task { if model.agentState(id).connected { await model.refreshAccount(id) } else { await model.connect(id) } }
+                    }.disabled(agent.connecting)
+                    if agent.authenticated { Button(copy.signOut()) { Task { await model.logout(id) } }.disabled(model.anyBusy) }
+                }
+                EngineCompatibilityRows(agent: id.agent, name: profile.productName, engine: agent.descriptor?.engine)
+            }
+        }
+    }
+
     private var accountsSettings: some View {
         Form {
-            Section(L10n.text("Аккаунт Codex", "Codex account")) {
-                LabeledContent(L10n.text("Аккаунт", "Account"), value: model.accountLabel)
-                if model.authenticated { Button(L10n.text("Выйти из аккаунта этого приложения", "Sign out of this app")) { Task { await model.logout() } }.disabled(model.anyBusy) }
-                else { Button(L10n.text("Войти через ChatGPT", "Sign in with ChatGPT")) { Task { await model.login() } }.disabled(!model.connected) }
-                Button(L10n.text("Переподключить Codex", "Reconnect Codex")) { Task { await model.connect() } }.disabled(model.connecting || model.anyBusy)
-                EngineCompatibilityRows(agent: .codex, name: "Codex", engine: model.agentDescriptor?.engine)
-            }
-            Section(L10n.text("Подписка Claude", "Claude subscription")) {
-                Text(model.claudeAuthenticated ? L10n.text("Вход выполнен", "Signed in") : L10n.text("Вход не выполнен", "Not signed in"))
-                Text(L10n.text("Официальный Claude Code \(ClaudeRuntime.pinnedVersion). Вход открывается в Terminal в отдельном профиле Switchboard, затем нажми «Проверить вход»; твой профиль Claude Code не меняется.",
-                               "Official Claude Code \(ClaudeRuntime.pinnedVersion). Sign-in opens in Terminal in a separate Switchboard profile, then click Check sign-in; your own Claude Code profile is unchanged."))
-                    .font(.ui(.caption)).foregroundStyle(.secondary)
-                Button(L10n.text("Войти по подписке Claude", "Sign in with Claude subscription")) { Task { await model.loginClaude() } }.disabled(model.anyBusy || model.claudeConnecting)
-                Button(L10n.text("Проверить вход", "Check sign-in")) { Task { if model.claudeConnected { await model.refreshClaudeAccount() } else { await model.connectClaude() } } }.disabled(model.claudeConnecting)
-                if model.claudeAuthenticated {
-                    Button(L10n.text("Выйти из Claude в этом приложении", "Sign out of Claude in this app")) { Task { await model.logoutClaude() } }.disabled(model.anyBusy)
+            ForEach(model.agentIDs, id: \.self) { id in accountSection(id) }
+            if model.firstAgent(with: .catalogModels) != nil {
+                Section(L10n.text("Советник Claude", "Claude advisor")) {
+                    Picker(L10n.text("Советник", "Advisor"), selection: Binding(get: { model.state.claudeAdvisor ?? "" }, set: { model.selectClaudeAdvisor($0) })) {
+                        ForEach(ClaudeAdvisor.options, id: \.id) { Text($0.name).tag($0.id) }
+                    }
+                    Text(L10n.text("Более сильная модель, с которой Claude советуется перед выбором подхода, при повторяющейся ошибке и перед завершением; только для чатов и задач на более слабой модели (Sonnet и Haiku получают Opus, Opus — только Fable). Советы расходуют лимиты подписки, Fable может списывать кредиты; действует со следующего сообщения.",
+                                   "A stronger model Claude consults before choosing an approach, on a recurring error and before finishing; only for chats and jobs on a weaker model (Sonnet and Haiku get Opus, Opus gets only Fable). Advice counts toward subscription limits, Fable may use credits; takes effect from the next message."))
+                        .font(.ui(.caption)).foregroundStyle(.secondary)
                 }
-                EngineCompatibilityRows(agent: .claudeCode, name: "Claude Code", engine: model.claudeDescriptor?.engine)
-            }
-            Section(L10n.text("Советник Claude", "Claude advisor")) {
-                Picker(L10n.text("Советник", "Advisor"), selection: Binding(get: { model.state.claudeAdvisor ?? "" }, set: { model.selectClaudeAdvisor($0) })) {
-                    ForEach(ClaudeAdvisor.options, id: \.id) { Text($0.name).tag($0.id) }
-                }
-                Text(L10n.text("Более сильная модель, с которой Claude советуется перед выбором подхода, при повторяющейся ошибке и перед завершением; только для чатов и задач на более слабой модели (Sonnet и Haiku получают Opus, Opus — только Fable). Советы расходуют лимиты подписки, Fable может списывать кредиты; действует со следующего сообщения.",
-                               "A stronger model Claude consults before choosing an approach, on a recurring error and before finishing; only for chats and jobs on a weaker model (Sonnet and Haiku get Opus, Opus gets only Fable). Advice counts toward subscription limits, Fable may use credits; takes effect from the next message."))
-                    .font(.ui(.caption)).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped)
     }

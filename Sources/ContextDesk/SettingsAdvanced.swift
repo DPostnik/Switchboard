@@ -103,7 +103,7 @@ struct PluginSettings: View {
             }.pointingHandCursor()
             Text(model.routeMessage(model.defaultRoute)).font(.ui(.callout)).foregroundStyle(.secondary)
             Button(model.connecting ? L10n.text("Подключение…", "Connecting…") : L10n.text("Применить выбор", "Apply selection")) {
-                Task { await model.connect() }
+                Task { if let host = model.optimizerHost { await model.connect(host) } }
             }.disabled(model.anyBusy || model.connecting)
             Text(L10n.text("Переподключает Codex, чтобы запустить выбранные плагины. Дождись завершения текущих задач. Существующие чаты сохраняют свой выбор плагина.", "Reconnects Codex to start the selected plugins. Wait for current tasks to finish. Existing chats keep their plugin selection."))
                 .font(.ui(.caption)).foregroundStyle(.secondary)
@@ -118,8 +118,10 @@ struct PluginSettings: View {
                         Text(description.text()).font(.ui(.callout)).foregroundStyle(.secondary)
                     }
                     Text(model.routeMessage(plugin.route)).font(.ui(.caption)).foregroundStyle(.secondary)
-                    Text("Codex: " + OptimizerCompatibility.summary(agent: .codex, requirements: plugin.manifest.requirements)).font(.ui(.caption))
-                    Text("Claude Code: " + OptimizerCompatibility.summary(agent: .claudeCode, requirements: plugin.manifest.requirements)).font(.ui(.caption)).foregroundStyle(.secondary)
+                    ForEach(model.agentIDs, id: \.self) { id in
+                        Text((model.profile(id)?.productName ?? model.agentName(id)) + ": " + OptimizerCompatibility.summary(agent: id.agent, requirements: plugin.manifest.requirements))
+                            .font(.ui(.caption)).foregroundStyle(model.traits(id).contains(.optimizerPlugins) ? .primary : .secondary)
+                    }
                     if let status = model.pluginStatuses[plugin.id] {
                         ForEach(status.metrics) { metric in
                             LabeledContent(metric.localizedTitle(), value: String(metric.value))

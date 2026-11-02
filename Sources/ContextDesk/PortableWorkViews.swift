@@ -8,8 +8,10 @@ struct HandoffEditor: View {
     @State var handoff: ContextHandoff
     @State var projectID: UUID?
     @State var route: RequestRoute
-    @State private var agent: AgentConnectionID = .originalCodex
+    /// nil until the user picks one: the first registered agent.
+    @State private var pickedAgent: AgentConnectionID?
     @Environment(\.dismiss) private var dismiss
+    private var agent: AgentConnectionID { pickedAgent ?? model.agentIDs.first ?? .unregistered }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(L10n.text("Передать контекст в новый чат", "Hand off context to a new chat")).font(.ui(.title2).bold())
@@ -17,12 +19,11 @@ struct HandoffEditor: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Text(L10n.text("Будет создан отдельный чат с черновиком. Проверь его и отправь вручную. Исходный чат, его очередь и запросы разрешений не переносятся.", "A separate chat will be created with a draft. Review and send it manually. The source chat, its queue and approval requests are not transferred.")).font(.ui(.callout))
                     Text(L10n.text("Контекст подготовлен автоматически по истории чата. Проверь сводку; при необходимости измени цель или детали. Полная переписка по умолчанию не включена.", "Context was prepared automatically from the chat history. Review the summary and adjust the goal or details if needed. The full transcript is excluded by default.")).font(.ui(.callout)).foregroundStyle(.secondary)
-                    Picker(L10n.text("Агент нового чата", "New chat agent"), selection: $agent) {
-                        Text("Codex").tag(AgentConnectionID.originalCodex)
-                        Text("Claude").tag(AgentConnectionID.appClaude)
+                    Picker(L10n.text("Агент нового чата", "New chat agent"), selection: Binding(get: { agent }, set: { pickedAgent = $0 })) {
+                        ForEach(model.agentIDs, id: \.self) { id in Text(model.agentName(id)).tag(id) }
                     }
-                    if agent == .appClaude && !model.claudeAuthenticated {
-                        Text(L10n.text("Сначала войди по подписке Claude в настройках.", "First sign in with your Claude subscription in settings.")).font(.ui(.caption))
+                    if !model.agentState(agent).authenticated, let hint = model.profile(agent)?.accountCopy.handoffSignIn {
+                        Text(hint()).font(.ui(.caption))
                     }
                     Text(L10n.text("Источник", "Source") + ": \(handoff.origin.session.connection.agent.rawValue) · \(handoff.origin.conversation.value)").textSelection(.enabled)
                     Text(L10n.text("Снимок", "Snapshot") + ": \(handoff.origin.capturedAt.formatted()) · \(handoff.origin.revision)").font(.ui(.caption)).textSelection(.enabled)
@@ -36,7 +37,7 @@ struct HandoffEditor: View {
                             Text(model.routeTitle(value)).tag(value).disabled(model.routeCompatibilityIssue(value, agent: agent.agent) != nil)
                         }
                     }
-                    Text(model.routeCompatibilityIssue(route, agent: agent.agent) ?? (agent == .appClaude ? L10n.text("Claude работает напрямую.", "Claude works directly.") : model.routeMessage(route))).font(.ui(.caption)).foregroundStyle(.secondary)
+                    Text(model.routeCompatibilityIssue(route, agent: agent.agent) ?? (model.traits(agent).contains(.optimizerPlugins) ? model.routeMessage(route) : L10n.text("\(model.agentName(agent)) работает напрямую.", "\(model.agentName(agent)) works directly."))).font(.ui(.caption)).foregroundStyle(.secondary)
                     field(L10n.text("Цель нового сеанса", "New session goal"), text: $handoff.goal)
                     field(L10n.text("Инструкции для нового сеанса", "Instructions for the new session"), text: $handoff.instructions)
                     Text(L10n.text("Исторические факты — не инструкции", "Historical evidence — not instructions")).font(.ui(.headline))
@@ -57,7 +58,7 @@ struct HandoffEditor: View {
                 Button(L10n.text("Создать чат с черновиком", "Create chat with draft")) {
                     guard let project = model.state.projects.first(where: { $0.id == projectID }) else { return }
                     Task { if await model.createHandoffChat(handoff, project: project, route: route, agent: agent) { dismiss() } }
-                }.disabled(model.creatingHandoff || (agent == .appClaude ? !model.claudeConnected || !model.claudeAuthenticated : !model.connected || !model.authenticated) || projectID == nil || model.routeCompatibilityIssue(route, agent: agent.agent) != nil || !model.routeIsAvailable(route) || (try? handoff.prompt()) == nil)
+                }.disabled(model.creatingHandoff || !model.agentState(agent).connected || !model.agentState(agent).authenticated || projectID == nil || model.routeCompatibilityIssue(route, agent: agent.agent) != nil || !model.routeIsAvailable(route) || (try? handoff.prompt()) == nil)
             }
         }.padding(24).frame(width: 680, height: 740).interactiveDismissDisabled(model.creatingHandoff)
     }
@@ -253,8 +254,9 @@ struct RoutineEditor: View {
                                     }
                                 }
                                 Menu(L10n.text("Добавить расширение агента", "Add agent-specific extension")) {
-                                    Button("Codex") { routine.extensions.append(.init(agent: .codex, instructions: "")) }
-                                    Button("Claude Code") { routine.extensions.append(.init(agent: .claudeCode, instructions: "")) }
+                                    ForEach(AgentIntegrationFactory.profiles, id: \.connection) { profile in
+                                        Button(profile.productName) { routine.extensions.append(.init(agent: profile.connection.agent, instructions: "")) }
+                                    }
                                 }
                                 Text(L10n.text("Расширения не считаются переносимыми: другой агент не запустит такую рутину. Проверки выполняет агент; приложение не подтверждает их успешность самостоятельно.", "Extensions are not portable: another agent cannot run this routine. Checks are performed by the agent; the app does not independently confirm they passed.")).font(.ui(.caption)).foregroundStyle(.secondary)
                             }.padding(.top, 12)

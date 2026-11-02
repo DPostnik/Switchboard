@@ -13,7 +13,7 @@ import ContextCore
     model.state.projects = [project]; model.projectID = project.id
     model.state.model = "global-default"
     #expect(model.effort == "medium")
-    model.models = [.init(id: "model-a-updated", displayName: "A", defaultEffort: "high", efforts: ["medium", "high"])]
+    model.codexModels = [.init(id: "model-a-updated", displayName: "A", defaultEffort: "high", efforts: ["medium", "high"])]
     model.state.chats = [Chat(id: "a", projectID: project.id, title: "A", model: "model-a"),
                          Chat(id: "b", projectID: project.id, title: "B", model: "model-b")]
     model.chatID = "a"

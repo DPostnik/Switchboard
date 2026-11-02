@@ -8,7 +8,7 @@ extension DeskModel {
 
     /// Takes the chat itself so list views avoid a linear lookup per row.
     func supportsSummaries(_ chat: Chat) -> Bool {
-        !chat.isScheduledRecord && [.originalCodex, .appClaude].contains(chat.nativeSession?.connection)
+        !chat.isScheduledRecord && isRegistered(chat.nativeSession?.connection)
     }
 
     /// Generation for a chat runs on its own agent connection, never on another agent's account.
@@ -18,24 +18,26 @@ extension DeskModel {
 
     func canGenerateSummary(_ chat: Chat) -> Bool {
         guard supportsSummaries(chat) else { return false }
-        return chat.nativeSession?.connection == .appClaude ? claudeConnected && claudeAuthenticated : connected && authenticated
+        let state = agentState(chat.nativeSession?.connection)
+        return state.connected && state.authenticated
     }
 
-    func generationRunner(for id: String) -> AgentGenerationRunner {
-        state.chats.first { $0.id == id }?.nativeSession?.connection == .appClaude ? claudeSummaryRunner : summaryRunner
+    /// The generation runner of the chat's own connection; nil for a chat no registered connection owns.
+    func generationRunner(for id: String) -> AgentGenerationRunner? {
+        connectionOfChat(id).flatMap { generationRunner(connection: $0) }
     }
 
     func generationEnvironment(for id: String, workspace: String, recipe: String? = nil) -> AgentGenerationEnvironment {
-        let claude = state.chats.first { $0.id == id }?.nativeSession?.connection == .appClaude
-        return .init(executable: claude ? nil : summaryExecutable, home: claude ? claudeHome : summaryHome,
+        let registration = connectionOfChat(id).flatMap { self.registration($0) }
+        return .init(executable: registration?.generationExecutable, home: registration?.generationHome ?? summaryHome,
                      workspace: summarySkillsDirectory.appendingPathComponent(workspace),
                      recipeDirectory: recipe.map { summarySkillsDirectory.appendingPathComponent($0) })
     }
 
-    /// The chat's own model; Claude falls back to its app default, never to the Codex model.
+    /// The chat's own model; an empty one falls back to its own agent's default, never to another agent's model.
     func generationModel(for chat: Chat) -> String {
-        if chat.nativeSession?.connection == .appClaude { return ClaudeModel.resolved(chat.model.isEmpty ? state.claudeModel : chat.model) }
-        return chat.model.isEmpty ? state.model : chat.model
+        guard let agent = chat.nativeSession?.connection, traits(agent).contains(.catalogModels) else { return chat.model.isEmpty ? state.model : chat.model }
+        return ClaudeModel.resolved(chat.model.isEmpty ? state.claudeModel : chat.model)
     }
 
     /// Stops in-flight summary work owned by one agent after its account or connection changed.
@@ -161,7 +163,8 @@ extension DeskModel {
             for chunk in source.chunks.dropFirst(matching) {
                 try Task.checkCancellation()
                 let id = record.threadID, attempt = record.attempt
-                let part = try await generationRunner(for: id).summarize(source: sessionForChat(record.threadID), chunk: chunk, model: record.model,
+                guard let runner = generationRunner(for: id) else { throw ConversationIdentity.unavailable }
+                let part = try await runner.summarize(source: sessionForChat(record.threadID), chunk: chunk, model: record.model,
                     route: record.route, environment: generationEnvironment(for: id, workspace: ".summary-workspace", recipe: "archive-summary"),
                     language: L10n.language) { [weak self] in
                         guard let self else { throw CancellationError() }

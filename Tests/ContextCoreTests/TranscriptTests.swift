@@ -10,7 +10,7 @@ import ContextCore
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     let model = DeskModel(store: AppStore(file: folder.appendingPathComponent("state.sqlite")))
     model.authenticated = true
-    model.models = [CodexModel(id: "gpt-5.4", displayName: "GPT-5.4")]
+    model.codexModels = [CodexModel(id: "gpt-5.4", displayName: "GPT-5.4")]
     model.state.model = "gpt-5.4"
     model.draft = String(repeating: "Текст сообщения ", count: 100)
     model.items = [TranscriptItem(id: "u", kind: "user", text: model.draft)]
@@ -596,7 +596,7 @@ import ContextCore
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     let model = DeskModel(store: AppStore(file: folder.appendingPathComponent("state.sqlite")))
     model.authenticated = true
-    model.models = [CodexModel(id: "gpt-5.4", displayName: "GPT-5.4")]
+    model.codexModels = [CodexModel(id: "gpt-5.4", displayName: "GPT-5.4")]
     model.state.model = "gpt-5.4"
     model.items = (0..<10).flatMap { index in
         [TranscriptItem(id: "u\(index)", kind: "user", text: "Вопрос \(index)"),

@@ -175,7 +175,7 @@ private actor RoutineExecutorFixture: AgentScheduledExecutor {
         kind: .approval(canAllow: true), reason: nil, details: "Source approval"), threadID: source.id)
     model.pending = [approval]
     try await store.save(model.state)
-    #expect(await model.createHandoffChat(handoff, project: project, route: .direct))
+    #expect(await model.createHandoffChat(handoff, project: project, route: .direct, agent: .originalCodex))
     let target = try #require(model.selectedChat)
     #expect(target.id != source.id && target.nativeSession?.nativeID == "new-native")
     #expect(target.handoffOrigin == handoff.origin && target.route == .direct)

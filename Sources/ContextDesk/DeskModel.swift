@@ -167,15 +167,12 @@ private struct ChatRunState: Equatable {
     var chatIndexTask: Task<Void, Never>?
     /// The chats as the last completed index run saw them; an unchanged list skips the run.
     var chatIndexedInfos: [ChatSearchIndex.ChatInfo]?
-    let summaryRunner: AgentGenerationRunner
-    let claudeSummaryRunner: AgentGenerationRunner
     var titleTasks: [String: Task<Void, Never>] = [:]
     private var titleRunners: [String: AgentGenerationRunner] = [:]
     private var manuallyNamedChatIDs: Set<String> = []
     let summaryResources: URL?
-    let summaryExecutable: URL?
+    /// The home whose parent holds the app's workflow skills (`summarySkillsDirectory`).
     let summaryHome: URL
-    let claudeHome: URL
     let transcript = TranscriptPresentation()
     /// Git checkpoints at turn start and end (`TurnCheckpointing.swift`).
     let turnCheckpoints = TurnCheckpointCoordinator()
@@ -190,8 +187,6 @@ private struct ChatRunState: Equatable {
     @Published var handoffProgress = ""
     var handoffRunner: AgentGenerationRunner?
     var handoffCancelled = false
-    private var historyBackfillTask: Task<Void, Never>?
-    private var claudeHistoryBackfillTask: Task<Void, Never>?
     /// One-time launch pass that reduces the tool bodies of archived chats (`ActivityCleanup.swift`).
     var activityCleanupTask: Task<Void, Never>?
     /// The launch pass starts after this delay and, while any chat runs or sends, pauses before each chat so live turns
@@ -207,7 +202,8 @@ private struct ChatRunState: Equatable {
     /// Chats that asked for the pending restart; mirrored from AppRestartController for the sidebar.
     @Published var restartWaitingChatIDs: [String] = []
     @Published var usage: [String: UsageSnapshot] = [:]
-    @Published var models: [AgentModelInfo] = []
+    /// Models the current agent's engine listed; empty for catalog agents.
+    var models: [AgentModelInfo] { agentState(currentAgent).models }
     @Published var draftEffort = "medium"
     var effort: String {
         get {
@@ -239,10 +235,30 @@ private struct ChatRunState: Equatable {
             newChatDrafts[projectID] = draft.isEmpty ? nil : draft
         }
     }
-    @Published var agentDescriptor: AgentDescriptor?
-    @Published var connected = false
-    @Published var authenticated = false
-    @Published var connecting = false
+    /// Registered agent connections in the factory's order (`AgentIntegrationFactory.profiles`).
+    let agentIDs: [AgentConnectionID]
+    private let slots: [AgentConnectionID: AgentConnectionSlot]
+    /// Connection, sign-in, descriptor, models and limits of every registered connection. One dictionary of values, so
+    /// every change publishes the model as the separate per-agent properties did.
+    @Published var agentStates: [AgentConnectionID: AgentConnectionState]
+    func agentState(_ id: AgentConnectionID?) -> AgentConnectionState { id.flatMap { agentStates[$0] } ?? AgentConnectionState() }
+    func client(_ id: AgentConnectionID) -> AgentClient? { slots[id]?.client }
+    /// The connection's runner for isolated generation (archive summaries).
+    func generationRunner(connection id: AgentConnectionID) -> AgentGenerationRunner? { slots[id]?.generationRunner }
+    func registration(_ id: AgentConnectionID) -> AgentRegistration? { slots[id]?.registration }
+    func profile(_ id: AgentConnectionID?) -> AgentProfile? { id.flatMap { slots[$0]?.profile } }
+    func traits(_ id: AgentConnectionID?) -> AgentAppTraits { profile(id)?.traits ?? [] }
+    func isRegistered(_ id: AgentConnectionID?) -> Bool { id.map { slots[$0] != nil } ?? false }
+    /// The registered connection that runs jobs stored with `engine`.
+    func connection(for engine: JobEngine) -> AgentConnectionID? { agentIDs.first { slots[$0]?.profile.engine == engine } }
+    /// The first registered connection with all of `traits`.
+    func firstAgent(with traits: AgentAppTraits) -> AgentConnectionID? { agentIDs.first { self.traits($0).isSuperset(of: traits) } }
+    func connectionOfChat(_ id: String) -> AgentConnectionID? { state.chats.first { $0.id == id }?.nativeSession?.connection }
+    /// Name of the agent that owns a session; an unknown agent shows its raw ID, never another agent's name.
+    func agentName(_ connection: AgentConnectionID?) -> String { profile(connection)?.name ?? connection?.agent.rawValue ?? "" }
+    var anyAgentConnecting: Bool { agentStates.values.contains { $0.connecting } }
+    /// A connection serving optimizer plugins is connecting: plugin settings wait for it.
+    var connecting: Bool { agentIDs.contains { traits($0).contains(.optimizerPlugins) && agentState($0).connecting } }
     @Published private(set) var isBootstrapping = true {
         didSet { syncMenu() }
     }
@@ -298,54 +314,35 @@ private struct ChatRunState: Equatable {
         runs.removeAll(); turnStarts.removeAll(); tokenTotals.removeAll(); turnTokens.removeAll()
     }
     @Published var loadingChat = false
-    @Published var accountLabel = L10n.text("Вход не выполнен", "Not signed in")
     @Published var error: String?
     /// The queued message being edited in place, at most one at a time.
     @Published private(set) var queueEdit: QueueEditSession?
-    @Published private(set) var accountLimits: AccountLimits?
-    @Published private(set) var limitsError: String?
-    @Published private(set) var refreshingLimits = false
-    private var limitsRequestID: UUID?
-    @Published private(set) var claudeLimits: AccountLimits?
-    @Published private(set) var claudeLimitsError: String?
-    @Published private(set) var refreshingClaudeLimits = false
-    private var claudeLimitsRequestID: UUID?
     @Published var notificationStatus = L10n.text("Уведомления не включены", "Notifications are off")
     /// macOS allows the app's notifications; the "Needs you" page offers to enable them otherwise.
     @Published var notificationsAllowed = false
     var loadedThreads: Set<String> = []
-    private var eventTask: Task<Void, Never>?
     private var selectionGeneration = UUID()
     private var booted = false
-    let connection: AgentClient
-    let claudeConnection: AgentClient
-    @Published var claudeConnected = false
-    @Published var claudeAuthenticated = false
-    @Published var claudeConnecting = false
-    @Published var claudeDescriptor: AgentDescriptor?
-    private var claudeEventTask: Task<Void, Never>?
     let store: AppStore
     /// Every capability use and permission decision (roles plan, Phase 0); writes never block a decision.
     let capabilityLedger: CapabilityLedger
-    init(connection: any AgentIntegration = AgentIntegrationFactory.codex(), claudeIntegration: any AgentIntegration = AgentIntegrationFactory.claude(), store: AppStore = AppStore(file: Locations.root.appendingPathComponent("metadata.sqlite")),
-         capabilityLedger: CapabilityLedger = CapabilityLedger(file: Locations.root.appendingPathComponent("capability-ledger.sqlite")),
-         pluginDirectory: URL = PluginCatalog.defaultDirectory,
-         summaryResources: URL? = Bundle.main.resourceURL?.appendingPathComponent("Skills"),
-         summaryExecutable: URL? = nil, summaryHome: URL = Locations.codexHome, claudeHome: URL = Locations.claudeHome,
-         jobStore: JobStore = JobStore(file: Locations.root.appendingPathComponent("scheduled-jobs.json"))) {
+    /// `agents` comes from `AgentIntegrationFactory.registrations` (the convenience initializer there builds it).
+    init(agents: [AgentRegistration], store: AppStore, capabilityLedger: CapabilityLedger, pluginDirectory: URL,
+         summaryResources: URL?, summaryHome: URL, jobStore: JobStore) {
         self.jobStore = jobStore
         self.attentionStore = AttentionStore(file: jobStore.file.deletingLastPathComponent().appendingPathComponent("attention.json"))
         self.pullRequests = PullRequestStore(file: jobStore.file.deletingLastPathComponent().appendingPathComponent(PullRequestWatchStore.fileName))
         self.chatSearchIndex = ChatSearchIndex(file: jobStore.file.deletingLastPathComponent().appendingPathComponent(ChatSearchIndex.fileName))
-        self.connection = AgentClient(integration: connection)
-        self.claudeConnection = AgentClient(integration: claudeIntegration)
-        self.summaryRunner = AgentGenerationRunner(integration: connection)
-        self.claudeSummaryRunner = AgentGenerationRunner(integration: claudeIntegration)
-        self.claudeHome = claudeHome
+        var ids: [AgentConnectionID] = [], slots: [AgentConnectionID: AgentConnectionSlot] = [:]
+        for registration in agents where slots[registration.connection] == nil {
+            ids.append(registration.connection); slots[registration.connection] = AgentConnectionSlot(registration)
+        }
+        self.agentIDs = ids; self.slots = slots
+        self.agentStates = Dictionary(uniqueKeysWithValues: ids.map { ($0, AgentConnectionState()) })
         self.store = store
         self.capabilityLedger = capabilityLedger
         self.pluginDirectory = pluginDirectory
-        self.summaryResources = summaryResources; self.summaryExecutable = summaryExecutable; self.summaryHome = summaryHome
+        self.summaryResources = summaryResources; self.summaryHome = summaryHome
         composer.onChange = { [weak self] text in self?.storeDraft(text) }
         refreshPlugins()
     }
@@ -356,7 +353,7 @@ private struct ChatRunState: Equatable {
     var chats: [Chat] { projectID.map { state.orderedChats(projectID: $0, archived: false) } ?? [] }
     var currentAction: PendingAction? { pending.first { $0.threadID == chatID } }
     var currentUsage: UsageSnapshot? { chatID.flatMap { usage[$0] } }
-    var canSend: Bool { (selectedChat?.isScheduledRecord != true || !busy) && !creatingHandoff && (chatID.map { chatIsAvailable($0) } ?? ([.originalCodex, .appClaude].contains(currentAgent))) && !selectedChatIsArchived && !isChangingChat(currentRunKey) && routeIsAvailable(currentRoute) && currentAgentConnected && currentAgentAuthenticated && selectedProject != nil && !sending && !creatingWorktree && !loadingChat && composer.hasMessage }
+    var canSend: Bool { (selectedChat?.isScheduledRecord != true || !busy) && !creatingHandoff && (chatID.map { chatIsAvailable($0) } ?? isRegistered(currentAgent)) && !selectedChatIsArchived && !isChangingChat(currentRunKey) && routeIsAvailable(currentRoute) && currentAgentConnected && currentAgentAuthenticated && selectedProject != nil && !sending && !creatingWorktree && !loadingChat && composer.hasMessage }
     var supportedEfforts: [String] {
         models.first { $0.id == currentModel }?.efforts ?? []
     }
@@ -404,18 +401,16 @@ private struct ChatRunState: Equatable {
         await refreshJobs(); step("jobs")
         await loadAttention()
         await startPullRequests()
-        await connection.observeEvents(sessions: state.chats.compactMap(\.nativeSession))
-        eventTask = Task { [weak self, connection] in
-            for await event in connection.events { await self?.receive(event) }
+        await startEventLoops()
+        for id in agentIDs where traits(id).contains(.connectsAtLaunch) { await connect(id); step(agentName(id)) }
+        // Scheduled tasks run as chats of their agent's connection, so enabled ones need it connected too.
+        let jobEngines = Set((try? await jobStore.load())?.jobs.filter(\.enabled).map(\.engine) ?? [])
+        for id in agentIDs where !traits(id).contains(.connectsAtLaunch) {
+            if state.defaultConnection == id || profile(id).map({ jobEngines.contains($0.engine) }) == true
+                || state.chats.contains(where: { $0.nativeSession?.connection == id }) { await connect(id) }
+            step(agentName(id))
         }
-        claudeEventTask = Task { [weak self, claudeConnection] in
-            for await event in claudeConnection.events { await self?.receiveClaude(event) }
-        }
-        await connect(); step("Codex")
-        // Claude scheduled tasks run in the app's Claude profile, so enabled ones need it connected too.
-        let claudeJobs = (try? await jobStore.load())?.jobs.contains { $0.engine == .claude && $0.enabled } == true
-        if state.defaultConnection == .appClaude || claudeJobs || state.chats.contains(where: { $0.nativeSession?.connection == .appClaude }) { await connectClaude() }
-        step("Claude"); await startScheduler(); step("scheduler")
+        await startScheduler(); step("scheduler")
         startActivityCleanup()
         Task { await mobileRemote.restoreOnLaunch(model: self) } // Network sign-in must not hold up boot.
         continueAfterRestart(RestartContinuation.take())
@@ -425,11 +420,28 @@ private struct ChatRunState: Equatable {
         notificationsAllowed = settings.authorizationStatus == .authorized
         notificationStatus = settings.authorizationStatus == .authorized ? L10n.text("Уведомления включены", "Notifications are on") : L10n.text("Уведомления не включены", "Notifications are off")
     }
-    var defaultRoute: RequestRoute { state.defaultRoute ?? .direct }
-    var currentRoute: RequestRoute { selectedChat.map { $0.route ?? .direct } ?? (currentAgent == .appClaude ? .direct : defaultRoute) }
-    var neededPluginIDs: Set<String> {
-        Set(((state.defaultConnection == .originalCodex ? [defaultRoute] : []) + state.chats.filter { chatIsAvailable($0.id) }.compactMap(\.route)).filter { $0 != .direct }.map(\.rawValue))
+    /// One event loop per registered connection; every event names the connection it came from.
+    func startEventLoops() async {
+        let sessions = state.chats.compactMap(\.nativeSession)
+        for id in agentIDs {
+            guard let slot = slots[id], slot.eventTask == nil else { continue }
+            await slot.client.observeEvents(sessions: sessions.filter { $0.connection == id })
+            slot.eventTask = Task { [weak self, client = slot.client] in
+                for await event in client.events { await self?.receive(event, from: id) }
+            }
+        }
     }
+    var defaultRoute: RequestRoute { state.defaultRoute ?? .direct }
+    /// A new chat takes the default route only on an agent that runs optimizer plugins; others work directly.
+    func newChatRoute(_ agent: AgentConnectionID) -> RequestRoute { traits(agent).contains(.optimizerPlugins) ? defaultRoute : .direct }
+    var currentRoute: RequestRoute { selectedChat.map { $0.route ?? .direct } ?? newChatRoute(currentAgent) }
+    var neededPluginIDs: Set<String> {
+        Set(((traits(state.defaultConnection).contains(.optimizerPlugins) ? [defaultRoute] : []) + state.chats.filter { chatIsAvailable($0.id) }.compactMap(\.route)).filter { $0 != .direct }.map(\.rawValue))
+    }
+    /// The connection that starts and serves optimizer plugins.
+    var optimizerHost: AgentConnectionID? { firstAgent(with: .optimizerPlugins) }
+    /// The agent optimizer requirements are checked for; without a plugin host no route is compatible.
+    private var optimizerAgent: AgentID { optimizerHost?.agent ?? AgentID(rawValue: "") }
     var availableRoutes: [RequestRoute] {
         [.direct] + Set(plugins.map(\.route) + [defaultRoute, currentRoute] + state.chats.compactMap(\.route))
             .filter { $0 != .direct }.sorted { $0.rawValue < $1.rawValue }
@@ -439,20 +451,24 @@ private struct ChatRunState: Equatable {
         return plugins.first(where: { $0.id == route.rawValue })?.manifest.localizedTitle(language: language)
             ?? L10n.text("\(route.rawValue) (не установлен)", "\(route.rawValue) (not installed)", language: language)
     }
-    func routeCompatibilityIssue(_ route: RequestRoute, agent: AgentID = .codex) -> String? {
+    /// `agent` nil checks the route for the optimizer plugin host.
+    func routeCompatibilityIssue(_ route: RequestRoute, agent: AgentID? = nil) -> String? {
         if route == .direct { return nil }
         guard let plugin = plugins.first(where: { $0.id == route.rawValue }) else {
             return L10n.text("Плагин не установлен. Сохранённый маршрут не заменён.", "Plugin is not installed. The saved route has not been replaced.")
         }
-        return OptimizerCompatibility.issue(agent: agent, requirements: plugin.manifest.requirements)
+        return OptimizerCompatibility.issue(agent: agent ?? optimizerAgent, requirements: plugin.manifest.requirements)
     }
     func routeIsAvailable(_ route: RequestRoute) -> Bool {
         route == .direct || (routeCompatibilityIssue(route) == nil && pluginStatuses[route.rawValue] != nil)
     }
     func routeMessage(_ route: RequestRoute, language: AppLanguage = L10n.language) -> String {
-        if route == .direct { return L10n.text("Codex работает напрямую, без обработки запросов плагином.", "Codex works directly, without a plugin processing requests.", language: language) }
+        if route == .direct {
+            let name = agentName(optimizerHost)
+            return L10n.text("\(name) работает напрямую, без обработки запросов плагином.", "\(name) works directly, without a plugin processing requests.", language: language)
+        }
         if let plugin = plugins.first(where: { $0.id == route.rawValue }),
-           let issue = OptimizerCompatibility.issue(agent: .codex, requirements: plugin.manifest.requirements, language: language) { return issue }
+           let issue = OptimizerCompatibility.issue(agent: optimizerAgent, requirements: plugin.manifest.requirements, language: language) { return issue }
         if connecting && neededPluginIDs.contains(route.rawValue) {
             return L10n.text("Подключение…", "Connecting…", language: language)
         }
@@ -477,140 +493,195 @@ private struct ChatRunState: Equatable {
     func selectClaudeAdvisor(_ advisor: String) {
         state.claudeAdvisor = advisor.isEmpty ? nil : advisor; persist()
     }
+    /// Applied by reconnecting the connected agents that do not share one engine process (their reconnect waits only for
+    /// their own chats); a shared engine picks it up at its next reconnect.
     func selectUserChromeEnabled(_ enabled: Bool) {
         state.userChromeEnabled = enabled; persist()
-        if claudeConnected { Task { await connectClaude() } }
+        for id in agentIDs where !traits(id).contains(.sharedEngine) && agentState(id).connected { Task { await connect(id) } }
     }
     private func stopPlugins() async {
         pluginTask?.cancel(); pluginTask = nil
         for runtime in pluginRuntimes.values { await runtime.stop() }
         pluginRuntimes.removeAll(); pluginStatuses.removeAll()
     }
-    func connect() async {
-        guard !connecting, !anyBusy else { return }
-        refreshPlugins()
-        connecting = true; connected = false
-        clearLimits()
-        defer { connecting = false }
-        await connection.stop(); resetAgentState(.originalCodex)
-        await stopPlugins()
-        pluginMessages.removeAll()
-        let optimizerEnvironment: [String: String]
-        do { optimizerEnvironment = try await connection.integration.optimizerEnvironment(home: Locations.codexHome).value() }
-        catch { self.error = error.localizedDescription; return }
+    /// Connects one registered agent. A shared engine stops first and waits for the whole app to be idle, starting the
+    /// optimizer plugins it serves; a per-chat engine waits only for its own chats and keeps their processes.
+    func connect(_ id: AgentConnectionID) async {
+        guard let slot = slots[id], !agentState(id).connecting else { return }
+        let traits = slot.profile.traits, shared = traits.contains(.sharedEngine)
+        if shared { guard !anyBusy else { return } }
+        else { guard !state.chats.contains(where: { $0.nativeSession?.connection == id && isBusy(threadID: $0.id) }) else { return } }
+        if traits.contains(.optimizerPlugins) { refreshPlugins() }
+        agentStates[id]?.connecting = true; agentStates[id]?.connected = false
+        clearLimits(id)
+        defer { agentStates[id]?.connecting = false }
+        slot.historyBackfillTask?.cancel()
+        if shared { await slot.client.stop() } else { agentStates[id]?.authenticated = false }
+        resetAgentState(id)
         var optimizers: [AgentOptimizerEndpoint] = []
-        for id in neededPluginIDs.sorted() {
-            guard let plugin = plugins.first(where: { $0.id == id }) else {
-                pluginMessages[id] = L10n.text("Плагин не установлен. Установи его и нажми «Применить выбор».", "Plugin is not installed. Install it, then click Apply selection.")
-                continue
-            }
-            let runtime = ProviderPluginRuntime(plugin: plugin, environment: optimizerEnvironment)
-            if let issue = OptimizerCompatibility.issue(agent: .codex, requirements: plugin.manifest.requirements) {
-                pluginMessages[id] = issue; continue
-            }
-            do {
-                let endpoint = try await runtime.start()
-                let status = try await runtime.status()
-                optimizers.append(.init(id: plugin.id, endpoint: endpoint))
-                pluginStatuses[id] = status
-                pluginRuntimes[id] = runtime
-            } catch {
-                await runtime.stop()
-                pluginMessages[id] = error.localizedDescription
+        if traits.contains(.optimizerPlugins) {
+            await stopPlugins()
+            pluginMessages.removeAll()
+            let optimizerEnvironment: [String: String]
+            do { optimizerEnvironment = try await slot.client.integration.optimizerEnvironment(home: slot.registration.home).value() }
+            catch { self.error = error.localizedDescription; return }
+            for pluginID in neededPluginIDs.sorted() {
+                guard let plugin = plugins.first(where: { $0.id == pluginID }) else {
+                    pluginMessages[pluginID] = L10n.text("Плагин не установлен. Установи его и нажми «Применить выбор».", "Plugin is not installed. Install it, then click Apply selection.")
+                    continue
+                }
+                let runtime = ProviderPluginRuntime(plugin: plugin, environment: optimizerEnvironment)
+                if let issue = OptimizerCompatibility.issue(agent: id.agent, requirements: plugin.manifest.requirements) {
+                    pluginMessages[pluginID] = issue; continue
+                }
+                do {
+                    let endpoint = try await runtime.start()
+                    let status = try await runtime.status()
+                    optimizers.append(.init(id: plugin.id, endpoint: endpoint))
+                    pluginStatuses[pluginID] = status
+                    pluginRuntimes[pluginID] = runtime
+                } catch {
+                    await runtime.stop()
+                    pluginMessages[pluginID] = error.localizedDescription
+                }
             }
         }
         do {
-            agentDescriptor = try await connection.start(.init(home: Locations.codexHome, resources: Bundle.main.resourceURL,
-                browserEnabled: state.browserEnabled == true, optimizers: optimizers))
-            connected = true
-            if summaryResources != nil {
+            let descriptor = try await slot.client.start(.init(home: slot.registration.home, resources: Bundle.main.resourceURL,
+                browserEnabled: state.browserEnabled == true, userChromeEnabled: state.userChromeEnabled != false, optimizers: optimizers))
+            agentStates[id]?.descriptor = descriptor
+            agentStates[id]?.connected = true
+            if descriptor.capabilities.contains(.workflowRegistration), summaryResources != nil {
                 do {
                     try prepareSummarySkills()
-                    try await connection.registerWorkflows(at: summarySkillsDirectory)
+                    try await slot.client.registerWorkflows(at: summarySkillsDirectory)
                 } catch { self.error = L10n.text("Не удалось подключить навыки рутин: ", "Could not load routine skills: ") + error.localizedDescription }
             }
-            clearConnectionError()
-            await refreshAccount()
-            startHistoryBackfill()
-            if !pluginRuntimes.isEmpty {
-                pluginTask = Task { [weak self] in
-                    while !Task.isCancelled {
-                        do { try await Task.sleep(for: .seconds(5)) } catch { return }
-                        guard let self else { return }
-                        for id in self.pluginRuntimes.keys.sorted() {
-                            guard let runtime = self.pluginRuntimes[id] else { continue }
-                            do {
-                                let status = try await runtime.status()
-                                guard !Task.isCancelled else { return }
-                                // Every 5 s for every plugin; an unchanged status must not redraw the window.
-                                if self.pluginStatuses[id] != status { self.pluginStatuses[id] = status }
-                            } catch {
-                                guard !Task.isCancelled else { return }
-                                if self.pluginStatuses[id] != nil { self.pluginStatuses[id] = nil }
-                                self.pluginMessages[id] = error.localizedDescription
-                                await runtime.stop()
-                                self.pluginRuntimes[id] = nil
-                                let affected = self.state.chats.filter { $0.route?.rawValue == id }
-                                for chat in affected { self.runs[chat.id, default: ChatRunState()].queuePaused = true }
-                                if affected.contains(where: { self.isBusy(threadID: $0.id) }) {
-                                    await self.connection.stop()
-                                    self.connected = false
-                                    self.resetAgentState(.originalCodex)
-                                    self.error = L10n.text("Плагин отключился. Запрос не повторён.", "The plugin disconnected. The request was not retried.")
-                                    return
-                                }
-                            }
+            if shared { clearConnectionError() }
+            await refreshAccount(id)
+            // Reading every history takes seconds with many long chats; it must not hold up launch.
+            let chats = state.chats.filter { $0.nativeSession?.connection == id }
+            slot.historyBackfillTask = Task { [weak self] in await self?.backfillHistory(chats) }
+            if traits.contains(.optimizerPlugins) { monitorPlugins(host: id) }
+        } catch {
+            agentStates[id]?.connected = false; self.error = error.localizedDescription
+            if traits.contains(.optimizerPlugins) { await stopPlugins() }
+        }
+    }
+    /// Reconnects every connection whose single engine process reads app settings (the browser) only at start.
+    func reconnectSharedEngines() async {
+        for id in agentIDs where traits(id).contains(.sharedEngine) { await connect(id) }
+    }
+    /// Every 5 s for every plugin. A plugin that stops pauses its chats' queues; with one of them busy the host
+    /// connection is stopped too, and nothing is retried.
+    private func monitorPlugins(host id: AgentConnectionID) {
+        guard !pluginRuntimes.isEmpty else { return }
+        pluginTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                guard let self else { return }
+                for pluginID in self.pluginRuntimes.keys.sorted() {
+                    guard let runtime = self.pluginRuntimes[pluginID] else { continue }
+                    do {
+                        let status = try await runtime.status()
+                        guard !Task.isCancelled else { return }
+                        // An unchanged status must not redraw the window.
+                        if self.pluginStatuses[pluginID] != status { self.pluginStatuses[pluginID] = status }
+                    } catch {
+                        guard !Task.isCancelled else { return }
+                        if self.pluginStatuses[pluginID] != nil { self.pluginStatuses[pluginID] = nil }
+                        self.pluginMessages[pluginID] = error.localizedDescription
+                        await runtime.stop()
+                        self.pluginRuntimes[pluginID] = nil
+                        let affected = self.state.chats.filter { $0.route?.rawValue == pluginID }
+                        for chat in affected { self.runs[chat.id, default: ChatRunState()].queuePaused = true }
+                        if affected.contains(where: { self.isBusy(threadID: $0.id) }) {
+                            await self.client(id)?.stop()
+                            self.agentStates[id]?.connected = false
+                            self.resetAgentState(id)
+                            self.error = L10n.text("Плагин отключился. Запрос не повторён.", "The plugin disconnected. The request was not retried.")
+                            return
                         }
                     }
                 }
             }
-        } catch {
-            connected = false; self.error = error.localizedDescription
-            await stopPlugins()
         }
     }
-    func refreshAccount() async {
+    func refreshAccount(_ id: AgentConnectionID) async {
+        guard let slot = slots[id] else { return }
+        let shared = slot.profile.traits.contains(.sharedEngine)
         do {
-            let result = try await connection.account()
-            clearConnectionError()
-            authenticated = result.authenticated
-            accountLabel = authenticated ? L10n.text("ChatGPT · \(result.plan ?? "подключён")", "ChatGPT · \(result.plan ?? "connected")") : L10n.text("Вход не выполнен", "Not signed in")
-            if authenticated { await refreshModels(); await refreshLimits(); startSummaryQueue() }
-            else { clearLimits() }
-        } catch let failure as AgentOperationFailure where failure.rejection == .staleContext {
+            let result = try await slot.client.account()
+            if shared { clearConnectionError() }
+            agentStates[id]?.authenticated = result.authenticated
+            agentStates[id]?.accountLabel = slot.profile.accountLabel(result)
+        } catch let failure as AgentOperationFailure where shared && failure.rejection == .staleContext {
             // An account event superseded this metadata request. Never publish its obsolete result.
             return
-        } catch { self.error = error.localizedDescription }
+        } catch {
+            // A per-chat engine that cannot confirm the account is treated as signed out; a shared engine keeps its state.
+            if !shared { agentStates[id]?.authenticated = false }
+            self.error = error.localizedDescription
+            if shared { return }
+        }
+        if agentState(id).authenticated {
+            if !slot.profile.traits.contains(.catalogModels) { await refreshModels(id) }
+            await refreshLimits(id); startSummaryQueue()
+        } else { clearLimits(id) }
     }
     // A successful server response makes an earlier transport warning obsolete.
     // Keep unrelated errors (for example, persistence failures) visible.
     private func clearConnectionError() {
         guard let error else { return }
-        let transportErrors = [
+        var transportErrors = [
             L10n.text("Движок недоступен. Подключись заново.", "The engine is unavailable. Reconnect."),
-            L10n.text("Codex не подключён", "Codex is not connected"),
-            L10n.text("Соединение закрыто", "Connection closed"),
-            L10n.text("Соединение с Codex закрыто", "The connection to Codex is closed"),
-            L10n.text("Codex отключился. Подключись заново; отправка не будет повторена автоматически.", "Codex disconnected. Reconnect; the message will not be sent again automatically.")
+            L10n.text("Соединение закрыто", "Connection closed")
         ]
+        for id in agentIDs where traits(id).contains(.sharedEngine) {
+            let name = agentName(id)
+            transportErrors += [
+                L10n.text("\(name) не подключён", "\(name) is not connected"),
+                L10n.text("Соединение с \(name) закрыто", "The connection to \(name) is closed"),
+                Self.disconnectedNotice(name)
+            ]
+        }
         if transportErrors.contains(error) { self.error = nil }
     }
-    func login() async {
+    static func disconnectedNotice(_ name: String) -> String {
+        L10n.text("\(name) отключился. Подключись заново; отправка не будет повторена автоматически.",
+                  "\(name) disconnected. Reconnect; the message will not be sent again automatically.")
+    }
+    /// Starts the agent's own sign-in: a browser page, or a terminal in the app's profile for a CLI sign-in.
+    func login(_ id: AgentConnectionID) async {
+        guard let slot = slots[id] else { return }
+        if !agentState(id).connected { await connect(id) }
         do {
-            let url = try await connection.signInURL()
-            NSWorkspace.shared.open(url)
-            accountLabel = L10n.text("Заверши вход в браузере", "Finish signing in in your browser")
+            switch try await slot.client.integration.authenticate(.beginSignIn).value() {
+            case .openURL(let url):
+                NSWorkspace.shared.open(url)
+                agentStates[id]?.accountLabel = L10n.text("Заверши вход в браузере", "Finish signing in in your browser")
+            case .openLocalSignIn(let url):
+                guard NSWorkspace.shared.open(url) else { throw ConversationIdentity.unavailable }
+            case .complete, .externalCLIRequired:
+                throw ConversationIdentity.unavailable
+            }
         } catch { self.error = error.localizedDescription }
     }
-    func logout() async {
-        guard !anyBusy else { return }
-        do { try await connection.signOut(); authenticated = false; clearLimits(); await refreshAccount() }
+    func logout(_ id: AgentConnectionID) async {
+        guard !anyBusy, let client = client(id) else { return }
+        do { try await client.signOut(); agentStates[id]?.authenticated = false; clearLimits(id); await refreshAccount(id) }
         catch { self.error = error.localizedDescription }
     }
-    func refreshModels() async {
+    /// The connection whose new chats use `SavedState.model`: the first registered one without a model catalog. Another
+    /// agent with listed models needs a default setting of its own before it shares this one.
+    func ownsDefaultModelSetting(_ id: AgentConnectionID) -> Bool { agentIDs.first { !traits($0).contains(.catalogModels) } == id }
+    /// Lists the engine's models; the default model setting follows the engine's default when it is no longer listed.
+    func refreshModels(_ id: AgentConnectionID) async {
+        guard let client = client(id) else { return }
         do {
-            models = try await connection.models()
-            if !models.contains(where: { $0.id == state.model }) {
+            let models = try await client.models()
+            agentStates[id]?.models = models
+            if ownsDefaultModelSetting(id), !models.contains(where: { $0.id == state.model }) {
                 state.model = (models.first { $0.isDefault } ?? models.first)?.id ?? ""
             }
             persist()
@@ -629,65 +700,37 @@ private struct ChatRunState: Equatable {
         }
         persist()
     }
-    func refreshLimits() async {
-        guard connected, authenticated, !refreshingLimits else { return }
+    func refreshLimits(_ id: AgentConnectionID) async {
+        guard let slot = slots[id], agentState(id).connected, agentState(id).authenticated, !agentState(id).refreshingLimits else { return }
         let requestID = UUID()
-        limitsRequestID = requestID
-        refreshingLimits = true
-        limitsError = nil
+        slot.limitsRequestID = requestID
+        agentStates[id]?.refreshingLimits = true
+        agentStates[id]?.limitsError = nil
         defer {
-            if limitsRequestID == requestID { refreshingLimits = false; limitsRequestID = nil }
+            if slot.limitsRequestID == requestID { agentStates[id]?.refreshingLimits = false; slot.limitsRequestID = nil }
         }
         do {
-            let result = try await connection.limits()
-            guard limitsRequestID == requestID, authenticated, connected else { return }
-            accountLimits = result
+            let result = try await slot.client.limits()
+            guard slot.limitsRequestID == requestID, agentState(id).authenticated, agentState(id).connected else { return }
+            agentStates[id]?.limits = result
         } catch let failure as AgentOperationFailure where failure.rejection == .staleContext {
             return
+        } catch let failure as AgentOperationFailure where failure.rejection == .unsupported(.accountLimits) && slot.profile.noLimitsNotice != nil {
+            guard slot.limitsRequestID == requestID else { return }
+            agentStates[id]?.limits = nil
+            agentStates[id]?.limitsError = slot.profile.noLimitsNotice?()
         } catch {
-            guard limitsRequestID == requestID else { return }
-            limitsError = accountLimits == nil
+            guard slot.limitsRequestID == requestID else { return }
+            agentStates[id]?.limitsError = agentState(id).limits == nil
                 ? L10n.text("Не удалось получить лимиты. Попробуй обновить ещё раз.", "Could not fetch limits. Try refreshing again.")
                 : L10n.text("Не удалось обновить лимиты. Показаны последние полученные данные.", "Could not refresh limits. Showing the last available data.")
         }
     }
-    private func clearLimits() {
-        limitsRequestID = nil
-        refreshingLimits = false
-        accountLimits = nil
-        limitsError = nil
-    }
-    func refreshClaudeLimits() async {
-        guard claudeConnected, claudeAuthenticated, !refreshingClaudeLimits else { return }
-        let requestID = UUID()
-        claudeLimitsRequestID = requestID
-        refreshingClaudeLimits = true
-        claudeLimitsError = nil
-        defer {
-            if claudeLimitsRequestID == requestID { refreshingClaudeLimits = false; claudeLimitsRequestID = nil }
-        }
-        do {
-            let result = try await claudeConnection.limits()
-            guard claudeLimitsRequestID == requestID, claudeAuthenticated, claudeConnected else { return }
-            claudeLimits = result
-        } catch let failure as AgentOperationFailure where failure.rejection == .staleContext {
-            return
-        } catch let failure as AgentOperationFailure where failure.rejection == .unsupported(.accountLimits) {
-            guard claudeLimitsRequestID == requestID else { return }
-            claudeLimits = nil
-            claudeLimitsError = L10n.text("Claude Code не сообщает лимиты для этого аккаунта. Они доступны только для подписки Claude.", "Claude Code reports no limits for this account. They are available only with a Claude subscription.")
-        } catch {
-            guard claudeLimitsRequestID == requestID else { return }
-            claudeLimitsError = claudeLimits == nil
-                ? L10n.text("Не удалось получить лимиты. Попробуй обновить ещё раз.", "Could not fetch limits. Try refreshing again.")
-                : L10n.text("Не удалось обновить лимиты. Показаны последние полученные данные.", "Could not refresh limits. Showing the last available data.")
-        }
-    }
-    private func clearClaudeLimits() {
-        claudeLimitsRequestID = nil
-        refreshingClaudeLimits = false
-        claudeLimits = nil
-        claudeLimitsError = nil
+    private func clearLimits(_ id: AgentConnectionID) {
+        slots[id]?.limitsRequestID = nil
+        agentStates[id]?.refreshingLimits = false
+        agentStates[id]?.limits = nil
+        agentStates[id]?.limitsError = nil
     }
     func moveProject(_ id: UUID, to targetID: UUID) -> Bool {
         guard state.moveProject(id, to: targetID) else { return false }
@@ -855,11 +898,6 @@ private struct ChatRunState: Equatable {
             }
         }
     }
-    private func startHistoryBackfill() {
-        historyBackfillTask?.cancel()
-        let chats = state.chats
-        historyBackfillTask = Task { [weak self] in await self?.backfillHistory(chats) }
-    }
     func cancelHandoffPreparation() async {
         handoffCancelled = true
         await handoffRunner?.stop()
@@ -919,22 +957,20 @@ private struct ChatRunState: Equatable {
         }
     }
     /// `model`, `effort`, `role` and `title` override the new chat's defaults (a run record's follow-up keeps its settings).
-    func createHandoffChat(_ handoff: ContextHandoff, project: Project, route: RequestRoute, agent: AgentConnectionID = .originalCodex,
+    func createHandoffChat(_ handoff: ContextHandoff, project: Project, route: RequestRoute, agent: AgentConnectionID,
                            model: String? = nil, effort: String? = nil, role: String? = nil, title: String? = nil) async -> Bool {
         guard !creatingHandoff else { return false }
         creatingHandoff = true; defer { creatingHandoff = false }
         do {
-            guard [.originalCodex, .appClaude].contains(agent),
-                  agent == .appClaude ? claudeConnected && claudeAuthenticated : connected && authenticated,
+            guard let client = self.client(agent), agentState(agent).connected && agentState(agent).authenticated,
                   state.projects.contains(where: { $0 == project }), routeIsAvailable(route) else {
                 throw ConversationIdentity.unavailable
             }
-            let client = agent == .appClaude ? claudeConnection : connection
             let descriptor = try await client.descriptor()
             guard descriptor.context.connection == agent, descriptor.capabilities.contains(.interactiveSessions),
                   descriptor.routes.contains(route.agentRoute) else { throw ConversationIdentity.unavailable }
             let prompt = try handoff.prompt()
-            let selectedModel = model ?? (agent == .appClaude ? state.claudeModel ?? "" : state.model)
+            let selectedModel = model ?? defaultModelSetting(agent)
             try await store.saveHandoff(handoff)
             let current = state.projects.first { $0.id == project.id } ?? project
             let resolvedRole = roleCatalog.role(role) ?? current.chatRole(roleCatalog)
@@ -1144,12 +1180,11 @@ private struct ChatRunState: Equatable {
     /// Dimensions the current agent can only approximate for the current role; shown, never silently downgraded.
     var roleApproximations: [AgentPermissionDimension] {
         guard let project = state.projects.first(where: { $0.id == projectID }) else { return [] }
-        let descriptor = currentAgent == .appClaude ? claudeDescriptor : agentDescriptor
-        return descriptor?.permissions.approximations(currentRole.profile(for: project)) ?? []
+        return agentState(currentAgent).descriptor?.permissions.approximations(currentRole.profile(for: project)) ?? []
     }
     var roleApproximationNotice: String {
         let names = roleApproximations.map(Self.dimensionTitle).joined(separator: ", ")
-        let agent = currentAgent == .appClaude ? "Claude" : "Codex"
+        let agent = currentAgentName
         return L10n.text("\(agent) не может точно применить для роли «\(currentRole.title)»: \(names). Ограничение приближено, не снято.",
                          "\(agent) cannot enforce for the \(currentRole.title) role: \(names). The restriction is approximated, not dropped.")
     }
@@ -1373,12 +1408,9 @@ private struct ChatRunState: Equatable {
     func queueContinuation(_ id: String, text: String, localID: String = "local-user:" + UUID().uuidString, removingLimitResume: Bool = false) -> Bool {
         guard let index = state.chats.firstIndex(where: { $0.id == id }), !state.chats[index].isArchived, chatIsAvailable(id) else { return false }
         let chat = state.chats[index]
-        let claude = chat.nativeSession?.connection == .appClaude
         if removingLimitResume { state.chats[index].limitResume = nil }
         state.queuedMessages = queuedMessages + [QueuedMessage(id: localID, threadID: id,
-            projectID: chat.projectID, text: text,
-            model: claude ? ClaudeModel.resolved(chat.model) : chat.model,
-            effort: claude ? ClaudeEffort.resolved(chat.effort ?? state.claudeEffort) : chat.effort ?? "medium")]
+            projectID: chat.projectID, text: text, model: dispatchModel(chat), effort: dispatchEffort(chat))]
         runs[id, default: ChatRunState()].queuePaused = false
         persist()
         scheduleQueue(threadID: id)
@@ -1387,7 +1419,7 @@ private struct ChatRunState: Equatable {
     /// The chat directory server's command line for a chat the user opted in (Claude chats only, plan Phase 5).
     func chatDirectoryArguments(for id: String) -> [String]? {
         guard let chat = state.chats.first(where: { $0.id == id }), chat.chatDirectoryAccess == true,
-              chat.nativeSession?.connection == .appClaude,
+              traits(chat.nativeSession?.connection).contains(.chatDirectory),
               let script = Bundle.main.resourceURL?.appendingPathComponent("ChatDirectoryRuntime/server.py"),
               FileManager.default.fileExists(atPath: script.path) else { return nil }
         // Every chat with access can search the index; only a chat-search chat gets the search recipe as instructions.
@@ -1420,7 +1452,7 @@ private struct ChatRunState: Equatable {
             }
             let running = isBusy(threadID: chat.id)
             entries.append(.init(id: chat.id, title: chat.title, project: state.projects.first { $0.id == chat.projectID }?.name ?? "",
-                                 agent: chat.nativeSession?.connection == .appClaude ? "Claude" : "Codex",
+                                 agent: agentName(chat.nativeSession?.connection),
                                  state: ChatDirectory.state(attention[chat.id], running: running), detail: attentionDetail(chat),
                                  activity: running ? runActivity(threadID: chat.id).status : nil, updated: chat.updated,
                                  messages: messages.map { .init(role: $0.kind, text: $0.text) }))
@@ -1464,11 +1496,9 @@ private struct ChatRunState: Equatable {
            let value = field.options.isEmpty ? text : field.options.first(where: { $0.label.caseInsensitiveCompare(text) == .orderedSame })?.label {
             return await answer(action, result: .answers([field.id: value])) == nil
         }
-        let claude = chat.nativeSession?.connection == .appClaude
         let message = QueuedMessage(id: "local-user:telegram:" + String(reply.id), threadID: chat.id, projectID: chat.projectID,
             text: L10n.text("Ответ пользователя из Telegram:", "The user's reply from Telegram:") + "\n\n" + text,
-            model: claude ? ClaudeModel.resolved(chat.model) : chat.model,
-            effort: claude ? ClaudeEffort.resolved(chat.effort ?? state.claudeEffort) : chat.effort ?? "medium")
+            model: dispatchModel(chat), effort: dispatchEffort(chat))
         guard !queuedMessages.contains(where: { $0.id == message.id }) else { return true }
         state.queuedMessages = queuedMessages + [message]
         do { try await store.save(state) } catch {
@@ -1487,7 +1517,7 @@ private struct ChatRunState: Equatable {
     var restartBlockers: [String] {
         func title(_ id: String) -> String { state.chats.first { $0.id == id }?.title ?? L10n.text("новый чат", "new chat") }
         var reasons: Set<String> = []
-        if isBootstrapping || connecting || claudeConnecting { reasons.insert(L10n.text("Подключение к агентам", "Connecting to agents")) }
+        if isBootstrapping || anyAgentConnecting { reasons.insert(L10n.text("Подключение к агентам", "Connecting to agents")) }
         for (id, run) in runs where run.running || run.sending {
             reasons.insert(id.hasPrefix("job:") ? L10n.text("Запуск задания", "Scheduled run starting") : L10n.text("Выполняется: ", "Running: ") + title(id))
         }
@@ -1562,24 +1592,24 @@ private struct ChatRunState: Equatable {
         let localID = "local-user:" + UUID().uuidString
         if shuttingDown, let thread = chatID {
             holdForRestart(QueuedMessage(id: localID, threadID: thread, projectID: project.id, text: text,
-                                         model: currentModel, effort: currentAgent == .appClaude ? claudeEffort : effort), first: false)
+                                         model: currentModel, effort: currentEffort), first: false)
             return
         }
         if let thread = chatID, busy || !visibleQueue.isEmpty {
             if visibleQueue.isEmpty { runs[thread, default: ChatRunState()].queuePaused = false }
             state.queuedMessages = queuedMessages + [QueuedMessage(id: localID, threadID: thread,
-                projectID: project.id, text: text, model: currentModel, effort: currentAgent == .appClaude ? claudeEffort : effort)]
+                projectID: project.id, text: text, model: currentModel, effort: currentEffort)]
             persist()
             scheduleQueue(threadID: thread)
             return
         }
         await deliver(text: text, project: project, threadID: chatID, localID: localID,
-                      selectedModel: currentModel, selectedEffort: currentAgent == .appClaude ? claudeEffort : effort, worktree: worktree)
+                      selectedModel: currentModel, selectedEffort: currentEffort, worktree: worktree)
     }
     /// `worktree` is the new chat's own worktree (only with `threadID == nil`); an existing chat keeps its own folder.
     func deliver(text: String, project: Project, threadID: String?, localID: String,
                          selectedModel: String, selectedEffort: String, scheduledRun: UUID? = nil, scheduledRoute: RequestRoute? = nil, scheduledBrowserImport: ChromeSessionImportPolicy? = nil,
-                         scheduledAgent: AgentConnectionID = .originalCodex, scheduledRole: AgentRole? = nil, afterInterrupt: Bool = false,
+                         scheduledAgent: AgentConnectionID? = nil, scheduledRole: AgentRole? = nil, afterInterrupt: Bool = false,
                          worktree: ChatWorktree? = nil) async {
         let selection = selectionGeneration
         let visible = scheduledRun == nil && threadID == chatID && project.id == projectID
@@ -1606,17 +1636,17 @@ private struct ChatRunState: Equatable {
         let newWorktree = threadID == nil && scheduledRun == nil ? worktree : nil
         // The chat's own folder (`Chat.workingDirectory(in:)`): engine cwd, permission root and checkpoints.
         let workingDirectory = newWorktree?.workingDirectory ?? threadID.flatMap { workingDirectory(forChat: $0) } ?? project.path
-        let newConnection = scheduledRun == nil ? currentAgent : scheduledAgent
-        let route = scheduledRoute ?? (threadID == nil ? (newConnection == .appClaude ? .direct : defaultRoute) : (state.chats.first { $0.id == threadID }?.route ?? .direct))
+        let newConnection = scheduledRun == nil ? currentAgent : scheduledAgent ?? currentAgent
+        let route = scheduledRoute ?? (threadID == nil ? newChatRoute(newConnection) : (state.chats.first { $0.id == threadID }?.route ?? .direct))
         do {
             if let threadID {
                 guard !isScheduledRecord(threadID) else { throw ClientFailure(Self.scheduledRecordReadOnly) }
                 _ = try nativeThread(threadID)
-            } else if ![.originalCodex, .appClaude].contains(newConnection) { throw ConversationIdentity.unavailable }
+            } else if !isRegistered(newConnection) { throw ConversationIdentity.unavailable }
             if workingDirectory != project.path, !FileManager.default.fileExists(atPath: workingDirectory) {
                 throw ClientFailure(L10n.text("Папка worktree этого чата не найдена: \(workingDirectory)", "This chat's worktree folder was not found: \(workingDirectory)"))
             }
-            let client = try threadID.map { try clientForChat($0) } ?? (newConnection == .appClaude ? claudeConnection : connection)
+            guard let client = try threadID.map({ try clientForChat($0) }) ?? self.client(newConnection) else { throw ConversationIdentity.unavailable }
             if route != .direct {
                 guard let runtime = pluginRuntimes[route.rawValue], routeIsAvailable(route) else { throw ClientFailure(routeMessage(route)) }
                 pluginStatuses[route.rawValue] = try await runtime.status()
@@ -1685,7 +1715,7 @@ private struct ChatRunState: Equatable {
                             sourceIsRunning: { !NSRunningApplication.runningApplications(withBundleIdentifier: "com.google.Chrome").isEmpty })
                     }.value
                     AppLog.delivery.info("Scheduled sign-in preflight for chat \(id, privacy: .public): \(String(describing: preflight), privacy: .public)")
-                    let tool = scheduledAgent == .appClaude ? ScheduledBrowserImport.claudeImportTool : "browser_import_session"
+                    let tool = profile(newConnection)?.browserImportTool ?? "browser_import_session"
                     outgoing = ScheduledBrowserImport.applying(preflight, policy: scheduledBrowserImport, to: text, tool: tool)
                 }
             }
@@ -1759,9 +1789,9 @@ private struct ChatRunState: Equatable {
         }
     }
     func scheduledAgentReady(_ agent: AgentConnectionID) -> Bool {
-        agent == .appClaude ? claudeConnected && claudeAuthenticated : connected && authenticated
+        agentState(agent).connected && agentState(agent).authenticated
     }
-    func deliverScheduled(_ job: ManagedJob, run: JobRun, project: Project, agent: AgentConnectionID = .originalCodex) async {
+    func deliverScheduled(_ job: ManagedJob, run: JobRun, project: Project, agent: AgentConnectionID) async {
         do {
             let prompt = try job.browserExecutionPrompt() + "\n\n" + AttentionMarkers.instructions()
             await deliver(text: prompt, project: project, threadID: nil, localID: "local-user:" + run.id.uuidString,
@@ -2022,23 +2052,25 @@ private struct ChatRunState: Equatable {
                 remote.runningSince = run.turnID.flatMap { turnStarts[chat.id + ":" + $0] }.map { Self.remoteTimestampFormatter.string(from: $0) }
             }
             if chat.isScheduledRecord { remote.readOnly = true; remote.supportsPhotos = false }
-            if let project = selected.first(where: { $0.id == chat.projectID }), chat.nativeSession?.connection == .originalCodex {
+            if let project = selected.first(where: { $0.id == chat.projectID }), traits(chat.nativeSession?.connection).contains(.remoteChatSettings) {
                 remote.settings = remoteSettings(chat, project: project)
             }
             chats.append(remote)
         }
-        let codexOptions = models.map { RemoteModelOption(id: $0.id, name: $0.displayName) }
-        let codexNew = codexRemoteReady && !models.isEmpty
-            ? models.map { RemoteModelOption(id: $0.id, name: $0.displayName, agent: RemoteModelOption.codexAgent) } : []
-        let claudeNew = claudeRemoteReady ? remoteClaudeModels.map { RemoteModelOption(id: $0.id, name: $0.name, agent: RemoteModelOption.claudeAgent) } : []
-        let claudeFirst = (state.defaultConnection == .appClaude && !claudeNew.isEmpty) || codexNew.isEmpty
-        let newChatModels = claudeFirst ? claudeNew + codexNew : codexNew + claudeNew
-        let claudeDefault = ClaudeModel.resolved(state.claudeModel)
-        let defaultModel = !claudeFirst ? state.model
-            : claudeNew.contains(where: { $0.id == claudeDefault }) ? claudeDefault : claudeNew.first?.id ?? state.model
+        // Existing chats' settings list the models of the agent whose chats the phone may configure.
+        let settingsOptions = remoteSettingsAgent.map { agentState($0).models.map { RemoteModelOption(id: $0.id, name: $0.displayName) } } ?? []
+        // New-chat models of every ready agent: the default agent's first, then the others in registration order.
+        let lists = agentIDs.map { id in (id, remoteReady(id) ? remoteNewChatModels(id) : []) }.filter { !$0.1.isEmpty }
+        let ordered = lists.filter { $0.0 == state.defaultConnection } + lists.filter { $0.0 != state.defaultConnection }
+        let newChatModels = ordered.flatMap(\.1)
+        let defaultModel: String
+        if let (lead, options) = ordered.first, traits(lead).contains(.catalogModels) {
+            let configured = resolvedDefaultModel(lead)
+            defaultModel = options.contains(where: { $0.id == configured }) ? configured : options.first?.id ?? state.model
+        } else { defaultModel = state.model }
         return RemoteSnapshot(projects: selected.map {
             var project = RemoteProject(id: $0.id.uuidString, name: $0.name, canCreateChat: canCreateRemoteChat)
-            project.models = codexOptions
+            project.models = settingsOptions
             project.newChatModels = newChatModels
             let projectRole = $0.chatRole(roleCatalog)
             project.settings = RemoteChatSettings(options: RemoteChatOptions(model: defaultModel),
@@ -2069,41 +2101,50 @@ private struct ChatRunState: Equatable {
         return RemoteChatSettings(options: RemoteChatOptions(model: chat.model,
             access: chat.inheritsProjectRole ? nil : RemoteAccessMode(rawValue: role.legacyAccessMode.rawValue), role: chat.inheritsProjectRole ? nil : role.id),
             projectAccess: RemoteAccessMode(rawValue: projectRole.legacyAccessMode.rawValue)!,
-            canEdit: connected && authenticated && !models.isEmpty && !isChangingChat(chat.id) && !isBusy(threadID: chat.id)
+            canEdit: agentState(chat.nativeSession?.connection).connected && agentState(chat.nativeSession?.connection).authenticated
+                && !agentState(chat.nativeSession?.connection).models.isEmpty && !isChangingChat(chat.id) && !isBusy(threadID: chat.id)
                 && !pending.contains(where: { $0.threadID == chat.id }) && !queuedMessages.contains(where: { $0.threadID == chat.id })
                 && role.rank <= projectRole.rank,
             projectRole: projectRole.id, roles: remoteRoles(project: project))
     }
-    private func remoteModel(_ options: RemoteChatOptions) throws -> AgentModelInfo {
-        guard let model = models.first(where: { $0.id == options.model }) else { throw RemoteFailure.invalidCommand }
+    private func remoteModel(_ options: RemoteChatOptions, agent: AgentConnectionID?) throws -> AgentModelInfo {
+        guard let model = agentState(agent).models.first(where: { $0.id == options.model }) else { throw RemoteFailure.invalidCommand }
         return model
     }
-    /// A phone may start a chat on either agent, independent of the desktop's default agent.
-    private var codexRemoteReady: Bool { connected && authenticated && routeIsAvailable(defaultRoute) }
-    private var claudeRemoteReady: Bool { claudeConnected && claudeAuthenticated }
-    /// Catalog models the pinned Claude Code build can run.
-    private var remoteClaudeModels: [ClaudeModel] { ClaudeModel.catalog.filter { $0.isSupported() } }
-    private var canCreateRemoteChat: Bool {
-        codexRemoteReady || claudeRemoteReady
+    /// The agent whose chats the phone may configure (model and role).
+    private var remoteSettingsAgent: AgentConnectionID? { firstAgent(with: .remoteChatSettings) }
+    /// A phone may start a chat on any ready agent, independent of the desktop's default agent.
+    private func remoteReady(_ id: AgentConnectionID) -> Bool {
+        agentState(id).connected && agentState(id).authenticated && routeIsAvailable(newChatRoute(id))
     }
+    /// Models the phone may start a chat with on this agent: the listed ones, or the catalog models the pinned build runs.
+    private func remoteNewChatModels(_ id: AgentConnectionID) -> [RemoteModelOption] {
+        guard let tag = profile(id)?.remoteAgent else { return [] }
+        if traits(id).contains(.catalogModels) {
+            return ClaudeModel.catalog.filter { $0.isSupported() }.map { RemoteModelOption(id: $0.id, name: $0.name, agent: tag) }
+        }
+        return agentState(id).models.map { RemoteModelOption(id: $0.id, name: $0.displayName, agent: tag) }
+    }
+    private var canCreateRemoteChat: Bool { agentIDs.contains(where: remoteReady) }
     private func createRemoteChat(_ command: RemoteCommand) async throws -> String {
         guard !state.chats.contains(where: { $0.id == command.chat }),
               let project = state.projects.first(where: { $0.id.uuidString == command.project }) else { throw RemoteFailure.invalidCommand }
         let options = command.settings?.options
-        // The command carries only a model ID; the Mac resolves its agent. Older phones without options mean Codex.
-        let claude = options.map { option in !models.contains { $0.id == option.model } && remoteClaudeModels.contains { $0.id == option.model } } ?? false
-        guard claude ? claudeRemoteReady : codexRemoteReady else { throw RemoteFailure.invalidCommand }
-        let model: String, effort: String, route: RequestRoute
-        if claude, let options {
-            model = options.model; effort = ClaudeEffort.resolved(state.claudeEffort); route = .direct
+        // The command carries only a model ID; the Mac resolves its agent (the first registered one that offers the model).
+        // Older phones without options mean the agent whose chats the phone configures.
+        let agent = options.map { option in agentIDs.first { remoteNewChatModels($0).contains { $0.id == option.model } } } ?? remoteSettingsAgent
+        guard let agent, remoteReady(agent), let client = client(agent) else { throw RemoteFailure.invalidCommand }
+        let model: String, effort: String, route = newChatRoute(agent)
+        if traits(agent).contains(.catalogModels), let options {
+            model = options.model; effort = resolvedDefaultEffort(agent)
         } else {
-            let chosen = try options.map { try remoteModel($0) }
-            model = chosen?.id ?? state.model; effort = chosen?.defaultEffort ?? draftEffort; route = defaultRoute
+            let chosen = try options.map { try remoteModel($0, agent: agent) }
+            model = chosen?.id ?? state.model; effort = chosen?.defaultEffort ?? draftEffort
         }
         let explicitRole = try remoteRole(options, project: project)
         let role = explicitRole ?? project.chatRole(roleCatalog)
         // Persist the stable app ID before sending. Native identity never comes from the phone.
-        let session = try await (claude ? claudeConnection : connection).createSession(projectPath: project.path, permissions: role.profile(for: project), model: model, route: route)
+        let session = try await client.createSession(projectPath: project.path, permissions: role.profile(for: project), model: model, route: route)
         guard !state.chats.contains(where: { $0.id == command.chat }),
               ConversationIdentity.appID(for: session.nativeID, in: state, connection: session.connection) == nil else { throw RemoteFailure.invalidCommand }
         var chat = Chat(session: session, projectID: project.id, title: ChatTitle.placeholder(), model: model)
@@ -2127,10 +2168,10 @@ private struct ChatRunState: Equatable {
               !isChangingChat(chat.id), chatIsAvailable(chat.id), chatConnected(chat.id), chatAuthenticated(chat.id) else { throw RemoteFailure.invalidCommand }
         switch command.kind {
         case "configure":
-            guard chat.nativeSession?.connection == .originalCodex, let change = command.settings else { throw RemoteFailure.invalidCommand }
+            guard traits(chat.nativeSession?.connection).contains(.remoteChatSettings), let change = command.settings else { throw RemoteFailure.invalidCommand }
             let current = remoteSettings(chat, project: project)
             guard current.canEdit, change.expected == current.options, change.expectedProjectAccess == current.projectAccess else { throw RemoteFailure.invalidCommand }
-            let selectedModel = try remoteModel(change.options)
+            let selectedModel = try remoteModel(change.options, agent: chat.nativeSession?.connection)
             let role = try remoteRole(change.options, project: project)
             configuringRemoteChats.insert(chat.id)
             defer { configuringRemoteChats.remove(chat.id); objectWillChange.send() }
@@ -2184,66 +2225,40 @@ private struct ChatRunState: Equatable {
         flushDeltas()
         photoCleanupTask?.cancel(); photoCleanupTask = nil
         step("mobile remote"); await mobileRemote.disable()
-        historyBackfillTask?.cancel(); claudeHistoryBackfillTask?.cancel(); activityCleanupTask?.cancel()
+        for slot in slots.values { slot.historyBackfillTask?.cancel() }
+        activityCleanupTask?.cancel()
         for task in historyRefreshTasks.values { task.cancel() }
         step("chat titles (\(titleTasks.count))")
         for id in Array(titleTasks.keys) { await cancelChatTitle(id) }
         step("scheduler"); await stopScheduler()
         summaryTask?.cancel()
         step("handoff"); await cancelHandoffPreparation()
-        step("summary runners"); await summaryRunner.stop()
-        await claudeSummaryRunner.stop()
+        step("summary runners")
+        for id in agentIDs { await slots[id]?.generationRunner.stop() }
         step("summary queue"); await summaryTask?.value
-        step("Codex connection"); await connection.stop()
-        step("Claude connection"); await claudeConnection.stop()
-        claudeEventTask?.cancel()
+        for id in agentIDs {
+            guard let slot = slots[id] else { continue }
+            step("\(slot.profile.name) connection"); await slot.client.stop()
+            slot.eventTask?.cancel()
+        }
         step("plugins"); await stopPlugins()
         step("orphan processes"); await orphanProcesses.shutdown()
         step("done")
     }
     func saveAgentChoice() { persist() }
+    /// The agent of new chats. One that does not connect at launch connects when it is chosen.
     func selectAgent(_ agent: AgentConnectionID) {
-        guard chatID == nil, !sending, [.originalCodex, .appClaude].contains(agent) else { return }
+        guard chatID == nil, !sending, isRegistered(agent) else { return }
         // Browser profiles belong to one agent; a picked profile does not carry over.
         if state.defaultConnection != agent { newChatBrowserProfiles.removeAll() }
         state.defaultConnection = agent; persist()
-        if agent == .appClaude && !claudeConnected { Task { await connectClaude() } }
+        if !traits(agent).contains(.connectsAtLaunch) && !agentState(agent).connected { Task { await connect(agent) } }
     }
-    func connectClaude() async {
-        guard !claudeConnecting, !state.chats.contains(where: { $0.nativeSession?.connection == .appClaude && isBusy(threadID: $0.id) }) else { return }
-        claudeConnecting = true; defer { claudeConnecting = false }
-        claudeHistoryBackfillTask?.cancel()
-        resetAgentState(.appClaude); claudeConnected = false; claudeAuthenticated = false; clearClaudeLimits()
-        do {
-            claudeDescriptor = try await claudeConnection.start(.init(home: claudeHome, resources: Bundle.main.resourceURL,
-                                                                      browserEnabled: state.browserEnabled == true,
-                                                                      userChromeEnabled: state.userChromeEnabled != false))
-            claudeConnected = true
-            await refreshClaudeAccount()
-            // Reading every Claude history takes seconds with many long chats; it must not hold up launch.
-            let chats = state.chats.filter { $0.nativeSession?.connection == .appClaude }
-            claudeHistoryBackfillTask = Task { [weak self] in await self?.backfillHistory(chats) }
-        } catch { self.error = error.localizedDescription }
-    }
-    func refreshClaudeAccount() async {
-        do { claudeAuthenticated = try await claudeConnection.account().authenticated }
-        catch { claudeAuthenticated = false; self.error = error.localizedDescription }
-        if claudeAuthenticated { startSummaryQueue(); await refreshClaudeLimits() } else { clearClaudeLimits() }
-    }
-    func loginClaude() async {
-        if !claudeConnected { await connectClaude() }
-        do {
-            guard case .openLocalSignIn(let url) = try await claudeConnection.integration.authenticate(.beginSignIn).value(),
-                  NSWorkspace.shared.open(url) else { throw ConversationIdentity.unavailable }
-        } catch { self.error = error.localizedDescription }
-    }
-    func logoutClaude() async {
-        do { try await claudeConnection.signOut(); await refreshClaudeAccount() }
-        catch { self.error = error.localizedDescription }
-    }
+    /// The composer's sign-in button. A shared engine that is not connected connects first; its account may already be
+    /// signed in. Others sign in at once (connecting on the way).
     func loginCurrentAgent() async {
-        if currentAgent == .appClaude { await loginClaude() }
-        else if connected { await login() } else { await connect() }
+        let id = currentAgent
+        if agentState(id).connected || !traits(id).contains(.sharedEngine) { await login(id) } else { await connect(id) }
     }
     private func resetAgentState(_ agent: AgentConnectionID) {
         let ids = Set(state.chats.filter { $0.nativeSession?.connection == agent }.map(\.id))
@@ -2254,24 +2269,6 @@ private struct ChatRunState: Equatable {
         let actions = pending.filter { $0.interaction.session.connection == agent }
         removeActionNotices(actions); pending.removeAll { $0.interaction.session.connection == agent }
         refreshDockBadge()
-    }
-    func receiveClaude(_ event: AgentEvent) async {
-        switch event.payload {
-        case .descriptor(let descriptor): claudeDescriptor = descriptor
-        case .accountChanged(let issue):
-            resetAgentState(.appClaude); clearClaudeLimits()
-            await interruptSummaries(.appClaude, issue: L10n.text("Аккаунт изменился. Проверь итог перед новым запуском.", "The account changed. Review the summary before starting again."))
-            if let issue { error = issue }
-            await refreshClaudeAccount()
-        case .interactionsReset: clearAgentInteractions(.appClaude)
-        case .disconnected:
-            flushDeltas()
-            claudeHistoryBackfillTask?.cancel()
-            resetAgentState(.appClaude); claudeConnected = false; claudeAuthenticated = false; clearClaudeLimits()
-            await interruptSummaries(.appClaude, issue: L10n.text("Claude отключился. Итог не повторён автоматически.", "Claude disconnected. The summary was not retried automatically."))
-        case .limitsChanged: break
-        default: await receive(event)
-        }
     }
     // MARK: State persistence
     /// `persist()` calls within this delay share one write (a turn makes 2-3 of them).
@@ -2315,53 +2312,74 @@ private struct ChatRunState: Equatable {
         await task.value
     }
 
-    func receive(_ event: AgentEvent) async {
+    /// Every event of every registered connection, tagged with the connection it came from.
+    func receive(_ event: AgentEvent, from id: AgentConnectionID) async {
         let thread = event.session.flatMap { appID(for: $0) }
         if event.session != nil && thread == nil {
-            if case .interaction(let request) = event.payload { await (request.session.connection == .appClaude ? claudeConnection : connection).rejectInteraction(request.id) }
+            if case .interaction(let request) = event.payload { await client(id)?.rejectInteraction(request.id) }
             return
         }
         defer { mobileRemote.observe(event, thread: thread) }
+        let traits = traits(id), name = agentName(id)
         switch event.payload {
         case .descriptor(let descriptor):
-            if agentDescriptor?.context != descriptor.context { models = []; clearLimits() }
-            agentDescriptor = descriptor
+            if agentState(id).descriptor?.context != descriptor.context { agentStates[id]?.models = []; clearLimits(id) }
+            agentStates[id]?.descriptor = descriptor
         case .interaction(let request):
-            guard let thread else { await (request.session.connection == .appClaude ? claudeConnection : connection).rejectInteraction(request.id); return }
+            guard let thread else { await client(id)?.rejectInteraction(request.id); return }
             let action = PendingAction(interaction: request, threadID: thread)
             if !pending.contains(where: { $0.id == action.id }) { pending.append(action); notify(action) }
         case .interactionsReset:
-            clearAgentInteractions(.originalCodex)
+            clearAgentInteractions(id)
         case .capability(let record):
             guard let thread, let chat = state.chats.first(where: { $0.id == thread }),
                   let project = state.projects.first(where: { $0.id == chat.projectID }) else { return }
             let role = chat.resolvedRole(in: project, catalog: roleCatalog)
             let run = jobLedger.runs.first { $0.threadID == thread && $0.status.active }?.id
+            // The ledger names the agent by its job engine value ("codex", "claude").
+            let agent = profile(event.session?.connection ?? id)?.engine.rawValue ?? id.agent.rawValue
             let decision = CapabilityDecision(chatID: thread, runID: run, projectID: project.id, roleID: role.id,
-                                              agent: event.session?.connection == .appClaude ? "claude" : "codex", record: record, audit: role.profile.audit)
+                                              agent: agent, record: record, audit: role.profile.audit)
             Task { [capabilityLedger] in await capabilityLedger.record(decision) }
         case .accountChanged(let issue):
-            for (id, task) in titleTasks where state.chats.first(where: { $0.id == id })?.nativeSession?.connection != .appClaude { task.cancel() }
-            models = []; clearLimits(); resetAgentState(.originalCodex)
-            await interruptSummaries(.originalCodex, issue: L10n.text("Аккаунт изменился. Проверь итог перед новым запуском.", "The account changed. Review the summary before starting again."))
-            for run in jobLedger.runs where run.engine == .codex && run.status.active {
-                await finishJob(run.id, status: .uncertain, output: L10n.text("Аккаунт изменился; запуск не повторён.", "The account changed; the run was not retried."))
+            if traits.contains(.sharedEngine) {
+                // Titles of this connection's chats (and of chats no registered connection owns) ran on the old account.
+                for (chatID, task) in titleTasks {
+                    let owner = state.chats.first(where: { $0.id == chatID })?.nativeSession?.connection
+                    if owner == id || !isRegistered(owner) { task.cancel() }
+                }
+            }
+            agentStates[id]?.models = []; clearLimits(id); resetAgentState(id)
+            await interruptSummaries(id, issue: L10n.text("Аккаунт изменился. Проверь итог перед новым запуском.", "The account changed. Review the summary before starting again."))
+            if traits.contains(.sharedEngine), let engine = profile(id)?.engine {
+                for run in jobLedger.runs where run.engine == engine && run.status.active {
+                    await finishJob(run.id, status: .uncertain, output: L10n.text("Аккаунт изменился; запуск не повторён.", "The account changed; the run was not retried."))
+                }
             }
             if let issue { error = issue }
-            await refreshAccount()
-        case .limitsChanged: await refreshLimits()
+            await refreshAccount(id)
+        case .limitsChanged: await refreshLimits(id)
         case .disconnected:
             flushDeltas()
-            historyBackfillTask?.cancel()
-            for task in historyRefreshTasks.values { task.cancel() }
-            agentDescriptor = nil; models = []
-            connected = false
-            for run in jobLedger.runs where run.engine == .codex && run.status.active {
-                await finishJob(run.id, status: .uncertain, output: L10n.text("Соединение потеряно; повторной отправки не было.", "Connection lost; the task was not sent again."))
+            slots[id]?.historyBackfillTask?.cancel()
+            if traits.contains(.sharedEngine) {
+                // Every chat of the engine lost its turn: running scheduled runs end as uncertain and nothing is resent.
+                for task in historyRefreshTasks.values { task.cancel() }
+                agentStates[id]?.descriptor = nil; agentStates[id]?.models = []
+                agentStates[id]?.connected = false
+                if let engine = profile(id)?.engine {
+                    for run in jobLedger.runs where run.engine == engine && run.status.active {
+                        await finishJob(run.id, status: .uncertain, output: L10n.text("Соединение потеряно; повторной отправки не было.", "Connection lost; the task was not sent again."))
+                    }
+                }
+                resetAgentState(id)
+                agentStates[id]?.connected = false
+                error = Self.disconnectedNotice(name)
+            } else {
+                resetAgentState(id)
+                agentStates[id]?.connected = false; agentStates[id]?.authenticated = false; clearLimits(id)
+                await interruptSummaries(id, issue: L10n.text("\(name) отключился. Итог не повторён автоматически.", "\(name) disconnected. The summary was not retried automatically."))
             }
-            resetAgentState(.originalCodex)
-            connected = false
-            error = L10n.text("Codex отключился. Подключись заново; отправка не будет повторена автоматически.", "Codex disconnected. Reconnect; the message will not be sent again automatically.")
         case .diagnostic(let message): error = message
         case .resolved(let requestID):
             let resolved = pending.filter { $0.interaction.id == requestID && $0.threadID == thread }
@@ -2455,8 +2473,7 @@ private struct ChatRunState: Equatable {
         case .delta(let turn, let id, let text):
             if let thread { historyEventRevisions[thread, default: 0] += 1 }
             guard thread == chatID else { return }
-            let agent = event.session?.connection == .appClaude ? "Claude" : "Codex"
-            transcript.enqueue(id: id, text: text, turn: turn) { $0.agentName = agent }
+            transcript.enqueue(id: id, text: text, turn: turn) { $0.agentName = name }
         case .status(let turn, let text):
             guard let thread, let run = runs[thread], run.running, turn == nil || run.turnID == turn else { return }
             // Claude repeats the status on every content block; identical text must not publish.
@@ -2518,7 +2535,7 @@ private struct ChatRunState: Equatable {
             guard chatID == record.id else { return }
             let title = L10n.text("\(record.title) — продолжение", "\(record.title) — follow-up")
             guard await createHandoffChat(handoff, project: project, route: record.route ?? .direct, agent: agent,
-                                          model: model, effort: agent == .appClaude ? effort : nil, role: role, title: title) else { return }
+                                          model: model, effort: traits(agent).contains(.catalogModels) ? effort : nil, role: role, title: title) else { return }
             chatDrafts[record.id] = nil
             await send()
         } catch { self.error = error.localizedDescription }
@@ -2539,7 +2556,9 @@ private struct ChatRunState: Equatable {
 
     private func createScheduledRecord(_ run: JobRun, job: ManagedJob, prompt: String, project: Project) async throws -> String {
         if let existing = state.chats.first(where: { $0.scheduledRecord == run.id }) { return existing.id }
-        let session = AgentSessionReference(connection: .appClaude, nativeID: "scheduled-" + run.id.uuidString.lowercased())
+        // The record belongs to the job's agent; print runs exist only for Claude jobs.
+        guard let connection = connection(for: job.engine) else { throw ConversationIdentity.unavailable }
+        let session = AgentSessionReference(connection: connection, nativeID: "scheduled-" + run.id.uuidString.lowercased())
         guard !state.chats.contains(where: { $0.nativeSession == session }) else { throw ConversationIdentity.invalidStorage }
         var chat = Chat(session: session, projectID: project.id, title: run.name, model: job.model)
         chat.effort = job.effort; chat.route = .direct; chat.scheduledRecord = run.id
@@ -2574,7 +2593,7 @@ private struct ChatRunState: Equatable {
             if !text.isEmpty {
                 var answer = TranscriptItem(id: "assistant:" + turn, kind: "assistant", text: text,
                                             timing: ResponseTiming(startedAt: started, completedAt: Date()))
-                answer.turnID = turn; answer.agentName = "Claude"
+                answer.turnID = turn; answer.agentName = agentName(session.connection)
                 TranscriptItem.merge(answer, into: &entries)
             }
             if status != .completed {

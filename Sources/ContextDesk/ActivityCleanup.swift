@@ -28,7 +28,8 @@ extension DeskModel {
               !isChangingChat(id), summaryActiveThread != id else { return (false, nil) }
         let summaryInProgress = supportsSummaries(chat)
             && [.queued, .reading, .generating].contains(archiveSummaries[id]?.status ?? .stale)
-        let session = chat.nativeSession?.connection == .appClaude && !summaryInProgress && claudeConnected && chat.historyReduced != true
+        let connection = chat.nativeSession?.connection
+        let session = traits(connection).contains(.adapterHistory) && !summaryInProgress && agentState(connection).connected && chat.historyReduced != true
             ? chat.nativeSession : nil
         return (true, session)
     }
@@ -47,7 +48,8 @@ extension DeskModel {
         } catch { AppLog.lifecycle.error("Transcript of chat \(id, privacy: .public) not reduced: \(error.localizedDescription, privacy: .public)") }
         if let session = targets.session {
             do {
-                if let reduction = try await claudeConnection.reduceHistory(session) {
+                guard let client = client(session.connection) else { throw ConversationIdentity.unavailable }
+                if let reduction = try await client.reduceHistory(session) {
                     result.chats = 1; result.bytesBefore += reduction.bytesBefore; result.bytesAfter += reduction.bytesAfter
                 }
                 // Restored from the archive while the file was being reduced: new turns may follow, so the mark waits.
@@ -56,7 +58,7 @@ extension DeskModel {
                     result.historiesMarked = 1
                     if persisting { persist() }
                 }
-            } catch { AppLog.lifecycle.error("Claude history of chat \(id, privacy: .public) not reduced: \(error.localizedDescription, privacy: .public)") }
+            } catch { AppLog.lifecycle.error("Agent history of chat \(id, privacy: .public) not reduced: \(error.localizedDescription, privacy: .public)") }
         }
         return result
     }

@@ -323,8 +323,8 @@ struct ProjectSettingsView: View {
     private func loadBrowserProfiles() {
         let store = BrowserProfileStore()
         do {
-            browserProfiles = try [(AgentConnectionID.originalCodex, "Codex"), (AgentConnectionID.appClaude, "Claude")].flatMap { connection, agent in
-                try store.profiles(project: project.path, connection: connection).map { SavedProfile(profile: $0, agent: agent) }
+            browserProfiles = try model.agentIDs.flatMap { connection in
+                try store.profiles(project: project.path, connection: connection).map { SavedProfile(profile: $0, agent: model.agentName(connection)) }
             }
             browserProfilesIssue = nil
         } catch { browserProfiles = []; browserProfilesIssue = error.localizedDescription }

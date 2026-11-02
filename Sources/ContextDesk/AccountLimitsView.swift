@@ -11,13 +11,18 @@ struct AccountLimitsView: View {
     /// Room under the bucket list for the "Checked" line.
     static let checkedLineHeight: CGFloat = 40
 
-    private var selected: AgentConnectionID { agent ?? (model.currentAgent == .appClaude ? .appClaude : .originalCodex) }
-    private var claude: Bool { selected == .appClaude }
-    private var limits: AccountLimits? { claude ? model.claudeLimits : model.accountLimits }
-    private var issue: String? { claude ? model.claudeLimitsError : model.limitsError }
-    private var refreshing: Bool { claude ? model.refreshingClaudeLimits : model.refreshingLimits }
-    private var connected: Bool { claude ? model.claudeConnected : model.connected }
-    private var authenticated: Bool { claude ? model.claudeAuthenticated : model.authenticated }
+    private var selected: AgentConnectionID {
+        agent ?? (model.isRegistered(model.currentAgent) ? model.currentAgent : model.agentIDs.first ?? .unregistered)
+    }
+    private var state: AgentConnectionState { model.agentState(selected) }
+    private var profile: AgentProfile? { model.profile(selected) }
+    /// A per-chat engine connects only to check the CLI and account, so the popover connects it to read limits.
+    private var connectsOnDemand: Bool { !model.traits(selected).contains(.sharedEngine) }
+    private var limits: AccountLimits? { state.limits }
+    private var issue: String? { state.limitsError }
+    private var refreshing: Bool { state.refreshingLimits }
+    private var connected: Bool { state.connected }
+    private var authenticated: Bool { state.authenticated }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -28,12 +33,9 @@ struct AccountLimitsView: View {
                     .buttonStyle(PointerButtonStyle(base: .plain)).help(L10n.text("Закрыть", "Close")).keyboardShortcut(.cancelAction)
             }
             Picker(L10n.text("Провайдер", "Provider"), selection: Binding(get: { selected }, set: { agent = $0 })) {
-                Text("Codex").tag(AgentConnectionID.originalCodex)
-                Text("Claude Code").tag(AgentConnectionID.appClaude)
+                ForEach(model.agentIDs, id: \.self) { id in Text(model.profile(id)?.productName ?? model.agentName(id)).tag(id) }
             }.pickerStyle(.segmented).labelsHidden().pointingHandCursor()
-            Text(claude
-                 ? L10n.text("Лимиты подписки Claude общие для аккаунта: Claude Code, claude.ai и другие приложения. Контекст отдельного чата показан рядом с полем сообщения.", "Claude subscription limits are shared across your account: Claude Code, claude.ai and other apps. Each chat’s context usage is shown next to the message field.")
-                 : L10n.text("Лимиты Codex общие для аккаунта во всех приложениях. Контекст отдельного чата показан рядом с полем сообщения.", "Codex limits are shared across all apps on your account. Each chat’s context usage is shown next to the message field."))
+            Text(profile?.accountCopy.limitsScope() ?? "")
                 .font(.ui(.callout)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             // A fixed height from the first frame: AppKit places the popover only when it is shown,
             // so late data, a provider switch or a loading state must not resize it afterwards.
@@ -52,12 +54,11 @@ struct AccountLimitsView: View {
     }
 
     @ViewBuilder private var status: some View {
-        if claude && !model.claudeConnected && model.claudeConnecting {
-            ProgressView(L10n.text("Подключаю Claude Code…", "Connecting Claude Code…")).padding(.vertical)
+        if connectsOnDemand && !connected && state.connecting {
+            let name = profile?.productName ?? model.agentName(selected)
+            ProgressView(L10n.text("Подключаю \(name)…", "Connecting \(name)…")).padding(.vertical)
         } else if !authenticated {
-            Text(claude
-                 ? L10n.text("Войди в Claude в настройках приложения, чтобы увидеть лимиты.", "Sign in to Claude in the app’s settings to see your limits.")
-                 : L10n.text("Войди в ChatGPT в настройках приложения, чтобы увидеть лимиты.", "Sign in with ChatGPT in the app’s settings to see your limits."))
+            Text(profile?.accountCopy.limitsSignIn() ?? "")
         } else {
             if !connected { Label(L10n.text("Нет подключения. Данные могут быть устаревшими.", "Disconnected. Data may be out of date."), systemImage: "wifi.slash") }
             if let issue {
@@ -90,10 +91,10 @@ struct AccountLimitsView: View {
     }
 
     private func refresh() async {
-        guard claude else { await model.refreshLimits(); return }
-        // The usage probe needs the app-owned Claude profile; connecting only checks the CLI and account.
-        if !model.claudeConnected { await model.connectClaude() }
-        await model.refreshClaudeLimits()
+        let id = selected
+        // The usage probe of a per-chat engine needs its app-owned profile; connecting only checks the CLI and account.
+        if connectsOnDemand && !model.agentState(id).connected { await model.connect(id) }
+        await model.refreshLimits(id)
     }
 
     private func windowRow(_ window: LimitWindow) -> some View {

@@ -11,7 +11,7 @@ import ContextCore
 @MainActor extension DeskModel {
     /// The reset the chat waits for: the stop's own, else the account limits of the chat's agent.
     func limitResumeReset(_ chat: Chat, now: Date = Date()) -> Date? {
-        chat.limitResume?.reset(limits: chat.nativeSession?.connection == .appClaude ? claudeLimits : accountLimits, now: now)
+        chat.limitResume?.reset(limits: agentState(chat.nativeSession?.connection).limits, now: now)
     }
 
     /// Records (or clears) the offer when a turn completes. Any other completion makes an earlier offer obsolete.
@@ -26,10 +26,8 @@ import ContextCore
         AppLog.delivery.notice("Chat \(threadID, privacy: .public) stopped on the usage limit; reset \(stop.resetsAt == nil ? "from account limits" : "reported", privacy: .public)")
         // Fresh account limits supply the reset when the stop carried none.
         guard stop.resetsAt == nil else { return }
-        let claude = state.chats[index].nativeSession?.connection == .appClaude
-        Task { [weak self] in
-            if claude { await self?.refreshClaudeLimits() } else { await self?.refreshLimits() }
-        }
+        guard let connection = state.chats[index].nativeSession?.connection else { return }
+        Task { [weak self] in await self?.refreshLimits(connection) }
     }
 
     func armLimitResume(_ id: String, now: Date = Date()) {

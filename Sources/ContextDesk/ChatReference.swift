@@ -13,11 +13,8 @@ import ContextTranscript
         var lines = [text("Чат Switchboard: «\(chat.title)»", "Switchboard chat: \"\(chat.title)\""), text("ID чата: ", "Chat ID: ") + chat.id,
                      text("Ссылка: ", "Link: ") + link(chat)]
         if let session = chat.nativeSession {
-            let agent = switch session.connection.agent {
-            case .claudeCode: "Claude Code"
-            case .codex: "Codex"
-            default: session.connection.agent.rawValue
-            }
+            let agent = AgentIntegrationFactory.profiles.first { $0.connection.agent == session.connection.agent }?.productName
+                ?? session.connection.agent.rawValue
             lines.append(text("Сессия \(agent): ", "\(agent) session: ") + session.nativeID)
         }
         if let projectPath { lines.append(text("Проект: ", "Project: ") + projectPath) }

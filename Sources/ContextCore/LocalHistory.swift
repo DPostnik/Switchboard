@@ -58,3 +58,11 @@ public enum LocalHistory {
         }
     }
 }
+
+extension TranscriptItem {
+    /// Agent items recorded before agent names were stored come from the original Codex connection; Claude history
+    /// is named when it is read (`LocalHistory.items`). Newer items always carry their agent's name.
+    public static let legacyAgentName = "Codex"
+    /// The name shown over an agent's message or actions.
+    public var speakerName: String { agentName ?? Self.legacyAgentName }
+}

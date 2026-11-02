@@ -12,7 +12,9 @@ import ContextCore
                 if FileManager.default.fileExists(atPath: source.path), !FileManager.default.fileExists(atPath: destination.path) {
                     try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
                     try FileManager.default.copyItem(at: source, to: destination)
-                    if connected { try await connection.registerWorkflows(at: summarySkillsDirectory) }
+                    for id in agentIDs where agentState(id).connected && agentState(id).descriptor?.capabilities.contains(.workflowRegistration) == true {
+                        try await client(id)?.registerWorkflows(at: summarySkillsDirectory)
+                    }
                 }
             }
         }
@@ -73,8 +75,9 @@ import ContextCore
     func routineIssue(_ job: ManagedJob) -> String? {
         guard let invocation = job.routine else { return nil }
         let capabilities: Set<AgentCapability>
-        if job.engine == .claude { capabilities = [.scheduledExecution, .interruption] }
-        else if let descriptor = agentDescriptor { capabilities = descriptor.capabilities }
+        let agent = connection(for: job.engine)
+        if let fixed = profile(agent)?.routineCapabilities { capabilities = fixed }
+        else if let descriptor = agentState(agent).descriptor { capabilities = descriptor.capabilities }
         else { return L10n.text("Подключи агента для проверки возможностей рутины.", "Connect the agent to check routine capabilities.") }
         return invocation.definition.mappingIssue(capabilities: capabilities, agent: job.engine.agentID)
     }

@@ -26,7 +26,7 @@ struct QueuePanel: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                     if model.queuePaused && model.priorityMessageID == nil {
-                        Button(L10n.text("Продолжить", "Resume")) { model.resumeQueue() }.disabled(model.busy || !model.connected || model.selectedChatIsArchived || model.selectedChat.map { model.isChangingChat($0.id) } == true)
+                        Button(L10n.text("Продолжить", "Resume")) { model.resumeQueue() }.disabled(model.busy || !model.currentAgentConnected || model.selectedChatIsArchived || model.selectedChat.map { model.isChangingChat($0.id) } == true)
                     }
                 }.font(.ui(.caption))
                 ScrollView {
@@ -81,7 +81,7 @@ struct QueuePanel: View {
                 Task { await model.sendQueuedMessageNow(message.id) }
             } label: {
                 Label(model.priorityMessageID == message.id ? L10n.text("Останавливаю…", "Stopping…") : model.busy ? L10n.text("Прервать и отправить", "Interrupt and send") : L10n.text("Отправить сейчас", "Send now"), systemImage: "arrow.up")
-            }.disabled(model.sending || !model.connected || model.priorityMessageID != nil || model.selectedChatIsArchived || model.selectedChat.map { model.isChangingChat($0.id) } == true)
+            }.disabled(model.sending || !model.currentAgentConnected || model.priorityMessageID != nil || model.selectedChatIsArchived || model.selectedChat.map { model.isChangingChat($0.id) } == true)
             Button { model.beginQueueEdit(message.id) } label: {
                 Label(L10n.text("Изменить", "Edit"), systemImage: "pencil").labelStyle(.iconOnly)
             }

@@ -17,7 +17,7 @@ import Foundation
     static let settle: TimeInterval = 1.5
 
     init(isIdle: @escaping @MainActor (DeskModel) -> Bool = { $0.readyForRestart },
-         apply: @escaping @MainActor (DeskModel) async -> Void = { await $0.connect() }) {
+         apply: @escaping @MainActor (DeskModel) async -> Void = { await $0.reconnectSharedEngines() }) {
         self.isIdle = isIdle; self.apply = apply
     }
 

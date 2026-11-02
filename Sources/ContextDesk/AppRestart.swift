@@ -25,15 +25,19 @@ struct RestartContinuation: Codable, Equatable {
     /// Session IDs the agents export to their commands; read by the requesting CLI process.
     static func requesterInfo(environment: [String: String]) -> [String: String] {
         var info: [String: String] = [:]
-        if let id = environment["CLAUDE_CODE_SESSION_ID"], valid(id) { info[claudeSessionKey] = id }
-        if let id = environment["CODEX_THREAD_ID"], valid(id) { info[codexThreadKey] = id }
+        for profile in requesterOrder {
+            if let id = environment[profile.restartRequester.environment], valid(id) { info[profile.restartRequester.key] = id }
+        }
         return info
     }
+    /// Agents in the order their sessions are matched: the agent registered last first (Claude before Codex), as when
+    /// the order was written out for the two agents.
+    private static var requesterOrder: [AgentProfile] { AgentIntegrationFactory.profiles.reversed() }
     /// The requester must be an existing, unarchived chat of the matching agent.
     static func chatID(requestedBy info: [AnyHashable: Any]?, in chats: [Chat]) -> String? {
-        for (key, connection) in [(claudeSessionKey, AgentConnectionID.appClaude), (codexThreadKey, .originalCodex)] {
-            guard let id = info?[key] as? String, valid(id) else { continue }
-            let session = AgentSessionReference(connection: connection, nativeID: id)
+        for profile in requesterOrder {
+            guard let id = info?[profile.restartRequester.key] as? String, valid(id) else { continue }
+            let session = AgentSessionReference(connection: profile.connection, nativeID: id)
             if let chat = chats.first(where: { $0.nativeSession == session && !$0.isArchived }) { return chat.id }
         }
         return nil
@@ -183,7 +187,7 @@ struct RestartContinuation: Codable, Equatable {
 
 extension DeskModel {
     var readyForRestart: Bool {
-        !isBootstrapping && !anyBusy && !connecting && !claudeConnecting && pending.isEmpty && !hasDeliverableQueue && backgroundWorkChatIDs.isEmpty
+        !isBootstrapping && !anyBusy && !anyAgentConnecting && pending.isEmpty && !hasDeliverableQueue && backgroundWorkChatIDs.isEmpty
     }
     /// Idle chats whose agent still runs background tasks or sub-agents; a restart would end that work.
     /// Running sub-agents also cover the gap between a turn's completion and its background-wait report.

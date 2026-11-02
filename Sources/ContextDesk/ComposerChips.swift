@@ -35,7 +35,8 @@ struct ChipLabel: View {
 /// A click opens the "Context and tokens" details.
 struct ContextRing: View {
     let usage: UsageSnapshot?
-    let claude: Bool
+    /// The chat's agent, named until its first answer brings metrics.
+    let agentName: String
     @State private var showingDetails = false
 
     /// The ring turns amber from this share of the context window.
@@ -63,7 +64,7 @@ struct ContextRing: View {
                 .help(Self.help(usage, cache: cache))
                 .accessibilityLabel(Self.summary(usage, cache: cache))
         }
-        .popover(isPresented: $showingDetails) { UsageDetail(usage: usage, claude: claude).padding(20).frame(width: 330) }
+        .popover(isPresented: $showingDetails) { UsageDetail(usage: usage, agentName: agentName).padding(20).frame(width: 330) }
     }
 
     /// Text inside the ring and the tooltip: the rounded percentage, "6%", as in the details; nil until the window is known.
