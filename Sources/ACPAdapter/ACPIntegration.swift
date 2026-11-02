@@ -9,7 +9,9 @@ import ContextCore
 /// `.disconnected`; the app reconnects, and a chat continues in the new process through `session/resume` or
 /// `session/load`, only when the agent advertises them.
 /// History: the app keeps its own record per session (`ACPSessionStore`) in the agent's app home, because v1 agents need
-/// not list or replay sessions. Updates outside a running turn (for example a `session/load` replay) are not surfaced.
+/// not list or replay sessions. Turn content outside a running turn (for example a `session/load` replay) is not surfaced;
+/// session state is: commands (`AgentCommand`) and config options (`AgentConfigOption`, also from the older `models` list
+/// Gemini CLI 0.66.0 reports, changed through `session/set_model`) whenever the agent reports them, repeated when a turn starts.
 /// Permissions: role profiles whose prompts the app can answer (`ask`, or `blocked`, which refuses every prompt) and the
 /// external policy with prompts denied. The agent applies its own rules first; the app never selects `allow_always` or
 /// `reject_always`, which would persist decisions inside the agent beyond the role.
@@ -38,12 +40,16 @@ public actor ACPIntegration: AgentIntegration {
     /// Sessions whose `session/load` history replay is still arriving; their updates are dropped.
     private var replaying: [String: Date] = [:]
     private var lastUpdate: [String: Date] = [:]
+    /// The commands each session last offered (`available_commands_update`); repeated when a turn starts, because the
+    /// first list arrives right after `session/new`, before the app knows the chat.
+    private var commands: [String: [AgentCommand]] = [:]
     private struct Permission {
         let request: JSONValue
         let session: String
         let turn: String
         let options: [ACPPermissionOption]
         let tool: ACPTurn.ACPToolState?
+        let call: String
     }
     private var permissions: [UUID: Permission] = [:]
     /// The role of each session's running turn, for prompts the role refuses without asking.
@@ -132,7 +138,7 @@ public actor ACPIntegration: AgentIntegration {
         if let transport { await stop(transport) }
         reader?.cancel(); reader = nil
         home = nil; engine = nil; capabilities = ACPAgentCapabilities(); authMethods = []; authenticated = false
-        records.removeAll(); replaying.removeAll(); lastUpdate.removeAll(); sessionProfiles.removeAll()
+        records.removeAll(); replaying.removeAll(); lastUpdate.removeAll(); sessionProfiles.removeAll(); commands.removeAll()
         context = AgentContext(connection: profile.connection, accountRevision: UUID())
     }
 
@@ -194,6 +200,7 @@ public actor ACPIntegration: AgentIntegration {
             let request = params["requestId"]
             for (token, value) in permissions where value.request == request {
                 permissions[token] = nil; sink.yield(.init(session: reference(value.session), payload: .resolved(token)))
+                mark(value.call, nil, session: value.session)
             }
         default: if ACPProtocolSurface.clientMethods.contains(method) { count("notification:" + method) }
         }
@@ -205,10 +212,16 @@ public actor ACPIntegration: AgentIntegration {
         guard ACPProtocolSurface.sessionUpdates.contains(kind) else { return } // Drift, counted by name above.
         let now = Date()
         lastUpdate[session] = now
-        // Side state the contract cannot show yet stays in the record.
+        // Session state, current even during a history replay and outside turns. The title has no place in the contract
+        // (the app names its chats), so it stays in the record.
         switch kind {
         case "config_option_update":
-            if let options = ACPConfigOption.list(update["configOptions"]) { records[session]?.configOptions = options }
+            if let options = ACPConfigOption.list(update["configOptions"]) { setOptions(options, session: session); return }
+        case "available_commands_update":
+            let list = ACPCommand.list(update["availableCommands"])
+            commands[session] = list
+            sink.yield(.init(session: reference(session), payload: .commands(list)))
+            return
         case "session_info_update":
             if let title = update["title"].string { records[session]?.title = title }
         default: break
@@ -225,18 +238,21 @@ public actor ACPIntegration: AgentIntegration {
             try? await connection.respond(id: id, result: ACPPermissionOutcome.cancelled)
             return
         }
-        let session = request.sessionId
+        let session = request.sessionId, call = request.toolCall.toolCallId
         for payload in turn.observe(permission: request.toolCall) { sink.yield(.init(session: reference(session), payload: payload)) }
-        turns[session] = turn
-        let tool = turn.tool(request.toolCall.toolCallId)
-        let state = tool ?? ACPTurn.ACPToolState(title: request.toolCall.title ?? request.toolCall.toolCallId, started: Date())
+        let tool = turn.tool(call)
+        let state = tool ?? ACPTurn.ACPToolState(title: request.toolCall.title ?? call, started: Date())
         if Self.refusal(state, turn: turn, profile: sessionProfiles[session]) != nil {
+            turns[session] = turn
+            mark(call, .rejected, session: session)
             record(ACPTurn.capability(state, cwd: turn.cwd, decision: .denied, turn: turn.id), session: session)
             try? await connection.respond(id: id, result: Self.reject(request.options))
             return
         }
+        turns[session] = turn
+        mark(call, .awaitingApproval, session: session)
         let token = UUID()
-        permissions[token] = Permission(request: id, session: session, turn: turn.id, options: request.options, tool: tool)
+        permissions[token] = Permission(request: id, session: session, turn: turn.id, options: request.options, tool: tool, call: call)
         record(ACPTurn.capability(state, cwd: turn.cwd, decision: .asked, turn: turn.id), session: session)
         let canAllow = request.options.contains { $0.kind == "allow_once" }
         sink.yield(.init(session: reference(session), payload: .interaction(.init(
@@ -265,6 +281,21 @@ public actor ACPIntegration: AgentIntegration {
         options.first { $0.kind == "reject_once" }.map { ACPPermissionOutcome.selected($0.optionId) } ?? ACPPermissionOutcome.cancelled
     }
 
+    /// Shows the app's state of a call of the session's running turn (nil returns to the agent's own status).
+    private func mark(_ call: String, _ status: AgentToolCall.Status?, session: String) {
+        guard var turn = turns[session] else { return }
+        let payloads = turn.mark(call, status)
+        turns[session] = turn
+        for payload in payloads { sink.yield(.init(session: reference(session), payload: payload)) }
+    }
+
+    /// New settings of a session: kept in its record and in the connection's model cache, and reported to the app.
+    private func setOptions(_ options: [ACPConfigOption], session: String) {
+        records[session]?.configOptions = options
+        if let home { ACPOptionCache(options: options.filter { ["model", "thought_level"].contains($0.category) }).save(home: home) }
+        sink.yield(.init(session: reference(session), payload: .configOptions(options.compactMap(\.contract))))
+    }
+
     private func record(_ value: AgentCapabilityRecord, session: String) {
         sink.yield(.init(session: reference(session), payload: .capability(value)))
     }
@@ -281,7 +312,7 @@ public actor ACPIntegration: AgentIntegration {
 
     public func account() -> AgentResult<AgentAccountInfo> {
         guard transport != nil, home != nil else { return .unavailable }
-        return .success(.init(authenticated: authenticated, plan: nil))
+        return .success(.init(authenticated: authenticated, plan: nil, canSignOut: capabilities.auth.logout != nil))
     }
 
     /// Records the sign-in state. An explicit sign-in or a lost sign-in starts a new account revision; a session that simply
@@ -294,6 +325,12 @@ public actor ACPIntegration: AgentIntegration {
         context = AgentContext(connection: profile.connection, accountRevision: UUID())
         sink.yield(.init(session: nil, payload: .accountChanged(error: error)))
         if case .success(let value) = descriptor() { sink.yield(.init(session: nil, payload: .descriptor(value))) }
+    }
+
+    /// The agent answered auth-required (-32000): shown to the user instead of the agent's own text.
+    private var signInRequired: String {
+        L10n.text("\(profile.productName) просит войти. Войди в Настройки → Аккаунты; запрос не отправлен повторно.",
+                  "\(profile.productName) asks you to sign in. Sign in under Settings → Accounts; nothing was sent again.")
     }
 
     public func authenticate(_ action: AgentAuthenticationAction) async -> AgentResult<AgentAuthenticationStep> {
@@ -320,10 +357,13 @@ public actor ACPIntegration: AgentIntegration {
 
     public func models() -> AgentResult<[AgentModelInfo]> {
         // Models are a per-session config option in ACP; a loaded session that reported one stands for the connection.
-        guard let option = records.values.compactMap({ $0.configOptions?.first { $0.category == "model" && $0.type == "select" } }).first else {
+        // Without one, the options the last session reported (cached in the home) stand for it until a session reports them.
+        let cached = home.flatMap(ACPOptionCache.load)?.options ?? []
+        let sources = records.values.compactMap(\.configOptions) + [cached]
+        guard let option = sources.lazy.compactMap({ $0.first { $0.category == "model" && $0.type == "select" } }).first else {
             return .rejected(.unsupported(.modelDiscovery))
         }
-        let efforts = records.values.compactMap { $0.configOptions?.first { $0.category == "thought_level" && $0.type == "select" } }.first
+        let efforts = sources.lazy.compactMap { $0.first { $0.category == "thought_level" && $0.type == "select" } }.first
         return .success(option.options.map {
             AgentModelInfo(id: $0.value, displayName: $0.name, isDefault: option.currentValue.string == $0.value,
                            defaultEffort: efforts?.currentValue.string ?? "", efforts: efforts?.options.map(\.value) ?? [])
@@ -364,14 +404,15 @@ public actor ACPIntegration: AgentIntegration {
                                                   timeout: profile.sessionTimeout)
             let response = try ACPCodec.decode(ACPNewSessionResponse.self, from: raw)
             guard self.transport === transport, context == epoch else { return .rejected(.staleContext) }
-            var record = ACPSessionRecord(id: response.sessionId, cwd: request.projectPath)
-            record.configOptions = ACPConfigOption.list(raw["configOptions"])
-            try ACPSessionStore(home: home).save(record)
-            records[record.id] = record; live.insert(record.id)
+            let record = ACPSessionRecord(id: response.sessionId, cwd: request.projectPath)
+            records[record.id] = record
+            if let options = ACPConfigOption.session(raw) { setOptions(options, session: record.id) }
+            try ACPSessionStore(home: home).save(records[record.id] ?? record)
+            live.insert(record.id)
             if !authenticated { setAuthenticated(true, rotate: false) }
             return .success(reference(record.id))
         } catch let error as ACPTransportError {
-            if case .remote(-32000, let message) = error { setAuthenticated(false, error: message) }
+            if case .remote(-32000, _) = error { setAuthenticated(false, error: signInRequired) }
             return failure(error)
         } catch { return failure(error) }
     }
@@ -418,6 +459,9 @@ public actor ACPIntegration: AgentIntegration {
             handles[id] = handle
             sink.yield(.init(session: session, payload: .started(turn: turn)))
             sink.yield(.init(session: session, payload: .item(prompt)))
+            // Session state reported before the app knew the chat (right after `session/new` or a load).
+            if let list = commands[id] { sink.yield(.init(session: session, payload: .commands(list))) }
+            if let options = records[id]?.configOptions { sink.yield(.init(session: session, payload: .configOptions(options.compactMap(\.contract)))) }
             delivered = true
             let params = try ACPCodec.encode(ACPPromptRequest(sessionId: id, prompt: [.text(request.prompt)]))
             // A turn has no deadline; a cancelled one that does not answer is closed by `cancel`. The response comes as an
@@ -443,13 +487,13 @@ public actor ACPIntegration: AgentIntegration {
         let params = try ACPCodec.encode(ACPSessionRequest(sessionId: id, cwd: cwd))
         if capabilities.sessionCapabilities.resume != nil {
             let raw = try await transport.request("session/resume", params: params, timeout: profile.sessionTimeout)
-            if let options = ACPConfigOption.list(raw["configOptions"]) { records[id]?.configOptions = options }
+            if let options = ACPConfigOption.session(raw) { setOptions(options, session: id) }
         } else if capabilities.loadSession {
             // The agent replays the whole conversation as updates; the app already has it, so they are dropped until quiet.
             replaying[id] = Date()
             defer { replaying[id] = nil }
             let raw = try await transport.request("session/load", params: params, timeout: profile.sessionTimeout)
-            if let options = ACPConfigOption.list(raw["configOptions"]) { records[id]?.configOptions = options }
+            if let options = ACPConfigOption.session(raw) { setOptions(options, session: id) }
             let settle = profile.replaySettle
             let seconds = Double(settle.components.seconds) + Double(settle.components.attoseconds) / 1e18
             for _ in 0..<50 {
@@ -465,15 +509,25 @@ public actor ACPIntegration: AgentIntegration {
     }
 
     /// Selects the requested model and effort through the session's config options before the prompt. An empty model keeps
-    /// the agent's default; a model or effort the session does not offer is refused instead of silently ignored.
+    /// the agent's default; a model the session does not offer is refused instead of silently ignored. An effort is applied
+    /// only when the session has a thought-level option, and refused when that option does not offer it.
     private func configure(_ id: String, model: AgentModelSelection, transport: ACPConnection) async throws {
         for (category, value) in [("model", model.model), ("thought_level", model.effort ?? "")] where !value.isEmpty {
-            guard let option = records[id]?.configOptions?.first(where: { $0.category == category && $0.type == "select" }),
-                  option.options.contains(where: { $0.value == value }) else { throw RejectedInput() }
+            let option = records[id]?.configOptions?.first(where: { $0.category == category && $0.type == "select" })
+            if option == nil, category == "thought_level" { continue }
+            guard let option, option.options.contains(where: { $0.value == value }) else { throw RejectedInput() }
             guard option.currentValue.string != value else { continue }
+            if option.setModel == true {
+                // The older session model API (Gemini CLI 0.66.0): the answer is empty, so the record follows the request.
+                _ = try await transport.request("session/set_model", params: .object([
+                    "sessionId": .string(id), "modelId": .string(value)]), timeout: profile.sessionTimeout)
+                var changed = option; changed.currentValue = .string(value)
+                setOptions((records[id]?.configOptions ?? []).map { $0.id == option.id ? changed : $0 }, session: id)
+                continue
+            }
             let raw = try await transport.request("session/set_config_option", params: .object([
                 "sessionId": .string(id), "configId": .string(option.id), "value": .string(value)]), timeout: profile.sessionTimeout)
-            if let options = ACPConfigOption.list(raw["configOptions"]) { records[id]?.configOptions = options }
+            if let options = ACPConfigOption.list(raw["configOptions"]) { setOptions(options, session: id) }
         }
     }
     private struct RejectedInput: Error {}
@@ -486,20 +540,23 @@ public actor ACPIntegration: AgentIntegration {
             if !ACPStopReason.all.contains(reason) {
                 drift.record(profile.agent, version: engine?.version, .missingField, "session/prompt:stopReason=" + reason)
             }
+            let stop = ACPStopReason.contract(reason)
             switch reason {
-            case ACPStopReason.endTurn: finish(id, outcome: .completed, error: nil)
-            case ACPStopReason.cancelled: finish(id, outcome: .cancelled, error: nil)
-            case ACPStopReason.refusal: finish(id, outcome: .failed, error: L10n.text("Агент отказался выполнять запрос.", "The agent refused the request."))
+            case ACPStopReason.endTurn: finish(id, outcome: .completed, error: nil, stopReason: stop)
+            case ACPStopReason.cancelled: finish(id, outcome: .cancelled, error: nil, stopReason: stop)
+            case ACPStopReason.refusal:
+                finish(id, outcome: .failed, error: L10n.text("Агент отказался выполнять запрос.", "The agent refused the request."), stopReason: stop)
             case ACPStopReason.maxTokens:
-                finish(id, outcome: .failed, error: L10n.text("Ответ остановлен: достигнут предел токенов.", "The response stopped at the token limit."))
+                finish(id, outcome: .failed, error: L10n.text("Ответ остановлен: достигнут предел токенов.", "The response stopped at the token limit."), stopReason: stop)
             case ACPStopReason.maxTurnRequests:
-                finish(id, outcome: .failed, error: L10n.text("Ход остановлен: достигнут предел запросов к модели.", "The turn stopped at the model request limit."))
+                finish(id, outcome: .failed, error: L10n.text("Ход остановлен: достигнут предел запросов к модели.", "The turn stopped at the model request limit."),
+                       stopReason: stop)
             default: finish(id, outcome: .failed, error: L10n.text("Неизвестная причина остановки хода.", "Unknown reason for the end of the turn."))
             }
         case .failure(let error as ACPTransportError):
             if case .remote(let code, let message) = error {
-                if code == -32000 { setAuthenticated(false, error: message) }
-                finish(id, outcome: .failed, error: message)
+                if code == -32000 { setAuthenticated(false, error: signInRequired) }
+                finish(id, outcome: .failed, error: code == -32000 ? signInRequired : message)
             } else {
                 finish(id, outcome: .uncertain, error: error.localizedDescription)
             }
@@ -507,11 +564,11 @@ public actor ACPIntegration: AgentIntegration {
         }
     }
 
-    private func finish(_ id: String, outcome: AgentExecutionOutcome, error: String?) {
+    private func finish(_ id: String, outcome: AgentExecutionOutcome, error: String?, stopReason: AgentStopReason? = nil) {
         guard var turn = turns.removeValue(forKey: id) else { return }
         handles[id] = nil; sessionProfiles[id] = nil; finishedTurns.insert(turn.id)
         let session = reference(id)
-        for payload in turn.close() { sink.yield(.init(session: session, payload: payload)) }
+        for payload in turn.close(outcome: outcome) { sink.yield(.init(session: session, payload: payload)) }
         for (token, value) in permissions where value.session == id {
             permissions[token] = nil; sink.yield(.init(session: session, payload: .resolved(token)))
         }
@@ -528,7 +585,7 @@ public actor ACPIntegration: AgentIntegration {
         }
         sink.yield(.init(session: session, payload: .status(turn: turn.id, text: nil)))
         sink.yield(.init(session: session, payload: .completed(.init(id: turn.id, status: outcome, hasError: outcome != .completed && outcome != .cancelled,
-                                                                    error: error, history: history))))
+                                                                    error: error, history: history, stopReason: stopReason))))
     }
 
     public func cancel(_ execution: AgentExecutionHandle) async -> AgentResult<AgentCancellation> {
@@ -578,6 +635,7 @@ public actor ACPIntegration: AgentIntegration {
         }
         permissions[id] = nil
         sink.yield(.init(session: session, payload: .resolved(id)))
+        mark(pending.call, decision == .allowed ? .inProgress : .rejected, session: pending.session)
         if let tool = pending.tool, let cwd = records[pending.session]?.cwd {
             record(ACPTurn.capability(tool, cwd: cwd, decision: decision, turn: pending.turn), session: pending.session)
         }

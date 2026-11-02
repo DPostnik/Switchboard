@@ -57,3 +57,18 @@ struct ACPAccountState: Codable, Equatable {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
     }
 }
+
+/// The model and thought-level options the connection's last session reported, so a new chat can offer the agent's
+/// models before its session exists (ACP lists models per session only). Rewritten whenever a session reports options.
+struct ACPOptionCache: Codable, Equatable {
+    var options: [ACPConfigOption]
+
+    static func file(home: URL) -> URL { home.appendingPathComponent("switchboard-acp-options.json") }
+    static func load(home: URL) -> Self? { (try? Data(contentsOf: file(home: home))).flatMap { try? JSONDecoder().decode(Self.self, from: $0) } }
+    func save(home: URL) {
+        guard !options.isEmpty, Self.load(home: home) != self, let data = try? JSONEncoder().encode(self) else { return }
+        let path = Self.file(home: home)
+        try? data.write(to: path, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+    }
+}

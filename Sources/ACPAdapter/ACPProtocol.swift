@@ -1,4 +1,5 @@
 import Foundation
+import AgentContract
 import ContextCore
 
 // The ACP v1 subset this adapter reads and writes, written against the pinned schema release
@@ -143,9 +144,14 @@ struct ACPConfigOption: Codable, Equatable, Sendable {
     var currentValue: JSONValue
     /// Select choices, flattened from groups.
     var options: [Choice]
-    enum CodingKeys: String, CodingKey { case id, name, category, type, currentValue, options }
-    init(id: String, name: String, category: String?, type: String, currentValue: JSONValue, options: [Choice]) {
+    /// Set by this client for the model list of the pre-config-option session API (`models` in the session response,
+    /// changed through `session/set_model`), which Gemini CLI 0.66.0 still uses instead of a model config option.
+    /// Never read from the wire: only the app's own session records carry it.
+    var setModel: Bool?
+    enum CodingKeys: String, CodingKey { case id, name, category, type, currentValue, options, setModel = "switchboardSetModel" }
+    init(id: String, name: String, category: String?, type: String, currentValue: JSONValue, options: [Choice], setModel: Bool? = nil) {
         self.id = id; self.name = name; self.category = category; self.type = type; self.currentValue = currentValue; self.options = options
+        self.setModel = setModel
     }
     init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -158,10 +164,66 @@ struct ACPConfigOption: Codable, Equatable, Sendable {
             if entry["group"] != .null { return entry["options"].array.compactMap { try? ACPCodec.decode(Choice.self, from: $0) } }
             return (try? ACPCodec.decode(Choice.self, from: entry)).map { [$0] } ?? []
         }
+        setModel = c.lenient(Bool.self, .setModel)
     }
     static func list(_ value: JSONValue) -> [Self]? {
         guard case .array(let entries) = value else { return nil }
         return entries.compactMap { try? ACPCodec.decode(Self.self, from: $0) }
+    }
+    /// A session's settings from a `session/new`, `session/load` or `session/resume` response: its config options, or,
+    /// from an agent that reports only the older `models` list, that list as one model select option.
+    static func session(_ response: JSONValue) -> [Self]? {
+        if let options = list(response["configOptions"]) { return options }
+        let models = response["models"]
+        guard case .array(let available) = models["availableModels"] else { return nil }
+        let choices = available.compactMap { entry -> Choice? in
+            guard let id = entry["modelId"].string else { return nil }
+            return Choice(value: id, name: entry["name"].string ?? id, description: entry["description"].string)
+        }
+        guard !choices.isEmpty else { return nil }
+        return [Self(id: "model", name: L10n.text("Модель", "Model"), category: "model", type: "select",
+                     currentValue: models["currentModelId"].string.map { JSONValue.string($0) } ?? .null, options: choices, setModel: true)]
+    }
+
+    /// The contract's form: categories and select choices as named values, a boolean's value as "true" or "false".
+    var contract: AgentConfigOption? {
+        let kind: AgentConfigOption.Kind
+        switch type {
+        case "select": kind = .select(options.map { .init(id: $0.value, name: $0.name, description: $0.description) })
+        case "boolean": kind = .boolean
+        default: return nil
+        }
+        let category: AgentConfigOption.Category = switch self.category {
+        case "mode": .mode
+        case "model": .model
+        case "model_config": .modelConfig
+        case "thought_level": .thoughtLevel
+        default: .other
+        }
+        let current: String = switch currentValue {
+        case .string(let value): value
+        case .bool(let value): value ? "true" : "false"
+        default: ""
+        }
+        return AgentConfigOption(id: id, name: name, category: category, kind: kind, current: current)
+    }
+}
+
+/// One `available_commands_update` entry, typed as "/name" in the composer.
+struct ACPCommand: Decodable, Equatable, Sendable {
+    var name: String
+    var description: String?
+    var hint: String?
+    enum CodingKeys: String, CodingKey { case name, description, input }
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        description = c.lenient(String.self, .description)
+        hint = c.lenient(JSONValue.self, .input)?["hint"].string
+    }
+    static func list(_ value: JSONValue) -> [AgentCommand] {
+        value.array.compactMap { try? ACPCodec.decode(Self.self, from: $0) }.filter { !$0.name.isEmpty }
+            .map { AgentCommand(name: $0.name, description: $0.description ?? "", inputHint: $0.hint) }
     }
 }
 
@@ -195,6 +257,17 @@ enum ACPStopReason {
     static let endTurn = "end_turn", maxTokens = "max_tokens", maxTurnRequests = "max_turn_requests"
     static let refusal = "refusal", cancelled = "cancelled"
     static let all: Set<String> = [endTurn, maxTokens, maxTurnRequests, refusal, cancelled]
+    /// The contract's stop reason; nil for a value the schema does not declare.
+    static func contract(_ raw: String) -> AgentStopReason? {
+        switch raw {
+        case endTurn: .endTurn
+        case maxTokens: .maxTokens
+        case maxTurnRequests: .maxTurnRequests
+        case refusal: .refusal
+        case cancelled: .cancelled
+        default: nil
+        }
+    }
 }
 
 // MARK: session/update

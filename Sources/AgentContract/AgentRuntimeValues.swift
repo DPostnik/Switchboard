@@ -3,7 +3,11 @@ import Foundation
 public struct AgentAccountInfo: Sendable {
     public let authenticated: Bool
     public let plan: String?
-    public init(authenticated: Bool, plan: String?) { self.authenticated = authenticated; self.plan = plan }
+    /// False when the agent offers no sign-out (an ACP agent that does not advertise `logout`); the app then hides it.
+    public let canSignOut: Bool
+    public init(authenticated: Bool, plan: String?, canSignOut: Bool = true) {
+        self.authenticated = authenticated; self.plan = plan; self.canSignOut = canSignOut
+    }
 }
 
 public struct AgentModelInfo: Hashable, Sendable {

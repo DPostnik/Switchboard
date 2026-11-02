@@ -100,6 +100,18 @@ private struct ACPSnapshot {
     #expect(requests == ACPProtocolSurface.answeredRequests.union(ACPProtocolSurface.refusedRequests))
 }
 
+/// The older session model API Gemini CLI 0.66.0 uses stays outside the pinned schema; if a schema release declares it
+/// again, it moves into the regular surface.
+@Test func acpLegacyModelSurfaceIsOutsideThePinnedSchema() throws {
+    let snapshot = try ACPSnapshot()
+    #expect(ACPProtocolSurface.legacyRequests.isDisjoint(with: snapshot.agentMethods.keys))
+    #expect(ACPProtocolSurface.legacyRequests.isDisjoint(with: ACPProtocolSurface.sentRequests))
+    for (root, paths) in ACPProtocolSurface.legacyReads {
+        let start = try #require(snapshot.root(root))
+        #expect(paths.allSatisfy { !snapshot.resolves($0, from: start) }, "\(root)")
+    }
+}
+
 /// Guards the walker itself, so the containment test cannot pass vacuously.
 @Test func acpSnapshotWalkerRejectsUnknownRootsAndFields() throws {
     let snapshot = try ACPSnapshot()

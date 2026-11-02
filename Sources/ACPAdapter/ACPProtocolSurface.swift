@@ -41,10 +41,24 @@ enum ACPProtocolSurface {
     /// not advertise file system, terminal or elicitation support, so a compliant agent never sends them.
     static let answeredRequests: Set<String> = ["session/request_permission"]
     static var refusedRequests: Set<String> { clientMethods.subtracting(answeredRequests).subtracting(["session/update", "elicitation/complete"]) }
-    /// Updates that become `AgentEvent`s with the current contract. The others are known, kept in adapter state where useful
-    /// (config options, commands, title, mode) and counted as "not yet surfaced", never as drift.
+    /// Updates that become `AgentEvent`s with the stage C contract: tool calls as `AgentToolCall`, the plan as `AgentPlan`,
+    /// commands as `AgentCommand`s and config options as `AgentConfigOption`s. The others are known, kept in adapter state
+    /// where useful (title, mode) and counted as "not yet surfaced", never as drift.
     static let surfacedUpdates: Set<String> = [
-        "agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update", "plan", "usage_update", "compaction_update"
+        "agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update", "plan", "usage_update", "compaction_update",
+        "available_commands_update", "config_option_update"
+    ]
+
+    /// The session model API from before config options (ACP's unstable `models` field and `session/set_model`), which the
+    /// pinned schema no longer declares but Gemini CLI 0.66.0 still uses instead of a model config option (read from its
+    /// 0.66.0 bundle: `newSession`/`loadSession` return `models: {availableModels, currentModelId}`, `unstable_setSessionModel`).
+    /// Used only when a session reports no config options; ACPSnapshotTests checks that these stay outside the schema, so
+    /// a schema that adopts them again is noticed.
+    static let legacyRequests: Set<String> = ["session/set_model"]
+    static let legacyReads: [String: [String]] = [
+        "response:session/new": ["models.availableModels.*.modelId", "models.availableModels.*.name", "models.availableModels.*.description",
+                                 "models.currentModelId"],
+        "response:session/load": ["models"], "response:session/resume": ["models"]
     ]
     /// Root -> field paths the decoders read. Roots: `response:<method>`, `request:<client method>` (params of an agent request),
     /// `notification:<method>` (params) and `update:<session update kind>`; `*` steps into an array element.
@@ -66,14 +80,16 @@ enum ACPProtocolSurface {
                                                "toolCall.rawInput", "options.*.optionId", "options.*.name", "options.*.kind"],
         "update:agent_message_chunk": ["content.type", "content.text", "messageId"],
         "update:agent_thought_chunk": ["content.type", "content.text", "messageId"],
-        "update:tool_call": ["toolCallId", "title", "kind", "status", "locations.*.path", "locations.*.line", "rawInput", "content.*.type"],
+        "update:tool_call": ["toolCallId", "title", "kind", "status", "locations.*.path", "locations.*.line", "rawInput", "content.*.type",
+                             "content.*.content.text", "content.*.path", "content.*.oldText", "content.*.newText"],
         "update:tool_call_update": ["toolCallId", "title", "kind", "status", "content.*.type", "content.*.content.text", "content.*.path",
                                     "content.*.oldText", "content.*.newText", "content.*.terminalId", "locations.*.path", "rawOutput"],
         "update:plan": ["entries.*.content", "entries.*.status", "entries.*.priority"],
         "update:usage_update": ["used", "size"],
-        "update:config_option_update": ["configOptions"],
+        "update:config_option_update": ["configOptions.*.id", "configOptions.*.name", "configOptions.*.category", "configOptions.*.type",
+                                        "configOptions.*.currentValue", "configOptions.*.options.*.value", "configOptions.*.options.*.name"],
         "update:session_info_update": ["title"],
-        "update:available_commands_update": ["availableCommands.*.name", "availableCommands.*.description"],
+        "update:available_commands_update": ["availableCommands.*.name", "availableCommands.*.description", "availableCommands.*.input.hint"],
         "update:current_mode_update": ["currentModeId"],
         "update:compaction_update": ["compactionId", "status"]
     ]

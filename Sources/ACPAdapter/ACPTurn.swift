@@ -4,12 +4,13 @@ import ContextCore
 
 /// One running prompt turn of one session: turns `session/update` notifications into the current contract's events.
 ///
-/// Mapping (until the shared model gets typed tool calls and plans, plan stage C): message chunks stream as `.delta` into
-/// one assistant item per segment (a tool call or thought between chunks starts a new segment, a `messageId` names one);
-/// thought chunks become a thinking item; a tool call is an `activity` item (title, kind, locations, raw input) whose
-/// result item (`<call>:result`) carries the text, diff and terminal content once it completes or fails; the plan is one
-/// `activity` item replaced on every update; `usage_update` is the context size; a completed compaction is a
-/// `compaction` item. Other known updates return nil: the integration keeps what it needs and counts them.
+/// Mapping (stage C contract): message chunks stream as `.delta` into one assistant item per segment (a tool call or
+/// thought between chunks starts a new segment, a `messageId` names one); thought chunks become a thinking item; a tool
+/// call is an `activity` item carrying its `AgentToolCall` (kind, status, title, locations, diffs and terminals), updated
+/// in place by `toolCallId`, whose result item (`<call>:result`) carries the call's text output once it completes or
+/// fails; the plan is the turn's `AgentPlan` (one plan item per turn, replaced on every update); `usage_update` is the
+/// context size; a completed compaction is a `compaction` item. Commands, config options and the title are session
+/// state the integration handles outside the turn; other known updates return nil and are counted.
 struct ACPTurn {
     static let thinkingInterval: TimeInterval = 0.25
     let id: String
@@ -34,6 +35,8 @@ struct ACPTurn {
         var content: [ACPToolCallContent] = []
         var rawOutput: JSONValue?
         var started: Date
+        /// The app's own state of the call while the agent reports none: waiting for approval, refused, or ended with the turn.
+        var appStatus: AgentToolCall.Status?
     }
 
     init(id: String, cwd: String, prompt: TranscriptItem, attended: Bool, startedAt: Date = Date()) {
@@ -84,14 +87,10 @@ struct ACPTurn {
             guard let call = try? ACPCodec.decode(ACPToolCall.self, from: update) else { return [] }
             return closeMessage() + closeThought(at: now) + tool(call, at: now)
         case "plan":
-            let entries = update["entries"].array.compactMap { try? ACPCodec.decode(ACPPlanEntry.self, from: $0) }
-            let lines = entries.map { entry -> String in
-                let mark = switch entry.status { case "completed": "[x]"; case "in_progress": "[~]"; default: "[ ]" }
-                return mark + " " + entry.content
-            }
-            let item = TranscriptItem(id: id + ":plan", kind: "activity", text: ([L10n.text("План", "Plan")] + lines).joined(separator: "\n"))
-            store(item)
-            return [.item(item)]
+            let plan = Self.plan(update)
+            // Stored for the record's history; the app turns the event into the same item.
+            store(plan.transcriptItem(turn: id))
+            return [.plan(turn: id, plan)]
         case "usage_update":
             guard let used = update["used"].int, let size = update["size"].int else { return [] }
             return [.usage(turn: id, total: nil, snapshot: UsageSnapshot(last: used, window: size, measuredAt: now))]
@@ -118,18 +117,36 @@ struct ACPTurn {
 
     func tool(_ id: String) -> ACPToolState? { tools[id] }
 
+    /// Sets the app's state of a call (approval asked, refused, ended with the turn) and shows it; nil returns to the agent's.
+    mutating func mark(_ toolCallID: String, _ status: AgentToolCall.Status?) -> [AgentEvent.Payload] {
+        guard var state = tools[toolCallID], state.appStatus != status, !Self.status(state).isFinal || status == nil else { return [] }
+        state.appStatus = status
+        tools[toolCallID] = state
+        return [.item(callItem(toolCallID, state))]
+    }
+
+    private func callItem(_ toolCallID: String, _ state: ACPToolState) -> TranscriptItem {
+        var item = TranscriptItem(id: Self.callID(turn: id, tool: toolCallID), kind: "activity", text: Self.callText(state))
+        item.toolCall = Self.toolCall(toolCallID, state)
+        return ActivityRetention.cap(item)
+    }
+
     private mutating func tool(_ call: ACPToolCall, at now: Date) -> [AgentEvent.Payload] {
         var state = tools[call.toolCallId] ?? ACPToolState(title: call.title ?? call.toolCallId, started: now)
         let wasFinished = ["completed", "failed"].contains(state.status ?? "")
         if let title = call.title, !title.isEmpty { state.title = title }
         if let kind = call.kind { state.kind = kind }
-        if let status = call.status { state.status = status }
+        if let status = call.status {
+            // The agent's own status replaces the app's, except that a refused call it then reports failed stays refused.
+            if !(state.appStatus == .rejected && status == "failed") { state.appStatus = nil }
+            state.status = status
+        }
         if let locations = call.locations { state.locations = locations }
         if let input = call.rawInput { state.rawInput = input }
         if let content = call.content { state.content = content }
         if let output = call.rawOutput { state.rawOutput = output }
         tools[call.toolCallId] = state
-        let callItem = TranscriptItem(id: Self.callID(turn: id, tool: call.toolCallId), kind: "activity", text: Self.callText(state))
+        let callItem = callItem(call.toolCallId, state)
         store(callItem)
         var payloads: [AgentEvent.Payload] = [.item(callItem)]
         if !wasFinished, state.status == "pending" || state.status == "in_progress" || state.status == nil {
@@ -152,6 +169,19 @@ struct ACPTurn {
 
     /// Ends open text segments, for the end of the turn or before another kind of content.
     mutating func close(at now: Date = Date()) -> [AgentEvent.Payload] { closeMessage() + closeThought(at: now) }
+
+    /// The end of the turn: open segments close, and calls a cancelled or failed turn left unfinished end with it (after an
+    /// uncertain end their state is unknown and stays as last reported).
+    mutating func close(outcome: AgentExecutionOutcome, at now: Date = Date()) -> [AgentEvent.Payload] {
+        var payloads = close(at: now)
+        guard outcome == .cancelled || outcome == .failed else { return payloads }
+        for key in tools.keys.sorted() where tools[key].map({ !Self.status($0).isFinal }) == true {
+            let ended = mark(key, outcome == .cancelled ? .cancelled : .failed)
+            for case .item(let item) in ended { store(item) }
+            payloads += ended
+        }
+        return payloads
+    }
 
     private mutating func closeMessage() -> [AgentEvent.Payload] {
         guard let current = message else { return [] }
@@ -183,10 +213,55 @@ struct ACPTurn {
         return lines.joined(separator: "\n")
     }
 
+    /// The call's text output; diffs and terminals ride on its `AgentToolCall`.
     static func resultText(_ state: ACPToolState) -> String {
-        var parts = state.content.map(\.display).filter { !$0.isEmpty }
+        var parts = state.content.filter { $0.type == "content" }.map(\.display).filter { !$0.isEmpty }
         if parts.isEmpty, let output = state.rawOutput, output != .null { parts.append(output.display) }
         return parts.joined(separator: "\n\n")
+    }
+
+    static func status(_ state: ACPToolState) -> AgentToolCall.Status {
+        if let app = state.appStatus { return app }
+        switch state.status {
+        case "in_progress": return .inProgress
+        case "completed": return .completed
+        case "failed": return .failed
+        default: return .pending
+        }
+    }
+
+    static func kind(_ raw: String?) -> AgentToolCall.Kind {
+        raw == "switch_mode" ? .switchMode : raw.flatMap(AgentToolCall.Kind.init(rawValue:)) ?? .other
+    }
+
+    /// The call in the contract's form. Text output stays in the result item, so the row shows it once.
+    static func toolCall(_ id: String, _ state: ACPToolState) -> AgentToolCall {
+        let content: [AgentToolCall.Content] = state.content.compactMap { entry in
+            switch entry.type {
+            case "diff": entry.path.map { .diff(.init(path: $0, oldText: entry.oldText, newText: entry.newText ?? "")) }
+            // The client offers no terminals, so a compliant agent sends none; one that does is named, never read.
+            case "terminal": .terminal(.init(command: nil))
+            default: nil
+            }
+        }
+        var summary: String?
+        if let input = state.rawInput, input != .null, input != .object([:]) {
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            let text = input.string ?? String(decoding: (try? encoder.encode(input)) ?? Data(), as: UTF8.self)
+            let line = ActivityDetail.oneLine(text, limit: 200)
+            if !line.isEmpty { summary = line }
+        }
+        return AgentToolCall(id: id, kind: kind(state.kind), status: status(state), title: state.title,
+                             locations: state.locations.map { .init(path: $0.path, line: $0.line) }, content: content, inputSummary: summary)
+    }
+
+    static func plan(_ update: JSONValue) -> AgentPlan {
+        let entries = update["entries"].array.compactMap { try? ACPCodec.decode(ACPPlanEntry.self, from: $0) }
+        return AgentPlan(entries: entries.map { entry in
+            let status: AgentPlan.Entry.Status = switch entry.status { case "completed": .completed; case "in_progress": .inProgress; default: .pending }
+            let priority = entry.priority.flatMap(AgentPlan.Entry.Priority.init(rawValue:)) ?? .medium
+            return AgentPlan.Entry(content: entry.content, status: status, priority: priority)
+        })
     }
 
     static func capability(_ state: ACPToolState, cwd: String, decision: AgentCapabilityRecord.Decision, turn: String?) -> AgentCapabilityRecord {

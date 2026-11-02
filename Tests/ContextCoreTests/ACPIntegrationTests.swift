@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import AgentContract
 @testable import ACPAdapter
 @testable import ContextCore
 
@@ -49,7 +50,15 @@ for line in sys.stdin:
             update(session, {'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': 'replayed answer'}})
         options = [{'id': 'model', 'name': 'Model', 'category': 'model', 'type': 'select', 'currentValue': 'fast',
                     'options': [{'value': 'fast', 'name': 'Fast'}, {'group': 'more', 'name': 'More', 'options': [{'value': 'deep', 'name': 'Deep'}]}]}]
-        reply(i, {'sessionId': session, 'configOptions': options} if method == 'session/new' else {'configOptions': options})
+        if config.get('legacyModels'):
+            # Gemini CLI 0.66.0: the older `models` list instead of config options.
+            body = {'models': {'availableModels': [{'modelId': 'auto', 'name': 'Auto'}, {'modelId': 'pro', 'name': 'Pro', 'description': 'Deep'}],
+                               'currentModelId': 'auto'}, 'modes': {'availableModes': [], 'currentModeId': 'default'}}
+        else: body = {'configOptions': options}
+        if method == 'session/new': body['sessionId'] = session
+        reply(i, body)
+        update(session, {'sessionUpdate': 'available_commands_update', 'availableCommands': [{'name': 'init', 'description': 'Analyze'}]})
+    elif method == 'session/set_model': reply(i, {})
     elif method == 'session/set_config_option':
         reply(i, {'configOptions': [{'id': 'model', 'name': 'Model', 'category': 'model', 'type': 'select', 'currentValue': params['value'],
                                      'options': [{'value': 'fast', 'name': 'Fast'}, {'value': 'deep', 'name': 'Deep'}]}]})
@@ -85,6 +94,26 @@ for line in sys.stdin:
                 'sessionId': session, 'toolCall': {'toolCallId': 'w1'},
                 'options': [{'optionId': 'yes', 'name': 'Allow', 'kind': 'allow_once'}, {'optionId': 'always', 'name': 'Always', 'kind': 'allow_always'},
                             {'optionId': 'no', 'name': 'Reject', 'kind': 'reject_once'}]}})
+        elif text == 'structured':
+            path = os.path.join(config.get('project', '/tmp'), 'a.txt')
+            update(session, {'sessionUpdate': 'tool_call', 'toolCallId': 'e1', 'title': 'Edit a.txt', 'kind': 'edit', 'status': 'pending',
+                             'locations': [{'path': path, 'line': 3}], 'rawInput': {'file_path': path}})
+            update(session, {'sessionUpdate': 'tool_call_update', 'toolCallId': 'e1', 'status': 'in_progress'})
+            update(session, {'sessionUpdate': 'tool_call_update', 'toolCallId': 'e1', 'status': 'completed',
+                             'content': [{'type': 'diff', 'path': path, 'oldText': 'a\n', 'newText': 'b\n'},
+                                         {'type': 'content', 'content': {'type': 'text', 'text': 'edited'}}]})
+            update(session, {'sessionUpdate': 'tool_call', 'toolCallId': 'm1', 'title': 'Plan mode', 'kind': 'switch_mode', 'status': 'in_progress'})
+            update(session, {'sessionUpdate': 'plan', 'entries': [{'content': 'Edit', 'status': 'in_progress', 'priority': 'high'}]})
+            update(session, {'sessionUpdate': 'plan', 'entries': [{'content': 'Edit', 'status': 'completed', 'priority': 'high'},
+                                                                  {'content': 'Check', 'status': 'pending'}]})
+            update(session, {'sessionUpdate': 'available_commands_update', 'availableCommands': [
+                {'name': 'memory', 'description': 'Memory', 'input': {'hint': 'show | add <text>'}}, {'name': '', 'description': 'nameless'}]})
+            update(session, {'sessionUpdate': 'config_option_update', 'configOptions': [
+                {'id': 'mode', 'name': 'Mode', 'category': 'mode', 'type': 'select', 'currentValue': 'ask',
+                 'options': [{'value': 'ask', 'name': 'Ask'}, {'value': 'code', 'name': 'Code'}]},
+                {'id': 'brief', 'name': 'Brief', 'type': 'boolean', 'currentValue': True}]})
+            pending[session] = i
+        elif text == 'long': reply(i, {'stopReason': 'max_tokens'})
         elif text == 'hang': pending[session] = i
         elif text == 'exit': sys.exit(3)
         elif text == 'refuse': reply(i, {'stopReason': 'refusal'})
@@ -106,6 +135,19 @@ private actor ACPEvents {
     func capabilities() -> [AgentCapabilityRecord] { values.compactMap { if case .capability(let value) = $0.payload { return value }; return nil } }
     func resolved() -> [UUID] { values.compactMap { if case .resolved(let id) = $0.payload { return id }; return nil } }
     func disconnected() -> Bool { values.contains { if case .disconnected = $0.payload { return true }; return false } }
+    func plans() -> [AgentPlan] { values.compactMap { if case .plan(_, let plan) = $0.payload { return plan }; return nil } }
+    func commands() -> [[AgentCommand]] { values.compactMap { if case .commands(let list) = $0.payload { return list }; return nil } }
+    func options() -> [[AgentConfigOption]] { values.compactMap { if case .configOptions(let list) = $0.payload { return list }; return nil } }
+    /// The latest state of every structured call, by call ID.
+    func calls() -> [String: AgentToolCall] {
+        var result: [String: AgentToolCall] = [:]
+        for item in items() { if let call = item.toolCall { result[call.id] = call } }
+        return result
+    }
+    /// The statuses a call went through, repeats of the same status folded.
+    func callStatuses(_ id: String) -> [AgentToolCall.Status] {
+        items().compactMap { $0.toolCall?.id == id ? $0.toolCall?.status : nil }.reduce(into: []) { if $0.last != $1 { $0.append($1) } }
+    }
 }
 
 private struct ACPFixture {
@@ -240,7 +282,13 @@ private func waitFor(_ condition: @escaping () async -> Bool) async throws {
     #expect(items.contains { $0.kind == ActivityDetail.thinkingKind && $0.text == "pondering" })
     #expect(items.contains { $0.kind == "activity" && $0.text.hasPrefix("Read README") })
     #expect(items.contains { $0.kind == "activity" && $0.text == "# Readme" })
-    #expect(items.contains { $0.kind == "activity" && $0.text.contains("[x] Look") && $0.text.contains("[~] Answer") })
+    // Stage C: the call is structured and the plan is the turn's plan.
+    let read = try #require(await events.calls()["t1"])
+    #expect(read.kind == .read && read.status == .completed && read.title == "Read README" && read.locations.map(\.path).first?.hasSuffix("README.md") == true)
+    #expect(await events.plans().last?.entries.map(\.status) == [.completed, .inProgress])
+    #expect(await events.plans().last?.entries.map(\.priority) == [.high, .low])
+    #expect(await events.commands().last == [AgentCommand(name: "memory", description: "Memory")])
+    #expect(completion.stopReason == .endTurn)
     #expect(await events.usage().map(\.window) == [200000])
     #expect(await events.capabilities().map(\.decision) == [.used])
     let methods = fixture.methods()
@@ -251,13 +299,92 @@ private func waitFor(_ condition: @escaping () async -> Bool) async throws {
     #expect(Set(errors.compactMap { $0["id"].string }) == ["u1", "u2"])
     #expect(errors.allSatisfy { $0["error"]["code"].int == -32601 })
     let unsurfaced = await adapter.unsurfaced
-    #expect(unsurfaced["update:available_commands_update"] == 1 && unsurfaced["update:session_info_update"] == 1)
+    #expect(unsurfaced["update:available_commands_update"] == nil && unsurfaced["update:session_info_update"] == 1)
     #expect(unsurfaced["request:fs/read_text_file"] == 1)
     #expect(fixture.driftNames() == ["itemType hologram_update", "notification _fake/notice", "serverRequest _fake/teleport"])
     // The app's own record is the chat's history.
     let history = try await adapter.history(session, context: descriptor.context).value()
     #expect(history.count == 1 && history[0].items.first?.text == "stream" && history[0].isComplete)
+    #expect(history[0].items.contains { $0.kind == AgentPlan.itemKind && $0.plan?.entries.count == 2 })
+    #expect(history[0].items.contains { $0.toolCall?.id == "t1" && $0.toolCall?.status == .completed })
     await adapter.disconnect()
+}
+
+@Test func acpCallsPlansCommandsAndOptionsReachTheStructuredContract() async throws {
+    let fixture = try ACPFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    try fixture.write(["project": fixture.project.path])
+    let (adapter, events, reader, descriptor) = try await fixture.start()
+    defer { reader.cancel() }
+    let session = try await adapter.prepare(fixture.request(descriptor)).value()
+    let handle = try await adapter.submit(fixture.request(descriptor, prompt: "structured", session: session)).value()
+    // The commands sent right after session/new, before the app knew the chat, are repeated when the turn starts.
+    try await waitFor { await events.commands().count >= 3 }
+    try await waitFor { await events.options().contains { $0.contains { $0.category == .mode } } }
+    // One call updated in place by its ID: pending, in progress, completed with its diff; text output in the result item.
+    let edit = try #require(await events.calls()["e1"])
+    #expect(await events.callStatuses("e1") == [.pending, .inProgress, .completed])
+    #expect(edit.kind == .edit && edit.title == "Edit a.txt")
+    #expect(edit.locations == [.init(path: fixture.project.appendingPathComponent("a.txt").path, line: 3)])
+    #expect(edit.diffs == [.init(path: fixture.project.appendingPathComponent("a.txt").path, oldText: "a\n", newText: "b\n")])
+    #expect(edit.inputSummary?.contains("file_path") == true)
+    #expect(await events.items().contains { $0.id == ActivityDetail.resultID(of: ACPTurn.callID(turn: handle.turnID!, tool: "e1")) && $0.text == "edited" })
+    #expect(await events.calls()["m1"]?.kind == .switchMode)
+    // Every plan update replaces the turn's plan.
+    #expect(await events.plans().map { $0.entries.map(\.content) } == [["Edit"], ["Edit", "Check"]])
+    #expect(await events.plans().last?.entries.map(\.priority) == [.high, .medium])
+    // Commands: nameless entries are dropped; the input hint is kept.
+    #expect(await events.commands().contains([AgentCommand(name: "memory", description: "Memory", inputHint: "show | add <text>")]))
+    #expect(await events.commands().first == [AgentCommand(name: "init", description: "Analyze")])
+    let options = try #require(await events.options().last)
+    #expect(options.map(\.id) == ["mode", "brief"])
+    #expect(options[0].category == .mode && options[0].current == "ask" && options[0].kind == .select([.init(id: "ask", name: "Ask"), .init(id: "code", name: "Code")]))
+    #expect(options[1].kind == .boolean && options[1].current == "true" && options[1].category == .other)
+    // Cancelling ends the turn's unfinished calls as cancelled; finished ones keep their state.
+    #expect(try await adapter.cancel(handle).value() == .requested)
+    try await waitFor { await events.completions().count == 1 }
+    #expect(await events.completions().first?.stopReason == .cancelled)
+    let ended = await events.calls()
+    #expect(ended["m1"]?.status == .cancelled && ended["e1"]?.status == .completed)
+    let history = try await adapter.history(session, context: descriptor.context).value()
+    #expect(history.last?.items.filter { $0.kind == AgentPlan.itemKind }.count == 1)
+    #expect(history.last?.items.first { $0.toolCall?.id == "m1" }?.toolCall?.status == .cancelled)
+    // A stop reason other than the end of the turn reaches the contract.
+    _ = try await adapter.submit(fixture.request(descriptor, prompt: "long", session: session)).value()
+    try await waitFor { await events.completions().count == 2 }
+    let long = await events.completions().last
+    #expect(long?.stopReason == .maxTokens && long?.status == .failed)
+    await adapter.disconnect()
+}
+
+@Test func acpOlderSessionModelListSelectsThroughSetModelAndIsCachedForNewChats() async throws {
+    let fixture = try ACPFixture(["legacyModels": true])
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    var (adapter, events, reader, descriptor) = try await fixture.start()
+    guard case .rejected(.unsupported(.modelDiscovery)) = await adapter.models() else { Issue.record("models before any session"); return }
+    let session = try await adapter.prepare(fixture.request(descriptor)).value()
+    let models = try await adapter.models().value()
+    #expect(models.map(\.id) == ["auto", "pro"] && models.map(\.displayName) == ["Auto", "Pro"] && models.first?.isDefault == true)
+    // A thought level the session does not offer is not sent; a model it does not offer is refused before the prompt.
+    guard case .rejected(.invalidInput) = await adapter.submit(fixture.request(descriptor, session: session, model: "ultra")) else {
+        Issue.record("unknown model sent"); return
+    }
+    var request = fixture.request(descriptor, session: session, model: "pro")
+    request = .init(conversation: request.conversation, session: session, kind: .interactive, prompt: "hello", projectPath: fixture.project.path,
+                    permissions: request.permissions, model: .init(context: descriptor.context, model: "pro", effort: "medium"), route: .direct)
+    _ = try await adapter.submit(request).value()
+    try await waitFor { await events.completions().count == 1 }
+    let setModel = try #require(fixture.received().first { $0["method"].string == "session/set_model" })
+    #expect(setModel["params"]["modelId"].string == "pro" && setModel["params"]["sessionId"].string == session.nativeID)
+    #expect(!fixture.methods().contains("session/set_config_option"))
+    #expect(fixture.methods().firstIndex(of: "session/set_model")! < fixture.methods().firstIndex(of: "session/prompt")!)
+    #expect(await events.options().last?.first?.current == "pro")
+    await adapter.disconnect(); reader.cancel()
+
+    // A new process lists the models the last session reported before any session exists.
+    (adapter, events, reader, descriptor) = try await fixture.start()
+    #expect(try await adapter.models().value().map(\.id) == ["auto", "pro"])
+    await adapter.disconnect(); reader.cancel()
 }
 
 @Test func acpPermissionPromptsAreAnsweredOnceAndNeverAlways() async throws {
@@ -281,6 +408,10 @@ private func waitFor(_ condition: @escaping () async -> Bool) async throws {
     }
     let answers = fixture.received().filter { $0["id"].string == "p1" && $0["method"] == .null }.map { $0["result"]["outcome"]["optionId"].string }
     #expect(answers == ["yes", "no"])
+    // The call waits for approval, then runs after allow; a refused call stays refused when the agent reports it failed.
+    let statuses = await events.callStatuses("w1")
+    #expect(statuses.starts(with: [.pending, .awaitingApproval, .inProgress, .completed]))
+    #expect(Array(statuses.dropFirst(4)) == [.pending, .awaitingApproval, .rejected])
     #expect(await events.capabilities().map(\.decision) == [.asked, .allowed, .used, .asked, .denied])
     #expect(await events.items().contains { $0.text == "refused" && $0.failed == true })
     // A read-only role refuses the write without asking.
