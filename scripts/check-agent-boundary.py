@@ -51,6 +51,43 @@ if '.target(name: "ClaudeAdapter", dependencies: ["AgentContract", "ContextCore"
     failures.append('ClaudeAdapter must depend only on AgentContract and ContextCore')
 if (root / 'Sources/ContextCore/ClaudeJobRunner.swift').exists():
     failures.append('Native Claude runner must live in ClaudeAdapter')
+if (root / 'Sources/ContextCore/ClaudeModels.swift').exists():
+    failures.append('The Claude model catalog must live in ClaudeAdapter')
+
+# Stage B (N agents): the application and transcript reach agents through the registry. Concrete connection and agent
+# IDs, legacy job engines, Claude catalog types and "Claude or Codex" labels appear only in the composition root and
+# presentation table. Comments and string literals are ignored, so paths such as ".claude/..." do not count.
+agent_constant = re.compile(
+    r'(?<![\w"])(?:AgentConnectionID|AgentID|JobEngine)?\.(?:originalCodex|appClaude|codex|claudeCode|claude)\b'
+    r'|\bClaude(?:Model|Effort|Advisor|Runtime)\b')
+# Read on the raw line: string literals are what it looks for.
+agent_label = re.compile(r'"(?:Claude|Codex|Claude Code)"\s*:\s*"(?:Claude|Codex|Claude Code)"')
+agent_allowlist = {'Sources/ContextDesk/AgentIntegrationFactory.swift'}
+
+
+def code_only(source):
+    """Source without comments and string literal contents (approximate, line structure kept)."""
+    source = re.sub(r'"""[\s\S]*?"""', lambda m: '""' + '\n' * m.group(0).count('\n'), source)
+    lines = []
+    for line in source.split('\n'):
+        line = re.sub(r'"(?:\\.|[^"\\])*"', '""', line)
+        lines.append(re.sub(r'//.*', '', line))
+    return lines
+
+
+remaining = {}
+for folder in ['ContextDesk', 'ContextTranscript']:
+    for path in sorted((root / 'Sources' / folder).glob('*.swift')):
+        relative = str(path.relative_to(root))
+        text = path.read_text()
+        for number, (line, raw) in enumerate(zip(code_only(text), text.split('\n')), 1):
+            for match in list(agent_constant.finditer(line)) + list(agent_label.finditer(raw)):
+                if relative in agent_allowlist:
+                    remaining[relative] = remaining.get(relative, 0) + 1
+                else:
+                    failures.append(f'{relative}:{number}: concrete agent "{match.group(0).strip()}" outside the registry; '
+                                    'use AgentIntegrationFactory profiles, traits or descriptor capabilities')
 if failures:
     sys.exit('\n'.join(failures))
-print('AgentContract and Codex command/event boundaries passed (stages 3–4).')
+allowed = ', '.join(f'{Path(name).name} {count}' for name, count in sorted(remaining.items())) or 'none'
+print(f'AgentContract and Codex command/event boundaries passed (stages 3–4); concrete agent IDs only in the allowlist ({allowed}).')
