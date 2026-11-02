@@ -25,6 +25,12 @@ public struct AgentEvent: Sendable {
         case subagents([AgentSubagent])
         /// One capability use or permission decision for the ledger (plan Phase 0); never a prompt to the user.
         case capability(AgentCapabilityRecord)
+        /// The whole current plan of a turn; it replaces the turn's previous plan.
+        case plan(turn: String?, AgentPlan)
+        /// The full list of commands the session offers now.
+        case commands([AgentCommand])
+        /// The full list of the session's settings and their current values.
+        case configOptions([AgentConfigOption])
     }
 }
 
@@ -55,11 +61,14 @@ public struct AgentTurnCompletion: Sendable {
     public let error: String?
     /// Set when the turn stopped because the account's usage limit is exhausted.
     public let usageLimit: AgentUsageLimitStop?
+    /// Why the turn ended; the outcome's implied reason when the adapter has nothing more specific.
+    public let stopReason: AgentStopReason?
     private let history: AgentHistoryTurn
     public init(id: String, status: AgentExecutionOutcome, hasError: Bool, error: String?, history: AgentHistoryTurn,
-                usageLimit: AgentUsageLimitStop? = nil) {
+                usageLimit: AgentUsageLimitStop? = nil, stopReason: AgentStopReason? = nil) {
         self.id = id; self.status = status; self.hasError = hasError; self.error = error; self.history = history
         self.usageLimit = usageLimit
+        self.stopReason = stopReason ?? AgentStopReason.implied(by: status, usageLimit: usageLimit != nil)
     }
     public func timing(fallback: ResponseTiming) -> ResponseTiming { history.timing(fallback: fallback) ?? fallback }
 }

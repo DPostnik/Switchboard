@@ -24,10 +24,33 @@ public enum ActivityRetention {
     /// Caps an activity body: the first `headBytes`, a marker line and the last `tailBytes`, with the original size in
     /// `fullLength`. Other kinds, short bodies and already capped or reduced items pass through unchanged.
     public static func cap(_ item: TranscriptItem) -> TranscriptItem {
-        guard isActivity(item.kind), item.fullLength == nil, item.reduced != true, item.text.utf8.count > capBytes else { return item }
         var copy = item
+        // A structured call's own bodies (diff sides, terminal output, text) are capped one by one, independently of
+        // the item's text; capping is idempotent because a capped body fits its limit.
+        if let call = item.toolCall, item.reduced != true { copy.toolCall = capped(call) }
+        guard isActivity(item.kind), item.fullLength == nil, item.reduced != true, item.text.utf8.count > capBytes else { return copy }
         copy.fullLength = item.text.utf8.count
         copy.text = cappedCall(item.text) ?? cappedText(item.text, head: headBytes, tail: tailBytes)
+        return copy
+    }
+
+    /// Each body of a structured call keeps at most this many UTF-8 bytes (head and tail around a marker).
+    public static let contentBytes = 8 * 1024
+
+    static func capped(_ call: AgentToolCall) -> AgentToolCall {
+        func cut(_ text: String) -> String {
+            // The marker line fits the margin, so a capped body stays within the limit and is not cut again.
+            text.utf8.count > contentBytes ? cappedText(text, head: contentBytes * 3 / 4 - 64, tail: contentBytes / 4 - 64) : text
+        }
+        var copy = call
+        copy.content = call.content.map { content in
+            switch content {
+            case .text(let text): return .text(cut(text))
+            case .diff(var diff): diff.oldText = diff.oldText.map(cut); diff.newText = cut(diff.newText); return .diff(diff)
+            case .terminal(var terminal): terminal.output = cut(terminal.output); terminal.command = terminal.command.map(cut); return .terminal(terminal)
+            }
+        }
+        if let summary = call.inputSummary, summary.count > 300 { copy.inputSummary = String(summary.prefix(299)) + "…" }
         return copy
     }
 
@@ -151,6 +174,8 @@ public enum ActivityRetention {
             var copy = item
             copy.reduced = true
             copy.fullLength = sizes[item.id]
+            // A structured call keeps what it was (kind, status, title, files) and drops its bodies.
+            copy.toolCall?.content = []
             copy.text = headline(item.text) + "\n" + metadata(item, names: names, sizes: sizes)
             return copy
         }

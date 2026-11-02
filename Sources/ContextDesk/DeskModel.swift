@@ -267,6 +267,11 @@ private struct ChatRunState: Equatable {
     @Published private(set) var backgroundWaits: [String: Int] = [:]
     /// Thread ID -> sub-agents its agent delegated to (running ones and those finished since the last user message).
     @Published private(set) var subagents: [String: [AgentSubagent]] = [:]
+    /// Thread ID -> the commands and the settings its agent session last reported (ACP-shaped, stage C). Kept for the
+    /// composer; not published because no view shows them yet (the composer has no command list, and the model and
+    /// effort chips still come from the agent's model catalog).
+    private(set) var sessionCommands: [String: [AgentCommand]] = [:]
+    private(set) var sessionConfigOptions: [String: [AgentConfigOption]] = [:]
     /// Stop requests in flight, keyed by `stopKey`; their buttons stay disabled until the engine answers.
     @Published private(set) var stoppingTasks: Set<String> = []
     @Published private(set) var deletingChatIDs: Set<String> = []
@@ -844,7 +849,8 @@ private struct ChatRunState: Equatable {
         do {
             let eventRevision = historyEventRevisions[chat.id, default: 0]
             let capturedAt = Date()
-            let turns = try await clientForChat(chat.id).history(sessionForChat(chat.id))
+            // Engine histories have no plans; the stored transcript shown so far keeps each turn's latest one.
+            let turns = AgentPlan.carry(from: items, into: try await clientForChat(chat.id).history(sessionForChat(chat.id)))
             guard selectionGeneration == generation else { return }
             let timings = try await store.loadTimings(threadID: chat.id)
             guard selectionGeneration == generation else { return }
@@ -884,8 +890,11 @@ private struct ChatRunState: Equatable {
             do {
                 let capturedAt = Date()
                 let session = try sessionForChat(chat.id)
-                let turns = try await clientForChat(chat.id).history(session)
+                let history = try await clientForChat(chat.id).history(session)
                 guard !Task.isCancelled else { return }
+                // Plans live only in the stored transcript; keep them when it is rewritten from the engine's history.
+                let stored = (try? await store.loadTranscript(conversationID: chat.id)).flatMap { $0 }.map(LocalHistory.items) ?? []
+                let turns = AgentPlan.carry(from: stored, into: history)
                 let timings = try await store.loadTimings(threadID: chat.id)
                 // Encoding a long transcript takes tens of milliseconds; on the main actor it made scrolling stutter.
                 let conversation = ConversationID(chat.id)
@@ -2319,6 +2328,13 @@ private struct ChatRunState: Equatable {
             if case .interaction(let request) = event.payload { await client(id)?.rejectInteraction(request.id) }
             return
         }
+        // A plan update is the turn's plan item: recorded, shown and carried over history reloads like any other item.
+        if case .plan(let turn, let plan) = event.payload {
+            guard let thread, let turn = turn ?? runs[thread]?.turnID else { return }
+            let item = plan.transcriptItem(turn: turn, agentName: agentName(id))
+            await receive(AgentEvent(session: event.session, payload: .item(item)), from: id)
+            return
+        }
         defer { mobileRemote.observe(event, thread: thread) }
         let traits = traits(id), name = agentName(id)
         switch event.payload {
@@ -2486,6 +2502,13 @@ private struct ChatRunState: Equatable {
             guard let thread else { return }
             let agents = list.isEmpty ? nil : list
             if subagents[thread] != agents { subagents[thread] = agents }
+        case .commands(let list):
+            guard let thread else { return }
+            sessionCommands[thread] = list
+        case .configOptions(let options):
+            guard let thread else { return }
+            sessionConfigOptions[thread] = options
+        case .plan: break // Converted to an item above.
         }
     }
     private func flushDeltas() { transcript.flush() }

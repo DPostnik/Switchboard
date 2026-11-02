@@ -75,6 +75,11 @@ public struct TranscriptItem: Identifiable, Codable, Sendable, Equatable {
     public var failed: Bool?
     /// Seconds a thinking block or a command took, when the engine reported or the adapter measured it.
     public var seconds: Double?
+    /// The structured call behind an activity item (`AgentToolCall`); nil on results, other kinds and items stored
+    /// before it existed, which keep their text-only presentation.
+    public var toolCall: AgentToolCall?
+    /// The checklist of a `plan` item (`AgentPlan.itemKind`); nil on other kinds.
+    public var plan: AgentPlan?
     public init(id: String, kind: String, text: String, phase: String? = nil, timing: ResponseTiming? = nil) {
         self.id = id; self.kind = kind; self.phase = phase; self.timing = timing
         self.text = kind == "user" ? InterruptedTurnNote.stripped(text) : text
