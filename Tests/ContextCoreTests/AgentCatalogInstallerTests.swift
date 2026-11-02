@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import CryptoKit
+@testable import ACPAdapter
 @testable import ContextCore
 
 private let sharedLauncher = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
@@ -258,4 +259,43 @@ private func binaryEntry(_ host: CatalogHost, file: String, sha: String?, cmd: S
     let record = try await installer(agents, npm: npm, host: host).install(entry)
     #expect(record.command == agents.appendingPathComponent("binagent/3.1.0/agent-darwin").path)
     #expect(record.checksum == .unverified)
+}
+
+// MARK: Gemini
+
+@Test func agentCatalogGeminiInstallIsFoundByTheGeminiProfile() async throws {
+    let npm = try NPMFixture(), root = try catalogTemporaryDirectory()
+    let home = root.appendingPathComponent("gemini", isDirectory: true), agents = GeminiProfile.catalogDirectory(home: home)
+    #expect(agents == root.appendingPathComponent("agents", isDirectory: true))
+    let entry = AgentCatalogEntry(id: GeminiProfile.catalogID, name: "Gemini CLI", version: "0.66.0",
+                                  distribution: .init(npx: .init(package: "@google/gemini-cli", version: "0.66.0", args: ["--acp"])))
+    let choice = try #require(AgentCatalogVersionChoice.choose(for: entry, verified: GeminiProfile.verifiedVersions))
+    let record = try await installer(agents, npm: npm, bin: "gemini")
+        .install(entry, version: choice.version, checkEnvironment: GeminiProfile.installCheckEnvironment)
+    #expect(record.command == agents.appendingPathComponent("gemini/0.66.0/node_modules/.bin/gemini").path)
+    let found = try GeminiProfile.profile.executable(home: home, environment: ["PATH": ""])
+    #expect(found.path == record.command)
+    try await installer(agents, npm: npm).remove(GeminiProfile.catalogID)
+    #expect(GeminiProfile.candidates(home: home, environment: [:]).first == GeminiProfile.installedExecutable(home: home).path)
+}
+
+@Test func agentCatalogVersionChoiceFollowsTheVersionPolicy() {
+    func entry(_ version: String, binary: Bool = false) -> AgentCatalogEntry {
+        let distribution: AgentCatalogDistribution = binary
+            ? .init(binary: [AgentCatalog.currentPlatform: .init(archive: URL(string: "https://example.com/a.zip")!, cmd: "./a")])
+            : .init(npx: .init(package: "@google/gemini-cli", version: version))
+        return AgentCatalogEntry(id: "gemini", name: "Gemini CLI", version: version, distribution: distribution)
+    }
+    let verified = ["0.66.0"]
+    #expect(AgentCatalogVersionChoice.choose(for: entry("0.66.0"), verified: verified) == .init(version: "0.66.0", reason: .verified))
+    let sameMinor = AgentCatalogVersionChoice.choose(for: entry("0.66.2"), verified: verified)
+    #expect(sameMinor == .init(version: "0.66.2", reason: .unverified(nearest: "0.66.0")))
+    #expect(sameMinor?.note != nil)
+    let rejected = AgentCatalogVersionChoice.choose(for: entry("0.67.0"), verified: verified)
+    #expect(rejected == .init(version: "0.66.0", reason: .catalogRejected(catalog: "0.67.0")))
+    #expect(rejected?.note?.contains("0.67.0") == true)
+    #expect(AgentCatalogVersionChoice.choose(for: entry("0.67.0", binary: true), verified: verified) == nil)
+    #expect(AgentCatalogVersionChoice.choose(for: entry("9.0.0"), verified: []) == .init(version: "9.0.0", reason: .unconstrained))
+    #expect(AgentCatalogVersionChoice.isAcceptable("0.66.5", verified: verified))
+    #expect(!AgentCatalogVersionChoice.isAcceptable("0.67.0", verified: verified))
 }

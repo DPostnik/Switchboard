@@ -24,10 +24,19 @@ public enum GeminiProfile {
 
     /// `~/Library/Application Support/Switchboard/gemini/`: `GEMINI_CLI_HOME`, the app's session records and the install folder.
     public static var home: URL { Locations.root.appendingPathComponent("gemini", isDirectory: true) }
-    /// Where the app installs the CLI (`npm install --prefix <home>/cli`); searched first.
+    /// Gemini CLI's id in the ACP agent catalog (npx `@google/gemini-cli`).
+    public static let catalogID = "gemini"
+    /// The catalog's install folder beside the home (`<root>/agents`, `Locations.agentsHome` for the app's home).
+    public static func catalogDirectory(home: URL) -> URL {
+        home.deletingLastPathComponent().appendingPathComponent("agents", isDirectory: true)
+    }
+    /// An earlier app-owned install layout (`npm install --prefix <home>/cli`), still searched after the catalog install.
     public static func installedExecutable(home: URL) -> URL {
         home.appendingPathComponent("cli/node_modules/.bin/gemini")
     }
+    /// Variables for the catalog installer's `--version` check: the CLI's state goes to the throwaway check home, and it
+    /// does not relaunch itself.
+    public static let installCheckEnvironment = ["GEMINI_CLI_HOME": "$CHECK_HOME", "GEMINI_CLI_NO_RELAUNCH": "true"]
 
     /// Variables removed from the inherited environment: anything that selects another account, key, endpoint or state folder.
     static let removedPrefixes = ["GEMINI_", "GOOGLE_", "CODE_ASSIST_", "OTEL_", "OTLP_"]
@@ -72,9 +81,11 @@ public enum GeminiProfile {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: settings.path)
     }
 
-    /// App-owned install first (stage E installs there), then Homebrew, then absolute PATH entries.
+    /// The catalog install first (its `installed.json` names the command inside `<agents>/gemini/<version>/`), then the
+    /// earlier app-owned folder, then Homebrew, then absolute PATH entries.
     static func candidates(home: URL, environment: [String: String]) -> [String] {
-        [installedExecutable(home: home).path, "/opt/homebrew/bin/gemini", "/usr/local/bin/gemini"]
+        [AgentCatalogInstaller.installedCommand(id: catalogID, directory: catalogDirectory(home: home))?.path,
+         installedExecutable(home: home).path, "/opt/homebrew/bin/gemini", "/usr/local/bin/gemini"].compactMap { $0 }
             + ACPLaunchProfile.pathCandidates("gemini", environment: environment)
     }
 
