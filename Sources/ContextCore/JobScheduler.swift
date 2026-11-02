@@ -2,9 +2,27 @@ import Foundation
 import AgentContract
 import Darwin
 
-public enum JobEngine: String, Codable, CaseIterable, Sendable {
-    case codex, claude
-    public var title: String { self == .codex ? "Codex" : "Claude Code" }
+/// The agent a scheduled job runs on, stored as its raw string in `scheduled-jobs.json` and run records.
+/// Open like `AgentID`: a value written by a newer build (another agent) decodes as itself, is kept on save and never
+/// runs as Codex; the app runs only engines it has registered (`AgentIntegrationFactory`).
+public struct JobEngine: RawRepresentable, Codable, Hashable, Sendable {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    public init(from decoder: Decoder) throws { rawValue = try decoder.singleValueContainer().decode(String.self) }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer(); try container.encode(rawValue)
+    }
+    public static let codex = Self(rawValue: "codex")
+    public static let claude = Self(rawValue: "claude")
+    /// The engines this build knows; an agent request may only create jobs on one of them.
+    public static let known: [JobEngine] = [.codex, .claude]
+    public var title: String {
+        switch self {
+        case .codex: "Codex"
+        case .claude: "Claude Code"
+        default: rawValue
+        }
+    }
 }
 
 /// Deliberately bounded RRULE support. Unsupported fields are rejected, never ignored.

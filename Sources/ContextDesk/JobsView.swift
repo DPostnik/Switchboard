@@ -206,7 +206,7 @@ struct JobEditor: View {
             Form {
                 Section(L10n.text("Основное", "Basics")) {
                 TextField(L10n.text("Название", "Name"), text: $job.name)
-                Picker(L10n.text("Исполнитель", "Agent"), selection: $job.engine) { ForEach(JobEngine.allCases, id: \.self) { Text($0.title).tag($0) } }
+                Picker(L10n.text("Исполнитель", "Agent"), selection: $job.engine) { ForEach(JobEngine.known, id: \.self) { Text($0.title).tag($0) } }
                     .onChange(of: job.engine) { _, engine in
                         job.model = engine == .claude ? ClaudeModel.defaultID : ""
                         job.effort = engine == .claude ? ClaudeEffort.defaultLevel.rawValue : ""

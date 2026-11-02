@@ -64,7 +64,7 @@ public enum ScheduleControl {
               !input.model.isEmpty, input.model.count <= 128,
               input.model == input.model.trimmingCharacters(in: .whitespacesAndNewlines),
               !input.model.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
-              efforts.contains(input.effort) else { throw invalid }
+              efforts.contains(input.effort), JobEngine.known.contains(input.engine) else { throw invalid }
         guard input.schedule.once == nil, !input.schedule.rule.isEmpty,
               try input.schedule.next(after: now) != nil else { throw JobSchedule.invalid }
         var job = ManagedJob()

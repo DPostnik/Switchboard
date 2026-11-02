@@ -32,5 +32,12 @@ public enum OptimizerCompatibility {
 }
 
 extension JobEngine {
-    public var agentID: AgentID { self == .codex ? .codex : .claudeCode }
+    /// Legacy engine values predate `AgentID`; any other engine value is its agent's ID.
+    public var agentID: AgentID {
+        switch self {
+        case .codex: .codex
+        case .claude: .claudeCode
+        default: AgentID(rawValue: rawValue)
+        }
+    }
 }
