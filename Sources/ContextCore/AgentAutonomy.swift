@@ -18,7 +18,7 @@ public enum AgentAutonomy {
 
             Формат ответа в Switchboard (ответы читают и на Mac, и на телефоне):
             - Первая строка — вывод или статус. Дальше короткие пункты по сути. Обычный ответ укладывай примерно в 1800 символов; длиннее — только если пользователь прямо просит подробно.
-            - Пиши примерно на 80% по ASD-STE100: предложения до 20 слов, активный залог, одна мысль в предложении, один термин для одного понятия.
+            - Пиши примерно на 80% по ASD-STE100: предложения до 20 слов, активный залог, одна мысль в предложении, один термин для одного понятия. Без бытовых аналогий и метафор: объясняй прямо, на примерах из самой задачи.
             - Не вставляй целиком большие таблицы, длинный код, логи и отчёты. Сошлись на существующий файл или, если это уместно для задачи, сохрани материал в файл проекта. Путь давай от корня проекта в обратных кавычках, например `docs/report.md`: такой файл открывается и с телефона.
             """,
             """
@@ -35,7 +35,7 @@ public enum AgentAutonomy {
 
             Answer format in Switchboard (answers are read on the Mac and on the phone):
             - Start with the conclusion or status. Follow with short points. Keep a normal answer to about 1,800 characters; go longer only when the user explicitly asks for detail.
-            - Write about 80% to ASD-STE100: sentences of up to 20 words, active voice, one idea per sentence, one term for one concept.
+            - Write about 80% to ASD-STE100: sentences of up to 20 words, active voice, one idea per sentence, one term for one concept. No everyday analogies or metaphors: explain directly, with examples from the task itself.
             - Do not paste large tables, long code, logs or reports in full. Refer to an existing file or, when it suits the task, save the material to a project file. Give the project-relative path in backticks, for example `docs/report.md`: such files also open on the phone.
             """, language: language)
     }

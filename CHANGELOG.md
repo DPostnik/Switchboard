@@ -19,6 +19,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Changed
 
+- Agent answer format: the shared instructions now also ask agents to explain directly with examples from the task, without everyday analogies or metaphors.
 - Agent CLI version policy: besides the exact verified builds, Codex and Claude Code versions on the same major.minor branch (for example Codex 0.160.x, Claude Code 2.1.x) now connect as unverified, with a warning beside the agent name in the sidebar and in Settings → Accounts and drift diagnostics shown there; other versions are still rejected.
 
 ### Fixed

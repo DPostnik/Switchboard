@@ -129,6 +129,6 @@ private func withProject(_ body: (URL) throws -> Void) throws {
 @Test func answerFormatRuleIsSharedInBothLanguages() {
     let ru = AgentAutonomy.instructions(language: .russian)
     let en = AgentAutonomy.instructions(language: .english)
-    #expect(ru.contains("Формат ответа в Switchboard") && ru.contains("ASD-STE100") && ru.contains("1800"))
-    #expect(en.contains("Answer format in Switchboard") && en.contains("ASD-STE100") && en.contains("1,800"))
+    #expect(ru.contains("Формат ответа в Switchboard") && ru.contains("ASD-STE100") && ru.contains("1800") && ru.contains("Без бытовых аналогий"))
+    #expect(en.contains("Answer format in Switchboard") && en.contains("ASD-STE100") && en.contains("1,800") && en.contains("No everyday analogies"))
 }
