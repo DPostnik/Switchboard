@@ -63,6 +63,8 @@ public actor ClaudeIntegration: AgentIntegration {
         let input: JSONValue
         let questions: Set<String>?
         let epoch: UUID
+        /// The call the request is about (`can_use_tool` `tool_use_id`); its transcript status follows the answer.
+        let toolUseID: String?
     }
     private var interactions: [UUID: Interaction] = [:]
     /// Session -> tools the user allowed for the rest of the named turn ("allow for this turn"). Cleared when the turn ends.
@@ -83,6 +85,10 @@ public actor ClaudeIntegration: AgentIntegration {
     /// the next call's context is its size after.
     private var compactionsAwaitingSize: [String: (item: String, message: String?)] = [:]
     private var generations: [UUID: ClaudeGenerationRunner] = [:]
+    /// Session -> commands with the details `commands_changed` reported, by name; `init` lists names only.
+    private var commandDetails: [String: [String: AgentCommand]] = [:]
+    /// Session -> the model, effort and advisor of its live CLI's launch, reported as config options at `init`.
+    private var launchSettings: [String: (model: String, effort: String?, advisor: String?)] = [:]
     private var cancelledGenerations = Set<UUID>()
     /// App bundle resources when the Switchboard browser is attached to chats; nil keeps chats browser-less.
     private var browserResources: URL?
@@ -329,6 +335,9 @@ public actor ClaudeIntegration: AgentIntegration {
             let turn = request.id.uuidString
             let prompt = Self.decorated(TranscriptItem(id: "user:" + turn, kind: "user", text: request.prompt), turn: turn)
             sessions[id]?.active = turn; sessions[id]?.sent = true; sessions[id]?.current = [prompt]; limitStops[id] = nil
+            launchSettings[id] = (request.model.model, request.model.effort, request.model.advisor)
+            sink.yield(.init(session: reference(id), payload: .configOptions(ClaudeToolCalls.configOptions(
+                model: request.model.model, effort: request.model.effort, advisor: request.model.advisor))))
             pendingSaves.remove(id)
             try save(id) // Durable uncertain claim, including the prompt, before a byte of the user turn is sent.
             delivered = true
@@ -553,6 +562,8 @@ public actor ClaudeIntegration: AgentIntegration {
                 grant.tools.insert(interaction.tool)
                 turnGrants[interaction.session] = grant
             }
+            if case .deny = response { updateCall(interaction.toolUseID, session: interaction.session, status: .rejected) }
+            else { updateCall(interaction.toolUseID, session: interaction.session, status: .inProgress) }
             sink.yield(.init(session: session, payload: .resolved(id))); return .success(())
         } catch { await wire.close(); return failed(error, uncertain: true) }
     }
@@ -617,7 +628,18 @@ public actor ClaudeIntegration: AgentIntegration {
             let text = parts.filter { $0["type"].string == "text" }.compactMap { $0["text"].string }.joined(separator: "\n")
             if !text.isEmpty, let key = message["id"].string { emit(.init(id: key, kind: "assistant", text: text), session: id) }
             for part in parts where part["type"].string == "tool_use" {
-                if let key = part["id"].string { emit(.init(id: key, kind: "activity", text: (part["name"].string ?? "") + "\n" + part["input"].display), session: id) }
+                let name = part["name"].string ?? ""
+                if let key = part["id"].string {
+                    var call = TranscriptItem(id: key, kind: "activity", text: name + "\n" + part["input"].display)
+                    // A repeated frame of a call that already moved on keeps its status.
+                    var structured = ClaudeToolCalls.toolCall(id: key, name: name, input: part["input"])
+                    if let known = sessions[id]?.current.first(where: { $0.id == key })?.toolCall?.status { structured.status = known }
+                    call.toolCall = structured
+                    emit(call, session: id)
+                }
+                if name == "TodoWrite", let plan = ClaudeToolCalls.plan(input: part["input"]) {
+                    sink.yield(.init(session: reference(id), payload: .plan(turn: turn, plan)))
+                }
                 record(.init(tool: part["name"].string ?? "", capability: Self.capability(tool: part["name"].string ?? "", input: part["input"], cwd: sessions[id]?.cwd),
                              target: Self.target(tool: part["name"].string ?? "", input: part["input"]), decision: .used, turn: turn), session: id)
             }
@@ -634,6 +656,7 @@ public actor ClaudeIntegration: AgentIntegration {
                 (result.exitCode, result.failed) = ActivityDetail.claudeOutcome(call: sessions[id]?.current.first { $0.id == key },
                                                                                 result: result.text, isError: part["is_error"].bool == true)
                 emit(result, session: id)
+                updateCall(key, session: id, status: part["is_error"].bool == true ? .failed : .completed)
             }
         case "command_lifecycle":
             guard let command = commands[id], value["command_uuid"].string?.lowercased() == command.uuid else { return }
@@ -658,7 +681,8 @@ public actor ClaudeIntegration: AgentIntegration {
                 meter.complete(result: value); meters[id] = meter
                 sink.yield(.init(session: reference(id), payload: .usage(turn: turn, total: meter.total, snapshot: meter.snapshot())))
             }
-            finish(id, outcome: outcome)
+            let usageLimit = limitStops[id]?.stop(outcome: outcome) != nil
+            finish(id, outcome: outcome, stopReason: ClaudeToolCalls.stopReason(result: value, interrupted: interrupted.contains(id), usageLimit: usageLimit))
             if keep { beginWaiting(id, wire: wire) } else if park { stopSubagents(id); await parkWarm(id, wire: wire) }
             else { stopSubagents(id); await wire.close() }
         case "tool_use_summary":
@@ -671,6 +695,18 @@ public actor ClaudeIntegration: AgentIntegration {
                 // A new main turn the CLI started itself after its background tasks finished.
                 if waiting[id] != nil, sessions[id]?.active == nil, value["parent_tool_use_id"].string == nil { wake(id) }
                 if let model = value["model"].string { meters[id]?.model = model }
+                guard value["parent_tool_use_id"].string == nil else { return }
+                if let commands = ClaudeToolCalls.commands(initFrame: value, known: commandDetails[id] ?? [:]) {
+                    sink.yield(.init(session: reference(id), payload: .commands(commands)))
+                }
+                if let settings = launchSettings[id] {
+                    sink.yield(.init(session: reference(id), payload: .configOptions(ClaudeToolCalls.configOptions(
+                        model: value["model"].string ?? settings.model, effort: settings.effort, advisor: settings.advisor))))
+                }
+            case "commands_changed":
+                let commands = ClaudeToolCalls.commands(changed: value)
+                commandDetails[id] = Dictionary(commands.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+                sink.yield(.init(session: reference(id), payload: .commands(commands)))
             case "compact_boundary":
                 guard sessions[id]?.active != nil, value["parent_tool_use_id"].string == nil, let item = Self.compactionItem(value) else { return }
                 emit(item, session: id)
@@ -771,9 +807,11 @@ public actor ClaudeIntegration: AgentIntegration {
         let policy = policy(id), profile = policy.profile, cwd = sessions[id]?.cwd ?? "/"
         let turn = sessions[id]?.active
         let capability = Self.capability(tool: name, input: input, cwd: cwd), target = Self.target(tool: name, input: input)
+        let toolUseID = request["tool_use_id"].string
         func deny(_ message: String, _ decision: AgentCapabilityRecord.Decision = .denied) async {
             record(.init(tool: name, capability: capability, target: target, decision: decision, turn: turn), session: id)
             try? await respond(wire, requestID: requestID, response: .object(["behavior": .string("deny"), "message": .string(message)]))
+            updateCall(toolUseID, session: id, status: .rejected)
         }
         func allow() async {
             record(.init(tool: name, capability: capability, target: target, decision: .allowed, turn: turn), session: id)
@@ -847,7 +885,8 @@ public actor ClaudeIntegration: AgentIntegration {
         }
         let token = UUID()
         interactions[token] = .init(session: id, requestID: requestID, tool: name, turn: turn, input: input, questions: questions,
-                                    epoch: context.accountRevision)
+                                    epoch: context.accountRevision, toolUseID: toolUseID)
+        updateCall(toolUseID, session: id, status: .awaitingApproval)
         sink.yield(.init(session: reference(id), payload: .interaction(.init(id: token, session: reference(id), turn: turn,
             kind: kind, reason: name, details: input.display, canAllowTurn: questions == nil))))
     }
@@ -1069,8 +1108,14 @@ public actor ClaudeIntegration: AgentIntegration {
             "Процесс Claude с фоновыми задачами остановлен до их завершения; их результат не получен. Ничего не повторялось.",
             "The Claude process running background tasks stopped before they finished; their result was not received. Nothing was retried."))))
     }
-    private func finish(_ id: String, outcome: AgentExecutionOutcome) {
+    private func finish(_ id: String, outcome: AgentExecutionOutcome, stopReason: AgentStopReason? = nil) {
         guard let turn = sessions[id]?.active else { return }
+        // Calls the stopped or failed turn left unfinished end with it; after an uncertain end their state is unknown.
+        if outcome == .cancelled || outcome == .failed {
+            for item in sessions[id]?.current ?? [] where item.toolCall.map({ !$0.status.isFinal }) == true {
+                updateCall(item.id, session: id, status: outcome == .cancelled ? .cancelled : .failed)
+            }
+        }
         // Items were capped when emitted; the map keeps the record capped if an item reached `current` another way.
         let history = AgentHistoryTurn(id: turn, items: (sessions[id]?.current ?? []).map(ActivityRetention.cap), startedAt: nil, completedAt: Date(), duration: nil, isComplete: false)
         sessions[id]?.turns.append(history); sessions[id]?.active = nil; sessions[id]?.current = []
@@ -1087,7 +1132,14 @@ public actor ClaudeIntegration: AgentIntegration {
         do { try save(id) } catch { sink.yield(.init(session: reference(id), payload: .diagnostic(error.localizedDescription))) }
         sink.yield(.init(session: reference(id), payload: .completed(.init(id: turn, status: outcome, hasError: outcome == .failed || outcome == .uncertain,
             error: outcome == .uncertain ? L10n.text("Результат Claude неизвестен. Проверь историю перед новой отправкой; повторов не было.", "Claude's outcome is uncertain. Review history before sending again; nothing was retried.") : nil, history: history,
-            usageLimit: usageLimit))))
+            usageLimit: usageLimit, stopReason: stopReason))))
+    }
+    /// Moves a structured call of the active turn to `status` and emits it again; a call already in a final state keeps it.
+    private func updateCall(_ toolUseID: String?, session id: String, status: AgentToolCall.Status) {
+        guard let toolUseID, var item = sessions[id]?.current.first(where: { $0.id == toolUseID }), let call = item.toolCall,
+              call.status != status, !call.status.isFinal else { return }
+        item.toolCall?.status = status
+        emit(item, session: id)
     }
     private func reference(_ id: String) -> AgentSessionReference { .init(connection: .appClaude, nativeID: id) }
     private func file(_ id: String) throws -> URL {

@@ -43,9 +43,22 @@ enum ClaudeProtocolSurface {
         "system", "tool_use_summary", "user"
     ]
     static let readSystemSubtypes: Set<String> = [
-        "background_tasks_changed", "compact_boundary", "init", "task_notification", "task_progress", "task_started", "task_updated"
+        "background_tasks_changed", "commands_changed", "compact_boundary", "init", "task_notification", "task_progress", "task_started",
+        "task_updated"
     ]
-    static let readResultSubtypes: Set<String> = ["success"]
+    static let readResultSubtypes: Set<String> = ["error_max_turns", "success"]
+    /// Fields of the structured transcript model (stage C, 2026-11-02) read from frames, by `frame[/subtype]`. The snapshot
+    /// indexes names, not fields, so these were checked by hand against `sdk.d.ts` of the pinned SDK (`SDKSystemMessage`
+    /// `slash_commands`, `SDKCommandsChangedMessage` `commands: SlashCommand[]`, `SDKResultSuccess`/`SDKResultError`
+    /// `stop_reason`, `SDKControlPermissionRequest` `tool_use_id`); tool inputs are in `ClaudeToolCalls`.
+    static let readFields: [String: [String]] = [
+        "system/init": ["model", "slash_commands", "parent_tool_use_id"],
+        "system/commands_changed": ["commands.*.name", "commands.*.description", "commands.*.argumentHint"],
+        "result": ["subtype", "is_error", "stop_reason"],
+        "control_request/can_use_tool": ["request.tool_name", "request.input", "request.tool_use_id"],
+        "assistant": ["message.content.*.type", "message.content.*.id", "message.content.*.name", "message.content.*.input"],
+        "user": ["message.content.*.tool_use_id", "message.content.*.content", "message.content.*.is_error"]
+    ]
     /// Control requests the app sends to the CLI.
     static let sentControlRequests: Set<String> = ["apply_flag_settings", "get_usage", "initialize", "interrupt", "stop_task"]
 

@@ -45,6 +45,19 @@ private actor ClaudeEvents {
     func items() -> [TranscriptItem] {
         values.compactMap { if case .item(let item) = $0.payload { return item }; return nil }
     }
+    func plans() -> [(turn: String?, plan: AgentPlan)] {
+        values.compactMap { if case .plan(let turn, let plan) = $0.payload { return (turn, plan) }; return nil }
+    }
+    func commands() -> [[AgentCommand]] {
+        values.compactMap { if case .commands(let list) = $0.payload { return list }; return nil }
+    }
+    func configOptions() -> [[AgentConfigOption]] {
+        values.compactMap { if case .configOptions(let list) = $0.payload { return list }; return nil }
+    }
+    func stopReason() -> AgentStopReason? {
+        for event in values { if case .completed(let result) = event.payload { return result.stopReason } }
+        return nil
+    }
 }
 private func interactiveFixture(_ root: URL) throws -> URL {
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -90,7 +103,7 @@ private func interactiveFixture(_ root: URL) throws -> URL {
     assert (not (full or editor)) or connectors == full
     launch_settings=json.loads(sys.argv[sys.argv.index('--settings')+1])
     assert launch_settings.get('crossSessionInbound') == 'refuse'
-    assert not editor or launch_settings == {'crossSessionInbound': 'refuse'}
+    assert not editor or {k:v for k,v in launch_settings.items() if k!='advisorModel'} == {'crossSessionInbound': 'refuse'}
     assert '--append-system-prompt' in sys.argv
     assert len(sys.argv[sys.argv.index('--append-system-prompt')+1]) > 100
     assert sys.argv[sys.argv.index('--setting-sources')+1] == ''
@@ -214,6 +227,24 @@ private func interactiveFixture(_ root: URL) throws -> URL {
                 out({'type':'stream_event','session_id':sid,'event':{'type':'message_start','message':{'id':'compacted','usage':{'input_tokens':5,'cache_creation_input_tokens':20000,'output_tokens':1}}}})
                 out({'type':'assistant','session_id':sid,'message':{'id':'compacted','content':[{'type':'text','text':'continued'}]}})
                 result()
+                continue
+            if prompt=='structured':
+                # Claude Code 2.1.292: commands with details, then init with names only; Edit, TodoWrite and a failing Grep; a max_tokens stop.
+                out({'type':'system','subtype':'commands_changed','session_id':sid,'uuid':'cc','commands':[{'name':'review','description':'Review changes','argumentHint':'<branch>'},{'name':'compact','description':'Compact','argumentHint':''}]})
+                out({'type':'system','subtype':'init','session_id':sid,'model':'claude-test','slash_commands':['review','compact','context']})
+                def call(cid,name,args,text,error=False):
+                    out({'type':'assistant','session_id':sid,'parent_tool_use_id':None,'message':{'id':'s-'+sid,'content':[{'type':'tool_use','id':cid,'name':name,'input':args}]}})
+                    out({'type':'user','session_id':sid,'parent_tool_use_id':None,'message':{'role':'user','content':[{'type':'tool_result','tool_use_id':cid,'content':text,'is_error':error}]}})
+                call('e1','Edit',{'file_path':str(pathlib.Path.cwd()/'a.swift'),'old_string':'let a = 1','new_string':'let a = 2'},'The file has been updated.')
+                call('todo1','TodoWrite',{'todos':[{'content':'Edit a','status':'completed','activeForm':'Editing a'},{'content':'Run tests','status':'in_progress','activeForm':'Running tests'},{'content':'Ship','status':'pending','activeForm':'Shipping'}]},'Todos have been modified')
+                call('g1','Grep',{'pattern':'TODO','path':'Sources'},'No such directory',True)
+                out({'type':'result','subtype':'success','session_id':sid,'is_error':False,'stop_reason':'max_tokens',
+                     'usage':{'input_tokens':1,'cache_creation_input_tokens':0,'cache_read_input_tokens':0,'output_tokens':1}})
+                continue
+            if prompt in ['approval-call','outside-call']:
+                path=str(pathlib.Path.cwd()/'fixture.txt') if prompt=='approval-call' else '/outside-project/file'
+                out({'type':'assistant','session_id':sid,'parent_tool_use_id':None,'message':{'id':'w-'+sid,'content':[{'type':'tool_use','id':'w1','name':'Write','input':{'file_path':path,'content':'x'}}]}})
+                out({'type':'control_request','request_id':'permission','request':{'subtype':'can_use_tool','tool_name':'Write','input':{'file_path':path,'content':'x'},'tool_use_id':'w1'}})
                 continue
             if prompt in ['approval','question','outside','connector','approval-twice']:
                 name='AskUserQuestion' if prompt=='question' else 'mcp__claude_ai_Gmail__send_message' if prompt=='connector' else 'Write'
@@ -1580,4 +1611,103 @@ func claudeCompactBoundaryBecomesADividerWithItsSizes(prompt: String) async thro
     #expect(history.filter { $0.kind != "user" }.map(\.id) == ["compact:boundary-1", "compacted"])
     #expect(history.first { $0.kind == "compaction" }?.compaction == expected)
     await adapter.disconnect()
+}
+
+// ACP-shaped model (stage C, 2026-11-02): structured calls with diffs, TodoWrite as the plan, commands, settings, stop reason.
+@Test func claudeCallsPlanCommandsSettingsAndStopReasonAreStructured() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
+    let base = interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "structured")
+    let request = AgentExecutionRequest(id: base.id, conversation: base.conversation, session: session, kind: .interactive, prompt: "structured",
+                                        projectPath: root.path, permissions: base.permissions,
+                                        model: .init(context: descriptor.context, model: "claude-sonnet-5-5", effort: "high", advisor: "opus"), route: .direct)
+    _ = try await adapter.submit(request).value()
+    try await waitFor { await events.completion() != nil }
+
+    let history = try await adapter.history(session, context: descriptor.context).value().flatMap(\.items)
+    let calls = Dictionary(history.compactMap { item in item.toolCall.map { (item.id, $0) } }, uniquingKeysWith: { _, last in last })
+    let edit = try #require(calls["e1"])
+    #expect(edit.kind == .edit && edit.status == .completed && edit.title == ToolCallText.edit("a.swift"))
+    #expect(edit.locations.first?.path.hasSuffix("/a.swift") == true)
+    #expect(edit.diffs.map(\.oldText) == ["let a = 1"] && edit.diffs.map(\.newText) == ["let a = 2"])
+    #expect(calls["todo1"]?.kind == .think && calls["todo1"]?.title == ToolCallText.plan)
+    #expect(calls["g1"]?.kind == .search && calls["g1"]?.status == .failed && calls["g1"]?.locations == [.init(path: "Sources")])
+    // The text a reader of older builds sees is unchanged: the tool name and its JSON input.
+    #expect(history.first { $0.id == "e1" }?.text.hasPrefix("Edit\n{") == true)
+
+    let plans = await events.plans()
+    #expect(plans.count == 1 && plans.first?.turn == request.id.uuidString)
+    #expect(plans.first?.plan == AgentPlan(entries: [.init(content: "Edit a", status: .completed), .init(content: "Run tests", status: .inProgress),
+                                                     .init(content: "Ship", status: .pending)]))
+    // init names the commands; the details come from commands_changed.
+    let commands = await events.commands()
+    #expect(commands.last == [AgentCommand(name: "review", description: "Review changes", inputHint: "<branch>"),
+                              AgentCommand(name: "compact", description: "Compact"), AgentCommand(name: "context")])
+    let options = try #require(await events.configOptions().last)
+    #expect(options.map(\.id) == ["model", "effort", "advisor"] && options.map(\.current) == ["claude-test", "high", "opus"])
+    #expect(options.map(\.category) == [.model, .thoughtLevel, .modelConfig])
+    #expect(await events.stopReason() == .maxTokens)
+    await adapter.disconnect()
+}
+
+@Test(arguments: ["approval-call", "outside-call"]) func claudeCallStatusFollowsApprovalAndDenial(_ prompt: String) async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    var asking = AgentPermissionProfile.workspace(); asking.projectWrites = .ask
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root, role: asking)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: prompt, role: asking)).value()
+    if prompt == "approval-call" {
+        try await waitFor { await events.interaction() != nil }
+        try await waitFor { await events.items().last { $0.id == "w1" }?.toolCall?.status == .awaitingApproval }
+        let interaction = try #require(await events.interaction())
+        _ = try await adapter.answer(interaction.id, session: session, context: descriptor.context, response: .deny).value()
+    }
+    try await waitFor { await events.completion() != nil }
+    let statuses = await events.items().filter { $0.id == "w1" }.compactMap(\.toolCall?.status)
+    #expect(statuses == (prompt == "approval-call" ? [.inProgress, .awaitingApproval, .rejected] : [.inProgress, .rejected]))
+    #expect(try await adapter.history(session, context: descriptor.context).value().flatMap(\.items).first { $0.id == "w1" }?.toolCall?.status == .rejected)
+    await adapter.disconnect()
+}
+
+@Test func claudeToolInputsMapToStructuredCalls() throws {
+    func input(_ text: String) throws -> JSONValue { try JSONDecoder().decode(JSONValue.self, from: Data(text.utf8)) }
+    let bash = ClaudeToolCalls.toolCall(id: "b", name: "Bash", input: try input(#"{"command":"swift test","description":"Run tests"}"#))
+    #expect(bash.kind == .execute && bash.title == "swift test" && bash.terminal?.command == "swift test" && bash.inputSummary == "Run tests")
+    let read = ClaudeToolCalls.toolCall(id: "r", name: "Read", input: try input(#"{"file_path":"/p/A.swift","offset":40,"limit":10}"#))
+    #expect(read.kind == .read && read.locations == [.init(path: "/p/A.swift", line: 40)] && read.title == ToolCallText.read("/p/A.swift"))
+    let write = ClaudeToolCalls.toolCall(id: "w", name: "Write", input: try input(#"{"file_path":"/p/N.swift","content":"x\n"}"#))
+    #expect(write.kind == .edit && write.diffs == [.init(path: "/p/N.swift", oldText: nil, newText: "x\n")])
+    let multi = ClaudeToolCalls.toolCall(id: "m", name: "MultiEdit", input: try input(#"{"file_path":"/p/A.swift","edits":[{"old_string":"a","new_string":"b"},{"old_string":"c","new_string":"d"}]}"#))
+    #expect(multi.diffs.map(\.newText) == ["b", "d"])
+    let glob = ClaudeToolCalls.toolCall(id: "g", name: "Glob", input: try input(#"{"pattern":"**/*.swift"}"#))
+    #expect(glob.kind == .search && glob.locations.isEmpty)
+    #expect(ClaudeToolCalls.toolCall(id: "f", name: "WebFetch", input: try input(#"{"url":"https://a.dev","prompt":"Sum"}"#)).kind == .fetch)
+    #expect(ClaudeToolCalls.toolCall(id: "s", name: "WebSearch", input: try input(#"{"query":"acp"}"#)).title == ToolCallText.webSearch("acp"))
+    let agent = ClaudeToolCalls.toolCall(id: "a", name: "Agent", input: try input(#"{"description":"Check sources","prompt":"Look","subagent_type":"Explore"}"#))
+    #expect(agent.kind == .think && agent.title == "Check sources" && agent.inputSummary == "Explore")
+    #expect(ClaudeToolCalls.toolCall(id: "p", name: "ExitPlanMode", input: .object([:])).kind == .switchMode)
+    let mcp = ClaudeToolCalls.toolCall(id: "x", name: "mcp__switchboard_browser__browser_open", input: try input(#"{"url":"https://a.dev"}"#))
+    #expect(mcp.kind == .other && mcp.title == "switchboard_browser · browser_open" && mcp.inputSummary == #"{"url":"https://a.dev"}"#)
+    #expect(ClaudeToolCalls.toolCall(id: "o", name: "ToolSearch", input: .object([:])).inputSummary == nil)
+    #expect(ClaudeToolCalls.plan(input: try input(#"{"todos":"none"}"#)) == nil)
+    func stop(_ text: String, interrupted: Bool = false, limit: Bool = false) throws -> AgentStopReason {
+        ClaudeToolCalls.stopReason(result: try input(text), interrupted: interrupted, usageLimit: limit)
+    }
+    #expect(try stop(#"{"subtype":"error_max_turns","is_error":true}"#) == .maxTurnRequests)
+    #expect(try stop(#"{"subtype":"success","is_error":false,"stop_reason":"refusal"}"#) == .refusal)
+    #expect(try stop(#"{"subtype":"success","is_error":true}"#, limit: true) == .usageLimit)
+    #expect(try stop(#"{"subtype":"success","is_error":false,"stop_reason":"end_turn"}"#, interrupted: true) == .cancelled)
+    #expect(try stop(#"{"subtype":"success","is_error":false,"stop_reason":"end_turn"}"#) == .endTurn)
+    #expect(try stop(#"{"subtype":"error_during_execution","is_error":true}"#) == .failed)
 }

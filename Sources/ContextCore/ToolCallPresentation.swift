@@ -12,6 +12,7 @@ public enum ToolCallText {
     }
     public static func read(_ path: String) -> String { L10n.text("Чтение \(name(path))", "Read \(name(path))") }
     public static func edit(_ path: String) -> String { L10n.text("Изменение \(name(path))", "Edit \(name(path))") }
+    public static func write(_ path: String) -> String { L10n.text("Запись \(name(path))", "Write \(name(path))") }
     public static func create(_ path: String) -> String { L10n.text("Создание \(name(path))", "Create \(name(path))") }
     public static func delete(_ path: String) -> String { L10n.text("Удаление \(name(path))", "Delete \(name(path))") }
     public static func move(_ path: String, to target: String) -> String {
