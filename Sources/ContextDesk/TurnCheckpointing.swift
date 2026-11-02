@@ -114,7 +114,7 @@ private let checkpointLog = Logger(subsystem: AppLog.subsystem, category: "check
             }
             return TurnChanges(repository: end.root, start: start.checkpoint.commit, end: end.checkpoint.commit, files: files.count,
                                added: files.reduce(0) { $0 + ($1.added ?? 0) }, removed: files.reduce(0) { $0 + ($1.removed ?? 0) },
-                               otherChats: otherChats ? true : nil)
+                               otherChats: otherChats ? true : nil, list: TurnChanges.list(files, root: end.root))
         }
     }
 

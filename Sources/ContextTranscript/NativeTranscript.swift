@@ -439,6 +439,45 @@ public struct NativeTranscript: NSViewRepresentable {
         updateJumpToLatest()
     }
 
+    /// Scrolls to the message holding `itemID` (a tool call inside a collapsed action row brings up that row) and
+    /// briefly highlights the link to `file` in it, or the message's first line. False when the item is not shown.
+    @discardableResult public func reveal(itemID: String, file: String? = nil) -> Bool {
+        let rowID = previous.contains(where: { $0.id == itemID }) ? itemID
+            : actionGroups.first(where: { $0.value.contains { $0.id == itemID } })?.key
+        guard let rowID, let index = previous.firstIndex(where: { $0.id == rowID }), ranges.indices.contains(index),
+              ranges[index].length > 0, let storage = transcript.textStorage, let manager = transcript.layoutManager,
+              let container = transcript.textContainer, NSMaxRange(ranges[index]) <= storage.length else { return false }
+        let row = ranges[index]
+        var target: NSRange?
+        if let file {
+            storage.enumerateAttribute(.link, in: row) { value, range, stop in
+                guard let url = value as? URL, url.isFileURL, url.standardizedFileURL.path == file else { return }
+                target = range; stop.pointee = true
+            }
+        }
+        if target == nil {
+            // The first visible line of the message; rows start with spacing newlines.
+            let text = storage.string as NSString
+            var start = row.location
+            while start < NSMaxRange(row), CharacterSet.whitespacesAndNewlines.contains(Unicode.Scalar(text.character(at: start)) ?? " ") { start += 1 }
+            let line = text.lineRange(for: NSRange(location: min(start, NSMaxRange(row) - 1), length: 0))
+            target = NSIntersectionRange(NSRange(location: start, length: max(0, NSMaxRange(line) - start)), row)
+            if target?.length ?? 0 > 1, text.character(at: NSMaxRange(target!) - 1) == 10 { target!.length -= 1 }
+        }
+        guard let target, target.length > 0 else { return false }
+        manager.ensureLayout(forCharacterRange: NSRange(location: 0, length: min(storage.length, NSMaxRange(target) + 1)))
+        let rect = manager.boundingRect(forGlyphRange: manager.glyphRange(forCharacterRange: target, actualCharacterRange: nil), in: container)
+        // A third of the way down: the text before the mention stays readable.
+        let maxY = max(0, transcript.frame.height - contentView.bounds.height)
+        let y = min(maxY, max(0, rect.minY + transcript.textContainerOrigin.y - contentView.bounds.height / 3))
+        pendingPosition = nil; needsEndScroll = false; pinnedToEnd = false; deferredEndScroll = nil
+        contentView.scroll(to: NSPoint(x: 0, y: y))
+        reflectScrolledClipView(contentView)
+        updateJumpToLatest()
+        transcript.showFindIndicator(for: target)
+        return true
+    }
+
     @objc private func liveScrollStarted() { liveScrolling = true }
 
     /// A reader who stayed at the end through the gesture follows the text that arrived meanwhile.
@@ -677,6 +716,8 @@ public struct NativeTranscript: NSViewRepresentable {
             if let status = item.toolCall?.status { calls.combine(index); calls.combine(status) }
             // A plan entry that moves from in progress to done keeps the text length.
             if let plan = item.plan { calls.combine(index); calls.combine(plan.checklist) }
+            // Turn changes are recorded after the answer finished; they add the changes card.
+            if let changes = item.timing?.changes { calls.combine(index); calls.combine(changes.end); calls.combine(changes.list?.count) }
         }
         let key = GroupingKey(conversationID: conversationID, count: items.count, lastID: items.last?.id,
                               lastLength: items.last?.text.utf8.count ?? 0, lastSeconds: items.last?.seconds,
@@ -707,6 +748,10 @@ public struct NativeTranscript: NSViewRepresentable {
             let responseTiming = segment.last(where: { $0.kind == "assistant" && $0.timing != nil })?.timing
             var inserted = false
             var showedAuthor = false
+            // A finished turn's changed files go under its answer, or under the turn when it ended without one.
+            let timingSource = segment.last(where: { $0.kind == "assistant" && $0.timing != nil })
+            let card = active ? nil : responseTiming.flatMap { timing in timingSource.flatMap { TranscriptChangesCard.item(for: timing, sourceID: $0.id) } }
+            var cardPlaced = card == nil
             for var item in segment {
                 if item.kind == "compaction", item.phase == "inProgress", !active {
                     item.phase = "unconfirmed"
@@ -719,7 +764,11 @@ public struct NativeTranscript: NSViewRepresentable {
                     showedAuthor = true
                 }
                 if item.kind == ActivityDetail.thinkingKind { appendThinking(item, to: &result, groups: &groups); continue }
-                guard item.kind == "activity" else { result.append(item); continue }
+                guard item.kind == "activity" else {
+                    result.append(item)
+                    if !cardPlaced, item.id == finalAnswer?.id, let card { result.append(card); cardPlaced = true }
+                    continue
+                }
                 guard !inserted, let first = actions.first else { continue }
                 inserted = true
                 // A command and its result share one row.
@@ -729,6 +778,7 @@ public struct NativeTranscript: NSViewRepresentable {
                 result.append(TranscriptItem(id: first.id, kind: "activity",
                                              text: actions.map(activityKey).joined(separator: "\n"), phase: summary))
             }
+            if !cardPlaced, let card { result.append(card) }
             segment.removeAll()
         }
         for item in items {
@@ -746,6 +796,10 @@ public struct NativeTranscript: NSViewRepresentable {
         paragraph.lineSpacing = 4; paragraph.paragraphSpacing = 0
         paragraph.lineBreakMode = .byWordWrapping
         if item.kind == "compaction" { return TranscriptCompactionDivider.render(item) }
+        if item.kind == TranscriptChangesCard.itemKind {
+            guard TranscriptLinks.openTurnChanges != nil, let container = transcript.textContainer else { return result }
+            return TranscriptChangesCard.render(item, width: container.containerSize.width, padding: container.lineFragmentPadding)
+        }
         if item.kind == "refusal" {
             // A stop notice from the safety classifier.
             let attachment = NSTextAttachment()
@@ -820,14 +874,6 @@ public struct NativeTranscript: NSViewRepresentable {
                 ]
                 var pill = attributes; pill[.metricsPill] = true
                 result.append(NSAttributedString(string: (open ? "▾ " : "▸ ") + timing.label() + " · " + L10n.date(timing.completedAt), attributes: pill))
-                if let changes = timing.changes, changes.files > 0, TranscriptLinks.openTurnChanges != nil {
-                    // Its own pill on the same line; the gap is wider than both pills' padding.
-                    result.append(NSAttributedString(string: "\u{2003}\u{2003}", attributes: [.font: NSFont.systemFont(ofSize: 11.5), .responseHeader: true]))
-                    result.append(NSAttributedString(string: "± " + changes.label(), attributes: [
-                        .font: NSFont.systemFont(ofSize: 11.5), .foregroundColor: DeskPalette.ns.accentDeep,
-                        .link: "contextdesk-changes:" + item.id, .responseHeader: true, .changesPill: true
-                    ]))
-                }
                 result.append(NSAttributedString(string: "\n", attributes: attributes))
                 if open {
                     let detail = timing.tokens?.detail() ?? L10n.text("Данные о токенах для этого запроса недоступны.", "Token data is unavailable for this request.")
@@ -957,6 +1003,10 @@ public struct NativeTranscript: NSViewRepresentable {
     }
 
     private func applyMessageStyle(_ item: TranscriptItem, to text: NSMutableAttributedString, range: NSRange) {
+        if item.kind == TranscriptChangesCard.itemKind, let container = transcript.textContainer {
+            TranscriptChangesCard.restyle(text, range: range, width: container.containerSize.width, padding: container.lineFragmentPadding)
+            return
+        }
         guard item.kind == "user" || item.kind == "assistant", range.length > 2 else { return }
         let width = max(1, transcript.textContainer?.containerSize.width ?? 600)
         let outgoing = item.kind == "user"
@@ -1150,10 +1200,9 @@ public struct NativeTranscript: NSViewRepresentable {
             needsLayout = true
             return true
         }
-        if value.hasPrefix("contextdesk-changes:") {
-            let id = String(value.dropFirst("contextdesk-changes:".count))
-            if let changes = previous.first(where: { $0.id == id })?.timing?.changes {
-                TranscriptLinks.openTurnChanges?(conversationID, changes)
+        if let link = TranscriptChangesCard.parse(value) {
+            if let changes = previous.first(where: { $0.id == link.itemID })?.timing?.changes {
+                TranscriptLinks.openTurnChanges?(conversationID, changes, link.file)
             }
             return true
         }
@@ -1313,8 +1362,27 @@ private final class TranscriptTextView: NSTextView {
     var trackClick: ((() -> Void) -> Void)?
     private var hoverArea: NSTrackingArea?
     override func mouseDown(with event: NSEvent) {
+        // A changes-card row is one target across its whole width and height, not only over its text.
+        if event.clickCount == 1, !event.modifierFlags.contains(.shift),
+           let hit = changesLink(at: convert(event.locationInWindow, from: nil)) {
+            _ = delegate?.textView?(self, clickedOnLink: hit.link, at: hit.index)
+            return
+        }
         guard let trackClick else { return super.mouseDown(with: event) }
         trackClick { super.mouseDown(with: event) }
+    }
+    /// The link of the changes-card row under `point`, anywhere in the row's line.
+    func changesLink(at point: NSPoint) -> (link: String, index: Int)? {
+        guard let manager = layoutManager, let container = textContainer, let storage = textStorage, storage.length > 0 else { return nil }
+        let local = NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y)
+        let glyph = manager.glyphIndex(for: local, in: container)
+        guard glyph < manager.numberOfGlyphs else { return nil }
+        let line = manager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        guard local.y >= line.minY, local.y < line.maxY else { return nil }
+        let index = manager.characterIndexForGlyph(at: glyph)
+        guard index < storage.length, storage.attribute(.changesCard, at: index, effectiveRange: nil) != nil,
+              let link = storage.attribute(.link, at: index, effectiveRange: nil) as? String else { return nil }
+        return (link, index)
     }
     override func draw(_ dirtyRect: NSRect) {
         // Bubbles go under the selection and the text; the view itself draws no background.
@@ -1335,7 +1403,9 @@ private final class TranscriptTextView: NSTextView {
     }
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
-        hoverChanged?(convert(event.locationInWindow, from: nil))
+        let point = convert(event.locationInWindow, from: nil)
+        if changesLink(at: point) != nil { NSCursor.pointingHand.set() }
+        hoverChanged?(point)
     }
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
@@ -1367,7 +1437,6 @@ extension NSAttributedString.Key {
     /// The "worked for" line of an answer, drawn as a capsule.
     static let metricsPill = NSAttributedString.Key("ContextDeskMetricsPill")
     /// The turn's changed-files row next to the metrics pill; opens the diff viewer.
-    static let changesPill = NSAttributedString.Key("ContextDeskChangesPill")
     /// A tool-call group drawn as a card; `activityStep` marks the first character of each listed call.
     static let activityCard = NSAttributedString.Key("ContextDeskActivityCard")
     static let activityStep = NSAttributedString.Key("ContextDeskActivityStep")
@@ -1542,11 +1611,6 @@ private final class BubbleLayoutManager: NSLayoutManager {
             DeskPalette.ns.subtle.setFill()
             fillRuns(range, in: storage, container: container, origin: origin, pad: 8, rise: 3, radius: nil)
         }
-        storage.enumerateAttribute(.changesPill, in: characters) { value, range, _ in
-            guard value != nil else { return }
-            DeskPalette.ns.accentWash.setFill()
-            fillRuns(range, in: storage, container: container, origin: origin, pad: 8, rise: 3, radius: nil)
-        }
         let whole = NSRange(location: 0, length: storage.length)
         let padding = container.lineFragmentPadding
         /// A card spans its whole attribute run; its sides follow the first paragraph's indents.
@@ -1561,6 +1625,25 @@ private final class BubbleLayoutManager: NSLayoutManager {
             return (NSRect(x: origin.x + left, y: origin.y + bounds.minY - 2, width: max(1, right - left), height: bounds.height + 12), full)
         }
         var drawn = Set<String>()
+        storage.enumerateAttribute(.changesCard, in: characters) { value, range, _ in
+            guard let id = value as? String, drawn.insert("c" + id).inserted else { return }
+            var full = NSRange()
+            _ = storage.attribute(.changesCard, at: range.location, longestEffectiveRange: &full, in: whole)
+            let lines = glyphRange(forCharacterRange: full, actualCharacterRange: nil)
+            let first = lineFragmentRect(forGlyphAt: lines.location, effectiveRange: nil)
+            let last = lineFragmentRect(forGlyphAt: max(lines.location, NSMaxRange(lines) - 1), effectiveRange: nil)
+            let left = origin.x + padding, width = max(1, container.containerSize.width - 2 * padding - 4)
+            let rect = NSRect(x: left, y: origin.y + first.minY, width: width, height: last.maxY - first.minY).insetBy(dx: 0.5, dy: 0.5)
+            let shape = NSBezierPath(roundedRect: rect, xRadius: 12, yRadius: 12)
+            DeskPalette.ns.canvas.setFill(); shape.fill()
+            DeskPalette.ns.border.setStroke(); shape.lineWidth = 1; shape.stroke()
+            storage.enumerateAttribute(.changesRow, in: NSIntersectionRange(full, characters)) { row, rowRange, _ in
+                guard row != nil, rowRange.location > full.location else { return }
+                let top = lineFragmentRect(forGlyphAt: glyphIndexForCharacter(at: rowRange.location), effectiveRange: nil).minY
+                DeskPalette.ns.border.setFill()
+                NSRect(x: left + 12, y: origin.y + top, width: width - 24, height: 1).fill()
+            }
+        }
         storage.enumerateAttribute(.activityCard, in: characters) { value, range, _ in
             guard let id = value as? String, drawn.insert("a" + id).inserted else { return }
             var full = NSRange()

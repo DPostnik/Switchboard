@@ -10,20 +10,23 @@ import ContextTranscript
     /// Set by the app: brings the main window forward, for "Go to message".
     static var showMainWindow: (() -> Void)?
     private let changes: TurnChanges
+    private let viewer: TurnChangesViewer
     private var window: NSWindow?
 
-    static func show(_ changes: TurnChanges, chatID: String?, model: DeskModel) {
+    /// `file` (repository-relative) is selected once the list loads; an open window for the turn selects it at once.
+    static func show(_ changes: TurnChanges, chatID: String?, model: DeskModel, file: String? = nil) {
         if let existing = open.first(where: { $0.changes.start == changes.start && $0.changes.end == changes.end }) {
+            if let file, existing.viewer.files.contains(where: { $0.path == file }) { existing.viewer.selection = file }
             existing.window?.makeKeyAndOrderFront(nil); return
         }
-        let controller = TurnChangesWindow(changes: changes)
+        let viewer = TurnChangesViewer(changes: changes, chatID: chatID, engine: model.turnCheckpoints.engine, preferred: file)
+        let controller = TurnChangesWindow(changes: changes, viewer: viewer)
         open.append(controller)
         let title = chatID.flatMap { id in model.state.chats.first { $0.id == id }?.title }
-        controller.present(TurnChangesView(viewer: TurnChangesViewer(changes: changes, chatID: chatID, engine: model.turnCheckpoints.engine),
-                                           model: model), title: title)
+        controller.present(TurnChangesView(viewer: viewer, model: model), title: title)
     }
 
-    private init(changes: TurnChanges) { self.changes = changes }
+    private init(changes: TurnChanges, viewer: TurnChangesViewer) { self.changes = changes; self.viewer = viewer }
 
     private func present(_ view: TurnChangesView, title: String?) {
         let content = view
@@ -31,7 +34,7 @@ import ContextTranscript
             .tint(DeskPalette.accent)
             .preferredColorScheme(.light)
             .environment(\.locale, L10n.locale)
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 680),
+        let window = EscapeClosingWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 680),
                               styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
         let base = L10n.text("Изменения хода", "Turn changes")
         window.title = title.map { base + " · " + $0 } ?? base
@@ -48,6 +51,11 @@ import ContextTranscript
     }
 
     func windowWillClose(_ notification: Notification) { Self.open.removeAll { $0 === self } }
+}
+
+/// Escape closes the window when nothing inside used it first (an open comment editor cancels its comment instead).
+final class EscapeClosingWindow: NSWindow {
+    override func cancelOperation(_ sender: Any?) { performClose(sender) }
 }
 
 @MainActor final class TurnChangesViewer: ObservableObject {
@@ -74,6 +82,8 @@ import ContextTranscript
     let changes: TurnChanges
     let chatID: String?
     let engine: GitCheckpoints
+    /// Selected instead of the first file once the list loads.
+    private let preferred: String?
     @Published private(set) var files: [GitCheckpoints.FileChange] = []
     @Published private(set) var loadIssue: String?
     @Published private(set) var loading = true
@@ -92,15 +102,15 @@ import ContextTranscript
     @Published private(set) var outcome: (text: String, failed: Bool)?
     private var patchTask: Task<Void, Never>?
 
-    init(changes: TurnChanges, chatID: String?, engine: GitCheckpoints) {
-        self.changes = changes; self.chatID = chatID; self.engine = engine
+    init(changes: TurnChanges, chatID: String?, engine: GitCheckpoints, preferred: String? = nil) {
+        self.changes = changes; self.chatID = chatID; self.engine = engine; self.preferred = preferred
     }
 
     func load() async {
         defer { loading = false }
         do {
             files = try await engine.changes(root: changes.repository, from: changes.start, to: changes.end)
-            selection = files.first?.path
+            selection = files.first(where: { $0.path == preferred })?.path ?? files.first?.path
         } catch {
             loadIssue = L10n.text("Снимки этого хода больше недоступны: ", "This turn's checkpoints are no longer available: ") + error.localizedDescription
         }
@@ -465,16 +475,18 @@ private struct RestoreButton: View {
 
 /// One diff line: old and new line numbers, then the text on a green (added) or red (removed) wash.
 /// The line numbers are the comment handle: a click picks the line, Shift-click extends the pick.
-private struct DiffLineRow: View {
+struct DiffLineRow: View {
     let line: DiffLine
     var selected = false
+    /// Off where no comment can be written (the chat's file panel): the numbers are plain then.
+    var allowsComments = true
     var pick: (_ extend: Bool) -> Void = { _ in }
     @State private var hovering = false
     private static let added = Color(nsColor: DeskPalette.ns.accent.withAlphaComponent(0.13))
     private static let removed = Color(nsColor: DeskPalette.ns.problem.withAlphaComponent(0.11))
     private static let picked = Color(nsColor: DeskPalette.ns.attention.withAlphaComponent(0.22))
 
-    private var commentable: Bool { line.kind != .hunk && line.kind != .note }
+    private var commentable: Bool { allowsComments && line.kind != .hunk && line.kind != .note }
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {

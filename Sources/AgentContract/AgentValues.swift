@@ -30,9 +30,29 @@ public struct TurnChanges: Codable, Sendable, Equatable {
     public var removed: Int
     /// Another chat in the same project folder was running during the turn; its edits may be counted here.
     public var otherChats: Bool?
-    public init(repository: String, start: String, end: String, files: Int, added: Int, removed: Int, otherChats: Bool? = nil) {
+    /// The changed files themselves, at most `listLimit` of them, so the answer can show them without running git.
+    /// Nil on turns recorded before it existed.
+    public var list: [File]?
+    public static let listLimit = 40
+    public init(repository: String, start: String, end: String, files: Int, added: Int, removed: Int, otherChats: Bool? = nil,
+                list: [File]? = nil) {
         self.repository = repository; self.start = start; self.end = end
-        self.files = files; self.added = added; self.removed = removed; self.otherChats = otherChats
+        self.files = files; self.added = added; self.removed = removed; self.otherChats = otherChats; self.list = list
+    }
+
+    /// One changed file: repository-relative path, git's status word (added, modified, deleted, renamed, copied,
+    /// typeChanged) and line counts, nil for a binary file. `size` is the new file's size in bytes, for added files.
+    public struct File: Codable, Sendable, Equatable {
+        public var path: String
+        /// The source path of a rename or copy.
+        public var oldPath: String?
+        public var status: String
+        public var added: Int?
+        public var removed: Int?
+        public var size: Int?
+        public init(path: String, oldPath: String? = nil, status: String, added: Int?, removed: Int?, size: Int? = nil) {
+            self.path = path; self.oldPath = oldPath; self.status = status; self.added = added; self.removed = removed; self.size = size
+        }
     }
 }
 

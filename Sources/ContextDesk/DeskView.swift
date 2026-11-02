@@ -1008,6 +1008,9 @@ struct ChatView: View {
     /// The chat folder's file tree in the same side panel; a file picked there opens in the preview above it.
     @StateObject private var files = ProjectFilesModel()
     @State private var showingFiles = false
+    /// Files the open chat changed or cited, in a column on the chat's right; it appears once the chat has any.
+    /// Held without observing it: only `ChatFilesOverlay` redraws when the lists change, not the whole chat.
+    @State private var chatFiles = ChatFilesModel()
     /// Composer column: the transcript's readable text width (magnified with the interface zoom) plus the composer's side insets.
     private var columnWidth: CGFloat { InterfaceZoom.shared.scaled(TranscriptScrollView.readableWidth) + 48 }
     /// The composer grows and shrinks smoothly; past its cap the height no longer changes, so nothing animates.
@@ -1143,6 +1146,10 @@ struct ChatView: View {
             }
         }
         .animation(DeskMotion.standard(reduceMotion), value: model.currentAction?.id)
+        .overlay(alignment: .topTrailing) {
+            ChatFilesOverlay(files: chatFiles, model: model, open: { preview.open($0, line: $1) },
+                             addToMessage: { model.addDroppedFiles([$0]) })
+        }
         .background(DeskPalette.canvas)
         // The whole chat accepts dropped files, such as a screenshot thumbnail, and adds their paths to the draft.
         .onDrop(of: [.fileURL], delegate: ChatFileDrop(enabled: !model.selectedChatIsArchived, targeted: $fileDropTargeted) { model.addDroppedFiles($0) })
@@ -1219,6 +1226,10 @@ struct ChatView: View {
             // Runs when the tree is shown or the chat's folder changes: the listing is always fresh then.
             if showingFiles { await files.load(model.selectedWorkingDirectory, force: true) }
         }
+        // The column appears by itself once the chat has files, so its lists follow the transcript; the update is
+        // throttled and parses only changed messages.
+        .onChange(of: model.chatID, initial: true) { _, _ in refreshChatFiles(immediately: true) }
+        .onReceive(model.transcript.$items) { _ in refreshChatFiles() }
         .overlay {
             ZStack {
                 if preview.expanded, let current = preview.current {
@@ -1243,6 +1254,11 @@ struct ChatView: View {
         if showingFiles && preview.current == nil { showingFiles = false; return }
         preview.close()
         showingFiles = true
+    }
+
+    private func refreshChatFiles(immediately: Bool = false) {
+        chatFiles.update(chatID: model.chatID, items: model.transcript.items, projectPath: model.selectedWorkingDirectory,
+                         engine: model.turnCheckpoints.engine, immediately: immediately)
     }
 
     /// A fragment selected in the preview goes into the draft with its file and lines; nothing is sent.

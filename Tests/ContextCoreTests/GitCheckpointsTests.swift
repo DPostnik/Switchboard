@@ -259,34 +259,59 @@ private struct Repo {
     #expect(try await !checkpoints.refNumbers(root: repo.path, chatID: "b").isEmpty)
 }
 
-@Test @MainActor func answerWithTurnChangesShowsRowThatOpensTheViewer() throws {
-    var opened: [(String?, TurnChanges)] = []
-    TranscriptLinks.openTurnChanges = { opened.append(($0, $1)) }
+@Test @MainActor func answerWithTurnChangesShowsCardThatOpensTheViewer() throws {
+    var opened: [(String?, TurnChanges, String?)] = []
+    TranscriptLinks.openTurnChanges = { opened.append(($0, $1, $2)) }
     defer { TranscriptLinks.openTurnChanges = nil }
-    let changes = TurnChanges(repository: "/repo", start: "a", end: "b", files: 3, added: 12, removed: 4)
+    let list = [TurnChanges.File(path: "docs/burndown-status.agent.md", status: "added", added: 482, removed: 0, size: 15_800),
+                TurnChanges.File(path: "Sources/App/View.swift", status: "modified", added: 12, removed: 4),
+                TurnChanges.File(path: "old.txt", status: "deleted", added: 0, removed: 9)]
+    let changes = TurnChanges(repository: "/repo", start: "a", end: "b", files: 3, added: 494, removed: 13, list: list)
     let timing = ResponseTiming(startedAt: Date(timeIntervalSince1970: 100), completedAt: Date(timeIntervalSince1970: 167), changes: changes)
     let view = TranscriptScrollView()
-    view.frame = NSRect(x: 0, y: 0, width: 760, height: 300)
-    view.update(items: [TranscriptItem(id: "a", kind: "assistant", text: "Done.", timing: timing)], conversationID: "chat", followOutput: false)
+    view.frame = NSRect(x: 0, y: 0, width: 760, height: 360)
+    let items = [TranscriptItem(id: "u", kind: "user", text: "Make the file"),
+                 TranscriptItem(id: "a", kind: "assistant", text: "Done.", timing: timing)]
+    view.update(items: items, conversationID: "chat", followOutput: false)
     view.layoutSubtreeIfNeeded()
     let storage = try #require(view.transcript.textStorage)
-    let index = (storage.string as NSString).range(of: changes.label()).location
-    #expect(index != NSNotFound)
-    #expect(storage.attribute(.changesPill, at: index, effectiveRange: nil) as? Bool == true)
-    #expect(storage.attribute(.link, at: index, effectiveRange: nil) as? String == "contextdesk-changes:a")
-    _ = view.textView(view.transcript, clickedOnLink: "contextdesk-changes:a", at: index)
-    #expect(opened.count == 1 && opened.first?.0 == "chat" && opened.first?.1 == changes)
+    let string = storage.string as NSString
+    // The card sits under the answer, one row per file; the header no longer carries a changes pill.
+    let answer = string.range(of: "Done.").location
+    let row = string.range(of: "burndown-status.agent.md").location
+    #expect(answer != NSNotFound && row != NSNotFound && row > answer)
+    #expect(storage.attribute(.changesCard, at: row, effectiveRange: nil) as? String == "a:changes")
+    #expect(string.range(of: "View.swift").location != NSNotFound && string.range(of: "old.txt").location != NSNotFound)
+    #expect(string.range(of: changes.label()).location == NSNotFound)
+    let link = try #require(storage.attribute(.link, at: row, effectiveRange: nil) as? String)
+    _ = view.textView(view.transcript, clickedOnLink: link, at: row)
+    #expect(opened.count == 1 && opened.first?.0 == "chat" && opened.first?.1 == changes && opened.first?.2 == "docs/burndown-status.agent.md")
     if let path = ProcessInfo.processInfo.environment["SWITCHBOARD_RENDER_PATH"] {
         view.drawsBackground = true
-        view.backgroundColor = .windowBackgroundColor
+        view.backgroundColor = DeskPalette.ns.canvas
         let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
         view.cacheDisplay(in: view.bounds, to: bitmap)
         try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path + ".changes.png"))
     }
-    // No row without changes or without a viewer.
+    // An older turn without a file list gets one summary row; no card without a viewer.
+    var legacy = changes; legacy.list = nil
+    view.update(items: [TranscriptItem(id: "c", kind: "assistant", text: "Old.", timing: ResponseTiming(startedAt: nil, completedAt: Date(), changes: legacy))],
+                conversationID: "chat3", followOutput: false)
+    #expect(view.transcript.string.contains(L10n.text("Изменено файлов: 3", "3 files changed")))
     TranscriptLinks.openTurnChanges = nil
     view.update(items: [TranscriptItem(id: "b", kind: "assistant", text: "Done.", timing: timing)], conversationID: "chat2", followOutput: false)
-    #expect(!view.transcript.string.contains(changes.label()))
+    #expect(!view.transcript.string.contains("burndown-status"))
+}
+
+@Test func turnChangesListKeepsAddedFileSizes() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try Data(count: 1234).write(to: root.appendingPathComponent("new.md"))
+    let list = TurnChanges.list([GitCheckpoints.FileChange(path: "new.md", status: .added, added: 3, removed: 0),
+                                 GitCheckpoints.FileChange(path: "b.swift", oldPath: "a.swift", status: .renamed, added: 1, removed: 1)], root: root.path)
+    #expect(list.first?.size == 1234 && list.first?.status == "added")
+    #expect(list.last?.oldPath == "a.swift" && list.last?.size == nil)
 }
 
 @Test func diffLinesNumberHunksAndKeepNotes() {

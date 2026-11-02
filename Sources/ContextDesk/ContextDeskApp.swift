@@ -194,8 +194,8 @@ private struct MainWindowContent: View {
             .task {
                 delegate.model = model
                 TranscriptLinks.openChat = { [weak model] id in model?.openChatLink(id) }
-                TranscriptLinks.openTurnChanges = { [weak model] chatID, changes in
-                    if let model { TurnChangesWindow.show(changes, chatID: chatID, model: model) }
+                TranscriptLinks.openTurnChanges = { [weak model] chatID, changes, file in
+                    if let model { TurnChangesWindow.show(changes, chatID: chatID, model: model, file: file) }
                 }
                 TurnChangesWindow.showMainWindow = { [weak delegate] in delegate?.showMainWindow() }
                 EditorLauncher.projectFolders = { [weak model] in

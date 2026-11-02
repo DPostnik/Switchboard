@@ -18,8 +18,9 @@ extension NSAttributedString.Key {
     public static let chatScheme = "switchboard-chat"
     /// Set by the app; without it chat links stay plain text.
     public static var openChat: ((String) -> Void)?
-    /// Set by the app: opens the diff viewer for a turn's changes (chat ID, changes); without it the row is hidden.
-    public static var openTurnChanges: ((String?, TurnChanges) -> Void)?
+    /// Set by the app: opens the diff viewer for a turn's changes (chat ID, changes, repository-relative file to select);
+    /// without it the changes card is hidden.
+    public static var openTurnChanges: ((String?, TurnChanges, String?) -> Void)?
 
     /// How agent text is decorated in the transcript. Defaults keep the literal text.
     public struct Options {
@@ -279,7 +280,7 @@ extension NSAttributedString.Key {
 
     /// Icons by file type, cached: per-file icon lookups cost ~20 ms each and dominated long documents.
     private static var icons: [String: NSImage] = [:]
-    static func fileIcon(_ url: URL) -> NSImage {
+    public static func fileIcon(_ url: URL) -> NSImage {
         let ext = url.pathExtension.lowercased()
         if let icon = icons[ext] { return icon }
         let icon = (UTType(filenameExtension: ext).map { NSWorkspace.shared.icon(for: $0) } ?? NSWorkspace.shared.icon(for: .data))

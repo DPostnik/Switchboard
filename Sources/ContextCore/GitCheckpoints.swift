@@ -344,6 +344,15 @@ public struct DiffLine: Identifiable, Equatable, Sendable {
 }
 
 extension TurnChanges {
+    /// The stored file list of a turn: the first `listLimit` files, added files with their size on disk now.
+    public static func list(_ files: [GitCheckpoints.FileChange], root: String) -> [File] {
+        files.prefix(listLimit).map { file in
+            let size = file.status == .added ? (try? FileManager.default.attributesOfItem(
+                atPath: URL(fileURLWithPath: root).appendingPathComponent(file.path).path)[.size] as? Int) ?? nil : nil
+            return File(path: file.path, oldPath: file.oldPath, status: file.status.rawValue, added: file.added, removed: file.removed, size: size)
+        }
+    }
+
     /// "3 files changed · +12 −4" for the transcript row.
     public func label(language: AppLanguage = L10n.language) -> String {
         let counts = "+\(added) −\(removed)"
