@@ -197,6 +197,11 @@ private struct MainWindowContent: View {
                 TranscriptLinks.openTurnChanges = { [weak model] chatID, changes in
                     if let model { TurnChangesWindow.show(changes, chatID: chatID, model: model) }
                 }
+                TurnChangesWindow.showMainWindow = { [weak delegate] in delegate?.showMainWindow() }
+                EditorLauncher.projectFolders = { [weak model] in
+                    guard let model else { return [] }
+                    return model.state.projects.map(\.path) + model.state.chats.compactMap { $0.worktree?.workingDirectory }
+                }
                 NotchIslandController.start(model: model, showMainWindow: { [weak delegate] in delegate?.showMainWindow() })
                 FringeLinkServer.start(model: model, showMainWindow: { [weak delegate] in delegate?.showMainWindow() })
                 await model.boot()

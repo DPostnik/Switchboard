@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import ContextCore
+import ContextTranscript
 
 /// Own mouse tracking instead of attaching a drag recognizer to a SwiftUI Button.
 struct ProjectHeader<Content: View>: NSViewRepresentable {
@@ -56,7 +57,7 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
 }
 
 /// One project menu for the row's "…" button and its right-click menu, so both list the same items in the same order.
-enum ProjectMenu {
+@MainActor enum ProjectMenu {
     static var removeHelp: String {
         L10n.text("Файлы и чаты сохранятся. Вернуть проект можно через «Добавить проект».", "Files and chats are kept. Restore it with Add project.")
     }
@@ -70,6 +71,10 @@ enum ProjectMenu {
             .separator,
             SidebarMenuAction(title: L10n.text("Открыть в Finder", "Open in Finder"), systemImage: "folder") {
                 NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
+            },
+            SidebarMenuAction(title: EditorLauncher.openTitle, systemImage: "chevron.left.forwardslash.chevron.right",
+                              enabled: EditorLauncher.preferred != nil) {
+                EditorLauncher.open(path)
             },
             SidebarMenuAction(title: L10n.text("Скопировать путь", "Copy path"), systemImage: "doc.on.doc") {
                 NSPasteboard.general.clearContents()

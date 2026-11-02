@@ -1006,6 +1006,9 @@ struct ChatView: View {
     @StateObject private var dropWatchdog = DropTargetWatchdog()
     /// Files opened from answers in the preview pane, with back/forward history.
     @StateObject private var preview = DocumentPreviewSession()
+    /// The chat folder's file tree in the same side panel; a file picked there opens in the preview above it.
+    @StateObject private var files = ProjectFilesModel()
+    @State private var showingFiles = false
     /// Composer column: the transcript's readable text width (magnified with the interface zoom) plus the composer's side insets.
     private var columnWidth: CGFloat { InterfaceZoom.shared.scaled(TranscriptScrollView.readableWidth) + 48 }
     /// The composer grows and shrinks smoothly; past its cap the height no longer changes, so nothing animates.
@@ -1158,6 +1161,14 @@ struct ChatView: View {
         .modifier(DropTargetRecovery(targeted: $fileDropTargeted, watchdog: dropWatchdog) { model.focusComposer() })
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                if model.selectedWorkingDirectory != nil {
+                    Button { toggleFiles() } label: {
+                        Label(L10n.text("Файлы проекта", "Project files"), systemImage: "folder")
+                    }
+                    .pointingHandCursor()
+                    .help(L10n.text("Файлы проекта (⇧⌘E)", "Project files (⇧⌘E)"))
+                    .keyboardShortcut("e", modifiers: [.command, .shift])
+                }
                 if let chat = model.selectedChat {
                     if model.state.browserEnabled == true, let session = chat.nativeSession,
                        [.originalCodex, .appClaude].contains(session.connection) {
@@ -1192,13 +1203,22 @@ struct ChatView: View {
                 route: model.state.chats.first(where: { $0.id == value.origin.conversation.value })?.route ?? model.defaultRoute)
         }
         // Expanding moves the preview out of the inspector, so hiding the inspector then must not close it.
-        .inspector(isPresented: Binding(get: { preview.current != nil && !preview.expanded },
-                                        set: { if !$0 && !preview.expanded { preview.close() } })) {
+        .inspector(isPresented: Binding(get: { (preview.current != nil || showingFiles) && !preview.expanded },
+                                        set: { if !$0 && !preview.expanded { preview.close(); showingFiles = false } })) {
             if let current = preview.current, !preview.expanded {
-                DocumentPreviewView(session: preview, model: current, onQuote: quoteIntoDraft)
+                DocumentPreviewView(session: preview, model: current, onQuote: quoteIntoDraft,
+                                    onShowFiles: showingFiles ? { preview.close() } : nil)
                     .id(current.id)
                     .inspectorColumnWidth(min: 320, ideal: 520, max: 1100)
+            } else if showingFiles {
+                ProjectFilesView(files: files, open: { preview.open($0) },
+                                 addToMessage: { model.addDroppedFiles([$0]) }, close: { showingFiles = false })
+                    .inspectorColumnWidth(min: 320, ideal: 520, max: 1100)
             }
+        }
+        .task(id: showingFiles ? model.selectedWorkingDirectory : nil) {
+            // Runs when the tree is shown or the chat's folder changes: the listing is always fresh then.
+            if showingFiles { await files.load(model.selectedWorkingDirectory, force: true) }
         }
         .overlay {
             ZStack {
@@ -1217,6 +1237,13 @@ struct ChatView: View {
 
     private func openPreview(_ url: URL, line: Int?) {
         preview.open(url, line: line)
+    }
+
+    /// Shows the file tree (closing a file opened beside it) or hides the panel when the tree is already up.
+    private func toggleFiles() {
+        if showingFiles && preview.current == nil { showingFiles = false; return }
+        preview.close()
+        showingFiles = true
     }
 
     /// A fragment selected in the preview goes into the draft with its file and lines; nothing is sent.
@@ -1566,6 +1593,7 @@ struct SettingsView: View {
                 }
             }
             InterfaceZoomSettings()
+            EditorPreferenceSettings()
             MainWindowScreenSettings()
             NotchIslandSettings()
             KeepAwakeSettings(controller: keepAwake)

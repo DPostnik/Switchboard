@@ -306,6 +306,10 @@ public struct DiffLine: Identifiable, Equatable, Sendable {
     public let old: Int?
     public let new: Int?
 
+    public init(id: Int, kind: Kind, text: String, old: Int?, new: Int?) {
+        self.id = id; self.kind = kind; self.text = text; self.old = old; self.new = new
+    }
+
     public static func parse(_ patch: String) -> [DiffLine] {
         var result: [DiffLine] = []
         var inHunk = false, old = 0, new = 0

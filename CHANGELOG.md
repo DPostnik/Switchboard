@@ -8,6 +8,9 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 - Protocol drift diagnostics: events, item types and fields from Codex or Claude Code that the adapter does not recognize are counted by name (never content) instead of disappearing silently; Settings → Accounts shows a one-line summary per agent and the first occurrence of each is written to the system log (category compatibility).
 - Nightly agent CLI check: after the nightly tests, on AC power only, Switchboard compares the installed Codex and Claude Code with the verified versions and the latest published ones (npm, at most once a day), runs the no-inference live tests only for a newly installed unverified version, writes compat-status beside latest-status and notifies once per new problem or version.
+- Code editor integration, as in T3 Code: files from answers, the preview, the new file tree and turn changes open in your editor at the right line (VS Code, Cursor, Zed, Windsurf, VSCodium, Xcode, Sublime Text and JetBrains IDEs are detected; choose one in Settings → General → Code editor), ⌘-click on a file in a chat opens it there, and the project menu offers "Open in VS Code" for the whole folder.
+- Comments on turn changes: in the turn changes window, click a line number (Shift-click for a range), write what should change and "Add to message" puts the file, lines, the quoted diff and your comment into the chat's message for the agent; nothing is sent until you send it.
+- Project file tree: the folder button in the chat toolbar (⇧⌘E) shows the chat folder's files in the side panel (git's view without ignored files, or a walk that skips hidden and build folders), with search, preview on click, "Add to message", "Open in" and drag into the composer.
 
 ### Changed
 

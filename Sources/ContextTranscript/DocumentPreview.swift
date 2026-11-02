@@ -353,14 +353,21 @@ public struct DocumentPreviewView: View {
     @ObservedObject var model: DocumentPreviewModel
     /// Puts a selected fragment (file, source lines, text) into the chat draft; nil hides the menu item.
     let onQuote: ((URL, String, ClosedRange<Int>?) -> Void)?
+    /// Returns to the project's file tree when the file was opened from it; nil hides the button.
+    let onShowFiles: (() -> Void)?
 
-    public init(session: DocumentPreviewSession, model: DocumentPreviewModel, onQuote: ((URL, String, ClosedRange<Int>?) -> Void)? = nil) {
-        self.session = session; self.model = model; self.onQuote = onQuote
+    public init(session: DocumentPreviewSession, model: DocumentPreviewModel, onQuote: ((URL, String, ClosedRange<Int>?) -> Void)? = nil,
+                onShowFiles: (() -> Void)? = nil) {
+        self.session = session; self.model = model; self.onQuote = onQuote; self.onShowFiles = onShowFiles
     }
 
     public var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
+                if let onShowFiles, !session.expanded {
+                    Button(action: onShowFiles) { Image(systemName: "list.bullet.indent") }
+                        .help(L10n.text("К файлам проекта", "Back to project files"))
+                }
                 Button { session.goBack() } label: { Image(systemName: "chevron.left") }
                     .disabled(!session.canGoBack).help(L10n.text("Назад", "Back"))
                     .keyboardShortcut("[", modifiers: .command)
@@ -377,8 +384,13 @@ public struct DocumentPreviewView: View {
                     Button { model.showFind() } label: { Image(systemName: "magnifyingglass") }
                         .help(L10n.text("Найти в документе (⌘F)", "Find in document (⌘F)"))
                 }
-                Button { NSWorkspace.shared.open(model.url) } label: { Image(systemName: "arrow.up.forward.app") }
-                    .help(L10n.text("Открыть в программе по умолчанию", "Open in default app"))
+                Menu {
+                    OpenInEditorMenu(path: model.url.path, line: model.line)
+                } label: { Image(systemName: "arrow.up.forward.app") } primaryAction: {
+                    EditorLauncher.open(model.url.path, line: model.line)
+                }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                    .help(EditorLauncher.openTitle + (model.line.map { L10n.text(" на строке \($0)", " at line \($0)") } ?? ""))
                 Button { NSWorkspace.shared.activateFileViewerSelecting([model.url]) } label: { Image(systemName: "folder") }
                     .help(L10n.text("Показать в Finder", "Show in Finder"))
                 Button { session.expanded.toggle() } label: {

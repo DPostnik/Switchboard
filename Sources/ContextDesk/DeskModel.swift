@@ -764,6 +764,18 @@ private struct ChatRunState: Equatable {
         composer.text = updated
         composerFocusRequest = UUID()
     }
+    /// Replaces a chat's draft through `change`, whether or not the chat is open; nothing is sent.
+    func updateDraft(chatID id: String?, _ change: (String) -> String) {
+        guard let id, id != chatID else {
+            composer.text = change(composer.text); return
+        }
+        let updated = change(chatDrafts[id] ?? "")
+        chatDrafts[id] = updated.isEmpty ? nil : updated
+    }
+    func draft(chatID id: String?) -> String {
+        guard let id, id != chatID else { return composer.text }
+        return chatDrafts[id] ?? ""
+    }
     func openChat(_ chat: Chat) async {
         guard !isChangingChat(chat.id), state.chats.contains(where: { $0.id == chat.id }) else { return }
         transcript.cancelPending()

@@ -1,5 +1,6 @@
 import AppKit
 import ContextCore
+import ContextTranscript
 import SwiftUI
 import Testing
 @testable import ContextDesk
@@ -143,7 +144,7 @@ import Testing
     let menu = try #require(view.menu(for: event))
     #expect(menu.items.filter { !$0.isSeparatorItem }.map(\.title) == [
         L10n.text("Настройки проекта…", "Project settings…"), L10n.text("Новый чат", "New chat"),
-        L10n.text("Открыть в Finder", "Open in Finder"), L10n.text("Скопировать путь", "Copy path"),
+        L10n.text("Открыть в Finder", "Open in Finder"), EditorLauncher.openTitle, L10n.text("Скопировать путь", "Copy path"),
         L10n.text("Переименовать…", "Rename…"), L10n.text("Выделить все чаты", "Select all chats"),
         L10n.text("Убрать проект из списка", "Remove project from list"),
     ])

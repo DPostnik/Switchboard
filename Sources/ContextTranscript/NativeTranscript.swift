@@ -1174,7 +1174,11 @@ public struct NativeTranscript: NSViewRepresentable {
             switch Self.fileClickAction(NSApp.currentEvent?.modifierFlags ?? [], url: url, canPreview: onOpenFile != nil) {
             case .preview: onOpenFile?(url, line)
             case .reveal: NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: url.path)])
-            case .open: NSWorkspace.shared.open(URL(fileURLWithPath: url.path))
+            case .open:
+                var directory: ObjCBool = false
+                if FileManager.default.fileExists(atPath: url.path, isDirectory: &directory), !directory.boolValue {
+                    EditorLauncher.open(url.path, line: line)
+                } else { NSWorkspace.shared.open(URL(fileURLWithPath: url.path)) }
             }
             return true
         }
@@ -1183,7 +1187,8 @@ public struct NativeTranscript: NSViewRepresentable {
 
     public enum FileClickAction: Equatable { case preview, reveal, open }
 
-    /// Click previews a file in the app, Option-click reveals it in Finder, Command-click opens it externally.
+    /// Click previews a file in the app, Option-click reveals it in Finder, Command-click opens it in the code editor
+    /// (folders in Finder).
     /// Folders and missing files are never previewed.
     public static func fileClickAction(_ flags: NSEvent.ModifierFlags, url: URL, canPreview: Bool) -> FileClickAction {
         if flags.contains(.option) { return .reveal }
@@ -1227,7 +1232,14 @@ public struct NativeTranscript: NSViewRepresentable {
                 add(L10n.text("Предпросмотр", "Preview")) { onOpenFile(url, line) }
             }
             let file = URL(fileURLWithPath: url.path)
-            add(L10n.text("Открыть в программе по умолчанию", "Open in Default App")) { NSWorkspace.shared.open(file) }
+            var directory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: file.path, isDirectory: &directory), !directory.boolValue {
+                let line = storage.attribute(.fileLine, at: charIndex, effectiveRange: nil) as? Int
+                add(EditorLauncher.openTitle) { EditorLauncher.open(file.path, line: line) }
+                items.append(EditorLauncher.submenu(file.path, line: line))
+            } else {
+                add(L10n.text("Открыть в программе по умолчанию", "Open in Default App")) { NSWorkspace.shared.open(file) }
+            }
             add(L10n.text("Показать в Finder", "Show in Finder")) { NSWorkspace.shared.activateFileViewerSelecting([file]) }
             if let relative = Self.relativePath(url.path, project: projectPath) {
                 add(L10n.text("Скопировать относительный путь", "Copy Relative Path")) {

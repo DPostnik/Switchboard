@@ -7,6 +7,8 @@ import ContextTranscript
 /// the right, and "Restore files to before this turn". Opened from the changes row under an answer.
 @MainActor final class TurnChangesWindow: NSObject, NSWindowDelegate {
     private static var open: [TurnChangesWindow] = []
+    /// Set by the app: brings the main window forward, for "Go to message".
+    static var showMainWindow: (() -> Void)?
     private let changes: TurnChanges
     private var window: NSWindow?
 
@@ -61,13 +63,28 @@ import ContextTranscript
         let checkIssue: String?
     }
 
+    /// A comment already written into the chat draft, shown under its lines while the window is open.
+    struct LineComment: Identifiable {
+        let id = UUID()
+        let file: String
+        let lines: ClosedRange<Int>
+        let text: String
+    }
+
     let changes: TurnChanges
     let chatID: String?
     let engine: GitCheckpoints
     @Published private(set) var files: [GitCheckpoints.FileChange] = []
     @Published private(set) var loadIssue: String?
     @Published private(set) var loading = true
-    @Published var selection: String? { didSet { if selection != oldValue { loadPatch() } } }
+    @Published var selection: String? {
+        didSet { if selection != oldValue { lineSelection = nil; commentText = ""; loadPatch() } }
+    }
+    /// Diff line indices picked for a comment: a click on a line number, Shift-click extends from the first one.
+    @Published private(set) var lineSelection: ClosedRange<Int>?
+    private var selectionAnchor: Int?
+    @Published var commentText = ""
+    @Published private(set) var comments: [LineComment] = []
     @Published private(set) var patch: PatchState = .loading
     @Published private(set) var preparing = false
     @Published private(set) var restoring = false
@@ -109,6 +126,36 @@ import ContextTranscript
             guard !Task.isCancelled, let self, self.selection == file.path else { return }
             self.patch = state
         }
+    }
+
+    /// The file's absolute path in the repository the turn ran in.
+    func absolutePath(_ file: String) -> String {
+        URL(fileURLWithPath: changes.repository).appendingPathComponent(file).path
+    }
+
+    func selectLine(_ index: Int, extend: Bool) {
+        if extend, let anchor = selectionAnchor {
+            lineSelection = min(anchor, index)...max(anchor, index)
+        } else if lineSelection == index...index {
+            clearLineSelection()
+        } else {
+            selectionAnchor = index; lineSelection = index...index
+        }
+    }
+
+    func clearLineSelection() { lineSelection = nil; selectionAnchor = nil; commentText = "" }
+
+    /// Writes the selected lines and the comment into the chat draft; the comment stays visible under the lines.
+    func addComment(lines: [DiffLine], model: DeskModel) {
+        guard let file = selection, let range = lineSelection, lines.indices.contains(range.upperBound) else { return }
+        let text = commentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let picked = DiffComment.codeLines(lines[range])
+        guard !text.isEmpty, !picked.isEmpty else { return }
+        let absolute = absolutePath(file)
+        let path = chatID.flatMap(model.workingDirectory(forChat:)).flatMap { TranscriptScrollView.relativePath(absolute, project: $0) } ?? absolute
+        model.updateDraft(chatID: chatID) { DiffComment.draft(path: path, lines: picked, comment: text, appendingTo: $0) }
+        comments.append(LineComment(file: file, lines: range, text: text))
+        clearLineSelection()
     }
 
     /// Checks which files were edited after the turn, then asks for confirmation.
@@ -213,12 +260,49 @@ struct TurnChangesView: View {
                     Text(outcome.text).font(.system(size: 12)).textSelection(.enabled)
                         .foregroundStyle(outcome.failed ? DeskPalette.problemInk : DeskPalette.accentDeep)
                 }
+                if viewer.comments.isEmpty {
+                    Text(L10n.text("Нажмите на номер строки, чтобы прокомментировать её для агента; Shift-клик выделяет диапазон.",
+                                   "Click a line number to comment on it for the agent; Shift-click selects a range."))
+                        .font(.system(size: 11.5)).foregroundStyle(DeskPalette.muted)
+                } else {
+                    let count = viewer.comments.count
+                    Text(L10n.text("Комментариев в сообщении чата: \(count). Они уйдут агенту, когда вы отправите сообщение.",
+                                   "\(count) \(count == 1 ? "comment" : "comments") in the chat's message. They reach the agent when you send it."))
+                        .font(.system(size: 11.5)).foregroundStyle(DeskPalette.accentDeep)
+                }
             }
             Spacer(minLength: 12)
             if viewer.preparing || viewer.restoring { ProgressView().controlSize(.small) }
+            if !viewer.comments.isEmpty {
+                Button(L10n.text("Перейти к сообщению", "Go to message")) { goToMessage() }
+            }
+            if let file = selectedFile, file.status != .deleted {
+                Button(EditorLauncher.openTitle) {
+                    EditorLauncher.open(viewer.absolutePath(file.path), line: firstChangedLine)
+                }
+                .help(L10n.text("Открыть файл на первом изменении", "Open the file at its first change"))
+            }
             RestoreButton(viewer: viewer, model: model)
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
+    }
+
+    private var selectedFile: GitCheckpoints.FileChange? { viewer.files.first { $0.path == viewer.selection } }
+
+    private var firstChangedLine: Int? {
+        guard case .loaded(let lines, _) = viewer.patch else { return nil }
+        return lines.first { $0.kind == .added }?.new ?? lines.firstIndex { $0.kind == .removed }.flatMap { DiffComment.editorLine($0, in: lines) }
+    }
+
+    /// Opens the chat this turn belongs to with the comments in its composer.
+    private func goToMessage() {
+        TurnChangesWindow.showMainWindow?()
+        Task {
+            if let id = viewer.chatID, id != model.chatID, let chat = model.state.chats.first(where: { $0.id == id }) {
+                await model.openChat(chat)
+            }
+            model.focusComposer()
+        }
     }
 
     private var summary: String {
@@ -259,6 +343,18 @@ struct TurnChangesView: View {
             }
             .padding(.vertical, 2)
             .tag(file.path)
+            .contextMenu {
+                if file.status != .deleted {
+                    OpenInEditorMenu(path: viewer.absolutePath(file.path))
+                    Button(L10n.text("Показать в Finder", "Show in Finder")) {
+                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: viewer.absolutePath(file.path))])
+                    }
+                    Divider()
+                }
+                Button(L10n.text("Скопировать путь", "Copy path")) {
+                    NSPasteboard.general.clearContents(); NSPasteboard.general.setString(file.path, forType: .string)
+                }
+            }
         }
         .listStyle(.sidebar)
     }
@@ -280,7 +376,18 @@ struct TurnChangesView: View {
                         Text(L10n.text("Содержимое не изменилось (только режим или имя).", "No content change (mode or name only)."))
                             .font(.system(size: 12)).foregroundStyle(DeskPalette.muted).padding(12)
                     }
-                    ForEach(lines) { line in DiffLineRow(line: line) }
+                    ForEach(lines) { line in
+                        DiffLineRow(line: line, selected: viewer.lineSelection?.contains(line.id) == true) { extend in
+                            viewer.selectLine(line.id, extend: extend)
+                        }
+                        .contextMenu { lineMenu(line, lines: lines) }
+                        if viewer.lineSelection?.upperBound == line.id {
+                            DiffCommentEditor(viewer: viewer, lines: lines, model: model)
+                        }
+                        ForEach(viewer.comments.filter { $0.file == viewer.selection && $0.lines.upperBound == line.id }) { comment in
+                            DiffCommentNote(text: comment.text)
+                        }
+                    }
                     if truncated {
                         Text(L10n.text("Изменение слишком большое: показано начало.", "This change is too large: only the beginning is shown."))
                             .font(.system(size: 12)).foregroundStyle(DeskPalette.attentionInk).padding(12)
@@ -289,6 +396,17 @@ struct TurnChangesView: View {
                 .textSelection(.enabled)
             }
             .background(Color(nsColor: .textBackgroundColor))
+        }
+    }
+
+    @ViewBuilder private func lineMenu(_ line: DiffLine, lines: [DiffLine]) -> some View {
+        if line.kind != .hunk && line.kind != .note {
+            Button(L10n.text("Прокомментировать для агента", "Comment for the agent")) { viewer.selectLine(line.id, extend: false) }
+        }
+        if let file = selectedFile, file.status != .deleted, let number = DiffComment.editorLine(line.id, in: lines) {
+            Button(EditorLauncher.openTitle + L10n.text(" на строке \(number)", " at line \(number)")) {
+                EditorLauncher.open(viewer.absolutePath(file.path), line: number)
+            }
         }
     }
 
@@ -346,16 +464,39 @@ private struct RestoreButton: View {
 }
 
 /// One diff line: old and new line numbers, then the text on a green (added) or red (removed) wash.
+/// The line numbers are the comment handle: a click picks the line, Shift-click extends the pick.
 private struct DiffLineRow: View {
     let line: DiffLine
+    var selected = false
+    var pick: (_ extend: Bool) -> Void = { _ in }
+    @State private var hovering = false
     private static let added = Color(nsColor: DeskPalette.ns.accent.withAlphaComponent(0.13))
     private static let removed = Color(nsColor: DeskPalette.ns.problem.withAlphaComponent(0.11))
+    private static let picked = Color(nsColor: DeskPalette.ns.attention.withAlphaComponent(0.22))
+
+    private var commentable: Bool { line.kind != .hunk && line.kind != .note }
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            number(line.old)
-            number(line.new)
-            Text(sign).foregroundStyle(DeskPalette.muted).frame(width: 16, alignment: .center)
+            HStack(spacing: 0) {
+                number(line.old)
+                number(line.new)
+            }
+            .background(hovering && commentable ? DeskPalette.subtle : .clear)
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 && commentable }
+            .onTapGesture {
+                guard commentable else { return }
+                pick(NSEvent.modifierFlags.contains(.shift))
+            }
+            .pointingHandCursor()
+            .disabled(!commentable)
+            .help(commentable ? L10n.text("Прокомментировать строку для агента (Shift — диапазон)", "Comment on this line for the agent (Shift for a range)") : "")
+            Group {
+                if hovering { Image(systemName: "plus.bubble").font(.system(size: 9.5)).foregroundStyle(DeskPalette.accentDeep) }
+                else { Text(sign).foregroundStyle(DeskPalette.muted) }
+            }
+            .frame(width: 16, alignment: .center)
             Text(verbatim: line.text.isEmpty ? " " : line.text)
                 .foregroundStyle(line.kind == .hunk || line.kind == .note ? DeskPalette.muted : DeskPalette.ink)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -363,6 +504,10 @@ private struct DiffLineRow: View {
         .font(.system(size: 12, design: .monospaced))
         .padding(.vertical, line.kind == .hunk ? 3 : 0.5)
         .background(background)
+        .overlay(alignment: .leading) {
+            if selected { Rectangle().fill(DeskPalette.attention).frame(width: 3) }
+        }
+        .background(selected ? Self.picked : .clear)
     }
 
     private var sign: String {
@@ -387,5 +532,64 @@ private struct DiffLineRow: View {
             .foregroundStyle(DeskPalette.muted.opacity(0.75))
             .frame(width: 44, alignment: .trailing)
             .padding(.trailing, 6)
+    }
+}
+
+/// Under the last picked line: the comment, then "Add to message" puts lines and comment into the chat draft.
+private struct DiffCommentEditor: View {
+    @ObservedObject var viewer: TurnChangesViewer
+    let lines: [DiffLine]
+    let model: DeskModel
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let range = viewer.lineSelection, let file = viewer.selection {
+                Text(DiffComment.location(path: file, lines: DiffComment.codeLines(lines[range])))
+                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(DeskPalette.muted)
+            }
+            TextField(L10n.text("Что изменить или проверить в этих строках?", "What should change or be checked in these lines?"),
+                      text: $viewer.commentText, axis: .vertical)
+                .textFieldStyle(.plain).font(.system(size: 13)).lineLimit(2...10)
+                .focused($focused)
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(DeskPalette.focusBorder, lineWidth: 1))
+            HStack {
+                Text(L10n.text("Комментарий попадёт в сообщение чата; отправите его вы.", "The comment goes into the chat's message; you send it."))
+                    .font(.system(size: 11)).foregroundStyle(DeskPalette.muted)
+                Spacer()
+                Button(L10n.text("Отмена", "Cancel")) { viewer.clearLineSelection() }
+                    .keyboardShortcut(.cancelAction)
+                Button(L10n.text("Добавить в сообщение", "Add to message")) { viewer.addComment(lines: lines, model: model) }
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(viewer.commentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .help("⌘↩")
+            }
+        }
+        .padding(10)
+        .background(DeskPalette.subtle)
+        .padding(.leading, 116).padding(.trailing, 16).padding(.vertical, 6)
+        .onAppear { focused = true }
+    }
+}
+
+/// A comment already in the chat draft, under the lines it is about.
+private struct DiffCommentNote: View {
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "text.bubble").foregroundStyle(DeskPalette.accentDeep)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(text).font(.system(size: 12.5)).foregroundStyle(DeskPalette.ink).textSelection(.enabled)
+                Text(L10n.text("В сообщении чата", "In the chat's message")).font(.system(size: 11)).foregroundStyle(DeskPalette.muted)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 8).fill(DeskPalette.subtle))
+        .padding(.leading, 116).padding(.trailing, 16).padding(.vertical, 4)
     }
 }
