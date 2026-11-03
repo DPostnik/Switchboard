@@ -425,8 +425,11 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session)).value()
     try await waitFor { await events.completionCount() == 1 }
     try await Task.sleep(for: .milliseconds(600))
+    // The expired process took the session record with it; the next send reads the saved record.
+    try await waitFor { await adapter.residentSessionCount == 0 }
     _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session)).value()
     try await waitFor { await events.completionCount() == 2 }
+    #expect(try await adapter.history(session, context: descriptor.context).value().count == 2)
     let sent = try String(contentsOf: home.appendingPathComponent("submitted"), encoding: .utf8).split(separator: "\n")
         .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
     try #require(sent.count == 2)
@@ -643,7 +646,10 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     #expect(await adapter.residentSessionCount == 1)
     _ = try await adapter.cancel(handle).value()
     try await waitFor { await events.completionCount() == 2 }
-    #expect(await adapter.residentSessionCount == 1)
+    // A stopped turn closes its process; the saved record is then released and read back from the file.
+    try await waitFor { await adapter.residentSessionCount == 0 }
+    #expect(try await adapter.history(session, context: descriptor.context).value().count == 2)
+    #expect(await adapter.residentSessionCount == 0)
     let sent = try String(contentsOf: home.appendingPathComponent("submitted"), encoding: .utf8).split(separator: "\n")
         .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
     // Both turns were written to the same warm process: the reads did not disturb it.

@@ -617,6 +617,7 @@ public actor ClaudeIntegration: AgentIntegration {
         switch value["type"].string {
         case "transport_closed":
             wires.removeValue(forKey: id); warm[id] = nil; finish(id, outcome: .uncertain); abandonWait(id); stopSubagents(id)
+            release(id)
         case "control_request":
             if value["request"]["subtype"].string == "hook_callback" { await hook(value, session: id, wire: wire) }
             else { await permission(value, session: id, wire: wire) }
@@ -720,7 +721,7 @@ public actor ClaudeIntegration: AgentIntegration {
             let usageLimit = limitStops[id]?.stop(outcome: outcome) != nil
             finish(id, outcome: outcome, stopReason: ClaudeToolCalls.stopReason(result: value, interrupted: interrupted.contains(id), usageLimit: usageLimit))
             if keep { beginWaiting(id, wire: wire) } else if park { stopSubagents(id); await parkWarm(id, wire: wire) }
-            else { stopSubagents(id); await wire.close() }
+            else { stopSubagents(id); await wire.close(); release(id) }
         case "tool_use_summary":
             guard let turn = sessions[id]?.active, let text = Self.progressSummary(value["summary"].string) else { return }
             summaries[id] = (turn, text)
@@ -1082,12 +1083,15 @@ public actor ClaudeIntegration: AgentIntegration {
         warm[id] = nil
         guard sessions[id]?.active == nil, waiting[id] == nil, wires[id] === entry.wire else { return }
         wires.removeValue(forKey: id); await entry.wire.close()
+        release(id)
     }
     private func closeWarm() async {
+        var closed: [String] = []
         for (id, entry) in warm where wires[id] === entry.wire && sessions[id]?.active == nil && waiting[id] == nil {
-            wires.removeValue(forKey: id); await entry.wire.close()
+            wires.removeValue(forKey: id); closed.append(id); await entry.wire.close()
         }
         warm.removeAll()
+        for id in closed { release(id) }
     }
     private func beginWaiting(_ id: String, wire: ClaudeWire) {
         let token = UUID(), limit = backgroundWaitLimit
@@ -1110,6 +1114,7 @@ public actor ClaudeIntegration: AgentIntegration {
                 "Claude's background tasks did not finish in time; the process was stopped and their result was not received. Nothing was retried."))))
         }
         wires.removeValue(forKey: id); stopSubagents(id); await wire.close()
+        release(id)
     }
     /// Starts the turn the CLI began on its own: there is no user message, and it is never resent.
     private func wake(_ id: String) {
@@ -1191,15 +1196,19 @@ public actor ClaudeIntegration: AgentIntegration {
     /// Reads a session for a read-only accessor. A record decoded only for this call is dropped again: chat open and
     /// the connect-time backfill read every chat's history, and keeping each one resident held hundreds of megabytes
     /// of transcript text. A session that was already resident stays, as does one with a live or warm process,
-    /// an active turn or a pending save; `load` keeps the record for callers that go on to mutate it.
+    /// an active turn or a pending save; `load` keeps the record for callers that go on to mutate it. Once a turn has
+    /// ended and its process is gone (closed after the turn, after the warm timeout or after background tasks), the
+    /// saved record is released too (`release`), so chats sent to since launch no longer keep their history resident.
     private func peek(_ id: String) throws -> Session {
         let resident = sessions[id] != nil
         let value = try load(id)
         if !resident { release(id) }
         return value
     }
+    /// Only an idle, saved record goes: `submit` changes the record across suspensions before its first save.
     private func release(_ id: String) {
-        guard wires[id] == nil, warm[id] == nil, waiting[id] == nil, !pendingSaves.contains(id), sessions[id]?.active == nil else { return }
+        guard wires[id] == nil, warm[id] == nil, waiting[id] == nil, !pendingSaves.contains(id), sessions[id]?.active == nil,
+              !submitting.contains(id) else { return }
         sessions.removeValue(forKey: id)
     }
     /// Test seam: session records held in memory.
