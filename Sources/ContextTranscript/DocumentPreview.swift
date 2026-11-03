@@ -4,7 +4,7 @@ import SwiftUI
 import ContextCore
 
 /// How a previewed file is shown: Markdown and source through the transcript renderer,
-/// everything else (PDF, images, Office, plain text) through Quick Look.
+/// PDF through PDFKit, everything else (images, Office, plain text) through Quick Look.
 public enum DocumentPreviewKind: Equatable, Sendable {
     case markdown
     case code(language: String)
@@ -435,10 +435,44 @@ public struct DocumentPreviewView: View {
                                  let lines = model.kind == .markdown ? model.text.flatMap { DocumentQuote.lines(of: text, in: $0) } : codeLines
                                  quote(model.url, text, lines)
                              } })
+        } else if model.url.pathExtension.lowercased() == "pdf" {
+            PDFDocumentPreview(url: model.url, revision: model.revision)
         } else {
             QuickLookPreview(url: model.url, revision: model.revision)
         }
     }
+}
+
+/// PDF pages rendered by PDFKit: continuous scroll, fitted to the pane's width, text selectable.
+struct PDFDocumentPreview: NSViewRepresentable {
+    let url: URL
+    let revision: Int
+
+    func makeNSView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.autoScales = true
+        view.displayMode = .singlePageContinuous
+        view.displaysPageBreaks = true
+        view.backgroundColor = DeskPalette.ns.canvas
+        load(view, context: context)
+        return view
+    }
+
+    func updateNSView(_ view: PDFView, context: Context) {
+        guard context.coordinator.state?.0 != url || context.coordinator.state?.1 != revision else { return }
+        // The same file rewritten keeps the reader on its page.
+        let page = context.coordinator.state?.0 == url ? view.currentPage.flatMap { view.document?.index(for: $0) } : nil
+        load(view, context: context)
+        if let page, let target = view.document?.page(at: min(page, max(0, (view.document?.pageCount ?? 1) - 1))) { view.go(to: target) }
+    }
+
+    private func load(_ view: PDFView, context: Context) {
+        context.coordinator.state = (url, revision)
+        view.document = PDFDocument(url: url)
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    final class Coordinator { var state: (URL, Int)? }
 }
 
 /// Markdown and source code rendered by the transcript engine in document mode.

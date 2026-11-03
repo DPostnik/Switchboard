@@ -1716,7 +1716,8 @@ public struct NativeTranscript: NSViewRepresentable {
         }
         if let link = TranscriptChangesCard.parse(value) {
             if let changes = previous.first(where: { $0.id == link.itemID })?.timing?.changes {
-                TranscriptLinks.openTurnChanges?(conversationID, changes, link.file)
+                if let onOpenFile, let url = TranscriptChangesCard.previewURL(changes, file: link.file) { onOpenFile(url, nil) }
+                else { TranscriptLinks.openTurnChanges?(conversationID, changes, link.file) }
             }
             return true
         }

@@ -36,6 +36,13 @@ extension NSAttributedString.Key {
         return (id, parts.count > 1 ? parts[1] : nil)
     }
 
+    /// A binary file that still exists (PDF, image) opens in the preview pane: its diff has nothing to show.
+    nonisolated static func previewURL(_ changes: TurnChanges, file: String?) -> URL? {
+        guard let file, let entry = changes.list?.first(where: { $0.path == file }),
+              entry.added == nil, entry.removed == nil, entry.status != "deleted" else { return nil }
+        return URL(fileURLWithPath: changes.repository).appendingPathComponent(file)
+    }
+
     static func render(_ item: TranscriptItem, width: CGFloat, padding: CGFloat) -> NSAttributedString {
         let result = NSMutableAttributedString()
         guard let changes = item.timing?.changes else { return result }

@@ -153,6 +153,17 @@ private func turn(_ number: Int, _ id: String, otherChats: Bool? = nil) -> ChatT
     #expect(ChatFiles.storedFiles(cut) == nil)
 }
 
+@Test func binaryCardRowsOpenThePreviewInsteadOfTheDiff() {
+    let list = [TurnChanges.File(path: "docs/report.pdf", status: "added", added: nil, removed: nil),
+                TurnChanges.File(path: "old.png", status: "deleted", added: nil, removed: nil),
+                TurnChanges.File(path: "a.swift", status: "modified", added: 2, removed: 1)]
+    let changes = TurnChanges(repository: "/repo", start: "s", end: "e", files: 3, added: 2, removed: 1, list: list)
+    #expect(TranscriptChangesCard.previewURL(changes, file: "docs/report.pdf")?.path == "/repo/docs/report.pdf")
+    #expect(TranscriptChangesCard.previewURL(changes, file: "old.png") == nil)
+    #expect(TranscriptChangesCard.previewURL(changes, file: "a.swift") == nil)
+    #expect(TranscriptChangesCard.previewURL(changes, file: nil) == nil)
+}
+
 /// Cost of the column on a long chat: 3,000 items with paths in prose and tool calls, real file checks.
 @Test @MainActor func collectStaysCheapOnALongChat() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)

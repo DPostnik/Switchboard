@@ -394,7 +394,9 @@ struct ChatFilesSidebar: View {
                     Text(L10n.text("двоичный", "binary")).font(.ui(size: 10.5)).foregroundStyle(DeskPalette.muted)
                 }
             } hover: { EmptyView() } action: {
-                ChatChangesWindow.show(files.snapshot(), file: file.id, model: model)
+                // A binary file's diff has nothing to show: PDF and images open in the preview instead.
+                if file.isBinary, file.status != .deleted { open(URL(fileURLWithPath: file.absolutePath), nil) }
+                else { ChatChangesWindow.show(files.snapshot(), file: file.id, model: model) }
             }
             .contextMenu { changeMenu(file) }
             .transition(.opacity.combined(with: .move(edge: .top)))
