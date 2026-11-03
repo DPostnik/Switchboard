@@ -203,6 +203,35 @@ import ContextCore
     #expect(checked >= 3)
 }
 
+@Test @MainActor func openingALongChatLaysOutOnlyItsEndAndStylesOnce() throws {
+    let view = TranscriptScrollView()
+    let items = (0..<300).map { index in
+        TranscriptItem(id: "m\(index)", kind: index % 2 == 0 ? "user" : "assistant",
+                       text: String(repeating: "Строка истории номер \(index) с текстом.\n", count: 12))
+    }
+    // As in the app: items arrive before the view has its size.
+    view.update(items: items, conversationID: "long", followOutput: true)
+    view.frame = NSRect(x: 0, y: 0, width: 700, height: 500)
+    view.layoutSubtreeIfNeeded()
+    let manager = try #require(view.transcript.layoutManager)
+    let container = try #require(view.transcript.textContainer)
+    let storage = try #require(view.transcript.textStorage)
+    #expect(manager.hasNonContiguousLayout)
+    #expect(manager.firstUnlaidCharacterIndex() < storage.length / 2)
+    #expect(view.isAtTranscriptEnd)
+    let last = manager.glyphRange(forCharacterRange: NSRange(location: storage.length - 1, length: 1), actualCharacterRange: nil)
+    let end = manager.boundingRect(forGlyphRange: last, in: container).maxY + view.transcript.textContainerOrigin.y
+    #expect(view.transcript.visibleRect.maxY >= end - 2)
+    // Styled for the final column once the width is known: user bubbles carry their inset.
+    var bubbles = 0
+    storage.enumerateAttribute(.outgoingBubble, in: NSRange(location: 0, length: storage.length)) { value, _, _ in
+        if value != nil { bubbles += 1 }
+    }
+    #expect(bubbles == 150)
+    let first = try #require(storage.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)
+    #expect(abs(first.firstLineHeadIndent - (TranscriptScrollView.outgoingInset(items[0], width: container.containerSize.width) + 16)) < 0.5)
+}
+
 @Test @MainActor func expandingActionsDoesNotLoseFollowingMessages() {
     let view = TranscriptScrollView()
     let command = String(repeating: "длинная команда ", count: 3_000)

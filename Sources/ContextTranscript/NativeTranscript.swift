@@ -426,11 +426,28 @@ public struct NativeTranscript: NSViewRepresentable {
             restorePosition(position)
         } else if needsEndScroll {
             needsEndScroll = false
-            if let container = transcript.textContainer { transcript.layoutManager?.ensureLayout(for: container) }
+            layoutTail()
             transcript.scrollRangeToVisible(NSRange(location: transcript.textStorage?.length ?? 0, length: 0))
         }
         if Perf.end("chat.open", id: conversationID, "\(previous.count) rows") { Perf.watchHitches(in: self, for: 2) }
     }
+
+    /// Lays out the last rows, at least `tailCharacters` of them, so the end can be placed and shown; non-contiguous
+    /// layout fills in the history above only when it scrolls into view. Laying out the whole container here took
+    /// 1.3-1.7 s of a 1000-message chat's open.
+    private func layoutTail() {
+        guard let manager = transcript.layoutManager, let storage = transcript.textStorage, storage.length > 0 else { return }
+        var start = storage.length
+        for range in ranges.reversed() {
+            start = min(start, range.location)
+            if storage.length - start >= Self.tailCharacters { break }
+        }
+        if ranges.isEmpty { start = max(0, storage.length - Self.tailCharacters) }
+        manager.ensureLayout(forCharacterRange: NSRange(location: start, length: storage.length - start))
+    }
+
+    /// About two tall viewports of prose.
+    static let tailCharacters = 8_000
 
     public override func viewDidEndLiveResize() {
         super.viewDidEndLiveResize()
@@ -541,10 +558,12 @@ public struct NativeTranscript: NSViewRepresentable {
 
     private func restorePosition(_ position: TranscriptReadingPositions.Position) {
         guard let manager = transcript.layoutManager, let container = transcript.textContainer else { return }
-        // A document growing part by part only needs layout up to the reading position, not to its end.
-        if isDocument, case let .anchor(itemID, character, _, _) = position, let storage = transcript.textStorage,
+        // Only the text up to the reading position needs layout (the end: only the last rows), not the whole chat.
+        if case let .anchor(itemID, character, _, _) = position, let storage = transcript.textStorage,
            let index = previous.firstIndex(where: { $0.id == itemID }), ranges.indices.contains(index) {
             manager.ensureLayout(forCharacterRange: NSRange(location: 0, length: min(storage.length, ranges[index].location + character + 1)))
+        } else if case .end = position {
+            layoutTail()
         } else {
             manager.ensureLayout(for: container)
         }
@@ -564,7 +583,7 @@ public struct NativeTranscript: NSViewRepresentable {
         }
     }
 
-    /// Non-contiguous TextKit layout can place the final glyph at an estimated position. Lay out the container
+    /// Non-contiguous TextKit layout can place the final glyph at an estimated position. Lay out the last rows
     /// before deciding that the end is visible, but only when the viewport is within one viewport height of the
     /// document's end: farther up, the frame alone shows that the end is out of view, and no layout is forced.
     public var isAtTranscriptEnd: Bool {
@@ -574,7 +593,7 @@ public struct NativeTranscript: NSViewRepresentable {
         let viewport = contentView.bounds
         guard viewport.height > 0, viewport.maxY >= transcript.frame.maxY - viewport.height else { return false }
         let lastCharacter = NSRange(location: storage.length - 1, length: 1)
-        manager.ensureLayout(for: container)
+        layoutTail()
         let glyphs = manager.glyphRange(forCharacterRange: lastCharacter, actualCharacterRange: nil)
         let end = manager.boundingRect(forGlyphRange: glyphs, in: container).maxY + transcript.textContainerOrigin.y
         let visible = transcript.visibleRect
@@ -598,7 +617,7 @@ public struct NativeTranscript: NSViewRepresentable {
                                                options: .backwards, range: bodyRange)
         guard lastContent.location != NSNotFound else { return false }
         let end = NSMaxRange(lastContent)
-        manager.ensureLayout(for: container)
+        manager.ensureLayout(forCharacterRange: NSRange(location: range.location, length: end - range.location))
         let glyphs = manager.glyphRange(forCharacterRange: NSRange(location: end - 1, length: 1), actualCharacterRange: nil)
         let bottom = manager.boundingRect(forGlyphRange: glyphs, in: container).maxY + transcript.textContainerOrigin.y
         let visible = transcript.visibleRect
@@ -929,7 +948,9 @@ public struct NativeTranscript: NSViewRepresentable {
         while result.string.hasSuffix("\n") { result.deleteCharacters(in: NSRange(location: result.length - 1, length: 1)) }
         // Document parts continue on the next line; messages are separated by a gap.
         result.append(NSAttributedString(string: isDocument ? "\n" : "\n\n", attributes: [.font: NSFont.systemFont(ofSize: 14)]))
-        applyMessageStyle(item, to: result, range: NSRange(location: 0, length: result.length))
+        // Before the first layout the column width is unknown and `layout()` styles every message once it is;
+        // styling here as well did that work twice for every message of a newly opened chat.
+        if styledWidth > 0 { applyMessageStyle(item, to: result, range: NSRange(location: 0, length: result.length)) }
         return result
     }
 
