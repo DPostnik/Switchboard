@@ -15,4 +15,4 @@ units=$(value 'Data Units Written')
 [[ -n $units ]] || exit 0
 swapouts=$(vm_stat | awk -F: '/Swapouts/ { gsub(/[ .]/, "", $2); print $2 }')
 swap=$(sysctl -n vm.swapusage | awk '{ print $6 }')
-print -r -- "$(date +%Y-%m-%dT%H:%M:%S) written_gb=$(( units * 512000 / 1000000000 )) used_pct=$(value 'Percentage Used') power_on_h=$(value 'Power On Hours') swap_used=$swap swapouts_pages=$swapouts" >>"$log"
+print -r -- "$(date +%Y-%m-%dT%H:%M:%S) written_gb=$(( units * 512000 / 1000000000 )) used_pct=$(value 'Percentage Used') power_on_h=$(value 'Power On Hours') critical_warning=$(value 'Critical Warning') media_errors=$(value 'Media and Data Integrity Errors') spare_pct=$(value 'Available Spare') swap_used=$swap swapouts_pages=$swapouts" >>"$log"
