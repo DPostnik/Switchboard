@@ -1151,7 +1151,7 @@ struct ChatView: View {
                     }
                     ComposerPullRequestChip(model: model)
                     Spacer()
-                    ContextRing(usage: model.currentUsage, agentName: model.currentAgentName)
+                    ChatContextRing(activity: model.activity, chatID: model.chatID, agentName: model.currentAgentName)
                     SendControl(model: model, composer: model.composer, reduceMotion: reduceMotion)
                 }.padding(.horizontal, .ui(8)).padding(.bottom, .ui(8))
             }.background(RoundedRectangle(cornerRadius: 20).fill(DeskPalette.canvas).shadow(color: DeskPalette.shadow, radius: 14, y: 4))

@@ -187,7 +187,7 @@ enum FringeLinkMapping {
             lastSnapshot = nil
             answered = []
             NotchIslandController.setHandedOff(true)
-            observer = model.objectWillChange
+            observer = model.changes
                 .debounce(for: .milliseconds(150), scheduler: RunLoop.main)
                 .sink { [weak self] _ in self?.publish() }
             publish()

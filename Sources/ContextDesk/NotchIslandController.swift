@@ -130,7 +130,7 @@ import ContextCore
 
     private func start() {
         // Coalesce bursts of model changes (streamed deltas) into one snapshot.
-        model.objectWillChange
+        model.changes
             .debounce(for: .milliseconds(150), scheduler: RunLoop.main)
             .sink { [weak self] _ in self?.refresh() }
             .store(in: &observers)

@@ -21,6 +21,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Changed
 
+- The window stays responsive while chats stream: status lines, context usage and sub-agent updates no longer redraw the sidebar and the chat.
 - A streaming answer shows its list of web sources once it finishes (or when a tool call follows it).
 - Long chats take less memory, and a closed chat's text is released right away.
 - Long chats open instantly: the last screens are shown first and older messages are added above while you read; find, Select All and jumps to old messages load the whole history at once.

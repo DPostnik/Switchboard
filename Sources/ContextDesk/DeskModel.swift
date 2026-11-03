@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import SwiftUI
 import UserNotifications
@@ -96,8 +97,6 @@ private struct ChatRunState: Equatable {
     var priorityMessageID: String?
     /// The queued message whose "Interrupt and send" stopped the last turn; it goes out with `InterruptedTurnNote`.
     var interruptedFor: String?
-    /// Live activity label for the running turn; never persisted.
-    var status: String?
 }
 
 @MainActor final class DeskModel: ObservableObject {
@@ -273,7 +272,11 @@ private struct ChatRunState: Equatable {
     @Published var pending: [PendingAction] = []
     /// Chats that asked for the pending restart; mirrored from AppRestartController for the sidebar.
     @Published var restartWaitingChatIDs: [String] = []
-    @Published var usage: [String: UsageSnapshot] = [:]
+    /// Thread ID -> context usage; lives in `activity`, so a usage report does not publish the model.
+    var usage: [String: UsageSnapshot] {
+        get { activity.usage }
+        set { activity.replaceUsage(newValue) }
+    }
     /// Models the current agent's engine listed; empty for catalog agents.
     var models: [AgentModelInfo] { agentState(currentAgent).models }
     @Published var draftEffort = "medium"
@@ -352,13 +355,30 @@ private struct ChatRunState: Equatable {
     @Published private(set) var isBootstrapping = true {
         didSet { syncMenu() }
     }
+    /// Run flags per chat; they change at turn and send boundaries. The live activity line is in `activity.statuses`.
     @Published private var runs: [String: ChatRunState] = [:]
+    /// Values that change many times per turn, observed per property by the views that show them (`ChatActivityStore`).
+    let activity = ChatActivityStore()
+    /// Every change Combine consumers (phone sync, notch island, Fringe) follow: the model's publications and `activity`'s.
+    /// `objectWillChange` alone no longer covers status lines, usage, sub-agents and background waits.
+    var changes: AnyPublisher<Void, Never> {
+        objectWillChange.map { _ in () }.merge(with: activity.changes).eraseToAnyPublisher()
+    }
     /// Idle chats whose agent still runs background tasks and will resume on its own; thread ID -> task count.
-    @Published private(set) var backgroundWaits: [String: Int] = [:]
+    private(set) var backgroundWaits: [String: Int] {
+        get { activity.backgroundWaits }
+        set { activity.replaceBackgroundWaits(newValue) }
+    }
     /// Thread ID -> sub-agents its agent delegated to (running ones and those finished since the last user message).
-    @Published private(set) var subagents: [String: [AgentSubagent]] = [:]
+    private(set) var subagents: [String: [AgentSubagent]] {
+        get { activity.subagents }
+        set { activity.replaceSubagents(newValue) }
+    }
     /// Thread ID -> running sub-agents silent longer than `SubagentWatch` allows; set by `SubagentWatching`.
-    @Published var stalledSubagents: [String: Set<String>] = [:]
+    var stalledSubagents: [String: Set<String>] {
+        get { activity.stalledSubagents }
+        set { activity.replaceStalledSubagents(newValue) }
+    }
     /// Thread ID -> the commands and the settings its agent session last reported (ACP-shaped, stage C). Kept for the
     /// composer; not published because no view shows them yet (the composer has no command list, and the model and
     /// effort chips still come from the agent's model catalog).
@@ -377,7 +397,7 @@ private struct ChatRunState: Equatable {
     /// Any chat with a running turn or a send in flight; background passes yield to them.
     var anyChatRunsOrSends: Bool { runs.values.contains { $0.running || $0.sending } }
     var busy: Bool { runs[currentRunKey]?.running == true }
-    var workingStatus: String? { busy ? runs[currentRunKey]?.status : nil }
+    var workingStatus: String? { busy ? activity.statuses[currentRunKey] : nil }
     var workingSince: Date? { busy ? runs[currentRunKey]?.turnID.flatMap { turnStarts[currentRunKey + ":" + $0] } : nil }
     var queuePaused: Bool { runs[currentRunKey]?.queuePaused ?? true }
     var priorityMessageID: String? { runs[currentRunKey]?.priorityMessageID }
@@ -389,7 +409,7 @@ private struct ChatRunState: Equatable {
     /// Live activity label and start of a chat's running turn, for the notch island.
     func runActivity(threadID: String) -> (status: String?, since: Date?) {
         guard let run = runs[threadID], run.running else { return (nil, nil) }
-        return (run.status, run.turnID.flatMap { turnStarts[threadID + ":" + $0] })
+        return (activity.statuses[threadID], run.turnID.flatMap { turnStarts[threadID + ":" + $0] })
     }
     /// An idle chat whose agent will continue on its own once its background tasks finish.
     func backgroundWaitNotice(_ threadID: String) -> String? {
@@ -410,7 +430,7 @@ private struct ChatRunState: Equatable {
     private var tokenTotals: [String: TokenCounters] = [:]
     private var turnTokens: [String: ResponseTokenTracker] = [:]
     private func resetRuns() {
-        runs.removeAll(); turnStarts.removeAll(); tokenTotals.removeAll(); turnTokens.removeAll()
+        runs.removeAll(); activity.replaceStatuses([:]); turnStarts.removeAll(); tokenTotals.removeAll(); turnTokens.removeAll()
     }
     @Published var loadingChat = false
     @Published var error: String?
@@ -448,7 +468,10 @@ private struct ChatRunState: Equatable {
         self.summaryResources = summaryResources; self.summaryHome = summaryHome
         composer.onChange = { [weak self] text in self?.storeDraft(text) }
         refreshPlugins()
+        if Perf.enabled { publicationSignposts = observePublications { Perf.event("model.publish", $0) } }
     }
+    /// `model.publish` signpost subscriptions, only with `PerfSignposts` on.
+    private var publicationSignposts: [AnyCancellable] = []
 
     // Read the published IDs once: inside the predicate the @Published getter ran for every chat on every render.
     var selectedProject: Project? { guard let id = projectID else { return nil }; return project(id) }
@@ -855,30 +878,45 @@ private struct ChatRunState: Equatable {
         }
         persist()
     }
-    func refreshLimits(_ id: AgentConnectionID) async {
-        guard let slot = slots[id], agentState(id).connected, agentState(id).authenticated, !agentState(id).refreshingLimits else { return }
+    /// `quiet`: the engine reported new limits (Codex does after each model response, mid-turn). It shows no "Checking limits"
+    /// state and writes the result in one change, so each report publishes the model once instead of three or four times;
+    /// it waits for any refresh in flight. A user refresh supersedes a quiet one.
+    func refreshLimits(_ id: AgentConnectionID, quiet: Bool = false) async {
+        guard let slot = slots[id], agentState(id).connected, agentState(id).authenticated, !agentState(id).refreshingLimits,
+              !quiet || slot.limitsRequestID == nil else { return }
         let requestID = UUID()
         slot.limitsRequestID = requestID
-        agentStates[id]?.refreshingLimits = true
-        agentStates[id]?.limitsError = nil
+        if !quiet {
+            agentStates[id]?.refreshingLimits = true
+            agentStates[id]?.limitsError = nil
+        }
         defer {
-            if slot.limitsRequestID == requestID { agentStates[id]?.refreshingLimits = false; slot.limitsRequestID = nil }
+            if slot.limitsRequestID == requestID {
+                slot.limitsRequestID = nil
+                if !quiet { agentStates[id]?.refreshingLimits = false }
+            }
+        }
+        /// One publication for the whole result.
+        func apply(limits: AccountLimits?, error: String?) {
+            guard var next = agentStates[id] else { return }
+            next.limits = limits; next.limitsError = error
+            agentStates[id] = next
         }
         do {
             let result = try await slot.client.limits()
             guard slot.limitsRequestID == requestID, agentState(id).authenticated, agentState(id).connected else { return }
-            agentStates[id]?.limits = result
+            apply(limits: result, error: nil)
         } catch let failure as AgentOperationFailure where failure.rejection == .staleContext {
             return
         } catch let failure as AgentOperationFailure where failure.rejection == .unsupported(.accountLimits) && slot.profile.noLimitsNotice != nil {
             guard slot.limitsRequestID == requestID else { return }
-            agentStates[id]?.limits = nil
-            agentStates[id]?.limitsError = slot.profile.noLimitsNotice?()
+            apply(limits: nil, error: slot.profile.noLimitsNotice?())
         } catch {
             guard slot.limitsRequestID == requestID else { return }
-            agentStates[id]?.limitsError = agentState(id).limits == nil
+            let message = agentState(id).limits == nil
                 ? L10n.text("Не удалось получить лимиты. Попробуй обновить ещё раз.", "Could not fetch limits. Try refreshing again.")
                 : L10n.text("Не удалось обновить лимиты. Показаны последние полученные данные.", "Could not refresh limits. Showing the last available data.")
+            if agentState(id).limitsError != message { agentStates[id]?.limitsError = message }
         }
     }
     private func clearLimits(_ id: AgentConnectionID) {
@@ -1315,6 +1353,7 @@ private struct ChatRunState: Equatable {
         chatDrafts.removeValue(forKey: id)
         loadedThreads.remove(id)
         runs.removeValue(forKey: id)
+        activity.setStatus(nil, for: id)
         let notificationIDs = notifiedTurns.filter { $0.hasPrefix(id + ":") }.map { "turn:" + $0 }
         notifiedTurns = notifiedTurns.filter { !$0.hasPrefix(id + ":") }
         completedTurns = completedTurns.filter { !$0.key.hasPrefix(id + ":") }
@@ -1850,6 +1889,7 @@ private struct ChatRunState: Equatable {
                 tokenTotals[created] = .zero
                 runs[created] = runs[runKey]
                 runs.removeValue(forKey: runKey)
+                activity.moveStatus(from: runKey, to: created)
                 runKey = created
                 if visible && selectionGeneration == selection {
                     chatID = created
@@ -2217,7 +2257,7 @@ private struct ChatRunState: Equatable {
                 }, approvals: approvals, turn: runs[chat.id]?.turnID)
             if remote.running, let run = runs[chat.id] {
                 // The host replaces this with the current tool call when it saw one.
-                remote.activity = run.status.map { String($0.prefix(RemoteChat.activityLimit)) }
+                remote.activity = activity.statuses[chat.id].map { String($0.prefix(RemoteChat.activityLimit)) }
                 remote.runningSince = run.turnID.flatMap { turnStarts[chat.id + ":" + $0] }.map { Self.remoteTimestampFormatter.string(from: $0) }
             }
             if chat.isScheduledRecord { remote.readOnly = true; remote.supportsPhotos = false }
@@ -2433,7 +2473,8 @@ private struct ChatRunState: Equatable {
     private func resetAgentState(_ agent: AgentConnectionID) {
         let ids = Set(state.chats.filter { $0.nativeSession?.connection == agent }.map(\.id))
         clearAgentInteractions(agent)
-        for id in ids { runs[id] = nil; backgroundWaits[id] = nil; subagents[id] = nil; stalledSubagents[id] = nil; loadedThreads.remove(id) }
+        for id in ids { runs[id] = nil; loadedThreads.remove(id) }
+        activity.clearRuns(ids)
     }
     private func clearAgentInteractions(_ agent: AgentConnectionID) {
         let actions = pending.filter { $0.interaction.session.connection == agent }
@@ -2535,7 +2576,7 @@ private struct ChatRunState: Equatable {
             }
             if let issue { error = issue }
             await refreshAccount(id)
-        case .limitsChanged: await refreshLimits(id)
+        case .limitsChanged: await refreshLimits(id, quiet: true)
         case .disconnected:
             flushDeltas()
             slots[id]?.historyBackfillTask?.cancel()
@@ -2604,8 +2645,9 @@ private struct ChatRunState: Equatable {
                 }
                 // One publication for the whole change, and none when nothing changed.
                 var run = runs[thread] ?? ChatRunState()
-                run.running = true; run.turnID = turn; run.status = nil
+                run.running = true; run.turnID = turn
                 if runs[thread] != run { runs[thread] = run }
+                activity.setStatus(nil, for: thread)
                 if backgroundWaits[thread] != nil { backgroundWaits[thread] = nil }
                 noteTurnStarted(chatID: thread, turnID: turn)
             }
@@ -2654,7 +2696,7 @@ private struct ChatRunState: Equatable {
         case .status(let turn, let text):
             guard let thread, let run = runs[thread], run.running, turn == nil || run.turnID == turn else { return }
             // Claude repeats the status on every content block; identical text must not publish.
-            if run.status != text { runs[thread]?.status = text }
+            activity.setStatus(text, for: thread)
         case .background(let tasks):
             guard let thread else { return }
             let count = tasks > 0 ? tasks : nil
@@ -2678,6 +2720,33 @@ private struct ChatRunState: Equatable {
         }
     }
     private func flushDeltas() { transcript.flush() }
+
+    /// Calls `handler` with the property name on every `@Published` write (each one is an `objectWillChange`), for the
+    /// `model.publish` signpost (`PerfSignposts`) and the publication probes. Lives here because `runs` is private.
+    func observePublications(_ handler: @escaping @MainActor (String) -> Void) -> [AnyCancellable] {
+        func watch<P: Publisher>(_ publisher: P, _ name: String) -> AnyCancellable where P.Failure == Never {
+            publisher.dropFirst().sink { _ in MainActor.assumeIsolated { handler(name) } }
+        }
+        return [
+            watch($configuringBrowserChats, "configuringBrowserChats"), watch($newChatBrowserProfiles, "newChatBrowserProfiles"),
+            watch($newChatRoles, "newChatRoles"), watch($newChatWorkspaces, "newChatWorkspaces"), watch($creatingWorktree, "creatingWorktree"),
+            watch($worktreeRemovalOffers, "worktreeRemovalOffers"), watch($runningBrowserChats, "runningBrowserChats"),
+            watch($composerFocusRequest, "composerFocusRequest"), watch($plugins, "plugins"), watch($pluginIssues, "pluginIssues"),
+            watch($pluginStatuses, "pluginStatuses"), watch($pluginMessages, "pluginMessages"), watch($notices, "notices"),
+            watch($unreadResponseItems, "unreadResponseItems"), watch($state, "state"), watch($projectID, "projectID"),
+            watch($chatID, "chatID"), watch($showingArchive, "showingArchive"), watch($archiveViewingChat, "archiveViewingChat"),
+            watch($showingJobs, "showingJobs"), watch($jobs, "jobs"), watch($jobLedger, "jobLedger"), watch($schedulerReady, "schedulerReady"),
+            watch($attention, "attention"), watch($showingAttention, "showingAttention"), watch($archiveSummaries, "archiveSummaries"),
+            watch($summaryActiveThread, "summaryActiveThread"), watch($localHistoryNotice, "localHistoryNotice"), watch($routines, "routines"),
+            watch($creatingHandoff, "creatingHandoff"), watch($preparingHandoff, "preparingHandoff"), watch($handoffProgress, "handoffProgress"),
+            watch($pending, "pending"), watch($restartWaitingChatIDs, "restartWaitingChatIDs"),
+            watch($draftEffort, "draftEffort"), watch($agentStates, "agentStates"), watch($isBootstrapping, "isBootstrapping"),
+            watch($runs, "runs"), watch($stoppingTasks, "stoppingTasks"), watch($deletingChatIDs, "deletingChatIDs"),
+            watch($archivingChatIDs, "archivingChatIDs"), watch($loadingChat, "loadingChat"), watch($error, "error"),
+            watch($queueEdit, "queueEdit"), watch($notificationStatus, "notificationStatus"),
+            watch($notificationsAllowed, "notificationsAllowed"), watch($documentExpanded, "documentExpanded"),
+        ]
+    }
 }
 
 // MARK: - Claude scheduled run records

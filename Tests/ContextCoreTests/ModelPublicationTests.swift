@@ -1,5 +1,6 @@
 import AgentContract
 import Combine
+import Observation
 import Foundation
 import Testing
 import ContextCore
@@ -71,43 +72,107 @@ import ContextCore
     let chat = Chat(id: "run", projectID: UUID(), title: "Chat", model: "fixture")
     model.state.chats = [chat]
     let source = try #require(chat.nativeSession)
-    var changes = 0
-    let observer = model.objectWillChange.sink { changes += 1 }
-    defer { observer.cancel() }
+    // `changes`: the model's publications; `live`: the activity store's; `combined`: what phone sync, notch and Fringe follow.
+    var changes = 0, live = 0, combined = 0
+    let observers = [model.objectWillChange.sink { changes += 1 }, model.activity.changes.sink { live += 1 },
+                     model.changes.sink { combined += 1 }]
+    defer { observers.forEach { $0.cancel() } }
     await model.receive(.init(session: source, payload: .started(turn: "turn")))
     #expect(model.isBusy(threadID: chat.id))
-    #expect(changes == 1)
+    #expect(changes == 1 && live == 0)
     await model.receive(.init(session: source, payload: .started(turn: "turn")))
-    #expect(changes == 1)
+    #expect(changes == 1 && live == 0)
+    // Status lines, usage, background waits and sub-agents change the activity store only.
     await model.receive(.init(session: source, payload: .status(turn: "turn", text: "Thinking")))
     #expect(model.runActivity(threadID: chat.id).status == "Thinking")
-    #expect(changes == 2)
+    #expect(changes == 1 && live == 1)
     await model.receive(.init(session: source, payload: .status(turn: "turn", text: "Thinking")))
-    #expect(changes == 2)
+    #expect(live == 1)
     await model.receive(.init(session: source, payload: .status(turn: "turn", text: "Reading")))
     #expect(model.runActivity(threadID: chat.id).status == "Reading")
-    #expect(changes == 3)
+    #expect(live == 2)
     let usage = UsageSnapshot(measuredAt: Date(timeIntervalSince1970: 10))
     await model.receive(.init(session: source, payload: .usage(turn: nil, total: nil, snapshot: usage)))
-    #expect(model.usage[chat.id] == usage)
-    #expect(changes == 4)
+    #expect(model.usage[chat.id] == usage && model.activity.usage[chat.id] == usage)
+    #expect(live == 3)
     await model.receive(.init(session: source, payload: .usage(turn: nil, total: nil, snapshot: usage)))
-    #expect(changes == 4)
+    #expect(live == 3)
     await model.receive(.init(session: source, payload: .background(tasks: 0)))
     await model.receive(.init(session: source, payload: .subagents([])))
-    #expect(changes == 4)
+    #expect(live == 3)
     await model.receive(.init(session: source, payload: .background(tasks: 2)))
     #expect(model.backgroundWaits[chat.id] == 2)
-    #expect(changes == 5)
+    #expect(live == 4)
     await model.receive(.init(session: source, payload: .background(tasks: 2)))
-    #expect(changes == 5)
+    #expect(live == 4)
     let agent = AgentSubagent(id: "sub", title: "Explore", type: nil, prompt: "Find the files", background: false, depth: 1,
                               startedAt: Date(timeIntervalSince1970: 20))
     await model.receive(.init(session: source, payload: .subagents([agent])))
     #expect(model.subagents[chat.id] == [agent])
-    #expect(changes == 6)
+    #expect(live == 5)
     await model.receive(.init(session: source, payload: .subagents([agent])))
-    #expect(changes == 6)
+    #expect(changes == 1 && live == 5 && combined == 6)
+    // The next turn starts without the previous turn's status line.
+    await model.receive(.init(session: source, payload: .completed(completion("turn"))))
+    #expect(!model.isBusy(threadID: chat.id))
+    await model.receive(.init(session: source, payload: .started(turn: "next")))
+    #expect(model.isBusy(threadID: chat.id) && model.runActivity(threadID: chat.id).status == nil)
+}
+
+private func completion(_ turn: String) -> AgentTurnCompletion {
+    .init(id: turn, status: .completed, hasError: false, error: nil,
+          history: AgentHistoryTurn(id: turn, items: [], startedAt: nil, completedAt: nil, duration: nil, isComplete: true))
+}
+
+/// The views that show live activity read it through the model in their body. Observation must see those reads, or
+/// the views would no longer refresh now that the model does not publish these values.
+@Test @MainActor func liveActivityReadsThroughTheModelAreTracked() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let model = publicationModel(root, store: AppStore(file: root.appendingPathComponent("state.sqlite")))
+    let chat = Chat(id: "live", projectID: UUID(), title: "Chat", model: "fixture")
+    model.state.chats = [chat]
+    model.chatID = chat.id
+    let source = try #require(chat.nativeSession)
+    await model.receive(.init(session: source, payload: .started(turn: "turn")))
+    func tracked(_ read: @escaping @MainActor () -> Void, after change: () async -> Void) async -> Bool {
+        let fired = FiredFlag()
+        withObservationTracking { read() } onChange: { fired.set() }
+        await change()
+        return fired.value
+    }
+    // ChatHistoryView: the working row's status line.
+    #expect(await tracked({ _ = model.workingStatus }) {
+        await model.receive(.init(session: source, payload: .status(turn: "turn", text: "Reading")))
+    })
+    #expect(model.workingStatus == "Reading")
+    // ChatContextRing: the open chat's usage.
+    #expect(await tracked({ _ = model.activity.usage[chat.id] }) {
+        await model.receive(.init(session: source, payload: .usage(turn: nil, total: nil, snapshot: UsageSnapshot(last: 5, measuredAt: Date()))))
+    })
+    // SubagentsBar, SubagentsPanel, SubagentDetail.
+    let agent = AgentSubagent(id: "sub", title: "Explore", type: nil, prompt: "", background: true, depth: 1, startedAt: Date())
+    #expect(await tracked({ _ = model.subagents[chat.id] }) {
+        await model.receive(.init(session: source, payload: .subagents([agent])))
+    })
+    #expect(await tracked({ _ = model.stalledSubagents[chat.id] }) { model.stalledSubagents[chat.id] = ["sub"] })
+    // Sidebar row and chat: the background wait notice of an idle chat.
+    await model.receive(.init(session: source, payload: .completed(completion("turn"))))
+    #expect(await tracked({ _ = model.backgroundWaitNotice(chat.id) }) {
+        await model.receive(.init(session: source, payload: .background(tasks: 1)))
+    })
+    #expect(model.backgroundWaitNotice(chat.id) != nil)
+    // An unchanged value notifies nobody.
+    #expect(await tracked({ _ = model.backgroundWaitNotice(chat.id) }) {
+        await model.receive(.init(session: source, payload: .background(tasks: 1)))
+    } == false)
+}
+
+private final class FiredFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fired = false
+    func set() { lock.withLock { fired = true } }
+    var value: Bool { lock.withLock { fired } }
 }
 
 @Test func nativeSessionMapAnswersLikeTheChatFilter() {

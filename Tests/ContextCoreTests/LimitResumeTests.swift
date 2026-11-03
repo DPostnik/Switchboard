@@ -276,3 +276,26 @@ private func startedTexts(_ connection: CodexConnection) async throws -> [String
     // The saved state has no record left, so a further launch cannot send it again.
     #expect(try await store.load().chats.first { $0.id == "a" }?.limitResume == nil)
 }
+
+/// Codex reports new limits after each model response, mid-turn; each report must publish the model once, without the
+/// "Checking limits" state. A refresh the user asks for still shows it.
+@Test @MainActor func engineLimitReportsPublishTheModelOnce() async throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let (model, _, _) = try await limitModel(folder)
+    var names: [String] = []
+    let observers = model.observePublications { names.append($0) }
+    defer { observers.forEach { $0.cancel() } }
+    await model.receive(.init(session: nil, payload: .limitsChanged))
+    #expect(model.accountLimits?.buckets.isEmpty == false)
+    #expect(names == ["agentStates"])
+    await model.receive(.init(session: nil, payload: .limitsChanged))
+    #expect(names == ["agentStates", "agentStates"])
+    #expect(!model.agentState(.originalCodex).refreshingLimits && model.agentState(.originalCodex).limitsError == nil)
+    names = []
+    await model.refreshLimits()
+    // Progress on, limits error cleared, the result, progress off.
+    #expect(names == Array(repeating: "agentStates", count: 4))
+    #expect(model.accountLimits != nil && !model.agentState(.originalCodex).refreshingLimits)
+}

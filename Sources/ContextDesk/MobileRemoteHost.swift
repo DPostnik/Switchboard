@@ -169,7 +169,7 @@ import IOKit.ps
                 notePhonePresence(!peers.phones.isEmpty)
                 if phonePresent { requestPublication(immediate: true) }
             }
-            modelChanges = model.objectWillChange.merge(with: model.transcript.objectWillChange).sink { [weak self] _ in self?.requestPublication() }
+            modelChanges = model.changes.merge(with: model.transcript.objectWillChange.map { _ in () }).sink { [weak self] _ in self?.requestPublication() }
             observePowerAndSleep()
             updateSleepAssertion()
             channel.start()
