@@ -305,6 +305,168 @@ private struct TranscriptOrLoading: View {
     #expect((storage?.length ?? 0) == 0)
 }
 
+@MainActor private func keptChat(_ name: String, rows: Int = 20) -> [TranscriptItem] {
+    (0..<rows).map { TranscriptItem(id: "\(name)\($0)", kind: $0 % 2 == 0 ? "user" : "assistant",
+                                    text: "Чат \(name), сообщение \($0). " + String(repeating: "текст ", count: 40)) }
+}
+
+@Test @MainActor func switchingBackReusesTheKeptTextAndRendersOnlyWhatChanged() throws {
+    let view = TranscriptScrollView()
+    view.frame = NSRect(x: 0, y: 0, width: 700, height: 500)
+    let a = keptChat("a"), b = keptChat("b")
+    view.update(items: a, conversationID: "a", followOutput: true)
+    view.layoutSubtreeIfNeeded()
+    let storageA = try #require(view.transcript.textStorage)
+    let textA = view.transcript.string
+    view.update(items: b, conversationID: "b", followOutput: true)
+    view.layoutSubtreeIfNeeded()
+    #expect(view.transcript.textStorage !== storageA)
+    #expect(view.transcript.string.contains("Чат b, сообщение 19."))
+    #expect(view.renderedChats.map(\.id) == ["a"])
+    // Back to a: its own storage, nothing rendered, at the end as it was left.
+    var renders = view.renderCount
+    view.update(items: a, conversationID: "a", followOutput: true)
+    view.layoutSubtreeIfNeeded()
+    #expect(view.renderCount == renders)
+    #expect(view.transcript.textStorage === storageA)
+    #expect(view.transcript.string == textA)
+    #expect(view.isAtTranscriptEnd)
+    #expect(view.renderedChats.map(\.id) == ["b"])
+    // b got a message while it was away: only that row renders when it comes back.
+    let grown = b + [TranscriptItem(id: "b-new", kind: "user", text: "Новое сообщение в чате b")]
+    renders = view.renderCount
+    view.update(items: grown, conversationID: "b", followOutput: true)
+    view.layoutSubtreeIfNeeded()
+    #expect(view.renderCount - renders == 1)
+    let once = TranscriptScrollView()
+    once.update(items: grown, conversationID: "b", followOutput: true)
+    once.renderHistory()
+    #expect(view.transcript.string == once.transcript.string)
+}
+
+@Test @MainActor func keptChatsAreEvictedByCharactersAndReleaseTheirText() throws {
+    let view = TranscriptScrollView()
+    view.frame = NSRect(x: 0, y: 0, width: 700, height: 500)
+    let chats = ["a", "b", "c", "d"].map { ($0, keptChat($0)) }
+    view.update(items: chats[0].1, conversationID: "a", followOutput: true)
+    let length = try #require(view.transcript.textStorage).length
+    // Room for the shown chat and two kept ones.
+    view.renderedCharacterLimit = length * 3 + length / 2
+    var storages: [String: NSTextStorage] = [:]
+    for (id, items) in chats {
+        view.update(items: items, conversationID: id, followOutput: true)
+        storages[id] = view.transcript.textStorage
+    }
+    #expect(view.renderedChats.map(\.id) == ["b", "c"])
+    // The least recently shown chat went first, and its text with it.
+    #expect(storages["a"]?.length == 0)
+    #expect((storages["b"]?.length ?? 0) > 0)
+    // Coming back to it renders it again; coming back to a kept one does not.
+    var renders = view.renderCount
+    view.update(items: chats[0].1, conversationID: "a", followOutput: true)
+    #expect(view.renderCount > renders)
+    #expect(view.transcript.string.contains("Чат a, сообщение 19."))
+    renders = view.renderCount
+    view.update(items: chats[2].1, conversationID: "c", followOutput: true)
+    #expect(view.renderCount == renders)
+    // A chat longer than the limit alone is not kept.
+    view.renderedCharacterLimit = length / 2
+    let shown = view.transcript.textStorage
+    view.update(items: chats[3].1, conversationID: "d", followOutput: true)
+    #expect(view.renderedChats.isEmpty)
+    #expect(shown !== view.transcript.textStorage || !view.transcript.string.contains("Чат c"))
+    #expect(storages["b"]?.length == 0)
+}
+
+@Test @MainActor func closingTheTranscriptReleasesTheKeptChats() throws {
+    let view = TranscriptScrollView()
+    view.update(items: keptChat("a"), conversationID: "a", followOutput: true)
+    let kept = try #require(view.transcript.textStorage)
+    view.update(items: keptChat("b"), conversationID: "b", followOutput: true)
+    #expect(kept.length > 0)
+    view.tearDown()
+    #expect(kept.length == 0)
+    #expect(view.renderedChats.isEmpty)
+    #expect(view.transcript.textStorage?.length == 0)
+}
+
+@Test @MainActor func chatWhoseTurnFinishedWhileAwayRendersAgain() {
+    let view = TranscriptScrollView()
+    var a = keptChat("a")
+    view.update(items: a, conversationID: "a", followOutput: true, isWorking: true)
+    view.update(items: keptChat("b"), conversationID: "b", followOutput: true)
+    a.append(TranscriptItem(id: "a-final", kind: "assistant", text: "Итог", phase: "final_answer"))
+    let renders = view.renderCount
+    view.update(items: a, conversationID: "a", followOutput: true)
+    // File chips and images the answer mentioned may exist by now: rendered anew, as a finished turn is.
+    #expect(view.renderCount - renders > 1)
+    #expect(!view.renderedChats.contains { $0.id == "a" })
+    #expect(view.transcript.string.contains("Итог"))
+}
+
+/// The engine's history that replaces the stored transcript after an open usually differs in a row or two.
+@Test @MainActor func updateChangingARowInTheMiddleRendersOnlyThatRow() {
+    let view = TranscriptScrollView()
+    var items = keptChat("m")
+    view.update(items: items, conversationID: "m", followOutput: true)
+    items[12].text += " Уточнение из истории агента."
+    let renders = view.renderCount
+    view.update(items: items, conversationID: "m", followOutput: true)
+    #expect(view.renderCount - renders == 1)
+    let once = TranscriptScrollView()
+    once.update(items: items, conversationID: "m", followOutput: true)
+    once.renderHistory()
+    #expect(view.transcript.string == once.transcript.string)
+    #expect(view.previous == once.previous)
+}
+
+/// In the app: the loading state covers the transcript instead of replacing it, so the view and its kept chats stay.
+@Test @MainActor func chatHistoryKeepsItsTranscriptViewAcrossLoading() async throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let model = DeskModel(store: AppStore(file: folder.appendingPathComponent("state.sqlite")))
+    let host = NSHostingView(rootView: ChatHistoryView(model: model, transcript: model.transcript))
+    host.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+    func find(_ view: NSView) -> TranscriptScrollView? {
+        (view as? TranscriptScrollView) ?? view.subviews.lazy.compactMap(find).first
+    }
+    func settle() async throws {
+        for _ in 0..<3 { host.layoutSubtreeIfNeeded(); try await Task.sleep(for: .milliseconds(20)) }
+    }
+    func open(_ id: String, _ items: [TranscriptItem]) async throws {
+        model.loadingChat = true; model.chatID = id; model.items = []
+        try await settle()
+        model.items = items; model.loadingChat = false
+        try await settle()
+    }
+    try await open("a", keptChat("a"))
+    let view = try #require(find(host))
+    #expect(view.conversationID == "a")
+    try await open("b", keptChat("b"))
+    #expect(find(host) === view)
+    #expect(view.conversationID == "b")
+    let renders = view.renderCount
+    try await open("a", keptChat("a"))
+    #expect(find(host) === view)
+    #expect(view.renderCount == renders)
+    #expect(view.transcript.string.contains("Чат a, сообщение 19."))
+    #expect(!view.isCovered)
+    // A new, empty chat covers the transcript too; it and the kept chats stay.
+    model.chatID = nil; model.items = []
+    try await settle()
+    #expect(find(host) === view)
+    #expect(view.isCovered)
+    #expect(view.conversationID == "a")
+    #expect(view.renderedChats.map(\.id) == ["b"])
+    // A chat whose items appear without a loading state still opens from its end.
+    model.chatID = "c"
+    try await settle()
+    model.items = keptChat("c", rows: 2_000)
+    try await settle()
+    #expect(view.conversationID == "c")
+    #expect(!view.historyBacklog.isEmpty)
+    view.tearDown()
+}
+
 @Test @MainActor func reusedEarlierRequestsGroupLikeAFullRegroup() {
     let view = TranscriptScrollView()
     var items: [TranscriptItem] = []
@@ -662,6 +824,8 @@ private struct TranscriptOrLoading: View {
     let storage = try #require(view.transcript.textStorage)
     func controls() -> [(Int, String)] {
         var result: [(Int, String)] = []
+        // Another chat brings its own storage; the shown one is read each time.
+        guard let storage = view.transcript.textStorage else { return result }
         storage.enumerateAttribute(NSAttributedString.Key("ContextDeskQuoteCopy"), in: NSRange(location: 0, length: storage.length)) { value, range, _ in
             if let body = value as? String { result.append((range.location, body)) }
         }

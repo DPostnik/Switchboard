@@ -16,11 +16,15 @@ public struct NativeTranscript: NSViewRepresentable {
     let onReadToEnd: ((String, String) -> Void)?
     let projectPath: String?
     let onOpenFile: ((URL, Int?) -> Void)?
+    /// The next chat is loading: the view keeps what it shows (covered by the loading state) and its kept chats, and
+    /// takes the chat once its items arrive, so a recent chat comes back without rendering. Empty items are covered too.
+    let isLoading: Bool
     /// Read while the parent renders, so a zoom change updates the view.
     let zoom = InterfaceZoom.shared.scale
     public init(items: [TranscriptItem], conversationID: String?, followOutput: Bool, isWorking: Bool = false, workingStatus: String? = nil,
                 workingSince: Date? = nil, unreadCompletionID: String? = nil, unreadResponseItemID: String? = nil, projectPath: String? = nil,
-                onOpenFile: ((URL, Int?) -> Void)? = nil, onReadToEnd: ((String, String) -> Void)? = nil) {
+                isLoading: Bool = false, onOpenFile: ((URL, Int?) -> Void)? = nil, onReadToEnd: ((String, String) -> Void)? = nil) {
+        self.isLoading = isLoading
         self.unreadCompletionID = unreadCompletionID; self.onReadToEnd = onReadToEnd; self.projectPath = projectPath
         self.onOpenFile = onOpenFile
         self.unreadResponseItemID = unreadResponseItemID
@@ -45,6 +49,10 @@ public struct NativeTranscript: NSViewRepresentable {
         view.onReadToEnd = onReadToEnd
         view.onOpenFile = onOpenFile
         view.zoom = zoom
+        // Covered (loading, or an empty chat): the view keeps what it shows. Taking the empty items would make the chat's
+        // first items an ordinary update, rendered all at once instead of from the end.
+        view.isCovered = isLoading || items.isEmpty
+        guard !view.isCovered else { return }
         view.update(items: items, conversationID: conversationID, followOutput: followOutput,
                     isWorking: isWorking, workingStatus: workingStatus, workingSince: workingSince, unreadCompletionID: unreadCompletionID,
                     unreadResponseItemID: unreadResponseItemID, projectPath: projectPath)
@@ -56,7 +64,7 @@ public struct NativeTranscript: NSViewRepresentable {
     let pasteboard: NSPasteboard
     private(set) var previous: [TranscriptItem] = []
     private var ranges: [NSRange] = []
-    private var conversationID: String?
+    private(set) var conversationID: String?
     private var followed = false
     private var wasWorking = false
     private var expandedActions: Set<String> = []
@@ -72,9 +80,14 @@ public struct NativeTranscript: NSViewRepresentable {
     private var headlineMemo: (id: String, length: Int, headline: String)?
     /// Number of `render` calls so far; tests check that unchanged messages are not rendered again.
     public private(set) var renderCount = 0
+    /// `renderCount` and the time at the last chat switch, and whether its text was kept: the `chat.open` signpost
+    /// reports how many rows an open rendered.
+    private var openRenders = 0
+    private var openedAt: TimeInterval = 0
+    private var openReused = false
     /// Rendered answer blocks reused across the re-renders of a streamed message.
     let renderCache = TranscriptRenderCache()
-    private struct GroupingMemo {
+    fileprivate struct GroupingMemo {
         var conversationID: String?
         var isWorking: Bool
         /// The items grouped, and the index of their last user message, where the last request starts.
@@ -141,14 +154,16 @@ public struct NativeTranscript: NSViewRepresentable {
             guard abs(zoom - oldValue) > 0.001 else { return }
             magnification = zoom
             renderCache.invalidateStyles()
+            releaseRenderedChats()
             needsLayout = true
         }
     }
 
     public override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        // Diff line colors are blended at render time, so cached blocks belong to the old appearance.
+        // Diff line colors are blended at render time, so cached blocks and kept chats belong to the old appearance.
         renderCache.invalidateStyles()
+        releaseRenderedChats()
     }
 
     public init(pasteboard: NSPasteboard = .general, positions: TranscriptReadingPositions = TranscriptReadingPositions()) {
@@ -227,9 +242,9 @@ public struct NativeTranscript: NSViewRepresentable {
         view.enabledTextCheckingTypes = 0
     }
 
-    /// Called when SwiftUI removes the view (a chat switch shows the loading state instead). Its text stack can outlive
-    /// it, for a while in an autorelease pool or the shared typesetter, so the text is emptied: whatever still holds the
-    /// storage holds no chat. Reading positions were saved while scrolling and are not touched.
+    /// Called when SwiftUI removes the view (the chat area closes). Its text stack can outlive it, for a while in an
+    /// autorelease pool or the shared typesetter, so the text is emptied, also that of the chats kept for switching back:
+    /// whatever still holds a storage holds no chat. Reading positions were saved while scrolling and are not touched.
     public func tearDown() {
         changingLayout = true
         copyFeedbackTask?.cancel(); copyFeedbackTask = nil
@@ -237,11 +252,122 @@ public struct NativeTranscript: NSViewRepresentable {
         afterClick.removeAll()
         clearHistoryBacklog(); previous = []; ranges = []
         groupingMemo = nil; actionGroups = [:]; renderCache.removeAll()
+        releaseRenderedChats()
         transcript.textStorage?.setAttributedString(NSAttributedString())
+    }
+
+    // MARK: Recent chats
+
+    /// A chat switched away from, with its rendered text and the state that describes it, for switching back without
+    /// rendering again. Its storage is detached from the layout manager; it gets layout again when it is shown.
+    struct RenderedChat {
+        let storage: NSTextStorage
+        var previous: [TranscriptItem]
+        var ranges: [NSRange]
+        var historyBacklog: [TranscriptItem]
+        var historyPending: [NSAttributedString]
+        var historyPendingLength: Int
+        fileprivate var groupingMemo: GroupingMemo?
+        var actionGroups: [String: [TranscriptItem]]
+        var expandedActions: Set<String>
+        var expandedMetrics: Set<String>
+        var expandedBlocks: Set<String>
+        var expandedDetails: Set<String>
+        var sourcesDeferred: Set<String>
+        var styledWidth: CGFloat
+        var projectPath: String?
+        var wasWorking: Bool
+        var characters: Int { storage.length + historyPendingLength }
+        /// Emptied, not only dropped: an autorelease pool or the typesetter may still hold the storage for a while.
+        func release() {
+            storage.setAttributedString(NSAttributedString())
+            for part in historyPending { (part as? NSMutableAttributedString)?.setAttributedString(NSAttributedString()) }
+        }
+    }
+
+    /// Recently shown chats, least recent first. Their characters and the shown chat's together stay within
+    /// `renderedCharacterLimit`; a chat longer than that alone is not kept. Document previews keep none.
+    private(set) var renderedChats: [(id: String, chat: RenderedChat)] = []
+    /// About 2 M characters: a 1000-message chat renders to 1.6 M, about 55-110 bytes in memory per character.
+    static let renderedCharactersDefault = 2_000_000
+    var renderedCharacterLimit = TranscriptScrollView.renderedCharactersDefault
+
+    private func releaseRenderedChats() {
+        for entry in renderedChats { entry.chat.release() }
+        renderedChats.removeAll()
+    }
+
+    /// Evicts the least recently shown chats until the kept and the shown text fit the limit.
+    private func trimRenderedChats() {
+        var total = (transcript.textStorage?.length ?? 0) + historyPendingLength + renderedChats.reduce(0) { $0 + $1.chat.characters }
+        while total > renderedCharacterLimit, !renderedChats.isEmpty {
+            let evicted = renderedChats.removeFirst()
+            total -= evicted.chat.characters
+            evicted.chat.release()
+        }
+    }
+
+    /// On a chat switch: saves the reading place, keeps the shown chat's rendered text and state, and puts the next
+    /// chat's kept text in place. True when the next chat's text was kept and can be reused (it is compared with the
+    /// items as usual, so only rows that changed meanwhile are rendered); a chat whose turn finished meanwhile renders
+    /// again, as a finished turn does (file chips and images may exist by now).
+    private func switchRenderedChat(to next: String?, isWorking: Bool) -> Bool {
+        if let id = conversationID, let position = pendingPosition ?? capturePosition() { positions.values[id] = position }
+        pendingPosition = nil; needsEndScroll = false; deferredEndScroll = nil
+        hoveredItemID = nil; hoveredSection = nil
+        guard !isDocument, let manager = transcript.layoutManager, let storage = transcript.textStorage else { return false }
+        // A search belongs to the chat it ran in (the view used to be rebuilt on every switch).
+        if isFindBarVisible { isFindBarVisible = false }
+        if let feedback = copyFeedback {
+            // The kept text shows no "Copied" mark that nothing would clear.
+            copyFeedbackTask?.cancel(); copyFeedback = nil
+            rerenderItem(id: feedback.id)
+        }
+        var kept: RenderedChat?
+        if let index = renderedChats.firstIndex(where: { $0.id == next }) { kept = renderedChats.remove(at: index).chat }
+        if let chat = kept, chat.wasWorking && !isWorking { chat.release(); kept = nil }
+        let shown = storage.length + historyPendingLength
+        if let id = conversationID, !previous.isEmpty, shown > 0, shown <= renderedCharacterLimit {
+            renderedChats.append((id, RenderedChat(
+                storage: storage, previous: previous, ranges: ranges, historyBacklog: historyBacklog, historyPending: historyPending,
+                historyPendingLength: historyPendingLength, groupingMemo: groupingMemo, actionGroups: actionGroups,
+                expandedActions: expandedActions, expandedMetrics: expandedMetrics, expandedBlocks: expandedBlocks,
+                expandedDetails: expandedDetails, sourcesDeferred: sourcesDeferred, styledWidth: styledWidth,
+                projectPath: projectPath, wasWorking: wasWorking)))
+            transcript.setSelectedRange(NSRange(location: 0, length: 0))
+            manager.replaceTextStorage(kept?.storage ?? NSTextStorage())
+        } else if let chat = kept {
+            storage.setAttributedString(NSAttributedString())
+            transcript.setSelectedRange(NSRange(location: 0, length: 0))
+            manager.replaceTextStorage(chat.storage)
+        }
+        guard let chat = kept else {
+            // Rendered anew: `update` starts from an empty text.
+            if let current = transcript.textStorage, current.length > 0 { current.deleteCharacters(in: NSRange(location: 0, length: current.length)) }
+            previous = []; ranges = []; clearHistoryBacklog(); groupingMemo = nil; actionGroups = [:]
+            return false
+        }
+        previous = chat.previous; ranges = chat.ranges
+        historyBacklog = chat.historyBacklog; historyPending = chat.historyPending; historyPendingLength = chat.historyPendingLength
+        groupingMemo = chat.groupingMemo; actionGroups = chat.actionGroups
+        expandedActions = chat.expandedActions; expandedMetrics = chat.expandedMetrics
+        expandedBlocks = chat.expandedBlocks; expandedDetails = chat.expandedDetails; sourcesDeferred = chat.sourcesDeferred
+        styledWidth = chat.styledWidth; projectPath = chat.projectPath; wasWorking = chat.wasWorking
+        return true
     }
 
     /// The open chat's conversation; one main window shows at most one. Document previews are not registered.
     public fileprivate(set) static weak var chatTranscript: TranscriptScrollView?
+
+    /// The chat area shows a loading or empty state over the view (which stays to keep recent chats): it takes no
+    /// keyboard focus, find or read acknowledgement meanwhile.
+    public var isCovered = false {
+        didSet {
+            guard isCovered != oldValue else { return }
+            if isCovered, let window, window.firstResponder === transcript { window.makeFirstResponder(nil) }
+            if !isCovered { scheduleReadCheck() }
+        }
+    }
 
     /// Shows the native find bar above the text and moves focus into it; matches are highlighted as you type.
     public func showFind() {
@@ -264,7 +390,7 @@ public struct NativeTranscript: NSViewRepresentable {
             if let scroll = current as? TranscriptScrollView, scroll.transcript.usesFindBar { return scroll }
             view = current.superview
         }
-        guard let chat = chatTranscript, chat.window != nil else { return nil }
+        guard let chat = chatTranscript, chat.window != nil, !chat.isCovered else { return nil }
         return chat
     }
 
@@ -276,6 +402,11 @@ public struct NativeTranscript: NSViewRepresentable {
                          projectPath: projectPath)
         }) { return }
         let perfSpan = Perf.span("transcript.update", id: "\(items.count) items"); defer { perfSpan.end() }
+        let switched = self.conversationID != conversationID
+        // A chat shown recently comes back with its rendered text and state.
+        let reused = switched && switchRenderedChat(to: conversationID, isWorking: isWorking)
+        let rendersBefore = renderCount
+        if switched { openRenders = renderCount; openedAt = ProcessInfo.processInfo.systemUptime; openReused = reused }
         // Relative file links resolve against the project; a different project re-renders everything.
         let projectChanged = self.projectPath != projectPath
         self.projectPath = projectPath
@@ -293,11 +424,10 @@ public struct NativeTranscript: NSViewRepresentable {
         workingIndicator.isWorking = isWorking
         let finished = wasWorking && !isWorking
         wasWorking = isWorking
-        let switched = self.conversationID != conversationID
         // Rows opened during the turn close when it finishes; they are re-rendered in place below.
         let closing = finished && !switched ? expandedActions : []
-        if switched || finished { expandedActions.removeAll() }
-        if switched { expandedMetrics.removeAll(); expandedBlocks.removeAll(); expandedDetails.removeAll(); sourcesDeferred.removeAll() }
+        if (switched && !reused) || finished { expandedActions.removeAll() }
+        if switched && !reused { expandedMetrics.removeAll(); expandedBlocks.removeAll(); expandedDetails.removeAll(); sourcesDeferred.removeAll() }
         // A finished answer is rendered once more from scratch: file chips and images it mentioned may exist by now.
         if switched || finished || projectChanged { renderCache.removeAll() }
         if let feedback = copyFeedback,
@@ -309,7 +439,7 @@ public struct NativeTranscript: NSViewRepresentable {
         followed = followOutput
         // Older rows of a chat opened in parts wait in `historyBacklog`: they are compared, not rendered, and any change
         // among them renders the chat again.
-        var restart = switched || projectChanged
+        var restart = (switched && !reused) || projectChanged
         if !historyBacklog.isEmpty, !restart {
             if items.count >= historyBacklog.count, items.prefix(historyBacklog.count).elementsEqual(historyBacklog) {
                 items = Array(items[historyBacklog.count...])
@@ -323,7 +453,8 @@ public struct NativeTranscript: NSViewRepresentable {
             scheduleReadCheck()
             return
         }
-        let savedPosition = pendingPosition ?? capturePosition()
+        // A switch saved the previous chat's place before its text went away (`switchRenderedChat`).
+        let savedPosition = switched ? nil : pendingPosition ?? capturePosition()
         if let id = self.conversationID, let savedPosition { positions.values[id] = savedPosition }
         changingLayout = true
         defer { changingLayout = false; scheduleReadCheck() }
@@ -340,6 +471,14 @@ public struct NativeTranscript: NSViewRepresentable {
             while common < min(previous.count, items.count), previous[common] == items[common] { common += 1 }
         }
         let closingRows = closing.isEmpty ? [] : (0..<common).filter { closing.contains(previous[$0].id) }
+        // Rows equal at the end keep their rendering too: the engine's history that replaces the stored transcript
+        // after an open usually differs in a few rows (a decoration, a late changes card), not in everything after them.
+        // Not while an answer streams or a turn ends, when the last rows change or render once more anyway.
+        var suffix = 0
+        if !restart, !isWorking, !finished {
+            let limit = min(previous.count, items.count) - common
+            while suffix < limit, previous[previous.count - 1 - suffix] == items[items.count - 1 - suffix] { suffix += 1 }
+        }
         // A message the user just sent is brought into view even if they had scrolled up to re-read.
         // Only items after the last known one count: prepended older history also contains user messages.
         // While an answer streams the last row stays the same one: no set of every row's id per tick.
@@ -363,7 +502,9 @@ public struct NativeTranscript: NSViewRepresentable {
             for next in (index + 1)..<ranges.count { ranges[next].location += delta }
         }
         let start = common < ranges.count ? ranges[common].location : storage.length
-        storage.deleteCharacters(in: NSRange(location: start, length: storage.length - start))
+        let keptStart = suffix > 0 ? ranges[ranges.count - suffix].location : storage.length
+        let keptRanges = ranges.suffix(suffix)
+        storage.deleteCharacters(in: NSRange(location: start, length: keptStart - start))
         ranges = Array(ranges.prefix(common))
         // A chat rendered anew shows its end first; the rows above it follow in parts (`renderHistoryChunk`).
         var first = common
@@ -373,12 +514,28 @@ public struct NativeTranscript: NSViewRepresentable {
             var length = 0
             while first > 0, length < Self.firstScreenCharacters { first -= 1; length += items[first].text.utf16.count }
         }
-        for item in items.dropFirst(first) {
-            let rendered = render(item, expanded: expandedActions.contains(item.id))
-            ranges.append(NSRange(location: storage.length, length: rendered.length))
-            storage.append(rendered)
+        if suffix == 0 {
+            for item in items.dropFirst(first) {
+                let rendered = render(item, expanded: expandedActions.contains(item.id))
+                ranges.append(NSRange(location: storage.length, length: rendered.length))
+                storage.append(rendered)
+            }
+        } else {
+            let middle = NSMutableAttributedString()
+            for item in items[first..<(items.count - suffix)] {
+                let rendered = render(item, expanded: expandedActions.contains(item.id))
+                ranges.append(NSRange(location: start + middle.length, length: rendered.length))
+                middle.append(rendered)
+            }
+            storage.insert(middle, at: start)
+            let delta = start + middle.length - keptStart
+            ranges += keptRanges.map { NSRange(location: $0.location + delta, length: $0.length) }
         }
         storage.endEditing()
+        if Perf.enabled, !switched, renderCount > rendersBefore, ProcessInfo.processInfo.systemUptime - openedAt < 30, !isWorking {
+            // Rows rendered again soon after an open: the engine's history replacing the stored transcript (fix I).
+            Perf.event("chat.rerender", "\(conversationID ?? "") \(renderCount - rendersBefore) of \(items.count) rows, from row \(common), kept \(suffix) at the end")
+        }
         if restart, !isDocument {
             historyBacklog = Array(items[..<first])
             previous = Array(items[first...])
@@ -406,6 +563,7 @@ public struct NativeTranscript: NSViewRepresentable {
         if case let .anchor(itemID, _, _, _)? = pendingPosition, let index = historyBacklog.firstIndex(where: { $0.id == itemID }) {
             renderHistory(from: index)
         }
+        if !renderedChats.isEmpty { trimRenderedChats() }
         scheduleHistoryChunk()
     }
 
@@ -583,6 +741,7 @@ public struct NativeTranscript: NSViewRepresentable {
         historyBacklog.removeSubrange(index...)
         editCount += 1
         needsLayout = true
+        if !renderedChats.isEmpty { trimRenderedChats() }
     }
 
     /// NSTextView keeps the clicked link unretained between mouse-down and its delegate call, while its tracking loop
@@ -661,7 +820,9 @@ public struct NativeTranscript: NSViewRepresentable {
             layoutTail()
             transcript.scrollRangeToVisible(NSRange(location: transcript.textStorage?.length ?? 0, length: 0))
         }
-        if Perf.end("chat.open", id: conversationID, "\(previous.count) rows") { Perf.watchHitches(in: self, for: 2) }
+        if Perf.end("chat.open", id: conversationID, "\(previous.count) rows, \(renderCount - openRenders) rendered, \(openReused ? "kept text" : "new text")") {
+            Perf.watchHitches(in: self, for: 2)
+        }
     }
 
     /// Lays out the last rows, at least `tailCharacters` of them, so the end can be placed and shown; non-contiguous
@@ -768,8 +929,13 @@ public struct NativeTranscript: NSViewRepresentable {
     }
 
     private func rememberPosition() {
-        guard !changingLayout, pendingPosition == nil, !needsEndScroll,
-              let id = conversationID, let position = capturePosition() else { return }
+        guard !changingLayout, pendingPosition == nil, !needsEndScroll, let id = conversationID else { return }
+        // Checking the end lays out the last rows, and TextKit's resize of the text view may move the viewport: that
+        // is layout, not the reader scrolling (which pauses the older history).
+        changingLayout = true
+        let captured = capturePosition()
+        changingLayout = false
+        guard let position = captured else { return }
         positions.values[id] = position
         if case .end = position { pinnedToEnd = true } else { pinnedToEnd = false }
     }
@@ -872,7 +1038,7 @@ public struct NativeTranscript: NSViewRepresentable {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.readCheckScheduled = false
-            guard let completionID = self.unreadCompletionID, let threadID = self.conversationID,
+            guard let completionID = self.unreadCompletionID, let threadID = self.conversationID, !self.isCovered,
                   let window = self.window, window.isKeyWindow, window.isVisible, !window.isMiniaturized,
                   NSApplication.shared.isActive, !self.isHiddenOrHasHiddenAncestor,
                   !self.needsEndScroll, self.pendingPosition == nil, self.isUnreadResponseVisible else { return }

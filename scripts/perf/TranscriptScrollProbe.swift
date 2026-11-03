@@ -597,7 +597,7 @@ func stats(_ values: [Double]) -> [String: Any] {
             rows.append(["messages": size, "ok": ok, "loading_state_ms": ms(loading - start), "first_frame_ms": shown.map { ms($0 - start) } ?? -1,
                          "items_to_transcript_ms": ms(rendered - loading),
                          "draw_ms": ms(drawn - rendered), "total_ms": ms(drawn - start), "cpu_s": ((cpuSeconds() - cpu) * 1000).rounded() / 1000,
-                         "workspace_publications": publications - published])
+                         "workspace_publications": publications - published, "footprint_mb": footprintMB()])
             try await Task.sleep(for: .milliseconds(400))
         }
         report["desk_switch"] = ["rows": rows, "distinct_transcript_views": views, "switches": order.count]

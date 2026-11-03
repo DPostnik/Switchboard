@@ -21,6 +21,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Changed
 
+- Switching back to a recently viewed chat is instant: recent chats keep their rendered text (up to about 2 million characters in total).
 - The window stays responsive while chats stream: status lines, context usage and sub-agent updates no longer redraw the sidebar and the chat.
 - A streaming answer shows its list of web sources once it finishes (or when a tool call follows it).
 - Long chats take less memory, and a closed chat's text is released right away.

@@ -1314,31 +1314,41 @@ struct ChatHistoryView: View {
     @ObservedObject var transcript: TranscriptPresentation
     var onOpenFile: ((URL, Int?) -> Void)? = nil
     var body: some View {
-        if model.loadingChat {
-            ChatLoadingIndicator()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if transcript.items.isEmpty {
-            VStack {
-                EmptyState(icon: "bubble.left.and.bubble.right", title: L10n.text("Чем помочь с проектом?", "How can I help with your project?"), text: model.chatID == nil ? L10n.text("Первое сообщение создаст новый чат в папке «\(model.selectedProject?.name ?? "")»", "Your first message will create a new chat in “\(model.selectedProject?.name ?? "")”") : L10n.text("Чат в папке «\(model.selectedProject?.name ?? "")»", "Chat in “\(model.selectedProject?.name ?? "")”"))
-                if !model.selectedChatIsArchived {
-                    HStack {
-                        suggestion(L10n.text("Объясни проект", "Explain the project"), prompt: L10n.text("Объясни структуру этого проекта и как его запустить.", "Explain this project’s structure and how to run it."))
-                        suggestion(L10n.text("Найди проблемы", "Find problems"), prompt: L10n.text("Проверь проект и расскажи о найденных проблемах.", "Review the project and describe any problems you find."))
-                    }.padding(.bottom, 24)
-                }
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            let renderedItems = transcript.items
+        // The transcript view stays while a chat loads or a new chat is empty: it keeps recently shown chats rendered,
+        // so switching back to one swaps its text in instead of rendering it again.
+        let renderedItems = transcript.items
+        let covered = model.loadingChat || renderedItems.isEmpty
+        ZStack {
             // Always following: the transcript itself stops while the reader is scrolled up and resumes at the end.
             NativeTranscript(items: renderedItems, conversationID: model.chatID, followOutput: true,
                              isWorking: model.busy, workingStatus: model.workingStatus, workingSince: model.workingSince, unreadCompletionID: model.selectedChat?.unreadCompletionID,
                              unreadResponseItemID: model.chatID.flatMap { model.unreadResponseItems[$0] },
-                             projectPath: model.selectedWorkingDirectory, onOpenFile: onOpenFile) { threadID, completionID in
+                             projectPath: model.selectedWorkingDirectory, isLoading: model.loadingChat, onOpenFile: onOpenFile) { threadID, completionID in
                 guard transcript.items == renderedItems else { return }
                 model.markResponseRead(threadID: threadID, completionID: completionID)
             }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .opacity(covered ? 0 : 1)
+                .allowsHitTesting(!covered)
+                .accessibilityHidden(covered)
+            if model.loadingChat {
+                ChatLoadingIndicator()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if renderedItems.isEmpty {
+                emptyState
+            }
         }
+    }
+    private var emptyState: some View {
+        VStack {
+            EmptyState(icon: "bubble.left.and.bubble.right", title: L10n.text("Чем помочь с проектом?", "How can I help with your project?"), text: model.chatID == nil ? L10n.text("Первое сообщение создаст новый чат в папке «\(model.selectedProject?.name ?? "")»", "Your first message will create a new chat in “\(model.selectedProject?.name ?? "")”") : L10n.text("Чат в папке «\(model.selectedProject?.name ?? "")»", "Chat in “\(model.selectedProject?.name ?? "")”"))
+            if !model.selectedChatIsArchived {
+                HStack {
+                    suggestion(L10n.text("Объясни проект", "Explain the project"), prompt: L10n.text("Объясни структуру этого проекта и как его запустить.", "Explain this project’s structure and how to run it."))
+                    suggestion(L10n.text("Найди проблемы", "Find problems"), prompt: L10n.text("Проверь проект и расскажи о найденных проблемах.", "Review the project and describe any problems you find."))
+                }.padding(.bottom, 24)
+            }
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     private func suggestion(_ title: String, prompt: String) -> some View {
         Button(title) { model.composer.text = prompt }.buttonStyle(DeskButtonStyle())

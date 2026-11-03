@@ -181,7 +181,9 @@ import Testing
     }
 
     @Test func chatTranscriptHasTheFindBar() {
-        let host = NSHostingView(rootView: NativeTranscript(items: [], conversationID: "chat", followOutput: true))
+        // An empty chat is covered by its empty state and takes no Cmd+F; this one has a message.
+        let host = NSHostingView(rootView: NativeTranscript(items: [TranscriptItem(id: "m", kind: "assistant", text: "Ответ")],
+                                                            conversationID: "chat", followOutput: true))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = host
         host.layoutSubtreeIfNeeded()
