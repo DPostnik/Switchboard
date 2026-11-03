@@ -54,7 +54,8 @@ struct ComposerPullRequestChip: View {
     @ObservedObject var model: DeskModel
     @State private var showing = false
     @State private var edge = CompactPopoverPlacement.fallback.edge
-    @State private var height: CGFloat = 1
+    @State private var height: CGFloat?
+    @State private var maxHeight = CompactPopoverPlacement.fallback.maxHeight
     @State private var anchor = ScreenFrameProbe()
 
     var body: some View {
@@ -66,6 +67,7 @@ struct ComposerPullRequestChip: View {
                     // Measured before it opens: a popover that changes height after presentation leaves the screen.
                     let placement = anchor.compactPlacement
                     edge = placement.edge
+                    maxHeight = placement.maxHeight
                     height = FixedHeightPopover<EmptyView>.height(of: panel, placement: placement)
                 }
                 showing.toggle()
@@ -74,7 +76,7 @@ struct ComposerPullRequestChip: View {
                 .help(PullRequestText.summary(status))
                 .background(ScreenFrameReader(probe: anchor))
                 .popover(isPresented: $showing, arrowEdge: edge) {
-                    FixedHeightPopover(height: height) { panel }
+                    FixedHeightPopover(height: height, maxHeight: maxHeight) { panel }
                 }
         }
     }

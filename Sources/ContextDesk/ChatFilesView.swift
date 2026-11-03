@@ -161,28 +161,31 @@ struct ChatFilesOverlay: View {
     let open: (URL, Int?) -> Void
     let addToMessage: (URL) -> Void
     @AppStorage("chatFilesPanelOpen") private var panelOpen = false
+    /// Hides the tile and the panel in every chat; View → Show Chat Files brings them back.
+    @AppStorage(ChatFilesVisibility.hiddenKey) private var hidden = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Namespace private var morph
 
     var body: some View {
         GeometryReader { proxy in
         ZStack(alignment: .topTrailing) {
-            if model.selectedChat != nil, !files.isEmpty {
+            if model.selectedChat != nil, !files.isEmpty, !hidden {
                 if panelOpen {
                     ChatFilesSidebar(files: files, model: model, open: open, addToMessage: addToMessage,
                                      maxHeight: max(160, proxy.size.height - 130)) { toggle(false) }
-                        .background(shape.fill(DeskPalette.canvas).matchedGeometryEffect(id: "frame", in: morph))
+                        .background(shape.fill(DeskPalette.canvas))
                         .overlay(shape.stroke(DeskPalette.border, lineWidth: 1))
                         .clipShape(shape)
                         .shadow(color: DeskPalette.shadow, radius: 16, y: 6)
-                        .transition(.asymmetric(insertion: .opacity.animation(.easeOut(duration: 0.18).delay(0.05)), removal: .opacity.animation(.easeIn(duration: 0.1))))
+                        .contextMenu { hideButton }
+                        .transition(panelTransition)
                 } else {
                     ChatFilesTile(files: files) { toggle(true) }
-                        .background(shape.fill(DeskPalette.canvas).matchedGeometryEffect(id: "frame", in: morph))
+                        .background(shape.fill(DeskPalette.canvas))
                         .overlay(shape.stroke(DeskPalette.border, lineWidth: 1))
                         .clipShape(shape)
                         .shadow(color: DeskPalette.shadow, radius: 8, y: 3)
-                        .transition(.asymmetric(insertion: .opacity.animation(.easeOut(duration: 0.16).delay(0.08)), removal: .opacity.animation(.easeIn(duration: 0.08))))
+                        .contextMenu { hideButton }
+                        .transition(.asymmetric(insertion: .opacity.animation(.easeOut(duration: 0.14).delay(0.12)), removal: .opacity.animation(.easeIn(duration: 0.08))))
                 }
             }
         }
@@ -190,12 +193,38 @@ struct ChatFilesOverlay: View {
         }
         .padding(.top, 10).padding(.trailing, 12)
         .animation(reduceMotion ? .easeOut(duration: 0.12) : .spring(response: 0.36, dampingFraction: 0.86), value: panelOpen)
+        .animation(.easeOut(duration: 0.15), value: hidden)
+    }
+
+    private var hideButton: some View {
+        Button(L10n.text("Не показывать файлы чата", "Don't Show Chat Files")) { hidden = true }
     }
 
     private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 14, style: .continuous) }
 
+    /// The panel grows out of the tile's corner (top right) and shrinks back into it; only a fade with Reduce Motion.
+    private var panelTransition: AnyTransition {
+        if reduceMotion { return .opacity }
+        return .asymmetric(insertion: .scale(scale: 0.3, anchor: .topTrailing).combined(with: .opacity),
+                           removal: .scale(scale: 0.3, anchor: .topTrailing).combined(with: .opacity.animation(.easeIn(duration: 0.16))))
+    }
+
     private func toggle(_ open: Bool) {
         withAnimation(reduceMotion ? .easeOut(duration: 0.12) : .spring(response: 0.36, dampingFraction: 0.86)) { panelOpen = open }
+    }
+}
+
+/// Whether the chat files tile and panel are shown at all, shared by the overlay and the View menu.
+enum ChatFilesVisibility {
+    static let hiddenKey = "chatFilesHidden"
+}
+
+/// View menu toggle for the chat files tile and panel.
+struct ChatFilesMenuItem: View {
+    @AppStorage(ChatFilesVisibility.hiddenKey) private var hidden = false
+
+    var body: some View {
+        Toggle(L10n.text("Показывать файлы чата", "Show Chat Files"), isOn: Binding(get: { !hidden }, set: { hidden = !$0 }))
     }
 }
 
@@ -226,13 +255,15 @@ private struct ChatFilesTile: View {
             }
             .font(.ui(size: 11.5))
             .padding(.horizontal, 11).padding(.vertical, 7)
-            .background(hovering ? DeskPalette.rowHover.opacity(0.6) : .clear)
+            // One colour fading in and out: animating from .clear (transparent black) passes through a darker shade.
+            .background(DeskPalette.rowHover.opacity(hovering ? 0.6 : 0))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { value in withAnimation(.easeOut(duration: 0.12)) { hovering = value } }
         .pointingHandCursor()
-        .help(L10n.text("Показать файлы чата", "Show chat files"))
+        .help(L10n.text("Показать файлы чата. Убрать плашку совсем: правый клик или Вид → Показывать файлы чата",
+                        "Show chat files. To remove the tile, right-click it or use View → Show Chat Files"))
         .accessibilityLabel(L10n.text("Файлы чата", "Chat files"))
     }
 }

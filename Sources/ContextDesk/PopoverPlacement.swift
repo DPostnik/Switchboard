@@ -75,18 +75,33 @@ final class ScreenFrameProbe {
 /// A popover's content at a height fixed when it opens. A SwiftUI popover that changes height after it is shown
 /// grows downward from its top edge (seen on macOS 26: a popover above a composer chip ran 323 pt past the screen
 /// bottom), so content is measured before presentation and anything added later scrolls inside this frame.
+/// Without a measurement (`height` nil) the content sizes itself, capped to `maxHeight`.
 struct FixedHeightPopover<Content: View>: View {
-    let height: CGFloat
+    let height: CGFloat?
+    var maxHeight: CGFloat = CompactPopoverPlacement.fallback.maxHeight
     @ViewBuilder let content: Content
 
     var body: some View {
-        ScrollView { content }.scrollBounceBehavior(.basedOnSize).frame(height: height)
+        if let height {
+            ScrollView { content }.scrollBounceBehavior(.basedOnSize).frame(height: height)
+        } else {
+            content.frame(maxHeight: maxHeight)
+        }
     }
 
-    /// The natural height of `view`, capped to the room the placement allows.
-    @MainActor static func height(of view: some View, placement: CompactPopoverPlacement) -> CGFloat {
-        let natural = NSHostingView(rootView: view.fixedSize(horizontal: false, vertical: true)).fittingSize.height
-        return min(max(natural, 1), placement.maxHeight)
+    /// Below this a measurement is treated as failed: no popover here is that short.
+    static var minimumMeasuredHeight: CGFloat { 24 }
+
+    /// The natural height of `view`, capped to the room the placement allows, or nil when the hosting view has not
+    /// laid it out yet (seen in the running app: a 0 pt result opened the PR popover as a bare arrow and border).
+    @MainActor static func height(of view: some View, placement: CompactPopoverPlacement) -> CGFloat? {
+        let host = NSHostingController(rootView: view.fixedSize(horizontal: false, vertical: true))
+        let natural = host.sizeThatFits(in: CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)).height
+        guard natural.isFinite, natural >= minimumMeasuredHeight else {
+            AppLog.ui.error("popover measured \(natural, privacy: .public) pt; sizing to content")
+            return nil
+        }
+        return min(natural, placement.maxHeight)
     }
 }
 

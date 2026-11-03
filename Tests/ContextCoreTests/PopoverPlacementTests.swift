@@ -64,4 +64,18 @@ struct PopoverPlacementTests {
     let view = Color.clear.frame(width: 200, height: 300)
     #expect(FixedHeightPopover<EmptyView>.height(of: view, placement: CompactPopoverPlacement(edge: .top, maxHeight: 500)) == 300)
     #expect(FixedHeightPopover<EmptyView>.height(of: view, placement: CompactPopoverPlacement(edge: .top, maxHeight: 200)) == 200)
+    // A zero measurement is not used as the popover's height.
+    #expect(FixedHeightPopover<EmptyView>.height(of: Color.clear.frame(width: 200, height: 0), placement: CompactPopoverPlacement(edge: .top, maxHeight: 500)) == nil)
+}
+
+@MainActor @Test func pullRequestPopoverMeasuresItsContent() {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let model = DeskModel(store: AppStore(file: root.appendingPathComponent("state.sqlite")),
+                          jobStore: JobStore(file: root.appendingPathComponent("jobs.json")))
+    let status = PullRequestStatus(number: 163, title: "Chat files tile", url: "https://github.com/o/r/pull/163", state: .open,
+                                   checks: [PullRequestCheck(name: "test", outcome: .passed)], headRefName: "desktop", baseRefName: "main")
+    let panel = PullRequestPopover(model: model, status: status, chatID: "chat").padding(16).frame(width: 320)
+    let height = FixedHeightPopover<EmptyView>.height(of: panel, placement: CompactPopoverPlacement(edge: .top, maxHeight: 800))
+    #expect((height ?? 0) > 120)
 }

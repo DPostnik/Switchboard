@@ -148,6 +148,8 @@ struct ContextDeskApp: App {
             CommandGroup(after: .toolbar) {
                 InterfaceZoomMenu()
                 Divider()
+                ChatFilesMenuItem()
+                Divider()
             }
             CommandMenu(L10n.text("Браузеры", "Browsers")) {
                 RunningBrowsersMenu(model: model)
