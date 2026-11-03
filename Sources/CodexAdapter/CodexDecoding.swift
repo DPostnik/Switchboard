@@ -103,7 +103,8 @@ enum CodexDecoding {
 
     /// Codex 0.160.0 `ThreadItem` "commandExecution" once finished (`status` "completed", "failed" or "declined"): its
     /// `aggregatedOutput` (stdout and stderr), `exitCode` and `durationMs` as the result item `<id>:result`, paired with
-    /// the call item like a Claude tool result. Nil while it runs or when its status is unknown.
+    /// the call item like a Claude tool result; the output is capped (`ActivityRetention.cap`) like Claude's tool results.
+    /// Nil while it runs or when its status is unknown.
     static func commandResult(_ raw: JSONValue) -> TranscriptItem? {
         guard raw["type"].string == "commandExecution", let id = raw["id"].string else { return nil }
         let status = raw["status"].string
@@ -117,7 +118,8 @@ enum CodexDecoding {
         default: return nil
         }
         item.seconds = raw["durationMs"].int.flatMap { $0 >= 0 ? Double($0) / 1_000 : nil }
-        return item
+        // Capped as the store caps it (head and tail): a huge build log is not held whole in the open chat.
+        return ActivityRetention.cap(item)
     }
 
     /// Reasoning as shown: the summary parts, or the raw reasoning parts when there is no summary; blank parts dropped.

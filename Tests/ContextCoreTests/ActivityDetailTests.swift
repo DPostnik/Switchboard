@@ -46,6 +46,12 @@ private func notification(_ method: String, item: String) throws -> JSONValue {
     let lost = try #require(CodexDecoding.commandResult(try json(codexCommand(status: "failed"))))
     #expect(lost.failed == true && ActivityDetail.outcome(lost) == .failed)
     #expect(CodexDecoding.commandResult(try json(codexCommand(status: "future"))) == nil)
+    // A huge output is capped at decode, as the store would cap it: head and tail, with the original size.
+    let long = String(repeating: "line of build output\n", count: 20_000)
+    let capped = try #require(CodexDecoding.commandResult(try json(codexCommand(status: "completed", exitCode: "0",
+        output: String(data: try JSONEncoder().encode(long), encoding: .utf8)!, duration: "5"))))
+    #expect(capped.fullLength == long.utf8.count && capped.text.utf8.count < ActivityRetention.capBytes + 200)
+    #expect(capped.text.hasPrefix("line of build output") && capped == ActivityRetention.cap(capped))
     // History (`thread/read` turns) carries the result item after its call.
     let turn = try json(#"{"id":"turn-1","status":"completed","items":[\#(codexCommand(status: "completed", exitCode: "0", output: #""ok\n""#, duration: "12"))]}"#)
     #expect(AgentHistoryTurn(turn).items.map(\.id) == ["call_7", "call_7:result"])
