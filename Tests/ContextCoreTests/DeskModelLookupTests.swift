@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import Testing
 import ContextCore
@@ -34,4 +35,27 @@ import ContextCore
     model.state.chats.append(Chat(id: "two", projectID: a.id, title: "Duplicate", model: ""))
     #expect(model.chat("two")?.title == "Two")
     #expect(model.workingDirectory(forChat: "two") == "/tmp/b" && model.workingDirectory(forChat: "zero") == nil)
+}
+
+@MainActor @Test func browsersMenuFollowsRunningBrowsersAndChatTitles() {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let model = DeskModel(pluginDirectory: root)
+    let project = Project(path: "/tmp/browsers")
+    model.state.projects = [project]
+    model.state.chats = [Chat(id: "one", projectID: project.id, title: "One", model: ""),
+                         Chat(id: "two", projectID: project.id, title: "Two", model: "")]
+    var publications = 0
+    let watch = model.browsersMenu.objectWillChange.sink { publications += 1 }
+    defer { watch.cancel() }
+    model.state.chats[0].title = "Still one" // No browser runs: nothing to publish.
+    #expect(model.browsersMenu.entries.isEmpty && publications == 0)
+    model.runningBrowserChats = ["two": 42]
+    #expect(model.browsersMenu.entries == [.init(id: "two", label: "Two · browsers")])
+    model.state.chats[0].title = "Other" // Not a browser chat: the rows stay, the menu is not rebuilt.
+    #expect(publications == 1)
+    model.state.chats[1].title = "Renamed"
+    #expect(model.browsersMenu.entries.map(\.label) == ["Renamed · browsers"] && publications == 2)
+    model.runningBrowserChats = [:]
+    #expect(model.browsersMenu.entries.isEmpty)
 }

@@ -1,6 +1,9 @@
+import AppKit
 import Foundation
+import SwiftUI
 import Testing
 @testable import ContextCore
+@testable import ContextTranscript
 
 @MainActor struct InterfaceZoomTests {
     private func defaults() -> UserDefaults {
@@ -42,5 +45,13 @@ import Testing
         let zoom = InterfaceZoom(defaults: store)
         zoom.zoomIn(); #expect(zoom.scale == 1.4)
         zoom.set(1.3); zoom.zoomOut(); #expect(zoom.scale == 1.25)
+    }
+}
+
+@MainActor @Test func zoomedTextSizesMatchTheSystemStyleAtEachScale() {
+    for scale: CGFloat in [1.25, 0.9, 1.25, 2] {
+        for (style, appKit) in [(Font.TextStyle.body, NSFont.TextStyle.body), (.caption, .caption1), (.headline, .headline), (.title2, .title2)] {
+            #expect(ZoomedTextSizes.size(style, scale: scale) == (NSFont.preferredFont(forTextStyle: appKit).pointSize * scale).rounded())
+        }
     }
 }

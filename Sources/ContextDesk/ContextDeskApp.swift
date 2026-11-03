@@ -153,7 +153,7 @@ struct ContextDeskApp: App {
                 Divider()
             }
             CommandMenu(L10n.text("Браузеры", "Browsers")) {
-                RunningBrowsersMenu(model: model)
+                RunningBrowsersMenu(model: model, browsers: model.browsersMenu)
             }
             CommandGroup(replacing: .help) {
                 SettingsLink { Text("Язык / Language…") }
@@ -296,23 +296,37 @@ private struct StartupLoadingView: View {
 }
 
 /// Names the chat behind each running Chrome for Testing; choosing one opens the chat and shows its browser.
+/// It observes `RunningBrowsersState` only, so a model change that leaves the browsers alone does not rebuild it.
 struct RunningBrowsersMenu: View {
-    @ObservedObject var model: DeskModel
+    let model: DeskModel
+    @ObservedObject var browsers: RunningBrowsersState
     var body: some View {
-        let chats = model.state.chats.filter { model.runningBrowserChats[$0.id] != nil }
-        if chats.isEmpty {
+        let entries = browsers.entries
+        if entries.isEmpty {
             Text(L10n.text("Нет открытых браузеров чатов", "No chat browsers are open"))
         } else {
-            Text(L10n.text("Открыто браузеров: \(chats.count)", "Open browsers: \(chats.count)"))
-            ForEach(chats) { chat in
-                let project = model.state.projects.first { $0.id == chat.projectID }?.name
-                Button([chat.title, project].compactMap { $0 }.joined(separator: " · ")) {
+            Text(L10n.text("Открыто браузеров: \(entries.count)", "Open browsers: \(entries.count)"))
+            ForEach(entries) { entry in
+                Button(entry.label) {
                     Task {
+                        guard let chat = model.chat(entry.id) else { return }
                         await model.openChat(chat)
-                        model.showBrowser(chatID: chat.id)
+                        model.showBrowser(chatID: entry.id)
                     }
                 }
             }
         }
+    }
+}
+
+/// The Browsers menu's rows (chat title · project), published only when they change.
+@MainActor final class RunningBrowsersState: ObservableObject {
+    struct Entry: Equatable, Identifiable {
+        let id: String
+        let label: String
+    }
+    @Published private(set) var entries: [Entry] = []
+    func update(_ entries: [Entry]) {
+        if self.entries != entries { self.entries = entries }
     }
 }

@@ -109,7 +109,11 @@ private struct ChatRunState: Equatable {
     @Published var worktreeRemovalOffers: [WorktreeRemovalOffer] = []
     var worktrees = GitWorktrees()
     /// Chat ID -> PID of its running Chrome for Testing; refreshed by `startBrowserActivityMonitor`.
-    @Published var runningBrowserChats: [String: Int32] = [:]
+    @Published var runningBrowserChats: [String: Int32] = [:] {
+        didSet { syncBrowsersMenu() }
+    }
+    /// Observed by the Browsers menu instead of the model (`ContextDeskApp`).
+    let browsersMenu = RunningBrowsersState()
     @Published private(set) var composerFocusRequest: UUID?
     @Published private(set) var plugins: [ProviderPlugin] = []
     @Published private(set) var pluginIssues: [String] = []
@@ -135,13 +139,20 @@ private struct ChatRunState: Equatable {
     private var directoryHistoryCache: [String: (updated: Date, messages: [TranscriptItem])] = [:]
     @Published var state = SavedState() {
         // Any state change may add, remove or re-key a chat; the next event rebuilds the map.
-        didSet { nativeSessionMap = nil; lookup = nil; sidebarChats = nil; syncMenu() }
+        didSet { nativeSessionMap = nil; lookup = nil; sidebarChats = nil; syncMenu(); syncBrowsersMenu() }
     }
     /// Observed by the app menu instead of the model (`ContextDeskApp`).
     let menu = AppMenuState()
     /// Command palette and chat shortcuts (`ChatNavigation.swift`).
     let navigation = DeskNavigation()
     private func syncMenu() { menu.update(ready: !isBootstrapping, hasProject: selectedProject != nil) }
+    private func syncBrowsersMenu() {
+        guard !runningBrowserChats.isEmpty else { return browsersMenu.update([]) }
+        browsersMenu.update(state.chats.compactMap { chat in
+            runningBrowserChats[chat.id] == nil ? nil
+                : RunningBrowsersState.Entry(id: chat.id, label: [chat.title, project(chat.projectID)?.name].compactMap { $0 }.joined(separator: " · "))
+        })
+    }
     /// (connection, native ID) -> chat ID for `receive`, built on demand after a state change instead of
     /// filtering every chat for every streamed delta.
     private var nativeSessionMap: NativeSessionMap?

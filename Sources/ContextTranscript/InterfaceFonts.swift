@@ -7,8 +7,7 @@ public extension Font {
     @MainActor static func ui(_ style: Font.TextStyle, design: Font.Design? = nil) -> Font {
         let scale = InterfaceZoom.shared.scale
         if scale == 1 { return design.map { .system(style, design: $0) } ?? .system(style) }
-        let base = NSFont.preferredFont(forTextStyle: style.appKit).pointSize
-        return .system(size: (base * scale).rounded(), weight: style == .headline ? .bold : .regular, design: design ?? .default)
+        return .system(size: ZoomedTextSizes.size(style, scale: scale), weight: style == .headline ? .bold : .regular, design: design ?? .default)
     }
 
     /// A fixed point size multiplied by the interface zoom.
@@ -28,6 +27,20 @@ public extension View {
     @MainActor func uiSmallSpinner() -> some View {
         let scale = InterfaceZoom.shared.scale
         return controlSize(.small).scaleEffect(scale).frame(width: .ui(16), height: .ui(16))
+    }
+}
+
+/// Zoomed point sizes per text style; `NSFont.preferredFont` on every call showed up in sidebar renders.
+/// A zoom change empties the cache.
+@MainActor enum ZoomedTextSizes {
+    private static var scale: CGFloat = 0
+    private static var sizes: [Font.TextStyle: CGFloat] = [:]
+    static func size(_ style: Font.TextStyle, scale: CGFloat) -> CGFloat {
+        if scale != self.scale { self.scale = scale; sizes.removeAll() }
+        if let size = sizes[style] { return size }
+        let size = (NSFont.preferredFont(forTextStyle: style.appKit).pointSize * scale).rounded()
+        sizes[style] = size
+        return size
     }
 }
 
