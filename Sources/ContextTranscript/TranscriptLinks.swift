@@ -250,6 +250,7 @@ extension NSAttributedString.Key {
             if let line, !title.hasSuffix(line) { title += line }
             result.append(NSAttributedString(string: "\u{2009}" + title, attributes: style))
             result.addAttributes(style, range: NSRange(location: 0, length: 1))
+            if let font = style[.font] as? NSFont { result.addAttribute(.font, value: thinSpaceFont(for: font), range: NSRange(location: 1, length: 1)) }
         } else {
             style[.underlineStyle] = NSUnderlineStyle.single.rawValue
             style[.underlineColor] = DeskPalette.ns.accentDeep.withAlphaComponent(0.35)
@@ -276,6 +277,18 @@ extension NSAttributedString.Key {
             let style = chunk.attributes(at: match.range.location, effectiveRange: nil)
             chunk.replaceCharacters(in: match.range, with: link(text, url: file.url, line: file.line, style: style, options: options, keepText: true))
         }
+    }
+
+    /// The font that draws the thin space after a chip's icon. SF Mono (inline code) has no U+2009, and text layout
+    /// substituted a fallback font object of its own, with a ~28 KB glyph cache, for every chip: about half of a
+    /// rendered chat's memory. The same fallback, looked up once per font, keeps the spacing as it was.
+    private static var thinSpaceFonts: [String: NSFont] = [:]
+    static func thinSpaceFont(for font: NSFont) -> NSFont {
+        let key = "\(font.fontName)@\(font.pointSize)"
+        if let known = thinSpaceFonts[key] { return known }
+        let fallback = CTFontCreateForString(font as CTFont, "\u{2009}" as CFString, CFRange(location: 0, length: 1)) as NSFont
+        thinSpaceFonts[key] = fallback
+        return fallback
     }
 
     /// Icons by file type, cached: per-file icon lookups cost ~20 ms each and dominated long documents.
