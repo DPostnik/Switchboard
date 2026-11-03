@@ -714,8 +714,10 @@ public actor ClaudeIntegration: AgentIntegration {
             guard value["session_id"].string == id, value["is_error"].bool != nil else { await wire.close(); return }
             // A resumed CLI ended a turn of its own while the user's message is still being submitted (during `initialize`).
             if sessions[id]?.active == nil, submitting.contains(id) { return }
-            // The CLI's own turn ended while the user's message still waits in its queue; that message starts next.
-            if let command = commands[id], command.queued, !command.started, !interrupted.contains(id) { return }
+            // The CLI's own turn ended while the user's message still waits in its queue or is not read yet; that message
+            // starts next. Such a result names its origin (2.1.292: `task-notification`); the reply to a user message has none.
+            if let command = commands[id], !command.started, !interrupted.contains(id),
+               command.queued || value["origin"]["kind"].string != nil { return }
             let outcome: AgentExecutionOutcome = interrupted.contains(id) ? .cancelled : value["is_error"].bool == true ? .failed : .completed
             // Background tasks live in this CLI, which resumes the agent itself when they finish; a stopped turn ends them.
             let keep = !interrupted.contains(id) && !(backgroundTasks[id] ?? []).isEmpty

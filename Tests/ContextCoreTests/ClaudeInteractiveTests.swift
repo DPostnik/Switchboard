@@ -165,6 +165,19 @@ private func interactiveFixture(_ root: URL) throws -> URL {
                 life('completed')
                 result()
                 continue
+            if prompt=='notified-unread':
+                # Claude Code 2.1.292: the CLI's own turn ends before it reads the message; its result names its origin.
+                def life(state): out({'type':'command_lifecycle','session_id':sid,'command_uuid':value['uuid'],'state':state,'uuid':'x-'+state})
+                out({'type':'system','subtype':'task_notification','session_id':sid,'task_id':'old','status':'stopped','summary':'old task'})
+                out({'type':'system','subtype':'init','session_id':sid,'model':'claude-test'})
+                out({'type':'result','subtype':'success','session_id':sid,'is_error':False,'num_turns':0,'origin':{'kind':'task-notification'},
+                     'usage':{'input_tokens':0,'cache_creation_input_tokens':0,'cache_read_input_tokens':0,'output_tokens':0}})
+                life('queued'); life('started')
+                out({'type':'system','subtype':'init','session_id':sid,'model':'claude-test'})
+                out({'type':'assistant','session_id':sid,'message':{'id':'handled-'+sid,'content':[{'type':'text','text':'handled'}]}})
+                result()
+                life('completed')
+                continue
             if prompt=='unknown': out({'type':'control_request','request_id':'unknown','request':{'subtype':'unexpected_action'}}); continue
             if prompt=='wait': continue
             if prompt=='limit':
@@ -1487,6 +1500,24 @@ private func completedClaudeSession(_ adapter: ClaudeIntegration, binary: URL, h
     // The user's turn ends with the reply to the message, not with the result of the CLI's own turn before it.
     let history = try await adapter.history(session, context: descriptor.context).value()
     #expect(history.map { $0.items.map(\.text) } == [["notified", "No response requested.", "handled"]])
+    #expect(await events.startedCount() == 1)
+    await adapter.disconnect()
+}
+
+@Test func claudeOwnTurnBeforeTheMessageIsReadDoesNotEndTheUserTurn() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "notified-unread")).value()
+    try await waitFor { await events.completionCount() == 1 }
+    // The CLI's own turn ended before the message was even queued; the user's turn still ends with its reply.
+    let history = try await adapter.history(session, context: descriptor.context).value()
+    #expect(history.map { $0.items.map(\.text) } == [["notified-unread", "handled"]])
     #expect(await events.startedCount() == 1)
     await adapter.disconnect()
 }
