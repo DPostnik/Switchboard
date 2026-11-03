@@ -110,6 +110,20 @@ public struct MessageComposer: NSViewRepresentable {
 /// Autoresizing alone can preserve an oversized document after SwiftUI resizes
 /// its viewport. Constrain TextKit to the actual clip width on every layout.
 @MainActor public class WidthBoundTextScrollView: NSScrollView {
+    /// Always overlay: a legacy scroller (system setting "Show scroll bars: Always" or a connected mouse)
+    /// draws its own light track with a divider beside the chat. The scroll view reapplies the system
+    /// style on every change, so the setter ignores it.
+    public override var scrollerStyle: NSScroller.Style {
+        get { .overlay }
+        set { super.scrollerStyle = .overlay }
+    }
+
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // Init takes the system style without the setter.
+        if window != nil { super.scrollerStyle = .overlay }
+    }
+
     public override func layout() {
         super.layout()
         // Clip bounds are in document points, which differ from the viewport under magnification.

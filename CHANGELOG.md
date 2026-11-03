@@ -43,6 +43,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Fixed
 
+- The chat and the message field also always use the thin overlay scroll bar: the light track with a divider line beside the conversation is gone.
 - Scrolling in a chat stays smooth at the edges: the text no longer jumps back for a frame during the bounce past the end, and the copy button of the message under the pointer no longer disappears while scrolling.
 - Claude chats whose role allows sub-agents can send follow-up instructions to their own running or finished sub-agents (SendMessage); messages to other Claude sessions stay blocked.
 - Scrolling fast to the end of a long chat no longer overshoots into blank space below the last message and snaps back.
