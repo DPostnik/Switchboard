@@ -1773,3 +1773,34 @@ func claudeCompactBoundaryBecomesADividerWithItsSizes(prompt: String) async thro
     #expect(try stop(#"{"subtype":"success","is_error":false,"stop_reason":"end_turn"}"#) == .endTurn)
     #expect(try stop(#"{"subtype":"error_during_execution","is_error":true}"#) == .failed)
 }
+
+@Test func claudeSessionRecordCoalescesInTurnItemsAndKeepsThemOnDisconnect() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(saveDelay: .seconds(2)), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    var asking = AgentPermissionProfile.workspace(); asking.projectWrites = .ask
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root, role: asking)).value()
+    let file = home.appendingPathComponent("contextdesk-sessions").appendingPathComponent(session.nativeID + ".json")
+    func savedIDs(_ key: String) throws -> [String] {
+        let record = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        if key == "turns" { return ((record["turns"] as? [[String: Any]])?.last?["items"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String } }
+        return (record[key] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }
+    }
+    // The turn emits a tool call twice (in progress, then awaiting approval) and waits for the answer.
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "approval-call", role: asking)).value()
+    try await waitFor { await events.items().last { $0.id == "w1" }?.toolCall?.status == .awaitingApproval }
+    let started = await adapter.recordWriteCount
+    // Turn start saved the prompt synchronously; the in-turn item waits for the save delay.
+    #expect(try !savedIDs("current").contains("w1"))
+    // One coalesced save writes both updates without loss.
+    try await waitFor { (try? savedIDs("current").contains("w1")) == true }
+    #expect(await adapter.recordWriteCount == started + 1)
+    // Disconnect (quit) ends the live turn and saves the record once, with the item in its turn.
+    await adapter.disconnect()
+    #expect(await adapter.recordWriteCount == started + 2)
+    #expect(try savedIDs("turns").contains("w1"))
+}

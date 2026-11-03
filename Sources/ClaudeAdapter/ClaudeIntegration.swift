@@ -36,6 +36,10 @@ public actor ClaudeIntegration: AgentIntegration {
     private var warm: [String: (token: UUID, since: Date, wire: ClaudeWire)] = [:]
     /// Sessions with in-turn item writes waiting to be coalesced.
     private var pendingSaves = Set<String>()
+    /// Wait before a session's pending in-turn items are written (`scheduleSave`).
+    private let saveDelay: Duration
+    /// Session records written to disk; exposed for tests.
+    var recordWriteCount = 0
     private let warmTimeout: Duration
     static let warmLimit = 8
     private let backgroundWaitLimit: Duration
@@ -97,10 +101,10 @@ public actor ClaudeIntegration: AgentIntegration {
     private let browserRoot: URL
     private var wireGrants: [String: BrowserProfileGrant] = [:]
     public init(browserRoot: URL = BrowserEnvironmentStore.directory, backgroundWaitLimit: Duration = .seconds(3600),
-                backgroundSettleDelay: Duration = .seconds(30), warmTimeout: Duration = .seconds(600)) {
+                backgroundSettleDelay: Duration = .seconds(30), warmTimeout: Duration = .seconds(600), saveDelay: Duration = .seconds(10)) {
         let stream = AsyncStream<AgentEvent>.makeStream(); events = stream.stream; sink = stream.continuation
         self.browserRoot = browserRoot; self.backgroundWaitLimit = backgroundWaitLimit; self.backgroundSettleDelay = backgroundSettleDelay
-        self.warmTimeout = warmTimeout
+        self.warmTimeout = warmTimeout; self.saveDelay = saveDelay
     }
     public func optimizerEnvironment(home: URL) -> AgentResult<[String: String]> { .rejected(.routeUnavailable) }
     public func connect(_ configuration: AgentConnectionConfiguration) async -> AgentResult<AgentDescriptor> {
@@ -138,6 +142,8 @@ public actor ClaudeIntegration: AgentIntegration {
     }
     public func observe(sessions: [AgentSessionReference]) {}
     public func disconnect() async {
+        // Quit and reconnect: a live turn's record is saved by `finish` below; any other pending save is written now.
+        for id in pendingSaves where wires[id] == nil { flushSave(id) }
         for runner in generations.values { await runner.stop() }
         for wire in wires.values { await wire.close() }
         for id in Array(wires.keys) { finish(id, outcome: .uncertain) }
@@ -1046,12 +1052,15 @@ public actor ClaudeIntegration: AgentIntegration {
         scheduleSave(id)
         sink.yield(.init(session: reference(id), payload: .item(item)))
     }
-    /// Coalesces in-turn item writes: the record holds the whole chat history, so one write per
-    /// tool call would stall the stream. Turn start and finish still save synchronously.
+    /// Coalesces in-turn item writes: the record holds the whole chat history, so it is rewritten at most once per
+    /// `saveDelay` (10 s) while a turn streams instead of once a second. Turn start and finish still save synchronously,
+    /// and `disconnect` (quit) saves the live turns; a crash loses at most the last ~10 s of in-turn items here, which
+    /// the CLI's own session log keeps.
     private func scheduleSave(_ id: String) {
         guard pendingSaves.insert(id).inserted else { return }
+        let delay = saveDelay
         Task { [weak self] in
-            try? await Task.sleep(for: .seconds(1))
+            try? await Task.sleep(for: delay)
             await self?.flushSave(id)
         }
     }
@@ -1218,6 +1227,7 @@ public actor ClaudeIntegration: AgentIntegration {
         try FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try JSONEncoder().encode(sessions[id]).write(to: path, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+        recordWriteCount += 1
     }
     private func checked(_ session: AgentSessionReference, context: AgentContext) -> Bool {
         session.connection == .appClaude && context == self.context && home != nil
