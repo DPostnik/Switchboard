@@ -2,6 +2,7 @@
 """Prefer SwiftPM; support the locally broken CLT installation without changing it."""
 import argparse
 import datetime
+import fcntl
 import hashlib
 import json
 import os
@@ -21,6 +22,21 @@ SHOWN = re.compile(r'error:|fatal error|✘|Test run with|Expectation failed|rec
 SHOWN_LIMIT = 60
 FAILED_TEST = re.compile(r'✘ Test (\w+)\(.*\) (?:with \d+ test cases? )?failed after')
 RETRY_LIMIT = 8
+# Shared by every checkout, worktree and project (see the shared AGENTS.md): heavy builds
+# and test runs execute one at a time, which limits peak memory, swap and SSD writes.
+BUILD_LOCK = Path.home() / 'Library/Caches/Switchboard/build.lock'
+
+
+def take_build_lock():
+    """Hold the shared build lock until this process exits; the kernel releases it on any exit."""
+    BUILD_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    handle = BUILD_LOCK.open('a')
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(f'Waiting for another build or test run ({BUILD_LOCK})...', flush=True)
+        fcntl.flock(handle, fcntl.LOCK_EX)
+    return handle
 
 
 def run(args, **kwargs):
@@ -98,6 +114,7 @@ def main():
     parser.add_argument('--verbose', action='store_true', help='Stream full test output instead of failures and the summary')
     args = parser.parse_args()
     os.chdir(ROOT)
+    lock = take_build_lock()  # noqa: F841 - kept open for the whole task
     OUT.mkdir(parents=True, exist_ok=True)
     filters = list(args.filter)
     if args.changed:
@@ -185,15 +202,17 @@ def main():
             if result.returncode != 0:
                 (OUT / 'testing-probe-error.log').write_text(result.stdout + result.stderr)
                 raise RuntimeError('Swift Testing framework/macros are incompatible with this toolchain. Tests did not run. Install a matching Command Line Tools or Xcode release; see guides/building.md and .build/local-build/testing-probe-error.log.')
+    # Agents never read the index store; it is rewritten on every compile. Opt in with SWITCHBOARD_INDEX_STORE=1.
+    index_flags = [] if os.environ.get('SWITCHBOARD_INDEX_STORE') == '1' else ['--disable-index-store']
     if not direct:
         # A source/build/test failure must fail, never trigger a fallback or reuse an old binary.
         if args.task == 'build':
-            command = [swift, 'build', '--sdk', sdk, '-c', 'release', '--product', 'ContextDesk', '--force-resolved-versions']
+            command = [swift, 'build', '--sdk', sdk, '-c', 'release', '--product', 'ContextDesk', '--force-resolved-versions'] + index_flags
             run(command)
             bin_path = capture([swift, 'build', '--sdk', sdk, '-c', 'release', '--show-bin-path'])
             shutil.copy2(Path(bin_path) / 'ContextDesk', OUT / 'ContextDesk')
         else:
-            command = [swift, 'test', '--sdk', sdk, '--disable-xctest', '--force-resolved-versions']
+            command = [swift, 'test', '--sdk', sdk, '--disable-xctest', '--force-resolved-versions'] + index_flags
             if macros.is_dir():
                 command += ['-Xswiftc', '-plugin-path', '-Xswiftc', macros]
             if has_testing_framework:

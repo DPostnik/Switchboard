@@ -8,6 +8,8 @@ BRANCH="${SWITCHBOARD_NIGHTLY_BRANCH:-main}"
 WORK="$HOME/Library/Caches/Switchboard/nightly-tests/worktree"
 LOGS="$HOME/Library/Logs/Switchboard/nightly-tests"
 mkdir -p "$LOGS" "${WORK:h}"
+# One line per day of SSD wear counters, before the suite adds its own writes.
+zsh "$REPO/scripts/perf/ssd-wear-log.sh"
 stamp=$(date +%Y-%m-%d_%H%M)
 log="$LOGS/$stamp.log"
 
