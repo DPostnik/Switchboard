@@ -46,8 +46,7 @@ enum WorktreeText {
     /// The chat's working folder by ID: `Chat.workingDirectory(in:)` for that chat; nil when the chat or its
     /// project is gone.
     func workingDirectory(forChat id: String) -> String? {
-        guard let chat = state.chats.first(where: { $0.id == id }),
-              let project = state.projects.first(where: { $0.id == chat.projectID }) else { return nil }
+        guard let chat = chat(id), let project = project(chat.projectID) else { return nil }
         return chat.workingDirectory(in: project)
     }
 

@@ -61,6 +61,16 @@ enum QueueChange: Equatable {
     }
 }
 
+/// ID -> position in `SavedState.chats` and `.projects`; the first position wins when an ID repeats.
+struct StateLookup {
+    let chats: [String: Int]
+    let projects: [UUID: Int]
+    init(_ state: SavedState) {
+        chats = Dictionary(state.chats.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
+        projects = Dictionary(state.projects.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
+    }
+}
+
 private struct ChatRunState: Equatable {
     var running = false
     var sending = false
@@ -125,7 +135,7 @@ private struct ChatRunState: Equatable {
     private var directoryHistoryCache: [String: (updated: Date, messages: [TranscriptItem])] = [:]
     @Published var state = SavedState() {
         // Any state change may add, remove or re-key a chat; the next event rebuilds the map.
-        didSet { nativeSessionMap = nil; syncMenu() }
+        didSet { nativeSessionMap = nil; lookup = nil; syncMenu() }
     }
     /// Observed by the app menu instead of the model (`ContextDeskApp`).
     let menu = AppMenuState()
@@ -139,6 +149,25 @@ private struct ChatRunState: Equatable {
         if nativeSessionMap == nil { nativeSessionMap = NativeSessionMap(chats: state.chats) }
         return nativeSessionMap?.appID(for: session)
     }
+    /// Chat and project positions by ID, built on demand after a state change: views read chats by ID many times
+    /// per render (`selectedChat`, `canDeleteChat`, row menus), and a scan of every chat for each read added up.
+    private var lookup: StateLookup?
+    private var stateLookup: StateLookup {
+        if let lookup { return lookup }
+        let built = StateLookup(state)
+        lookup = built
+        return built
+    }
+    /// The chat with this ID (the first one, as a scan would find it).
+    func chat(_ id: String) -> Chat? {
+        guard let index = stateLookup.chats[id], state.chats.indices.contains(index), state.chats[index].id == id else { return nil }
+        return state.chats[index]
+    }
+    func project(_ id: UUID) -> Project? {
+        guard let index = stateLookup.projects[id], state.projects.indices.contains(index), state.projects[index].id == id else { return nil }
+        return state.projects[index]
+    }
+    func hasChat(_ id: String) -> Bool { chat(id) != nil }
     @Published var projectID: UUID? {
         didSet { syncMenu() }
     }
@@ -257,7 +286,7 @@ private struct ChatRunState: Equatable {
     func connection(for engine: JobEngine) -> AgentConnectionID? { agentIDs.first { slots[$0]?.profile.engine == engine } }
     /// The first registered connection with all of `traits`.
     func firstAgent(with traits: AgentAppTraits) -> AgentConnectionID? { agentIDs.first { self.traits($0).isSuperset(of: traits) } }
-    func connectionOfChat(_ id: String) -> AgentConnectionID? { state.chats.first { $0.id == id }?.nativeSession?.connection }
+    func connectionOfChat(_ id: String) -> AgentConnectionID? { chat(id)?.nativeSession?.connection }
     /// Name of the agent that owns a session; an unknown agent shows its raw ID, never another agent's name.
     func agentName(_ connection: AgentConnectionID?) -> String { profile(connection)?.name ?? connection?.agent.rawValue ?? "" }
     var anyAgentConnecting: Bool { agentStates.values.contains { $0.connecting } }
@@ -301,7 +330,7 @@ private struct ChatRunState: Equatable {
     @Published private(set) var deletingChatIDs: Set<String> = []
     @Published private(set) var archivingChatIDs: Set<String> = []
     func isChangingChat(_ id: String) -> Bool { deletingChatIDs.contains(id) || archivingChatIDs.contains(id) || configuringRemoteChats.contains(id) || configuringBrowserChats.contains(id) }
-    func isArchived(_ id: String) -> Bool { state.chats.first { $0.id == id }?.isArchived == true }
+    func isArchived(_ id: String) -> Bool { chat(id)?.isArchived == true }
     var selectedChatIsArchived: Bool { selectedChat?.isArchived == true }
     private var completedTurns: [String: (status: AgentExecutionOutcome, hasError: Bool)] = [:]
     private var currentRunKey: String { chatID ?? "new:" + selectionGeneration.uuidString }
@@ -316,6 +345,8 @@ private struct ChatRunState: Equatable {
     var anyBusy: Bool { preparingHandoff || creatingHandoff || jobLedger.runs.contains { $0.status.active } || summaryTask != nil || !deletingChatIDs.isEmpty || !archivingChatIDs.isEmpty || runs.values.contains { $0.running || $0.sending } }
     func isBusy(threadID: String) -> Bool { runs[threadID]?.running == true }
     func isSending(threadID: String) -> Bool { runs[threadID]?.sending == true }
+    /// Chats with a running or sending turn, without scanning every chat.
+    var activeRunChatIDs: [String] { runs.compactMap { $0.value.running || $0.value.sending ? $0.key : nil } }
     /// Live activity label and start of a chat's running turn, for the notch island.
     func runActivity(threadID: String) -> (status: String?, since: Date?) {
         guard let run = runs[threadID], run.running else { return (nil, nil) }
@@ -381,8 +412,8 @@ private struct ChatRunState: Equatable {
     }
 
     // Read the published IDs once: inside the predicate the @Published getter ran for every chat on every render.
-    var selectedProject: Project? { guard let id = projectID else { return nil }; return state.projects.first { $0.id == id } }
-    var selectedChat: Chat? { guard let id = chatID else { return nil }; return state.chats.first { $0.id == id } }
+    var selectedProject: Project? { guard let id = projectID else { return nil }; return project(id) }
+    var selectedChat: Chat? { guard let id = chatID else { return nil }; return chat(id) }
     var chats: [Chat] { projectID.map { state.orderedChats(projectID: $0, archived: false) } ?? [] }
     var currentAction: PendingAction? { pending.first { $0.threadID == chatID } }
     var currentUsage: UsageSnapshot? { chatID.flatMap { usage[$0] } }
@@ -1094,7 +1125,7 @@ private struct ChatRunState: Equatable {
         } catch { self.error = error.localizedDescription }
     }
     func canDeleteChat(_ id: String) -> Bool {
-        (chatConnected(id) || isScheduledRecord(id)) && state.chats.contains(where: { $0.id == id }) &&
+        (chatConnected(id) || isScheduledRecord(id)) && hasChat(id) &&
         !isChangingChat(id) && summaryActiveThread != id && !isBusy(threadID: id) &&
         runs[id]?.sending != true && !pending.contains(where: { $0.threadID == id })
     }
@@ -2592,7 +2623,7 @@ private struct ChatRunState: Equatable {
         L10n.text("Запись запуска задания Claude. Ответ откроет новый чат с результатом этого запуска в контексте; сама запись не меняется.",
                   "A Claude scheduled run record. Replying opens a new chat with this run's result as context; the record itself stays unchanged.")
     }
-    func isScheduledRecord(_ id: String) -> Bool { state.chats.first { $0.id == id }?.isScheduledRecord == true }
+    func isScheduledRecord(_ id: String) -> Bool { chat(id)?.isScheduledRecord == true }
 
     /// Builds a handoff from the record's saved transcript. It never calls a model: the record holds the whole run.
     func scheduledRecordHandoff(_ chat: Chat, goal: String) async throws -> ContextHandoff {

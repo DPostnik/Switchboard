@@ -4,6 +4,19 @@ import AgentContract
 import ContextCore
 import ContextTranscript
 
+extension GitActions {
+    @MainActor private static var cached: (actions: GitActions, checked: TimeInterval)?
+    /// One `GitActions` for the views, built again after 10 s so a newly installed `gh` is found: views are created
+    /// on every render, and each new value looked for `gh` on disk.
+    @MainActor static var current: GitActions {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let cached, now - cached.checked < 10 { return cached.actions }
+        let actions = GitActions()
+        cached = (actions, now)
+        return actions
+    }
+}
+
 extension DeskModel {
     /// The folder a chat's git actions (and its composer branch chip) work in: its worktree or its project folder.
     func gitActionsFolder(forChat chatID: String) -> String? {
@@ -15,9 +28,7 @@ extension DeskModel {
 
     /// A chat working in the folder may move files under a commit, push or pull, so they wait for it.
     func gitFolderBusy(_ folder: String) -> Bool {
-        state.chats.contains { chat in
-            (isBusy(threadID: chat.id) || isSending(threadID: chat.id)) && gitActionsFolder(forChat: chat.id) == folder
-        }
+        activeRunChatIDs.contains { gitActionsFolder(forChat: $0) == folder }
     }
 
     /// Drafts run as an isolated generation on the agent connection of a chat in this folder: the selected chat
@@ -79,7 +90,7 @@ struct GitActionsChip: View {
     @State private var failure: GitActionFailure?
     @State private var confirmingPush: GitRepositoryState?
     @State private var sheet: GitActionSheet?
-    private let actions = GitActions()
+    private let actions = GitActions.current
 
     var body: some View {
         // The stack stays in place without a status so a running sheet is not torn down by a status refresh.
@@ -317,7 +328,7 @@ struct GitCommitSheet: View {
     @State private var committed = false
     @State private var finished = false
     @State private var output: [(text: String, failed: Bool)] = []
-    private let actions = GitActions()
+    private let actions = GitActions.current
 
     private var selected: [GitWorkingFile] { state.files.filter { !excluded.contains($0.id) } }
     private var needsConfirmation: Bool { action.pushes && state.pushesToDefaultBranch }
@@ -469,7 +480,7 @@ struct GitPullRequestSheet: View {
     @State private var note: String?
     @State private var running = false
     @State private var outcome: GitActions.Outcome?
-    private let actions = GitActions()
+    private let actions = GitActions.current
 
     private var head: String { state.pushBranch ?? state.status.displayName }
     /// Created, or possibly created (gh timed out): either way the button does not run again.
