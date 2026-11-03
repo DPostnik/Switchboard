@@ -217,11 +217,29 @@ import ContextCore
     let container = try #require(view.transcript.textContainer)
     let storage = try #require(view.transcript.textStorage)
     #expect(manager.hasNonContiguousLayout)
-    #expect(manager.firstUnlaidCharacterIndex() < storage.length / 2)
     #expect(view.isAtTranscriptEnd)
+    // The end renders first; the older rows follow in parts above it and the reader stays at the end.
+    #expect(!view.historyBacklog.isEmpty)
+    #expect(view.previous.count < 40)
+    #expect(view.transcript.string.contains("номер 299 "))
+    #expect(!view.transcript.string.contains("номер 0 "))
+    var parts = 0
+    while !view.historyBacklog.isEmpty, parts < 1_000 {
+        view.renderHistoryChunk(); view.layoutSubtreeIfNeeded(); parts += 1
+        #expect(view.isAtTranscriptEnd)
+    }
+    #expect(view.previous.count == 300)
+    #expect(manager.firstUnlaidCharacterIndex() < storage.length / 2)
     let last = manager.glyphRange(forCharacterRange: NSRange(location: storage.length - 1, length: 1), actualCharacterRange: nil)
     let end = manager.boundingRect(forGlyphRange: last, in: container).maxY + view.transcript.textContainerOrigin.y
     #expect(view.transcript.visibleRect.maxY >= end - 2)
+    // The same text as rendering the whole chat at once.
+    let once = TranscriptScrollView()
+    once.frame = view.frame
+    once.update(items: items, conversationID: "long", followOutput: true)
+    once.renderHistory()
+    once.layoutSubtreeIfNeeded()
+    #expect(once.transcript.string == view.transcript.string)
     // Styled for the final column once the width is known: user bubbles carry their inset.
     var bubbles = 0
     storage.enumerateAttribute(.outgoingBubble, in: NSRange(location: 0, length: storage.length)) { value, _, _ in
@@ -230,6 +248,27 @@ import ContextCore
     #expect(bubbles == 150)
     let first = try #require(storage.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)
     #expect(abs(first.firstLineHeadIndent - (TranscriptScrollView.outgoingInset(items[0], width: container.containerSize.width) + 16)) < 0.5)
+}
+
+@Test @MainActor func olderHistoryWaitsWhileTheReaderScrollsAndFindRendersItAll() {
+    let view = TranscriptScrollView()
+    view.transcript.usesFindBar = true
+    view.frame = NSRect(x: 0, y: 0, width: 700, height: 500)
+    let items = (0..<300).map { TranscriptItem(id: "m\($0)", kind: "assistant", text: String(repeating: "Строка \($0) истории.\n", count: 20)) }
+    view.update(items: items, conversationID: "c", followOutput: true)
+    view.layoutSubtreeIfNeeded()
+    let waiting = view.historyBacklog.count
+    #expect(waiting > 0)
+    // The reader scrolls up a little, far from the top of what is rendered.
+    view.contentView.scroll(to: NSPoint(x: 0, y: view.contentView.bounds.minY - 40))
+    view.reflectScrolledClipView(view.contentView)
+    view.renderHistoryChunk()
+    #expect(view.historyBacklog.count == waiting)
+    // Find needs the whole chat at once.
+    view.showFind()
+    #expect(view.historyBacklog.isEmpty)
+    #expect(view.previous.count == 300)
+    #expect(view.transcript.string.contains("Строка 0 истории."))
 }
 
 @Test @MainActor func reusedEarlierRequestsGroupLikeAFullRegroup() {

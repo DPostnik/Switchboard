@@ -170,3 +170,42 @@ import ContextCore
     view.layoutSubtreeIfNeeded()
     #expect(view.isAtTranscriptEnd)
 }
+
+@Test @MainActor func longChatOpensInPartsAndKeepsTheReadingPlace() throws {
+    let positions = TranscriptReadingPositions()
+    let items = (0..<200).map { TranscriptItem(id: "long-\($0)", kind: "assistant",
+        text: "Message \($0)\n" + String(repeating: "Reading line / Строка чтения\n", count: 12)) }
+    let view = readingView(positions)
+    view.update(items: items, conversationID: "a", followOutput: true)
+    view.renderHistory()
+    view.layoutSubtreeIfNeeded()
+    if let container = view.transcript.textContainer { view.transcript.layoutManager?.ensureLayout(for: container) }
+    view.layoutSubtreeIfNeeded()
+    // A place well above the first screen of the end (about message 150).
+    view.contentView.scroll(to: NSPoint(x: 0, y: (view.transcript.frame.height * 0.75).rounded()))
+    view.reflectScrolledClipView(view.contentView)
+    guard case let .anchor(id, character, _, _) = try #require(positions.values["a"]) else {
+        Issue.record("Expected a reading anchor"); return
+    }
+
+    // Reopened on a new view: the anchor's row is rendered at once, the rest of the history follows in parts.
+    let reopened = readingView(positions)
+    reopened.update(items: items, conversationID: "a", followOutput: true)
+    reopened.layoutSubtreeIfNeeded()
+    #expect(!reopened.historyBacklog.isEmpty)
+    #expect(reopened.previous.contains { $0.id == id })
+    func place() -> String {
+        guard case let .anchor(id, character, _, _)? = positions.values["a"] else { return "none" }
+        return "\(id)@\(character)"
+    }
+    #expect(place() == "\(id)@\(character)")
+    let top = reopened.contentView.bounds.origin.y
+    var parts = 0
+    while !reopened.historyBacklog.isEmpty, parts < 1_000 {
+        reopened.renderHistoryChunk(); reopened.layoutSubtreeIfNeeded(); parts += 1
+        #expect(place() == "\(id)@\(character)")
+    }
+    #expect(reopened.previous.count == 200)
+    #expect(reopened.contentView.bounds.origin.y > top)
+    #expect(!reopened.isAtTranscriptEnd)
+}

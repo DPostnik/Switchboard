@@ -21,6 +21,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Changed
 
+- Long chats open instantly: the last screens are shown first and older messages are added above while you read; find, Select All and jumps to old messages load the whole history at once.
 - Streaming answers in long chats use less CPU: only the running request is regrouped on each update.
 - Long code blocks and previewed source files scroll with less CPU.
 - Searching the sidebar no longer stalls in large workspaces: results follow a short pause in typing, show at most 50 chats with Show all (N), and sidebar rows build their menus only when opened.

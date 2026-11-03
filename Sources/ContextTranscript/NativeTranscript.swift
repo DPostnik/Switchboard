@@ -199,6 +199,7 @@ public struct NativeTranscript: NSViewRepresentable {
         addSubview(jumpToLatest, positioned: .above, relativeTo: nil)
         (transcript as? TranscriptTextView)?.didDrawText = { [weak self] in self?.positionWorkingIndicator() }
         (transcript as? TranscriptTextView)?.hoverChanged = { [weak self] point in self?.updateHover(at: point) }
+        (transcript as? TranscriptTextView)?.beforeSelectAll = { [weak self] in self?.renderHistory() }
         (transcript as? TranscriptTextView)?.trackClick = { [weak self] click in
             if let self { self.holdingEdits(during: click) } else { click() }
         }
@@ -226,6 +227,8 @@ public struct NativeTranscript: NSViewRepresentable {
     /// Shows the native find bar above the text and moves focus into it; matches are highlighted as you type.
     public func showFind() {
         guard transcript.usesFindBar else { return }
+        // Find searches the whole chat, also the older part still waiting to be rendered.
+        renderHistory()
         window?.makeFirstResponder(transcript)
         let item = NSMenuItem()
         item.tag = NSTextFinder.Action.showFindInterface.rawValue
@@ -284,8 +287,17 @@ public struct NativeTranscript: NSViewRepresentable {
         }
         let resumeFollowing = followOutput && !followed
         followed = followOutput
+        // Older rows of a chat opened in parts wait in `historyBacklog`: they are compared, not rendered, and any change
+        // among them renders the chat again.
+        var restart = switched || projectChanged
+        if !historyBacklog.isEmpty, !restart {
+            if items.count >= historyBacklog.count, items.prefix(historyBacklog.count).elementsEqual(historyBacklog) {
+                items = Array(items[historyBacklog.count...])
+            } else { restart = true }
+        }
+        if restart { historyBacklog.removeAll() }
         // From the end first: a streaming delta changes the last rows.
-        let changed = items.count != previous.count || items.last != previous.last || items != previous
+        let changed = restart || items.count != previous.count || items.last != previous.last || items != previous
         guard switched || finished || projectChanged || changed else {
             if resumeFollowing { scrollToEnd() }
             scheduleReadCheck()
@@ -304,7 +316,7 @@ public struct NativeTranscript: NSViewRepresentable {
         // A finished turn changes the items it affects (copy control, compaction state, the working row), so the
         // prefix is computed as usual; only the rows that were open and now close are re-rendered above it.
         var common = 0
-        if !switched && !projectChanged {
+        if !restart {
             while common < min(previous.count, items.count), previous[common] == items[common] { common += 1 }
         }
         let closingRows = closing.isEmpty ? [] : (0..<common).filter { closing.contains(previous[$0].id) }
@@ -319,7 +331,7 @@ public struct NativeTranscript: NSViewRepresentable {
         let sentMessage = followOutput && !switched && lastKnown != nil
             && items[(lastKnown! + 1)...].contains { $0.kind == "user" }
         // Streaming rewrites only the last message or appends; text above the viewport keeps its place.
-        let tailOnly = !switched && !projectChanged && closingRows.isEmpty && common + 1 >= previous.count
+        let tailOnly = !restart && closingRows.isEmpty && common + 1 >= previous.count
         // Re-rendering the last message briefly shortens the document and clamps the viewport; an anchor survives that.
         let gestureAnchor = liveScrolling && tailOnly && wasAtEnd && !stretched ? capturePosition(anchorAtEnd: true) : nil
         storage.beginEditing()
@@ -333,13 +345,25 @@ public struct NativeTranscript: NSViewRepresentable {
         let start = common < ranges.count ? ranges[common].location : storage.length
         storage.deleteCharacters(in: NSRange(location: start, length: storage.length - start))
         ranges = Array(ranges.prefix(common))
-        for item in items.dropFirst(common) {
+        // A chat rendered anew shows its end first; the rows above it follow in parts (`renderHistoryChunk`).
+        var first = common
+        if restart, !isDocument {
+            // The source length stands in for the rendered one; rows render oldest first, as the block cache expects.
+            first = items.count
+            var length = 0
+            while first > 0, length < Self.firstScreenCharacters { first -= 1; length += items[first].text.utf16.count }
+        }
+        for item in items.dropFirst(first) {
             let rendered = render(item, expanded: expandedActions.contains(item.id))
             ranges.append(NSRange(location: storage.length, length: rendered.length))
             storage.append(rendered)
         }
         storage.endEditing()
-        previous = items; self.conversationID = conversationID; editCount += 1
+        if restart, !isDocument {
+            historyBacklog = Array(items[..<first])
+            previous = Array(items[first...])
+        } else { previous = items }
+        self.conversationID = conversationID; editCount += 1
         needsLayout = true
         if switched {
             needsEndScroll = false
@@ -356,6 +380,99 @@ public struct NativeTranscript: NSViewRepresentable {
                 contentView.scroll(to: oldOrigin); reflectScrolledClipView(contentView)
             }
         }
+        // A reading position inside the older history needs its row now.
+        if case let .anchor(itemID, _, _, _)? = pendingPosition, let index = historyBacklog.firstIndex(where: { $0.id == itemID }) {
+            renderHistory(from: index)
+        }
+        scheduleHistoryChunk()
+    }
+
+    /// Older rows of the open chat not rendered yet, oldest first; `previous` holds the rows after them.
+    private(set) var historyBacklog: [TranscriptItem] = []
+    private var historyChunkScheduled = false
+    /// Rendered synchronously when a chat opens: about two tall viewports from its end.
+    static let firstScreenCharacters = 12_000
+    /// Main-thread time rendering one part of the older history may take (its layout adds about half as much);
+    /// the run loop handles input between parts.
+    static let historyChunkSeconds = 0.02
+    /// When the viewport last moved other than by the transcript itself: parts wait while the reader scrolls.
+    private var lastScrolled: TimeInterval = 0
+
+    private func scheduleHistoryChunk(after delay: Double = 0.005) {
+        guard !historyBacklog.isEmpty, !historyChunkScheduled else { return }
+        historyChunkScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            self.historyChunkScheduled = false
+            self.renderHistoryChunk()
+        }
+    }
+
+    /// Puts the next part of the older history above the rendered rows, keeping the reader's place (or the end).
+    func renderHistoryChunk() {
+        guard !historyBacklog.isEmpty else { return }
+        // A click, or scrolling anywhere but near the top of what is rendered, owns the main thread; the history waits.
+        let scrolling = liveScrolling || ProcessInfo.processInfo.systemUptime - lastScrolled < 0.3
+        let nearTop = contentView.bounds.minY < 2 * max(contentView.bounds.height, 1)
+        if isTrackingClick || (scrolling && !nearTop) { scheduleHistoryChunk(after: 0.1); return }
+        let started = ProcessInfo.processInfo.systemUptime
+        var index = historyBacklog.count
+        var parts: [NSAttributedString] = []
+        renderingHistory {
+            repeat {
+                index -= 1
+                parts.append(render(historyBacklog[index], expanded: expandedActions.contains(historyBacklog[index].id)))
+            } while index > 0 && ProcessInfo.processInfo.systemUptime - started < Self.historyChunkSeconds
+        }
+        prepend(parts.reversed(), from: index)
+        scheduleHistoryChunk()
+    }
+
+    /// Renders the older history from row `index` on at once (find, select all, a reveal or a reading position needs it).
+    func renderHistory(from index: Int = 0) {
+        guard index < historyBacklog.count else { return }
+        var parts: [NSAttributedString] = []
+        renderingHistory { parts = historyBacklog[index...].map { render($0, expanded: expandedActions.contains($0.id)) } }
+        prepend(parts, from: index)
+    }
+
+    /// Older rows rarely render again; caching them would evict the blocks of the newest messages.
+    private func renderingHistory(_ work: () -> Void) {
+        let enabled = renderCache.isEnabled
+        renderCache.isEnabled = false
+        work()
+        renderCache.isEnabled = enabled
+    }
+
+    /// Inserts rendered rows of the backlog from `index` on above the text; the reader stays where they were.
+    private func prepend(_ parts: [NSAttributedString], from index: Int) {
+        guard let storage = transcript.textStorage, !parts.isEmpty else { return }
+        let position = pendingPosition ?? capturePosition()
+        let wasChanging = changingLayout
+        changingLayout = true
+        defer {
+            changingLayout = wasChanging
+            switch position {
+            case .end?: scrollToEnd()
+            case .anchor?: pendingPosition = position
+            case nil: break
+            }
+        }
+        let text = NSMutableAttributedString()
+        var added: [NSRange] = []
+        for part in parts {
+            added.append(NSRange(location: text.length, length: part.length))
+            text.append(part)
+        }
+        for row in ranges.indices { ranges[row].location += text.length }
+        storage.beginEditing()
+        storage.insert(text, at: 0)
+        storage.endEditing()
+        ranges = added + ranges
+        previous = Array(historyBacklog[index...]) + previous
+        historyBacklog.removeSubrange(index...)
+        editCount += 1
+        needsLayout = true
     }
 
     /// NSTextView keeps the clicked link unretained between mouse-down and its delegate call, while its tracking loop
@@ -482,6 +599,9 @@ public struct NativeTranscript: NSViewRepresentable {
     /// Scrolls to the message holding `itemID` (a tool call inside a collapsed action row brings up that row) and
     /// briefly highlights the link to `file` in it, or the message's first line. False when the item is not shown.
     @discardableResult public func reveal(itemID: String, file: String? = nil) -> Bool {
+        if let index = historyBacklog.firstIndex(where: { $0.id == itemID || actionGroups[$0.id]?.contains { $0.id == itemID } == true }) {
+            renderHistory(from: index)
+        }
         let rowID = previous.contains(where: { $0.id == itemID }) ? itemID
             : actionGroups.first(where: { $0.value.contains { $0.id == itemID } })?.key
         guard let rowID, let index = previous.firstIndex(where: { $0.id == rowID }), ranges.indices.contains(index),
@@ -529,6 +649,7 @@ public struct NativeTranscript: NSViewRepresentable {
     }
 
     @objc private func viewportChanged() {
+        if !changingLayout { lastScrolled = ProcessInfo.processInfo.systemUptime }
         workingIndicator.refreshAnimation()
         keepEndPinned()
         updateJumpToLatest()
@@ -1435,6 +1556,12 @@ private final class TranscriptTextView: NSTextView {
         guard index < storage.length, storage.attribute(.changesCard, at: index, effectiveRange: nil) != nil,
               let link = storage.attribute(.link, at: index, effectiveRange: nil) as? String else { return nil }
         return (link, index)
+    }
+    /// Select All (and the copy after it) covers the whole chat, also the older part still waiting to be rendered.
+    var beforeSelectAll: (() -> Void)?
+    override func selectAll(_ sender: Any?) {
+        beforeSelectAll?()
+        super.selectAll(sender)
     }
     override func draw(_ dirtyRect: NSRect) {
         // Bubbles go under the selection and the text; the view itself draws no background.
