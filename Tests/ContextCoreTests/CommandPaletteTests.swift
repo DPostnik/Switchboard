@@ -114,6 +114,26 @@ import Testing
         #expect(state.sidebarChatRows(SidebarListing(search: "alpha")) == ["a3"] + (1...7).map { "a\($0)" })
     }
 
+    @Test func searchRowLimitSharesRowsAcrossOpenProjectsInOrder() {
+        let (state, alpha, beta) = fixture()
+        // "Chat" matches every chat: Alpha takes its 7 rows, Beta the remaining 1 of the limit of 8.
+        let limited = state.sidebarSections(SidebarListing(search: "Chat", searchLimit: 8))
+        #expect(limited.sections.map(\.project.id) == [alpha, beta])
+        #expect(limited.sections.map(\.limit) == [7, 1])
+        #expect(limited.matching == 9 && limited.hidden == 1)
+        #expect(state.sidebarChatRows(SidebarListing(search: "Chat", searchLimit: 8)) == ["a3"] + (1...7).map { "a\($0)" } + ["b1"])
+        // "Show all" lifts the limit; a project closed by hand takes no share and keeps one page for opening.
+        let all = state.sidebarSections(SidebarListing(search: "Chat"))
+        #expect(all.sections.map(\.limit) == [7, 2] && all.hidden == 0)
+        let closed = state.sidebarSections(SidebarListing(search: "Chat", collapsedInSearch: [alpha], searchLimit: 1))
+        #expect(closed.sections.map(\.limit) == [5, 1] && closed.matching == 2 && closed.hidden == 1)
+        // No search: no limit, one page per project, groups equal `orderedChats`.
+        let plain = state.sidebarSections(SidebarListing(expanded: [alpha], searchLimit: 1))
+        #expect(plain.sections.map(\.limit) == [5, 5] && plain.hidden == 0)
+        #expect(plain.sections[0].chats == state.orderedChats(projectID: alpha, archived: false))
+        #expect(state.activeChatsByProject()[beta] == state.orderedChats(projectID: beta, archived: false))
+    }
+
     @Test func adjacentChatWrapsAndCountsFavoritesOnce() {
         let (state, alpha, beta) = fixture()
         let listing = SidebarListing(expanded: [alpha, beta])

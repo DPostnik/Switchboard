@@ -167,7 +167,11 @@ public struct SavedState: Codable, Sendable {
     }
 
     public func orderedChats(projectID: UUID, archived: Bool) -> [Chat] {
-        chats.filter { $0.projectID == projectID && $0.isArchived == archived }.sorted {
+        Self.sidebarOrdered(chats.filter { $0.projectID == projectID && $0.isArchived == archived })
+    }
+    /// Sidebar order within a project: the saved order, new chats above it, the rest by last update.
+    static func sidebarOrdered(_ chats: [Chat]) -> [Chat] {
+        chats.sorted {
             switch ($0.sidebarOrder, $1.sidebarOrder) {
             case let (a?, b?) where a != b: return a < b
             case (nil, _?): return true // New chats appear above the saved order.

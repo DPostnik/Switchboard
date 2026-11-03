@@ -83,18 +83,40 @@ public struct SidebarListing: Equatable, Sendable {
     /// Chats shown per project after "Show more"; absent shows one page.
     public var visibleCounts: [UUID: Int] = [:]
     public var pageSize = 5
-    public init(search: String = "", expanded: Set<UUID> = [], collapsedInSearch: Set<UUID> = [], visibleCounts: [UUID: Int] = [:], pageSize: Int = 5) {
+    /// During a search, chat rows shown under the open projects before "Show all"; nil shows every match.
+    public var searchLimit: Int?
+    public init(search: String = "", expanded: Set<UUID> = [], collapsedInSearch: Set<UUID> = [], visibleCounts: [UUID: Int] = [:], pageSize: Int = 5,
+                searchLimit: Int? = nil) {
         self.search = search; self.expanded = expanded; self.collapsedInSearch = collapsedInSearch
-        self.visibleCounts = visibleCounts; self.pageSize = pageSize
+        self.visibleCounts = visibleCounts; self.pageSize = pageSize; self.searchLimit = searchLimit
     }
 
     public func isExpanded(_ project: UUID) -> Bool {
         search.isEmpty ? expanded.contains(project) : !collapsedInSearch.contains(project)
     }
-    /// How many of a project's chats are shown before "Show more".
+    /// How many of a project's chats are shown before "Show more" (without the search's row limit).
     public func limit(_ project: UUID, chatCount: Int) -> Int {
         search.isEmpty ? (visibleCounts[project] ?? pageSize) : chatCount
     }
+}
+
+/// A project as the sidebar lists it: its chats matching the search, in sidebar order, and how many are shown.
+public struct SidebarSection: Equatable, Sendable {
+    public let project: Project
+    public let chats: [Chat]
+    public let expanded: Bool
+    /// Rows under the header: one page or the "Show more" count, or during a search the project's share of the
+    /// row limit (a closed project keeps one page for its opening animation).
+    public let limit: Int
+}
+
+/// The sidebar's projects with the search applied; `hidden` matching chats wait behind "Show all".
+public struct SidebarSections: Equatable, Sendable {
+    public var sections: [SidebarSection] = []
+    /// Matching chats under the open projects, shown or not.
+    public var matching = 0
+    public var hidden = 0
+    public init() {}
 }
 
 /// The sidebar's filters for its search field, shared by the list itself and the chat shortcuts.
@@ -114,15 +136,50 @@ extension SavedState {
         search.isEmpty || projectMatches(project, search: search) || chat.title.localizedCaseInsensitiveContains(search)
     }
 
+    /// Active chats per project in sidebar order (`orderedChats`), grouped in one pass over the chats.
+    public func activeChatsByProject() -> [UUID: [Chat]] {
+        Dictionary(grouping: chats.filter { !$0.isArchived }, by: \.projectID).mapValues(Self.sidebarOrdered)
+    }
+
+    /// The listed projects and their chats; `chatsByProject` is `activeChatsByProject()`, which callers may keep
+    /// between renders.
+    public func sidebarSections(_ listing: SidebarListing, chatsByProject: [UUID: [Chat]]? = nil) -> SidebarSections {
+        let grouped = chatsByProject ?? activeChatsByProject()
+        let search = listing.search
+        var result = SidebarSections()
+        var remaining = search.isEmpty ? nil : listing.searchLimit
+        for project in visibleProjects {
+            let chats = grouped[project.id] ?? []
+            let matching: [Chat]
+            if search.isEmpty || projectMatches(project, search: search) { matching = chats }
+            else {
+                matching = chats.filter { $0.title.localizedCaseInsensitiveContains(search) }
+                guard !matching.isEmpty else { continue }
+            }
+            let expanded = listing.isExpanded(project.id)
+            var limit = listing.limit(project.id, chatCount: matching.count)
+            if !expanded, !search.isEmpty {
+                limit = min(matching.count, listing.pageSize)
+            } else if expanded, !search.isEmpty {
+                result.matching += matching.count
+                if let left = remaining {
+                    limit = min(matching.count, left)
+                    remaining = left - limit
+                    result.hidden += matching.count - limit
+                }
+            }
+            result.sections.append(SidebarSection(project: project, chats: matching, expanded: expanded, limit: limit))
+        }
+        return result
+    }
+
     /// Chat rows of the sidebar from top to bottom: favorites, then the shown chats of each open project.
     /// A favorite also appears under its project, as in the sidebar, so the N-th row is the N-th chat on screen.
     /// `includeCollapsed` also walks closed projects and chats behind "Show more", in the same order.
     public func sidebarChatRows(_ listing: SidebarListing, includeCollapsed: Bool = false) -> [String] {
         var rows = visiblePinnedChats.filter { sidebarShowsFavorite($0, search: listing.search) }.map(\.id)
-        for project in visibleProjects where sidebarShowsProject(project, search: listing.search)
-            && (includeCollapsed || listing.isExpanded(project.id)) {
-            let shown = orderedChats(projectID: project.id, archived: false).filter { sidebarShowsChat($0, in: project, search: listing.search) }
-            rows += (includeCollapsed ? shown[...] : shown.prefix(listing.limit(project.id, chatCount: shown.count))).map(\.id)
+        for section in sidebarSections(listing).sections where includeCollapsed || section.expanded {
+            rows += (includeCollapsed ? section.chats[...] : section.chats.prefix(section.limit)).map(\.id)
         }
         return rows
     }

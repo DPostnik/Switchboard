@@ -7,6 +7,11 @@ import ContextTranscript
 struct DeskView: View {
     @ObservedObject var model: DeskModel
     @State private var search = ""
+    /// The search the list applies: the field's text 100 ms after the last key, so typing a word filters once.
+    @State private var appliedSearch = ""
+    @State private var showsAllSearchResults = false
+    /// Chat rows a search shows before "Show all (N)".
+    private let searchRowLimit = 50
     @State private var renaming: Chat?
     @State private var renamingProject: Project?
     @State private var newProjectName = ""
@@ -67,8 +72,12 @@ struct DeskView: View {
             if let projectID { expandedProjects.insert(projectID) }
         }
         .onAppear { model.installNavigationKeys() }
-        .onChange(of: search) { _, _ in
-            collapsedSearchProjects.removeAll()
+        .task(id: search) {
+            if !search.isEmpty {
+                try? await Task.sleep(for: .milliseconds(100))
+                guard !Task.isCancelled else { return }
+            }
+            applySearch(search)
         }
         .onChange(of: model.chatID) { _, _ in
             revealSelectedChat()
@@ -130,18 +139,12 @@ struct DeskView: View {
                     .padding(.horizontal, .ui(12))
                 needsYouRow.padding(.horizontal, .ui(12))
                 ScrollView {
-                    VStack(alignment: .leading, spacing: .ui(4)) {
-                        if !model.state.visiblePinnedChats.isEmpty {
-                            Text(L10n.text("Избранное", "Favorites"))
-                                .sidebarSectionHeader()
-                            ForEach(model.state.visiblePinnedChats.filter { model.state.sidebarShowsFavorite($0, search: search) }) { chat in
-                                chatEntry(chat, favorite: true)
-                            }
-                            Divider().padding(.vertical, .ui(6))
-                        }
-                        projectsHeader
-                        ForEach(model.state.visibleProjects.filter { model.state.sidebarShowsProject($0, search: search) }) { project in
-                            projectEntries(project)
+                    Group {
+                        // Search results build only the rows on screen; the full list keeps its eager stack.
+                        if appliedSearch.isEmpty {
+                            VStack(alignment: .leading, spacing: .ui(4)) { sidebarRows }
+                        } else {
+                            LazyVStack(alignment: .leading, spacing: .ui(4)) { sidebarRows }
                         }
                     }.padding(.horizontal, .ui(12)).padding(.bottom, .ui(8))
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { sidebarContentHeight = $0 }
@@ -157,6 +160,45 @@ struct DeskView: View {
                 .animation(sidebarAnimation, value: selection.isEmpty)
                 .navigationSplitViewColumnWidth(min: .ui(240), ideal: .ui(285), max: .ui(380))
                 .background(SidebarWidthLimits(min: .ui(240), ideal: .ui(285), max: .ui(380)))
+    }
+    @ViewBuilder private var sidebarRows: some View {
+        let listed = model.sidebarSections(sidebarListing)
+        if !model.state.visiblePinnedChats.isEmpty {
+            Text(L10n.text("Избранное", "Favorites"))
+                .sidebarSectionHeader()
+            ForEach(model.state.visiblePinnedChats.filter { model.state.sidebarShowsFavorite($0, search: appliedSearch) }) { chat in
+                chatEntry(chat, favorite: true)
+            }
+            Divider().padding(.vertical, .ui(6))
+        }
+        projectsHeader
+        ForEach(listed.sections, id: \.project.id) { section in
+            projectEntries(section)
+        }
+        if listed.hidden > 0 {
+            Button {
+                showsAllSearchResults = true
+            } label: {
+                Label(L10n.text("Показать все (\(listed.matching))", "Show all (\(listed.matching))"), systemImage: "ellipsis")
+                    .font(.ui(.callout)).foregroundStyle(.secondary)
+                    .padding(.leading, .ui(8)).padding(.vertical, .ui(8))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PointerButtonStyle(base: .plain))
+            .help(L10n.text("Ещё найдено чатов: \(listed.hidden)", "More matching chats: \(listed.hidden)"))
+        }
+    }
+    /// A new search opens every matching project at once: animating hundreds of rows in cost more than the search.
+    private func applySearch(_ text: String) {
+        guard text != appliedSearch else { return }
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            appliedSearch = text
+            showsAllSearchResults = false
+            collapsedSearchProjects.removeAll()
+        }
     }
     /// Everything that waits for the user: waiting chats, unresolved important messages and notifications.
     private var needsYouCount: Int {
@@ -257,8 +299,9 @@ struct DeskView: View {
         .padding(.horizontal, .ui(10)).padding(.bottom, .ui(10))
     }
     private var sidebarListing: SidebarListing {
-        SidebarListing(search: search, expanded: expandedProjects, collapsedInSearch: collapsedSearchProjects,
-                       visibleCounts: visibleChatCounts, pageSize: chatPageSize)
+        SidebarListing(search: appliedSearch, expanded: expandedProjects, collapsedInSearch: collapsedSearchProjects,
+                       visibleCounts: visibleChatCounts, pageSize: chatPageSize,
+                       searchLimit: showsAllSearchResults ? nil : searchRowLimit)
     }
     private var detail: some View {
             VStack(spacing: 0) {
@@ -316,15 +359,17 @@ struct DeskView: View {
         }
     }
 
-    @ViewBuilder private func projectEntries(_ project: Project) -> some View {
-        let isExpanded = search.isEmpty ? expandedProjects.contains(project.id) : !collapsedSearchProjects.contains(project.id)
+    @ViewBuilder private func projectEntries(_ section: SidebarSection) -> some View {
+        let project = section.project
+        let isExpanded = section.expanded
+        let projectChats = model.activeChatsByProject[project.id] ?? []
         VStack(spacing: 0) {
             HStack(spacing: .ui(2)) {
                 ProjectHeader(project: project, expanded: isExpanded, activate: {
                     withAnimation(sidebarAnimation) {
                         if isExpanded {
                             expandedProjects.remove(project.id)
-                            if !search.isEmpty { collapsedSearchProjects.insert(project.id) }
+                            if !appliedSearch.isEmpty { collapsedSearchProjects.insert(project.id) }
                             model.selectProject(project.id)
                         } else {
                             // Reset on opening so collapsing keeps the full content height.
@@ -361,7 +406,6 @@ struct DeskView: View {
                                 }.font(.ui(.caption))
                             }
                         }
-                        let projectChats = model.state.chats.filter { $0.projectID == project.id && !$0.isArchived }
                         if projectChats.contains(where: { chat in model.pending.contains { $0.threadID == chat.id } || model.restartWaitingChatIDs.contains(chat.id) }) {
                             Circle().fill(DeskPalette.attention).frame(width: .ui(7), height: .ui(7))
                                 .help(L10n.text("Есть чаты, которые ждут действия или перезапуска", "Chats are waiting for action or a restart"))
@@ -403,11 +447,8 @@ struct DeskView: View {
 
             SidebarDisclosure(isExpanded: isExpanded, animation: sidebarAnimation) {
                 VStack(alignment: .leading, spacing: .ui(4)) {
-                    let matching = model.state.orderedChats(projectID: project.id, archived: false).filter {
-                        model.state.sidebarShowsChat($0, in: project, search: search)
-                    }
-                    chatEntries(matching, projectID: project.id)
-                    if model.state.chats.allSatisfy({ $0.projectID != project.id || $0.isArchived }) {
+                    chatEntries(section.chats, limit: section.limit, projectID: project.id)
+                    if projectChats.isEmpty {
                         Text(L10n.text("Пока нет чатов", "No chats yet")).font(.ui(.caption)).foregroundStyle(.secondary).padding(.leading, .ui(24))
                     }
                 }
@@ -422,6 +463,7 @@ struct DeskView: View {
 
     private func startChat(in project: Project) {
         search = ""
+        applySearch("")
         withAnimation(sidebarAnimation) {
             expandedProjects.insert(project.id)
             collapsedSearchProjects.remove(project.id)
@@ -430,13 +472,13 @@ struct DeskView: View {
         }
     }
 
-    @ViewBuilder private func chatEntries(_ chats: [Chat], projectID: UUID) -> some View {
-        let limit = search.isEmpty ? (visibleChatCounts[projectID] ?? chatPageSize) : chats.count
+    @ViewBuilder private func chatEntries(_ chats: [Chat], limit: Int, projectID: UUID) -> some View {
         ForEach(chats.prefix(limit)) { chat in
             chatEntry(chat)
                 .transition(.opacity.combined(with: .move(edge: .top)))
         }
-        if chats.count > limit {
+        // A search's rows past its limit wait behind "Show all" at the end of the list.
+        if appliedSearch.isEmpty && chats.count > limit {
             Button {
                 withAnimation(sidebarAnimation) {
                     visibleChatCounts[projectID] = limit + chatPageSize

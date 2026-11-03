@@ -135,7 +135,7 @@ private struct ChatRunState: Equatable {
     private var directoryHistoryCache: [String: (updated: Date, messages: [TranscriptItem])] = [:]
     @Published var state = SavedState() {
         // Any state change may add, remove or re-key a chat; the next event rebuilds the map.
-        didSet { nativeSessionMap = nil; lookup = nil; syncMenu() }
+        didSet { nativeSessionMap = nil; lookup = nil; sidebarChats = nil; syncMenu() }
     }
     /// Observed by the app menu instead of the model (`ContextDeskApp`).
     let menu = AppMenuState()
@@ -168,6 +168,17 @@ private struct ChatRunState: Equatable {
         return state.projects[index]
     }
     func hasChat(_ id: String) -> Bool { chat(id) != nil }
+    private var sidebarChats: [UUID: [Chat]]?
+    /// Active chats per project in sidebar order, grouped once per state change instead of once per project row.
+    var activeChatsByProject: [UUID: [Chat]] {
+        if let sidebarChats { return sidebarChats }
+        let grouped = state.activeChatsByProject()
+        sidebarChats = grouped
+        return grouped
+    }
+    func sidebarSections(_ listing: SidebarListing) -> SidebarSections {
+        state.sidebarSections(listing, chatsByProject: activeChatsByProject)
+    }
     @Published var projectID: UUID? {
         didSet { syncMenu() }
     }
