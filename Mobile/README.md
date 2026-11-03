@@ -32,6 +32,26 @@ https://developer.apple.com/help/account/basics/about-your-developer-account
 No paid Apple membership, hosting plan or domain is assumed or purchased.
 Supabase RLS reference: https://supabase.com/docs/guides/database/postgres/row-level-security
 
+## Device installation and re-signing
+
+`zsh scripts/install-mobile.sh` builds the working copy for a generic iOS device
+(this also works while the phone is locked), checks the signature and that the
+profile lists the iPhone, and installs it over Wi-Fi with `devicectl`. Xcode reuses
+a cached profile until it expires, so the script first moves a cached profile with
+under 3 days left aside. Xcode then fetches a fresh 7-day profile (an Apple ID must
+be signed in to Xcode → Settings → Accounts). If the build fails, the old profile
+is put back. The expiry of the installed profile is recorded in
+`~/Library/Logs/Switchboard/mobile-install/installed-expiry`.
+
+`zsh scripts/install-mobile-resign.sh` installs the launchd job
+`local.daniil.switchboard.mobile-resign` (`--uninstall` removes it). Every 6 hours
+it runs `install-mobile.sh --scheduled`. That run does nothing until the installed
+profile has under 3 days left. Then it builds committed `main` in a private
+worktree under `~/Library/Caches/Switchboard/mobile-install/` and installs it. An
+unreachable phone is retried on the next run, with a notification when less than
+a day is left. Results and failures are posted as notifications; the last result
+is in `~/Library/Logs/Switchboard/mobile-install/latest-status`.
+
 ## Build and verification
 
 ```sh
