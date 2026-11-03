@@ -2193,8 +2193,7 @@ private struct ChatRunState: Equatable {
                 if let cached = remoteHistoryCache[chat.id], cached.revision == revision, cached.session == chat.nativeSession {
                     messages = cached.messages
                 } else {
-                    let history = try? await store.loadTranscript(conversationID: chat.id)
-                    messages = Array((history.map(LocalHistory.items) ?? []).filter { ["user", "assistant"].contains($0.kind) }.suffix(20))
+                    messages = (try? await store.recentMessages(conversationID: chat.id, limit: 20)) ?? []
                     remoteHistoryCache[chat.id] = (revision, chat.nativeSession, messages)
                 }
             }
