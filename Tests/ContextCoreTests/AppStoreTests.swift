@@ -287,3 +287,37 @@ private func savedChat(_ store: AppStore, id: String = "chat") async throws -> (
     await reader.flushTranscripts()
     #expect(try await AppStore(file: file).loadTranscript(conversationID: chat.id)?.items.map(\.text) == ["Question", "Bash ls", "Answer", "More", "Last"])
 }
+
+@Test func recentMessagesMatchTheFullTranscriptWithoutCachingIt() async throws {
+    let file = temporaryStoreFile()
+    defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+    let store = AppStore(file: file, flushDelay: .seconds(30), flushInterval: .seconds(30))
+    let (chat, source) = try await savedChat(store)
+    var items: [TranscriptItem] = []
+    for index in 0..<30 {
+        items.append(TranscriptItem(id: "u\(index)", kind: "user", text: "Question \(index)"))
+        items.append(TranscriptItem(id: "t\(index)", kind: "activity", text: "Bash ls \(index)"))
+        items.append(TranscriptItem(id: "a\(index)", kind: "assistant", text: "Answer \(index)"))
+    }
+    try await store.saveTranscript(LocalHistory.snapshot(conversation: chat.conversationID, source: source, items: items))
+    func expected(_ store: AppStore) async throws -> [TranscriptItem] {
+        let full = try await store.loadTranscript(conversationID: chat.id).map(LocalHistory.items) ?? []
+        return Array(full.filter { ["user", "assistant"].contains($0.kind) }.suffix(20)).map {
+            var item = TranscriptItem(id: $0.id, kind: $0.kind, text: ""); item.text = $0.text; return item
+        }
+    }
+    // From the cache, including a pending item.
+    try await store.recordTranscriptItem(TranscriptItem(id: "late", kind: "assistant", text: "Late"), conversationID: chat.id, source: source)
+    let cached = try await store.recentMessages(conversationID: chat.id, limit: 20)
+    let fromStore = try await expected(store)
+    #expect(cached.count == 20 && cached.last?.text == "Late" && cached == fromStore)
+    await store.flushTranscripts()
+    // From the file: the same messages, and the transcript is not cached.
+    let reader = AppStore(file: file, flushDelay: .seconds(30), flushInterval: .seconds(30))
+    let light = try await reader.recentMessages(conversationID: chat.id, limit: 20)
+    #expect(await reader.cachedTranscriptCount == 0)
+    #expect(light == cached)
+    let fromReader = try await expected(reader)
+    #expect(light == fromReader)
+    #expect(try await reader.recentMessages(conversationID: "missing", limit: 20).isEmpty)
+}

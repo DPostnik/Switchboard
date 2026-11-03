@@ -435,6 +435,42 @@ public actor AppStore {
             return try materialized(conversationID)
         }
     }
+    /// The last `limit` user and assistant messages (id, kind and text only), for the phone. A cached transcript answers
+    /// from memory; otherwise only those fields are decoded from the blob and nothing is cached, so publishing 20 chats
+    /// neither keeps their transcripts nor evicts the open chat's.
+    public func recentMessages(conversationID id: String, limit: Int) throws -> [TranscriptItem] {
+        try withDatabase { db in
+            let messages: [(id: String, kind: String, text: String)]
+            if let entry = transcripts[id] {
+                try checkIdentity(db, conversationID: id, source: entry.snapshot.source)
+                messages = entry.items?.map { ($0.id, $0.kind, $0.text) } ?? entry.snapshot.items.map { ($0.id, $0.presentation?.kind ?? $0.kind.rawValue, $0.text) }
+            } else {
+                guard let data = try bytes(db: db, key: "transcript:" + id) else { return [] }
+                let light = try JSONDecoder().decode(MessagesOnly.self, from: data)
+                guard light.version == AgentTranscriptSnapshot.schemaVersion, light.conversation.value == id else { throw ConversationIdentity.invalidStorage }
+                try checkIdentity(db, conversationID: id, source: light.source)
+                messages = light.items.map { ($0.id, $0.presentation?.kind ?? $0.kind, $0.text) }
+            }
+            return messages.filter { $0.kind == "user" || $0.kind == "assistant" }.suffix(limit).map { message in
+                // Stored text as it is (the initializer would strip an interrupted-turn note from user text).
+                var item = TranscriptItem(id: message.id, kind: message.kind, text: ""); item.text = message.text
+                return item
+            }
+        }
+    }
+    private struct MessagesOnly: Decodable {
+        struct Item: Decodable {
+            struct Presentation: Decodable { let kind: String }
+            let id: String
+            let kind: String
+            let text: String
+            let presentation: Presentation?
+        }
+        let version: Int
+        let conversation: ConversationID
+        let source: AgentSessionReference
+        let items: [Item]
+    }
     /// Undecoded transcript blobs for the chat search index, which checks identity itself; pending items are written first.
     public func transcriptBlobs(conversationIDs: [String]) throws -> [String: Data] {
         try withDatabase { db in
