@@ -156,9 +156,10 @@ struct ProjectFilesView: View {
                     FileRow(name: URL(fileURLWithPath: path).lastPathComponent, detail: (path as NSString).deletingLastPathComponent,
                             folder: false, expanded: false, depth: 0)
                         .tag(path)
-                        .modifier(FileActions(files: files, path: path, open: open, addToMessage: addToMessage))
+                        .modifier(FileDrag(files: files, path: path))
                 }
                 .listStyle(.sidebar)
+                .contextMenu(forSelectionType: String.self) { paths in menu(paths, folder: { _ in false }) }
                 .onKeyPress(.return) { keyActivate() }
             }
         } else if files.tree.isEmpty {
@@ -169,14 +170,24 @@ struct ProjectFilesView: View {
                     FileRow(name: row.node.name, detail: nil, folder: row.node.isFolder,
                             expanded: files.expanded.contains(row.node.path), depth: row.depth) { files.toggle(row.node.path) }
                         .tag(row.node.path)
-                        .modifier(FileActions(files: files, path: row.node.path, folder: row.node.isFolder,
-                                              open: open, addToMessage: addToMessage))
+                        .modifier(FileDrag(files: files, path: row.node.path))
                 }
                 .listStyle(.sidebar)
+                .contextMenu(forSelectionType: String.self) { paths in
+                    menu(paths) { path in files.rows.first { $0.node.path == path }?.node.isFolder == true }
+                }
                 .onKeyPress(.return) { keyActivate() }
                 .onKeyPress(.space) { keyActivate() }
                 .onAppear { if let selected = files.selection { proxy.scrollTo(selected, anchor: .center) } }
             }
+        }
+    }
+
+    /// One menu for the whole list, built when it opens for the clicked row, instead of a menu per row that every
+    /// filter keystroke and every expansion rebuilt.
+    @ViewBuilder private func menu(_ paths: Set<String>, folder: (String) -> Bool) -> some View {
+        if paths.count == 1, let path = paths.first {
+            FileMenu(files: files, path: path, folder: folder(path), open: open, addToMessage: addToMessage)
         }
     }
 
@@ -237,33 +248,37 @@ private struct FileRow: View {
     }
 }
 
-/// Context menu and drag for a file row; folders get the Finder and path actions only.
-private struct FileActions: ViewModifier {
+/// Drag for a file row; the URL is made when the drag starts.
+private struct FileDrag: ViewModifier {
     let files: ProjectFilesModel
     let path: String
-    var folder = false
+
+    func body(content: Content) -> some View {
+        content.onDrag { files.url(path).map { NSItemProvider(object: $0 as NSURL) } ?? NSItemProvider() }
+    }
+}
+
+/// The context menu of one file or folder row; folders get the Finder and path actions only.
+private struct FileMenu: View {
+    let files: ProjectFilesModel
+    let path: String
+    let folder: Bool
     let open: (URL) -> Void
     let addToMessage: (URL) -> Void
 
-    func body(content: Content) -> some View {
+    var body: some View {
         if let url = files.url(path) {
-            content
-                .onDrag { NSItemProvider(object: url as NSURL) }
-                .contextMenu {
-                    if !folder {
-                        Button(L10n.text("Предпросмотр", "Preview")) { open(url) }
-                        OpenInEditorMenu(path: url.path)
-                        Button(L10n.text("Добавить в сообщение", "Add to Message")) { addToMessage(url) }
-                        Divider()
-                    } else if EditorLauncher.preferred != nil {
-                        Button(EditorLauncher.openTitle) { EditorLauncher.open(url.path) }
-                    }
-                    Button(L10n.text("Показать в Finder", "Show in Finder")) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-                    Button(L10n.text("Скопировать относительный путь", "Copy Relative Path")) { copy(path) }
-                    Button(L10n.text("Скопировать абсолютный путь", "Copy Absolute Path")) { copy(url.path) }
-                }
-        } else {
-            content
+            if !folder {
+                Button(L10n.text("Предпросмотр", "Preview")) { open(url) }
+                OpenInEditorMenu(path: url.path)
+                Button(L10n.text("Добавить в сообщение", "Add to Message")) { addToMessage(url) }
+                Divider()
+            } else if EditorLauncher.preferred != nil {
+                Button(EditorLauncher.openTitle) { EditorLauncher.open(url.path) }
+            }
+            Button(L10n.text("Показать в Finder", "Show in Finder")) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+            Button(L10n.text("Скопировать относительный путь", "Copy Relative Path")) { copy(path) }
+            Button(L10n.text("Скопировать абсолютный путь", "Copy Absolute Path")) { copy(url.path) }
         }
     }
 
