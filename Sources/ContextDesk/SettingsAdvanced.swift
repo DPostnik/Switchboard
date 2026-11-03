@@ -122,11 +122,7 @@ struct PluginSettings: View {
                         Text((model.profile(id)?.productName ?? model.agentName(id)) + ": " + OptimizerCompatibility.summary(agent: id.agent, requirements: plugin.manifest.requirements))
                             .font(.ui(.caption)).foregroundStyle(model.traits(id).contains(.optimizerPlugins) ? .primary : .secondary)
                     }
-                    if let status = model.pluginStatuses[plugin.id] {
-                        ForEach(status.metrics) { metric in
-                            LabeledContent(metric.localizedTitle(), value: String(metric.value))
-                        }
-                    }
+                    PluginMetricsList(metrics: model.pluginMetrics, pluginID: plugin.id)
                 }
             }
             ForEach(model.pluginIssues, id: \.self) { Text($0).font(.ui(.caption)).foregroundStyle(DeskPalette.attention) }
@@ -150,6 +146,17 @@ struct DataSettings: View {
             Text(L10n.text("Разговоры и настройки этого приложения хранятся отдельно от текущего Codex.", "This app’s conversations and settings are stored separately from your existing Codex setup."))
                 .font(.ui(.callout)).foregroundStyle(.secondary)
             Button(L10n.text("Открыть папку данных", "Open data folder")) { NSWorkspace.shared.open(Locations.root) }
+        }
+    }
+}
+
+/// A plugin's counters; it observes them alone, so their ticks do not redraw the rest of Settings or the window.
+private struct PluginMetricsList: View {
+    @ObservedObject var metrics: PluginMetricsState
+    let pluginID: String
+    var body: some View {
+        ForEach(metrics.metrics[pluginID] ?? []) { metric in
+            LabeledContent(metric.localizedTitle(), value: String(metric.value))
         }
     }
 }

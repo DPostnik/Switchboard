@@ -19,6 +19,22 @@ import AgentContract
     }
 }
 
+/// Plugin metrics (request counters) change on most polls during a turn; only the plugin settings observe them.
+@MainActor final class PluginMetricsState: ObservableObject {
+    @Published private(set) var metrics: [String: [PluginMetric]] = [:]
+    func update(_ pluginID: String, _ value: [PluginMetric]?) {
+        if metrics[pluginID] != value { metrics[pluginID] = value }
+    }
+    func removeAll() { if !metrics.isEmpty { metrics.removeAll() } }
+}
+
+private extension PluginStatus {
+    func sameIgnoringMetrics(_ other: PluginStatus) -> Bool {
+        protocolVersion == other.protocolVersion && pluginID == other.pluginID && pluginVersion == other.pluginVersion
+            && instance == other.instance && detail == other.detail && detailTranslations == other.detailTranslations
+    }
+}
+
 struct PendingAction: Identifiable {
     let interaction: AgentInteraction
     let threadID: String
@@ -119,6 +135,7 @@ private struct ChatRunState: Equatable {
     @Published private(set) var pluginIssues: [String] = []
     @Published private(set) var pluginStatuses: [String: PluginStatus] = [:]
     @Published private(set) var pluginMessages: [String: String] = [:]
+    let pluginMetrics = PluginMetricsState()
     let pluginDirectory: URL
     private var pluginRuntimes: [String: ProviderPluginRuntime] = [:]
     private var pluginTask: Task<Void, Never>?
@@ -589,7 +606,7 @@ private struct ChatRunState: Equatable {
     private func stopPlugins() async {
         pluginTask?.cancel(); pluginTask = nil
         for runtime in pluginRuntimes.values { await runtime.stop() }
-        pluginRuntimes.removeAll(); pluginStatuses.removeAll()
+        pluginRuntimes.removeAll(); pluginStatuses.removeAll(); pluginMetrics.removeAll()
     }
     /// Connects one registered agent. A shared engine stops first and waits for the whole app to be idle, starting the
     /// optimizer plugins it serves; a per-chat engine waits only for its own chats and keeps their processes.
@@ -633,7 +650,7 @@ private struct ChatRunState: Equatable {
                     let endpoint = try await runtime.start()
                     let status = try await runtime.status()
                     optimizers.append(.init(id: plugin.id, endpoint: endpoint))
-                    pluginStatuses[pluginID] = status
+                    applyPluginStatus(status, for: pluginID)
                     pluginRuntimes[pluginID] = runtime
                 } catch {
                     await runtime.stop()
@@ -672,22 +689,44 @@ private struct ChatRunState: Equatable {
     }
     /// Every 5 s for every plugin. A plugin that stops pauses its chats' queues; with one of them busy the host
     /// connection is stopped too, and nothing is retried.
+    /// Stores a plugin's status: the metrics go to `pluginMetrics`, and `pluginStatuses` publishes only when the
+    /// rest changes, so a counter tick no longer redraws every view observing the model.
+    func applyPluginStatus(_ status: PluginStatus?, for pluginID: String) {
+        pluginMetrics.update(pluginID, status?.metrics)
+        let current = pluginStatuses[pluginID]
+        guard let status else {
+            if current != nil { pluginStatuses[pluginID] = nil }
+            return
+        }
+        if current.map({ !$0.sameIgnoringMetrics(status) }) ?? true { pluginStatuses[pluginID] = status }
+    }
+    /// A turn runs through a plugin: its health is checked every 5 s instead of every 30 s.
+    private var pluginRouteInUse: Bool {
+        activeRunChatIDs.contains { id in chat(id)?.route.map { pluginRuntimes[$0.rawValue] != nil } ?? false }
+    }
+    /// Each poll opens a loopback connection to every plugin; idle plugins are asked twice a minute.
+    nonisolated static func pluginPollDue(routeInUse: Bool, sinceLastPoll: Duration) -> Bool {
+        routeInUse || sinceLastPoll >= .seconds(30)
+    }
     private func monitorPlugins(host id: AgentConnectionID) {
         guard !pluginRuntimes.isEmpty else { return }
         pluginTask = Task { [weak self] in
+            var lastPoll = ContinuousClock.now
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(5)) } catch { return }
                 guard let self else { return }
+                guard Self.pluginPollDue(routeInUse: self.pluginRouteInUse, sinceLastPoll: lastPoll.duration(to: .now)) else { continue }
+                lastPoll = .now
                 for pluginID in self.pluginRuntimes.keys.sorted() {
                     guard let runtime = self.pluginRuntimes[pluginID] else { continue }
                     do {
                         let status = try await runtime.status()
                         guard !Task.isCancelled else { return }
                         // An unchanged status must not redraw the window.
-                        if self.pluginStatuses[pluginID] != status { self.pluginStatuses[pluginID] = status }
+                        self.applyPluginStatus(status, for: pluginID)
                     } catch {
                         guard !Task.isCancelled else { return }
-                        if self.pluginStatuses[pluginID] != nil { self.pluginStatuses[pluginID] = nil }
+                        self.applyPluginStatus(nil, for: pluginID)
                         self.pluginMessages[pluginID] = error.localizedDescription
                         await runtime.stop()
                         self.pluginRuntimes[pluginID] = nil
@@ -1770,7 +1809,7 @@ private struct ChatRunState: Equatable {
             guard let client = try threadID.map({ try clientForChat($0) }) ?? self.client(newConnection) else { throw ConversationIdentity.unavailable }
             if route != .direct {
                 guard let runtime = pluginRuntimes[route.rawValue], routeIsAvailable(route) else { throw ClientFailure(routeMessage(route)) }
-                pluginStatuses[route.rawValue] = try await runtime.status()
+                applyPluginStatus(try await runtime.status(), for: route.rawValue)
             }
             var id = threadID
             if id == nil {
