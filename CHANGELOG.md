@@ -27,6 +27,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Fixed
 
+- The sidebar's project list always uses the thin overlay scroll bar: with "Show scroll bars: Always" or a mouse connected it no longer draws a light track that takes a column of the sidebar's width.
 - The PR badge in the composer (#123) no longer opens an empty popover with only its arrow and border: when the details cannot be measured beforehand, the popover sizes itself to them.
 - The changed-files card under an answer keeps a gap above the next message; the next user bubble no longer touches it.
 - A Claude chat whose sub-agents or other background tasks are still running no longer stops them when the next message uses a different model, reasoning level or advisor: the change is applied to the running Claude Code process; if Claude Code refuses it, the reply keeps the previous settings with a note and the new ones apply once the tasks are done.

@@ -37,7 +37,6 @@ struct DeskView: View {
     @State private var sidebarBeforeDocument: NavigationSplitViewVisibility?
     @State private var sidebarViewportHeight: CGFloat = 0
     @State private var sidebarContentHeight: CGFloat = 0
-    @State private var scrollerStyle = NSScroller.preferredScrollerStyle
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -145,14 +144,11 @@ struct DeskView: View {
                             projectEntries(project)
                         }
                     }.padding(.horizontal, .ui(12)).padding(.bottom, .ui(8))
-                        // Legacy scrollers take layout width only while the list overflows; reserve it otherwise so rows keep their width.
-                        .padding(.trailing, sidebarScrollerReserve)
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { sidebarContentHeight = $0 }
+                        // Overlay scrollers sit in the list's trailing padding and keep the rows' width.
+                        .background(OverlayScrollers())
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { sidebarViewportHeight = $0 }
-                .onReceive(NotificationCenter.default.publisher(for: NSScroller.preferredScrollerStyleDidChangeNotification)) { _ in
-                    scrollerStyle = NSScroller.preferredScrollerStyle
-                }
                 // The edge line only marks where the list scrolls under the controls below it.
                 DeskPalette.border.frame(height: 0.5).opacity(sidebarContentHeight > sidebarViewportHeight ? 1 : 0)
                 if !selection.isEmpty { selectionBar.transition(DeskMotion.slide(from: .bottom, reduceMotion)) }
@@ -263,10 +259,6 @@ struct DeskView: View {
     private var sidebarListing: SidebarListing {
         SidebarListing(search: search, expanded: expandedProjects, collapsedInSearch: collapsedSearchProjects,
                        visibleCounts: visibleChatCounts, pageSize: chatPageSize)
-    }
-    private var sidebarScrollerReserve: CGFloat {
-        guard scrollerStyle == .legacy, sidebarContentHeight <= sidebarViewportHeight else { return 0 }
-        return NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
     }
     private var detail: some View {
             VStack(spacing: 0) {
