@@ -101,6 +101,25 @@ private func savedChat(_ store: AppStore, id: String = "chat") async throws -> (
     #expect(try await AppStore(file: file).loadTranscript(conversationID: chat.id)?.items.map(\.text) == ["Hello", "Part 4", "Last"])
 }
 
+@Test func aFinishedTurnCostsOneWriteWhetherOrNotItsHistoryRefreshSaves() async throws {
+    let file = temporaryStoreFile()
+    defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+    let store = AppStore(file: file, flushDelay: .seconds(30), flushInterval: .seconds(30))
+    let (chat, source) = try await savedChat(store)
+    // Refresh saved: the engine's history replaces the pending items, and the turn-end flush has nothing left.
+    try await store.recordTranscriptItem(TranscriptItem(id: "a", kind: "assistant", text: "Live"), conversationID: chat.id, source: source)
+    let history = try LocalHistory.snapshot(conversation: chat.conversationID, source: source,
+                                            items: [TranscriptItem(id: "a", kind: "assistant", text: "Final")], capturedAt: Date())
+    try await store.saveTranscript(history)
+    await store.flushTranscript(conversationID: chat.id)
+    #expect(await store.transcriptWriteCount == 1)
+    // Refresh skipped (busy, scheduled record) or failed: the turn-end flush writes the pending items at once.
+    try await store.recordTranscriptItem(TranscriptItem(id: "b", kind: "assistant", text: "Next"), conversationID: chat.id, source: source)
+    await store.flushTranscript(conversationID: chat.id)
+    #expect(await store.transcriptWriteCount == 2)
+    #expect(try await AppStore(file: file).loadTranscript(conversationID: chat.id)?.items.map(\.text) == ["Final", "Next"])
+}
+
 @Test func archivingWritesTheChatsPendingItems() async throws {
     let file = temporaryStoreFile()
     defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }

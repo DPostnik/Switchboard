@@ -1167,10 +1167,20 @@ private struct ChatRunState: Equatable {
     func removeRoutine(_ id: UUID) async {
         do { routines = try await store.removeRoutine(id) } catch { self.error = error.localizedDescription }
     }
+    /// The refresh replaces the recorded transcript with the engine's history; when it is skipped (busy, scheduled record,
+    /// disconnected) or fails, the turn's pending recorded items are written now instead of at the store's next interval.
+    /// A refresh that saved leaves nothing pending, so a finished turn costs one blob write either way.
     private func refreshHistoryAfterTurn(_ id: String) {
-        guard let chat = state.chats.first(where: { $0.id == id }) else { return }
+        let store = store
+        guard let chat = state.chats.first(where: { $0.id == id }) else {
+            Task { await store.flushTranscript(conversationID: id) }
+            return
+        }
         historyRefreshTasks[id]?.cancel()
-        historyRefreshTasks[id] = Task { [weak self] in await self?.backfillHistory([chat]) }
+        historyRefreshTasks[id] = Task { [weak self] in
+            await self?.backfillHistory([chat])
+            await store.flushTranscript(conversationID: id)
+        }
     }
     func renameChat(_ id: String, title: String) async {
         guard !isChangingChat(id) else { return }
