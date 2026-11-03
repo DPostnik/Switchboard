@@ -36,7 +36,8 @@ public actor AppStore {
 
     private struct TranscriptEntry {
         var snapshot: AgentTranscriptSnapshot
-        /// Merged item list kept while items are recorded; `snapshotStale` marks a snapshot older than it.
+        /// Merged item list kept while recorded items are pending (dropped after their write, so a written entry holds one
+        /// copy); `snapshotStale` marks a snapshot older than it.
         var items: [TranscriptItem]?
         var snapshotStale = false
         /// True while the snapshot (after materializing) has not been written.
@@ -522,13 +523,26 @@ public actor AppStore {
     private func transcriptEntry(_ db: OpaquePointer, _ id: String) throws -> TranscriptEntry? {
         if let entry = transcripts[id] { touch(id); return entry }
         guard let data = try bytes(db: db, key: "transcript:" + id) else { return nil }
-        let snapshot = try JSONDecoder().decode(AgentTranscriptSnapshot.self, from: data)
-        guard snapshot.version == AgentTranscriptSnapshot.schemaVersion, snapshot.conversation.value == id else {
+        let decoded = try JSONDecoder().decode(AgentTranscriptSnapshot.self, from: data)
+        guard decoded.version == AgentTranscriptSnapshot.schemaVersion, decoded.conversation.value == id else {
             throw ConversationIdentity.invalidStorage
         }
+        let snapshot = Self.sharingTexts(decoded)
         let entry = TranscriptEntry(snapshot: snapshot, capturedAt: snapshot.capturedAt)
         try insertEntry(db, id, entry)
         return entry
+    }
+    /// Every stored item carries its text twice (`text` and `presentation.text`); decoding gives each its own buffer.
+    /// Equal texts share one buffer in the cache (a decoded 1000-message transcript: 18 MB -> 10 MB); the value and its
+    /// encoding are unchanged.
+    static func sharingTexts(_ snapshot: AgentTranscriptSnapshot) -> AgentTranscriptSnapshot {
+        let items = snapshot.items.map { item -> AgentTranscriptItem in
+            guard var presentation = item.presentation, presentation.text == item.text else { return item }
+            presentation.text = item.text
+            return AgentTranscriptItem(id: item.id, kind: item.kind, text: item.text, presentation: presentation)
+        }
+        return AgentTranscriptSnapshot(conversation: snapshot.conversation, source: snapshot.source, revision: snapshot.revision,
+                                       capturedAt: snapshot.capturedAt, completeness: snapshot.completeness, items: items)
     }
     private func materialized(_ id: String) throws -> AgentTranscriptSnapshot {
         guard var entry = transcripts[id] else { throw ConversationIdentity.invalidStorage }
@@ -545,7 +559,8 @@ public actor AppStore {
         let perfSpan = Perf.span("store.flush", id: id); var blobBytes: Int?; defer { perfSpan.end(blobBytes.map { "\($0) bytes" } ?? "unchanged") }
         let snapshot = try materialized(id)
         blobBytes = try writeTranscript(db, snapshot)
-        transcripts[id]?.dirty = false
+        // Written and current: the snapshot alone holds the transcript; the next recorded item rebuilds the list.
+        transcripts[id]?.dirty = false; transcripts[id]?.items = nil
         lastFlush[id] = .now
     }
     /// Blob and stamp commit together. Returns the blob size, or nil when the stored content already matches.

@@ -262,3 +262,28 @@ private func savedChat(_ store: AppStore, id: String = "chat") async throws -> (
     await store.flushTranscripts()
     #expect(try await AppStore(file: file).loadTranscript(conversationID: "chat-2")?.items.map(\.text) == ["Stored chat-2", "Pending"])
 }
+
+@Test func decodedTranscriptsShareEqualTextsWithoutChangingTheirValue() async throws {
+    let file = temporaryStoreFile()
+    defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+    let store = AppStore(file: file, flushDelay: .seconds(30), flushInterval: .seconds(30))
+    let (chat, source) = try await savedChat(store)
+    var tool = TranscriptItem(id: "t", kind: "activity", text: "Bash ls"); tool.exitCode = 0
+    let snapshot = try LocalHistory.snapshot(conversation: chat.conversationID, source: source,
+        items: [TranscriptItem(id: "u", kind: "user", text: "Question"), tool, TranscriptItem(id: "a", kind: "assistant", text: "Answer")])
+    // Sorted keys: the encoder's key order is not stable between calls.
+    let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+    let data = try encoder.encode(snapshot)
+    let shared = AppStore.sharingTexts(try JSONDecoder().decode(AgentTranscriptSnapshot.self, from: data))
+    #expect(shared == snapshot)
+    #expect(try encoder.encode(shared) == data)
+    // A fresh instance decodes the stored blob, serves it unchanged and records into it after a write dropped the item list.
+    try await store.saveTranscript(snapshot)
+    let reader = AppStore(file: file, flushDelay: .seconds(30), flushInterval: .seconds(30))
+    #expect(try await reader.loadTranscript(conversationID: chat.id) == snapshot)
+    try await reader.recordTranscriptItem(TranscriptItem(id: "b", kind: "assistant", text: "More"), conversationID: chat.id, source: source)
+    await reader.flushTranscripts()
+    try await reader.recordTranscriptItem(TranscriptItem(id: "c", kind: "assistant", text: "Last"), conversationID: chat.id, source: source)
+    await reader.flushTranscripts()
+    #expect(try await AppStore(file: file).loadTranscript(conversationID: chat.id)?.items.map(\.text) == ["Question", "Bash ls", "Answer", "More", "Last"])
+}
