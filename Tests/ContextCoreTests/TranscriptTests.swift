@@ -232,6 +232,47 @@ import ContextCore
     #expect(abs(first.firstLineHeadIndent - (TranscriptScrollView.outgoingInset(items[0], width: container.containerSize.width) + 16)) < 0.5)
 }
 
+@Test @MainActor func reusedEarlierRequestsGroupLikeAFullRegroup() {
+    let view = TranscriptScrollView()
+    var items: [TranscriptItem] = []
+    for turn in 0..<4 {
+        items.append(TranscriptItem(id: "u\(turn)", kind: "user", text: "Вопрос \(turn)"))
+        items.append(TranscriptItem(id: "t\(turn)", kind: "activity", text: "Read file \(turn)"))
+        items.append(TranscriptItem(id: "a\(turn)", kind: "assistant", text: "Ответ \(turn)", phase: "final_answer"))
+    }
+    var call = TranscriptItem(id: "run", kind: "activity", text: "swift test")
+    call.toolCall = AgentToolCall(id: "run", kind: .execute, status: .inProgress, title: "swift test")
+    items += [TranscriptItem(id: "u4", kind: "user", text: "Ещё"), call, TranscriptItem(id: "live", kind: "assistant", text: "")]
+    func check(_ working: Bool, _ step: String) {
+        view.update(items: items, conversationID: "c", followOutput: true, isWorking: working)
+        let full = TranscriptScrollView.groupActivities(items, isWorking: working)
+        var expected = full.items
+        if working { expected.append(view.previous.last!) }
+        #expect(view.previous == expected, "\(step)")
+        #expect(view.actionGroups == full.groups, "\(step)")
+    }
+    check(true, "start")
+    for chunk in ["Первая", " часть", " ответа"] {
+        items[items.count - 1].text += chunk
+        check(true, "delta")
+    }
+    // A new tool call in the running turn, then its status flips.
+    var second = TranscriptItem(id: "run2", kind: "activity", text: "git status")
+    second.toolCall = AgentToolCall(id: "run2", kind: .execute, status: .inProgress, title: "git status")
+    items.insert(second, at: items.count - 1)
+    check(true, "new call")
+    items[items.count - 2].toolCall?.status = .completed
+    check(true, "status flip")
+    // A change in an earlier request (a late changes card) is not hidden by the reused rows.
+    items[2].timing = ResponseTiming(startedAt: nil, completedAt: Date(timeIntervalSince1970: 10),
+                                     changes: TurnChanges(repository: "/repo", start: "a", end: "b", files: 1, added: 2, removed: 0))
+    check(true, "earlier change")
+    items[items.count - 1].phase = "final_answer"
+    check(false, "finished")
+    items.append(TranscriptItem(id: "u5", kind: "user", text: "Следующий"))
+    check(true, "next request")
+}
+
 @Test @MainActor func expandingActionsDoesNotLoseFollowingMessages() {
     let view = TranscriptScrollView()
     let command = String(repeating: "длинная команда ", count: 3_000)

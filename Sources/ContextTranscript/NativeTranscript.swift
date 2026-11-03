@@ -63,26 +63,25 @@ public struct NativeTranscript: NSViewRepresentable {
     var actionGroups: [String: [TranscriptItem]] = [:]
     /// Open thinking rows and command outputs (`TranscriptActivityDetail`).
     var expandedDetails: Set<String> = []
-    /// The last grouping and the cheap key it was computed for; a streaming update mostly changes only the last item.
-    private var groupingMemo: (key: GroupingKey, items: [TranscriptItem], groups: [String: [TranscriptItem]])?
+    /// The last grouping; a streaming update changes only the last request, so the rows before it are kept.
+    private var groupingMemo: GroupingMemo?
     /// The headline of the running tool call, keyed by item id and text length; parsing its JSON input is not free.
     private var headlineMemo: (id: String, length: Int, headline: String)?
     /// Number of `render` calls so far; tests check that unchanged messages are not rendered again.
     public private(set) var renderCount = 0
     /// Rendered answer blocks reused across the re-renders of a streamed message.
     let renderCache = TranscriptRenderCache()
-    private struct GroupingKey: Equatable {
+    private struct GroupingMemo {
         var conversationID: String?
-        var count: Int
-        var lastID: String?
-        var lastLength: Int
-        /// A thinking block's stop adds its duration without changing its text.
-        var lastSeconds: Double?
-        var totalLength: Int
-        /// Structured call statuses and plan entries (an approval or a result moves a call that is no longer the last
-        /// item; a plan entry's status changes without changing the text length).
-        var callStates: Int
         var isWorking: Bool
+        /// The items grouped, and the index of their last user message, where the last request starts.
+        var raw: [TranscriptItem]
+        var split: Int
+        /// Rows and groups of the requests before `split`; they do not depend on anything after it.
+        var head: [TranscriptItem]
+        var headGroups: [String: [TranscriptItem]]
+        var items: [TranscriptItem]
+        var groups: [String: [TranscriptItem]]
     }
     private(set) var copyFeedback: (id: String, succeeded: Bool, block: Int?)?
     /// Collapsible code, `<details>` and source lists the user opened, keyed by item and block.
@@ -285,7 +284,9 @@ public struct NativeTranscript: NSViewRepresentable {
         }
         let resumeFollowing = followOutput && !followed
         followed = followOutput
-        guard switched || finished || projectChanged || items != previous else {
+        // From the end first: a streaming delta changes the last rows.
+        let changed = items.count != previous.count || items.last != previous.last || items != previous
+        guard switched || finished || projectChanged || changed else {
             if resumeFollowing { scrollToEnd() }
             scheduleReadCheck()
             return
@@ -309,8 +310,12 @@ public struct NativeTranscript: NSViewRepresentable {
         let closingRows = closing.isEmpty ? [] : (0..<common).filter { closing.contains(previous[$0].id) }
         // A message the user just sent is brought into view even if they had scrolled up to re-read.
         // Only items after the last known one count: prepended older history also contains user messages.
-        let knownIDs = Set(previous.map(\.id))
-        let lastKnown = items.lastIndex { knownIDs.contains($0.id) }
+        // While an answer streams the last row stays the same one: no set of every row's id per tick.
+        let lastKnown: Int?
+        if let last = items.last?.id, last == previous.last?.id { lastKnown = items.count - 1 } else {
+            let knownIDs = Set(previous.map(\.id))
+            lastKnown = items.lastIndex { knownIDs.contains($0.id) }
+        }
         let sentMessage = followOutput && !switched && lastKnown != nil
             && items[(lastKnown! + 1)...].contains { $0.kind == "user" }
         // Streaming rewrites only the last message or appends; text above the viewport keeps its place.
@@ -743,30 +748,38 @@ public struct NativeTranscript: NSViewRepresentable {
         return line
     }
 
-    /// Groups once per (conversation, item count, last item id and length, total text length, working) key: a
-    /// streaming delta changes the last item's length, an appended item the count, a finished turn the flag. A
-    /// middle item that changes without changing the total length keeps the previous grouping until the next change.
+    /// Requests group independently (`groupActivities` closes a segment at each user message), so the rows before the
+    /// last user message are reused while they are unchanged and only the last request is regrouped: a streaming delta,
+    /// a new tool call or a status flip in the running turn costs as much as that turn, not the whole chat. Any change
+    /// before it (a late changes card on an earlier answer, an older call's status) regroups everything.
     private func groupedItems(_ items: [TranscriptItem], conversationID: String?, isWorking: Bool) -> [TranscriptItem] {
-        var totalLength = 0, calls = Hasher()
-        for (index, item) in items.enumerated() {
-            totalLength += item.text.utf8.count
-            if let status = item.toolCall?.status { calls.combine(index); calls.combine(status) }
-            // A plan entry that moves from in progress to done keeps the text length.
-            if let plan = item.plan { calls.combine(index); calls.combine(plan.checklist) }
-            // Turn changes are recorded after the answer finished; they add the changes card.
-            if let changes = item.timing?.changes { calls.combine(index); calls.combine(changes.end); calls.combine(changes.list?.count) }
+        let split = items.lastIndex { $0.kind == "user" } ?? 0
+        if let memo = groupingMemo, memo.conversationID == conversationID {
+            // Compared from the end first: a streaming delta differs in the last item.
+            if memo.isWorking == isWorking, memo.raw.count == items.count, memo.raw.last == items.last, memo.raw == items {
+                actionGroups = memo.groups
+                return memo.items
+            }
+            if memo.split == split, memo.raw.count >= split, memo.raw[..<split] == items[..<split] {
+                let tail = Self.groupActivities(Array(items[split...]), isWorking: isWorking)
+                var groups = memo.headGroups
+                for (id, members) in tail.groups { groups[id] = members }
+                let grouped = memo.head + tail.items
+                groupingMemo = GroupingMemo(conversationID: conversationID, isWorking: isWorking, raw: items, split: split,
+                                            head: memo.head, headGroups: memo.headGroups, items: grouped, groups: groups)
+                actionGroups = groups
+                return grouped
+            }
         }
-        let key = GroupingKey(conversationID: conversationID, count: items.count, lastID: items.last?.id,
-                              lastLength: items.last?.text.utf8.count ?? 0, lastSeconds: items.last?.seconds,
-                              totalLength: totalLength, callStates: calls.finalize(), isWorking: isWorking)
-        if let memo = groupingMemo, memo.key == key {
-            actionGroups = memo.groups
-            return memo.items
-        }
-        let grouped = Self.groupActivities(items, isWorking: isWorking)
-        groupingMemo = (key, grouped.items, grouped.groups)
-        actionGroups = grouped.groups
-        return grouped.items
+        let head = Self.groupActivities(Array(items[..<split]), isWorking: false)
+        let tail = Self.groupActivities(Array(items[split...]), isWorking: isWorking)
+        var groups = head.groups
+        for (id, members) in tail.groups { groups[id] = members }
+        let grouped = head.items + tail.items
+        groupingMemo = GroupingMemo(conversationID: conversationID, isWorking: isWorking, raw: items, split: split,
+                                    head: head.items, headGroups: head.groups, items: grouped, groups: groups)
+        actionGroups = groups
+        return grouped
     }
 
     /// Groups each request's tool calls behind one summary row. The row's text names the calls by id and text
