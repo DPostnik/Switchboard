@@ -497,11 +497,16 @@ private func waitFor(_ condition: @escaping () async -> Bool) async throws {
     // A new process loads the session; its history replay is not surfaced and the app's history stays the source.
     (adapter, events, reader, descriptor) = try await fixture.start()
     #expect(try await adapter.history(session, context: descriptor.context).value().count == 1)
+    // A history read alone (chat open, connect-time backfill) does not keep the record; the send loads it again.
+    #expect(await adapter.residentRecordCount == 0)
+    _ = try await adapter.summarySource(session, context: descriptor.context).value()
+    #expect(await adapter.residentRecordCount == 0)
     _ = try await adapter.submit(fixture.request(descriptor, prompt: "again", session: session)).value()
     try await waitFor { await events.completions().count == 1 }
     #expect(fixture.methods().contains("session/load") && !fixture.methods().contains("session/resume"))
     #expect(await !events.items().contains { $0.text.contains("replayed") })
     #expect(try await adapter.history(session, context: descriptor.context).value().map { $0.items.first?.text } == ["hello", "again"])
+    #expect(await adapter.residentRecordCount == 1)
     await adapter.disconnect(); reader.cancel()
 
     // resume is preferred when advertised.

@@ -662,6 +662,17 @@ public actor ACPIntegration: AgentIntegration {
         records[id] = record
         return record
     }
+    /// Reads a record for history or the summary source. One decoded only for this call is dropped again: chat open and
+    /// the connect-time backfill read every chat's history, and keeping each one held its whole history in memory. A
+    /// resident record (a live session, a turn, or one a send loaded) stays; nothing changes it within this call.
+    private func peek(_ id: String) throws -> ACPSessionRecord {
+        let resident = records[id] != nil
+        let record = try load(id)
+        if !resident { records[id] = nil }
+        return record
+    }
+    /// Test seam: session records held in memory.
+    var residentRecordCount: Int { records.count }
 
     private func checked(_ session: AgentSessionReference, context: AgentContext) -> Bool {
         session.connection == profile.connection && context == self.context && home != nil
@@ -670,7 +681,7 @@ public actor ACPIntegration: AgentIntegration {
     public func history(_ session: AgentSessionReference, context: AgentContext) -> AgentResult<[AgentHistoryTurn]> {
         guard checked(session, context: context) else { return .rejected(.wrongConnection) }
         do {
-            let record = try load(session.nativeID)
+            let record = try peek(session.nativeID)
             let current = turns[session.nativeID]?.items ?? record.current
             return .success(record.turns + (record.active.map { [AgentHistoryTurn(id: $0, items: current, startedAt: nil, completedAt: nil, duration: nil)] } ?? []))
         } catch { return .failed(.init(delivery: .notSent, diagnostic: error.localizedDescription)) }
@@ -679,7 +690,7 @@ public actor ACPIntegration: AgentIntegration {
     public func summarySource(_ session: AgentSessionReference, context: AgentContext) -> AgentResult<AgentSummarySource> {
         guard checked(session, context: context) else { return .rejected(.wrongConnection) }
         do {
-            let record = try load(session.nativeID)
+            let record = try peek(session.nativeID)
             guard record.active == nil, turns[session.nativeID] == nil else {
                 throw ClientFailure(L10n.text("История содержит незавершённый запрос", "History contains an active turn"))
             }
