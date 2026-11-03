@@ -436,6 +436,8 @@ struct ChatFilesSidebar: View {
         if all.isEmpty {
             note(searching ? L10n.text("Ничего не найдено", "No matches") : L10n.text("В чате пока нет ссылок на файлы.", "No files are mentioned in this chat yet."))
         }
+        // Once per render, not a scan of the changed files in every mentioned row's menu.
+        let changedByPath = Dictionary(files.changed.map { ($0.absolutePath, $0.id) }, uniquingKeysWith: { first, _ in first })
         ForEach(shown) { file in
             SidebarRow(icon: .file(file.path), name: URL(fileURLWithPath: file.path).lastPathComponent,
                        detail: (files.displayPath(file.path) as NSString).deletingLastPathComponent,
@@ -456,13 +458,14 @@ struct ChatFilesSidebar: View {
             } action: {
                 activate(file)
             }
-            .contextMenu { mentionMenu(file) }
+            .contextMenu { mentionMenu(file, change: changedByPath[file.path]) }
             .transition(.opacity.combined(with: .move(edge: .top)))
         }
         if all.count > rowLimit, !searching { moreButton(all.count - rowLimit, expanded: $showAllFiles) }
     }
 
-    @ViewBuilder private func mentionMenu(_ file: ChatFile) -> some View {
+    /// `change` is the id of the changed file at the same path, if the chat changed it.
+    @ViewBuilder private func mentionMenu(_ file: ChatFile, change: ChatChangedFile.ID?) -> some View {
         let url = URL(fileURLWithPath: file.path)
         if !file.deleted {
             Button(L10n.text("Предпросмотр", "Preview")) { open(url, file.line) }
@@ -474,8 +477,8 @@ struct ChatFilesSidebar: View {
         if file.mentions.count > 1, let first = file.mentions.first {
             Button(L10n.text("Перейти к первому упоминанию", "Go to the first mention")) { reveal(first.itemID, file: file.path) }
         }
-        if let change = files.changed.first(where: { $0.absolutePath == file.path }) {
-            Button(L10n.text("Показать изменения", "Show changes")) { ChatChangesWindow.show(files.snapshot(), file: change.id, model: model) }
+        if let change {
+            Button(L10n.text("Показать изменения", "Show changes")) { ChatChangesWindow.show(files.snapshot(), file: change, model: model) }
         }
         if !file.deleted {
             Button(L10n.text("Добавить в сообщение", "Add to Message")) { addToMessage(url) }
@@ -826,11 +829,7 @@ private struct ChatChangeDiffView: View {
                 DiffLineRow(line: line, allowsComments: false)
                     .contextMenu {
                         DiffLineCopyItems(line: line, lines: lines)
-                        if change.status != .deleted, let number = DiffComment.editorLine(line.id, in: lines) {
-                            Button(EditorLauncher.openTitle + L10n.text(" на строке \(number)", " at line \(number)")) {
-                                EditorLauncher.open(file.absolutePath, line: number)
-                            }
-                        }
+                        if change.status != .deleted { DiffLineOpenItem(path: file.absolutePath, line: line, lines: lines) }
                     }
             }
             if truncated {

@@ -353,20 +353,27 @@ struct TurnChangesView: View {
             }
             .padding(.vertical, 2)
             .tag(file.path)
-            .contextMenu {
-                if file.status != .deleted {
-                    OpenInEditorMenu(path: viewer.absolutePath(file.path))
-                    Button(L10n.text("Показать в Finder", "Show in Finder")) {
-                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: viewer.absolutePath(file.path))])
-                    }
-                    Divider()
-                }
-                Button(L10n.text("Скопировать путь", "Copy path")) {
-                    NSPasteboard.general.clearContents(); NSPasteboard.general.setString(file.path, forType: .string)
-                }
+        }
+        // One menu for the list instead of one per row: row menus are built with every row's body.
+        .contextMenu(forSelectionType: String.self) { paths in
+            if paths.count == 1, let path = paths.first, let file = viewer.files.first(where: { $0.path == path }) {
+                fileMenu(file)
             }
         }
         .listStyle(.sidebar)
+    }
+
+    @ViewBuilder private func fileMenu(_ file: GitCheckpoints.FileChange) -> some View {
+        if file.status != .deleted {
+            OpenInEditorMenu(path: viewer.absolutePath(file.path))
+            Button(L10n.text("Показать в Finder", "Show in Finder")) {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: viewer.absolutePath(file.path))])
+            }
+            Divider()
+        }
+        Button(L10n.text("Скопировать путь", "Copy path")) {
+            NSPasteboard.general.clearContents(); NSPasteboard.general.setString(file.path, forType: .string)
+        }
     }
 
     @ViewBuilder private var diff: some View {
@@ -380,6 +387,8 @@ struct TurnChangesView: View {
         case .failed(let message):
             notice(L10n.text("Не удалось показать изменения: ", "Could not show the changes: ") + message)
         case .loaded(let lines, let truncated):
+            // Looked up once for the diff, not in every row's menu.
+            let editable = selectedFile.flatMap { $0.status == .deleted ? nil : viewer.absolutePath($0.path) }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if lines.isEmpty {
@@ -390,7 +399,7 @@ struct TurnChangesView: View {
                         DiffLineRow(line: line, selected: viewer.lineSelection?.contains(line.id) == true) { extend in
                             viewer.selectLine(line.id, extend: extend)
                         }
-                        .contextMenu { lineMenu(line, lines: lines) }
+                        .contextMenu { lineMenu(line, lines: lines, editable: editable) }
                         if viewer.lineSelection?.upperBound == line.id {
                             DiffCommentEditor(viewer: viewer, lines: lines, model: model)
                         }
@@ -408,16 +417,13 @@ struct TurnChangesView: View {
         }
     }
 
-    @ViewBuilder private func lineMenu(_ line: DiffLine, lines: [DiffLine]) -> some View {
+    /// `editable` is the absolute path of the shown file unless it was deleted.
+    @ViewBuilder private func lineMenu(_ line: DiffLine, lines: [DiffLine], editable: String?) -> some View {
         if line.kind != .hunk && line.kind != .note {
             Button(L10n.text("Прокомментировать для агента", "Comment for the agent")) { viewer.selectLine(line.id, extend: false) }
         }
         DiffLineCopyItems(line: line, lines: lines)
-        if let file = selectedFile, file.status != .deleted, let number = DiffComment.editorLine(line.id, in: lines) {
-            Button(EditorLauncher.openTitle + L10n.text(" на строке \(number)", " at line \(number)")) {
-                EditorLauncher.open(viewer.absolutePath(file.path), line: number)
-            }
-        }
+        if let editable { DiffLineOpenItem(path: editable, line: line, lines: lines) }
     }
 
     private func notice(_ text: String) -> some View {
@@ -566,6 +572,20 @@ struct DiffLineCopyItems: View {
 
     private static func copy(_ text: String) {
         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
+    }
+}
+
+/// "Open at Line" for a diff line's menu. The editor line is resolved on click: for a removed line it scans the
+/// removed run, which the menu would otherwise pay with every row's body.
+struct DiffLineOpenItem: View {
+    let path: String
+    let line: DiffLine
+    let lines: [DiffLine]
+
+    var body: some View {
+        Button(L10n.text("Открыть на строке", "Open at Line")) {
+            EditorLauncher.open(path, line: DiffComment.editorLine(line.id, in: lines))
+        }
     }
 }
 
