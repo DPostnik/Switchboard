@@ -97,6 +97,8 @@ public struct BrowserProfileStore: Sendable {
         guard bytes.count <= 8 * 1024 * 1024 else { throw BrowserProfileError.storage }
         let path = root.appendingPathComponent("profiles.json")
         let marker = root.appendingPathComponent("profiles-required")
+        // Most calls (every send and CLI start) change nothing: an identical catalog is not rewritten or fsynced again.
+        if FileManager.default.fileExists(atPath: marker.path), let stored = try? Data(contentsOf: path), stored == bytes { return }
         if !FileManager.default.fileExists(atPath: marker.path) { try Data("1\n".utf8).write(to: marker, options: .atomic) }
         Self.catalogLock.withLock { _ = Self.catalogCache.removeValue(forKey: path.path) }
         try bytes.write(to: path, options: .atomic)

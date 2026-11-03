@@ -45,6 +45,8 @@ import Testing
     #expect(try await database.load().chats[0].title == "Новое имя")
     let snapshot = UsageSnapshot(measuredAt: Date(timeIntervalSince1970: 10))
     try await database.saveUsage(threadID: "thread-1", snapshot: snapshot)
+    // Usage rows are coalesced; another instance reads them once they are written.
+    await database.flushUsage()
     #expect(try await reopened.loadUsage()["thread-1"] == snapshot)
 }
 

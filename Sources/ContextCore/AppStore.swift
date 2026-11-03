@@ -70,13 +70,21 @@ public actor AppStore {
     private var transcriptRevisions: [String: Int] = [:]
     /// Number of transcript blobs written to the file; exposed for tests.
     var transcriptWriteCount = 0
+    /// Usage rows arrive with every token report of a streaming turn; they are written together after `usageDelay`.
+    private let usageDelay: Duration
+    private var pendingUsage: [String: Data] = [:]
+    /// Bytes of each usage row as last written by this instance; a report that changes nothing is not written again.
+    private var writtenUsage: [String: Data] = [:]
+    private var usageFlushTask: Task<Void, Never>?
+    /// Number of usage write transactions; exposed for tests.
+    var usageWriteCount = 0
 
     public init(file: URL) { self.init(file: file, flushDelay: .seconds(1), flushInterval: .seconds(10)) }
     /// Tests shorten the delays.
-    init(file: URL, flushDelay: Duration, flushInterval: Duration) {
-        self.file = file; self.flushDelay = flushDelay; self.flushInterval = flushInterval
+    init(file: URL, flushDelay: Duration, flushInterval: Duration, usageDelay: Duration = .seconds(2)) {
+        self.file = file; self.flushDelay = flushDelay; self.flushInterval = flushInterval; self.usageDelay = usageDelay
     }
-    deinit { for task in flushTasks.values { task.cancel() } }
+    deinit { for task in flushTasks.values { task.cancel() }; usageFlushTask?.cancel() }
     public func transcriptRevision(conversationID: String) -> Int { transcriptRevisions[conversationID, default: 0] }
     public func loadRoutines() throws -> [PortableRoutine] {
         try withDatabase { db in
@@ -303,8 +311,9 @@ public actor AppStore {
                     throw ClientFailure(L10n.text("Не удалось сохранить удаление чата", "Could not save the chat deletion"))
                 }
                 app = CachedApp(bytes: bytes, state: migrated)
-                // Pending items of a deleted chat are dropped with it.
+                // Pending items and usage of a deleted chat are dropped with it.
                 dropTranscript(threadID)
+                pendingUsage[threadID] = nil; writtenUsage[threadID] = nil
                 transcriptRevisions[threadID, default: 0] += 1
             } catch {
                 sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
@@ -312,8 +321,37 @@ public actor AppStore {
             }
         }
     }
+    /// Coalesced: rows of every chat are written in one transaction `usageDelay` (2 s) after the first pending report, and
+    /// a report identical to the row already written is skipped. `flushTranscripts()` (deactivation, sleep, quit) writes
+    /// pending rows at once; a crash loses at most the last ~2 s of usage figures.
     public func saveUsage(threadID: String, snapshot: UsageSnapshot) throws {
-        try put(key: "usage:" + threadID, bytes: JSONEncoder().encode(snapshot))
+        let bytes = try JSONEncoder().encode(snapshot)
+        if pendingUsage[threadID] == nil, writtenUsage[threadID] == bytes { return }
+        pendingUsage[threadID] = bytes
+        guard usageFlushTask == nil else { return }
+        usageFlushTask = Task { [weak self, usageDelay] in
+            try? await Task.sleep(for: usageDelay)
+            guard !Task.isCancelled else { return }
+            await self?.flushUsage()
+        }
+    }
+    /// Writes pending usage rows now. Failures are logged; the rows stay pending for the next flush.
+    public func flushUsage() {
+        usageFlushTask?.cancel(); usageFlushTask = nil
+        let rows = pendingUsage.filter { writtenUsage[$0.key] != $0.value }
+        guard !rows.isEmpty else { pendingUsage = [:]; return }
+        do {
+            try withDatabase { db in
+                try transaction(db, failure: ClientFailure(L10n.text("Ошибка сохранения метрик", "Could not save metrics"))) {
+                    for (id, bytes) in rows { try putRaw(db, key: "usage:" + id, bytes: bytes) }
+                }
+            }
+            for (id, bytes) in rows { writtenUsage[id] = bytes }
+            pendingUsage = [:]
+            usageWriteCount += 1
+        } catch {
+            Self.log.error("Usage flush failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     public func loadArchiveSummaries() throws -> [String: ArchiveSummaryRecord] {
@@ -359,7 +397,8 @@ public actor AppStore {
         }
     }
     public func loadUsage() throws -> [String: UsageSnapshot] {
-        try withDatabase { db in
+        flushUsage()
+        return try withDatabase { db in
             var s: OpaquePointer?; defer { sqlite3_finalize(s) }
             guard sqlite3_prepare_v2(db, "SELECT key,value FROM state WHERE key LIKE 'usage:%'", -1, &s, nil) == SQLITE_OK else { throw ClientFailure(L10n.text("Ошибка чтения метрик", "Could not read metrics")) }
             var values: [String: UsageSnapshot] = [:]
@@ -513,8 +552,9 @@ public actor AppStore {
         do { try withDatabase { db in try flushEntry(db, id) } }
         catch { Self.log.error("Transcript flush failed for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)") }
     }
-    /// Writes every pending recorded item now. Failures are logged; the items stay pending for the next flush.
+    /// Writes every pending recorded item and usage row now. Failures are logged; they stay pending for the next flush.
     public func flushTranscripts() async {
+        flushUsage()
         let dirty = transcripts.filter { $0.value.dirty }.map(\.key)
         for id in dirty {
             cancelFlush(id)

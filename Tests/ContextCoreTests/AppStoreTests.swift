@@ -340,3 +340,30 @@ private func savedChat(_ store: AppStore, id: String = "chat") async throws -> (
     #expect(light == fromReader)
     #expect(try await reader.recentMessages(conversationID: "missing", limit: 20).isEmpty)
 }
+
+@Test func usageRowsAreCoalescedAndWrittenOnFlush() async throws {
+    let file = temporaryStoreFile()
+    defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+    let store = AppStore(file: file, flushDelay: .seconds(30), flushInterval: .seconds(30), usageDelay: .milliseconds(200))
+    _ = try await savedChat(store)
+    // A streaming turn reports usage many times: one transaction after the delay carries the last value of each chat.
+    for index in 0..<20 {
+        try await store.saveUsage(threadID: "a", snapshot: UsageSnapshot(output: index, measuredAt: Date(timeIntervalSince1970: Double(index))))
+        try await store.saveUsage(threadID: "b", snapshot: UsageSnapshot(output: -index, measuredAt: Date(timeIntervalSince1970: Double(index))))
+    }
+    #expect(await store.usageWriteCount == 0)
+    let deadline = Date().addingTimeInterval(15)
+    while await store.usageWriteCount < 1, Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
+    #expect(await store.usageWriteCount == 1)
+    let written = try await AppStore(file: file).loadUsage()
+    #expect(written["a"]?.output == 19 && written["b"]?.output == -19)
+    // A report identical to the written row is not written again.
+    try await store.saveUsage(threadID: "a", snapshot: UsageSnapshot(output: 19, measuredAt: Date(timeIntervalSince1970: 19)))
+    await store.flushUsage()
+    #expect(await store.usageWriteCount == 1)
+    // Quit (flushTranscripts) writes what is pending without waiting for the delay.
+    try await store.saveUsage(threadID: "a", snapshot: UsageSnapshot(output: 20, measuredAt: Date(timeIntervalSince1970: 20)))
+    await store.flushTranscripts()
+    #expect(await store.usageWriteCount == 2)
+    #expect(try await AppStore(file: file).loadUsage()["a"]?.output == 20)
+}

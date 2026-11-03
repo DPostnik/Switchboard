@@ -189,3 +189,21 @@ private struct ProfileFixture {
     #expect(try f.store.current(session: f.a)?.name == "Home")
     #expect(try BrowserProfileStore(root: f.root).current(session: f.a)?.name == "Home")
 }
+
+@Test func unchangedCatalogIsNotRewritten() throws {
+    let f = ProfileFixture(); defer { f.cleanup() }
+    let grant = try f.start(f.a)
+    let path = f.root.appendingPathComponent("profiles.json")
+    func identity() throws -> (inode: Int, modified: Date?) {
+        let attributes = try FileManager.default.attributesOfItem(atPath: path.path)
+        return ((attributes[.systemFileNumber] as? NSNumber)?.intValue ?? -1, attributes[.modificationDate] as? Date)
+    }
+    let before = try identity()
+    // A repeated acknowledgement (every CLI start) leaves the catalog as it was: no atomic replace, no fsync.
+    try f.store.acknowledge(grant, session: f.a)
+    #expect(try identity() == before)
+    // A real change is still written.
+    try f.store.rename(session: f.a, name: "Work")
+    #expect(try identity().inode != before.inode)
+    #expect(try f.store.current(session: f.a)?.name == "Work")
+}
