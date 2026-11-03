@@ -69,7 +69,7 @@ extension NSAttributedString.Key {
                 line.append(NSAttributedString(string: "\t", attributes: [.font: body]))
                 numbers(changes.added, changes.removed, into: line)
             }
-            result.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 8)]))
+            result.append(gap())
             return result
         }
         for file in list.prefix(list.count > rowLimit + 1 ? rowLimit : rowLimit + 1) {
@@ -116,8 +116,15 @@ extension NSAttributedString.Key {
                                                                "Another chat worked in this folder during the turn: its edits may be included.\n"),
                                              attributes: [.font: small, .foregroundColor: DeskPalette.ns.attentionInk, .paragraphStyle: note(width: width, padding: padding)]))
         }
-        result.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 8)]))
+        result.append(gap())
         return result
+    }
+
+    /// The blank line after the card; it is taller than the next user bubble's overhang, so the bubble does not touch the card.
+    private static func gap() -> NSAttributedString {
+        let style = NSMutableParagraphStyle()
+        style.minimumLineHeight = 28; style.maximumLineHeight = 28
+        return NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 8), .paragraphStyle: style])
     }
 
     /// Rows are inset inside the card; the counts sit on a right tab at the card's inner edge.
