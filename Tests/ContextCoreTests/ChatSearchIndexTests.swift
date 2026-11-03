@@ -260,6 +260,90 @@ private func fragileDate() -> Date {
     #expect(try await index.search("filler1").map(\.chatID) == ["big"])
 }
 
+@Test func chatIndexAppendsMessagesOfATranscriptThatOnlyGrew() async throws {
+    let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let index = ChatSearchIndex(file: root.appendingPathComponent(ChatSearchIndex.fileName))
+    var chat = info("chat", title: "Growing chat"), other = info("other", title: "Other chat")
+    try await index.index([(chat, blob(chat, [("user", "first question"), ("assistant", "first answer")])),
+                           (other, blob(other, [("user", "untouched")]))])
+    func rows() async throws -> [[String]] {
+        try await index.rows("SELECT position, row FROM message_rows WHERE chat_id='chat' AND position>=0 ORDER BY position")
+    }
+    func card() async throws -> [String]? { try await index.rows("SELECT title, message_count, first_request FROM chats WHERE id='chat'").first }
+    let before = try await rows()
+    #expect(before.map(\.first) == ["0", "1"])
+
+    // One more turn: the stored rows stay, the new ones follow; the title row follows the rename.
+    chat.title = "Grown chat"; chat.updated = chat.updated.addingTimeInterval(60)
+    try await index.index([(chat, blob(chat, [("user", "first question"), ("assistant", "first answer"), ("user", "second question")]))])
+    let grown = try await rows()
+    #expect(Array(grown.prefix(2)) == before && grown.map(\.first) == ["0", "1", "2"])
+    #expect(try await card() == ["Grown chat", "3", "first question"])
+    #expect(try await index.search("second").map(\.chatID) == ["chat"])
+    #expect(try await index.search("Grown").map(\.chatID) == ["chat"])
+    #expect(try await index.search("Growing").isEmpty)
+    #expect(try await index.plan([chat, other]).isEmpty)
+
+    // An edited earlier message or a shorter transcript replaces every row.
+    try await index.index([(chat, blob(chat, [("user", "edited question"), ("assistant", "first answer"), ("user", "second question")]))])
+    #expect(try await rows().map(\.first) == ["0", "1", "2"])
+    #expect(try await index.rows("SELECT text FROM messages WHERE rowid IN (SELECT row FROM message_rows WHERE chat_id='chat' AND position=0)") == [["edited question"]])
+    #expect(try await index.rows("SELECT count(*) FROM messages").first == ["6"])
+    #expect(try await index.search("edited").map(\.chatID) == ["chat"])
+    #expect(try await card() == ["Grown chat", "3", "edited question"])
+    try await index.index([(chat, blob(chat, [("user", "edited question")]))])
+    #expect(try await rows().map(\.first) == ["0"])
+    #expect(try await index.search("second").isEmpty)
+    #expect(try await index.search("answer").isEmpty)
+    #expect(try await index.rows("SELECT count(*) FROM messages").first == ["4"])
+    #expect(try await index.rows("SELECT count(*) FROM message_rows").first == ["4"])
+    #expect(try await index.rows("SELECT count(*) FROM message_digests").first == ["2"])
+    #expect(try await index.search("untouched").map(\.chatID) == ["other"])
+}
+
+@Test func chatIndexDigestSeesEveryChangeToTheStoredMessages() {
+    typealias Message = ChatSearchIndex.Message
+    let messages = [Message(role: "user", text: "a", date: nil), Message(role: "assistant", text: "b", date: Date(timeIntervalSince1970: 5))]
+    let full = ChatSearchIndex.digests(messages, prefix: 2)
+    #expect(full.prefix == full.all)
+    #expect(ChatSearchIndex.digests(messages + [Message(role: "user", text: "c", date: nil)], prefix: 2).prefix == full.all)
+    #expect(ChatSearchIndex.digests([messages[0], Message(role: "assistant", text: "b", date: nil)], prefix: 2).all != full.all)
+    #expect(ChatSearchIndex.digests([messages[0], Message(role: "user", text: "b", date: messages[1].date)], prefix: 2).all != full.all)
+    #expect(ChatSearchIndex.digests([Message(role: "user", text: "ab", date: nil)], prefix: 1).all
+            != ChatSearchIndex.digests([Message(role: "user", text: "a", date: nil), Message(role: "user", text: "b", date: nil)], prefix: 1).all)
+    #expect(ChatSearchIndex.digests([], prefix: 0).prefix == ChatSearchIndex.digests(messages, prefix: 0).prefix)
+}
+
+@Test func chatIndexRebuildsAnOlderSchemaWithIncrementalVacuum() async throws {
+    let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent(ChatSearchIndex.fileName)
+    let old = ChatSearchIndex(file: file)
+    let chat = info("chat", title: "Old schema chat")
+    try await old.index([(chat, blob(chat, [("user", "stored before the upgrade")]))])
+    // What a file from schema 2 looks like: no auto-vacuum, an older version stamp.
+    _ = try await old.rows("PRAGMA auto_vacuum=0")
+    _ = try await old.rows("VACUUM")
+    _ = try await old.rows("UPDATE meta SET value='2' WHERE key='schema'")
+    #expect(try await old.rows("PRAGMA auto_vacuum").first == ["0"])
+
+    let upgraded = ChatSearchIndex(file: file)
+    #expect(try await upgraded.rows("PRAGMA auto_vacuum").first == ["2"])
+    #expect(try await upgraded.rows("SELECT value FROM meta WHERE key='schema'").first == [ChatSearchIndex.schemaVersion])
+    #expect(try await upgraded.rows("PRAGMA journal_mode").first == ["wal"])
+    #expect(try await upgraded.plan([chat]).content == ["chat"])
+    #expect(try await upgraded.search("upgrade").isEmpty)
+
+    // Removing chats gives their pages back instead of leaving them free inside the file.
+    let text = String(repeating: "padding words for many pages ", count: 400)
+    let chats = (0..<60).map { info("c\($0)", title: "Chat \($0)") }
+    try await upgraded.index(try chats.map { ($0, try blob($0, (0..<20).map { ("user", "\(text) \($0)") })) })
+    let pages = Int(try await upgraded.rows("PRAGMA page_count").first?.first ?? "") ?? 0
+    try await upgraded.remove(chats.map(\.id))
+    let free = Int(try await upgraded.rows("PRAGMA freelist_count").first?.first ?? "") ?? -1
+    let after = Int(try await upgraded.rows("PRAGMA page_count").first?.first ?? "") ?? 0
+    #expect(free >= 0 && free < 256 && after < pages / 2)
+}
+
 @Test func chatIndexMatchQueryQuotesEveryWord() {
     #expect(ChatSearchIndex.matchQuery("форма Андрюса") == "\"форма\"* \"Андрюса\"*")
     #expect(ChatSearchIndex.matchQuery("say \"hi\" OR NOT") == "\"say\"* \"hi\"* \"OR\"* \"NOT\"*")

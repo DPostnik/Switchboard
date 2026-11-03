@@ -9,7 +9,7 @@ import os
 public actor ChatSearchIndex {
     public static let fileName = "chat-index.sqlite"
     /// Bump to rebuild every chat after a schema or extraction change.
-    static let schemaVersion = "2"
+    static let schemaVersion = "3"
     /// Longer messages (pasted logs) are cut; the start carries the meaning.
     public static let messageLimit = 20_000
 
@@ -86,17 +86,31 @@ public actor ChatSearchIndex {
         }
     }
 
-    /// Replaces the messages of each chat from its saved transcript blob. A missing or foreign blob indexes the title only.
+    /// Brings the messages of each chat in line with its saved transcript blob. A missing or foreign blob indexes the
+    /// title only. A transcript that only grew since the last run keeps its stored rows and adds the new messages;
+    /// any other change (an edited, removed or reordered message) replaces all of them.
     public func index(_ chats: [(info: ChatInfo, transcript: Data?)]) throws {
         let decoder = JSONDecoder()
         let prepared = chats.map { chat in (chat.info, Self.messages(chat.transcript, info: chat.info, decoder: decoder)) }
         try withDatabase { db in
             try Self.transaction(db) {
                 for (info, messages) in prepared {
-                    try Self.removeRows(db, id: info.id)
-                    try Self.insertChat(db, info, messages: messages)
+                    var stored: (count: Int, digest: String)?
+                    try Self.query(db, "SELECT chats.message_count, message_digests.digest FROM chats JOIN message_digests ON message_digests.chat_id = chats.id WHERE chats.id=?",
+                                   [info.id]) { stored = ($0.int(0), $0.text(1)) }
+                    let digests = Self.digests(messages, prefix: stored?.count ?? 0)
+                    if let stored, stored.count <= messages.count, digests.prefix == stored.digest {
+                        try Self.deleteMessages(db, id: info.id, below: 0)
+                        try Self.run(db, "DELETE FROM chats WHERE id=?", [info.id])
+                        try Self.insertChat(db, info, messages: messages, from: stored.count)
+                    } else {
+                        try Self.removeRows(db, id: info.id)
+                        try Self.insertChat(db, info, messages: messages, from: 0)
+                    }
+                    try Self.run(db, "INSERT OR REPLACE INTO message_digests (chat_id, digest) VALUES (?,?)", [info.id, digests.all])
                 }
             }
+            try Self.reclaimFreePages(db)
         }
     }
 
@@ -115,7 +129,10 @@ public actor ChatSearchIndex {
     }
 
     public func remove(_ ids: [String]) throws {
-        try withDatabase { db in try Self.transaction(db) { for id in ids { try Self.removeRows(db, id: id) } } }
+        try withDatabase { db in
+            try Self.transaction(db) { for id in ids { try Self.removeRows(db, id: id) } }
+            try Self.reclaimFreePages(db)
+        }
     }
 
     /// Best match per chat, best chats first. Every word must occur, each as a word prefix. When every word has at
@@ -328,7 +345,8 @@ public actor ChatSearchIndex {
     static let deleteMessagesSQL = "DELETE FROM messages WHERE rowid IN (SELECT row FROM message_rows WHERE chat_id=? AND position<?)"
     private static let deleteRecordsSQL = "DELETE FROM message_rows WHERE chat_id=? AND position<?"
 
-    private static func insertChat(_ db: OpaquePointer, _ info: ChatInfo, messages: [Message]) throws {
+    /// Writes the chat's row, its header rows and its messages from position `from` on; earlier ones are already stored.
+    private static func insertChat(_ db: OpaquePointer, _ info: ChatInfo, messages: [Message], from: Int) throws {
         let first = messages.first { $0.role == "user" }.map { String($0.text.prefix(300)) } ?? ""
         // 0 when no message carries a time; date filters then rely on the last activity alone.
         let started = messages.lazy.compactMap(\.date).first?.timeIntervalSince1970 ?? 0
@@ -337,7 +355,7 @@ public actor ChatSearchIndex {
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, [info.id, info.projectID, info.project, info.projectPath, info.title, info.agent, info.archived ? 1 : 0,
                   info.updated.timeIntervalSince1970, info.summary, info.updated.timeIntervalSince1970, started, messages.count, first])
-        let rows = messages.enumerated().map { position, message in
+        let rows = messages.enumerated().dropFirst(from).map { position, message in
             MessageRow(position: position, role: message.role, date: message.date?.timeIntervalSince1970, text: message.text)
         }
         try insertMessages(db, chatID: info.id, headerRows(info) + rows)
@@ -370,6 +388,36 @@ public actor ChatSearchIndex {
     private static func removeRows(_ db: OpaquePointer, id: String) throws {
         try deleteMessages(db, id: id, below: Int.max)
         try run(db, "DELETE FROM chats WHERE id=?", [id])
+        try run(db, "DELETE FROM message_digests WHERE chat_id=?", [id])
+    }
+
+    /// FNV-1a over role, text and time of the first `prefix` messages and of all of them: an equal prefix digest
+    /// means the stored messages are still the transcript's first ones.
+    static func digests(_ messages: [Message], prefix: Int) -> (prefix: String, all: String) {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        func mix(_ byte: UInt8) { hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3 }
+        var atPrefix = prefix == 0 ? String(hash, radix: 16) : ""
+        for (offset, message) in messages.enumerated() {
+            for byte in message.role.utf8 { mix(byte) }
+            mix(0x1f)
+            for byte in message.text.utf8 { mix(byte) }
+            mix(0x1f)
+            if let date = message.date {
+                var bits = date.timeIntervalSince1970.bitPattern
+                for _ in 0..<8 { mix(UInt8(truncatingIfNeeded: bits)); bits >>= 8 }
+            } else { mix(0xff) }
+            mix(0x1e)
+            if offset + 1 == prefix { atPrefix = String(hash, radix: 16) }
+        }
+        return (atPrefix, String(hash, radix: 16))
+    }
+
+    /// Returns free pages to the file system once deletes have left a megabyte of them (the file uses incremental
+    /// auto-vacuum since schema 3).
+    private static func reclaimFreePages(_ db: OpaquePointer) throws {
+        var free = 0
+        try query(db, "PRAGMA freelist_count") { free = $0.int(0) }
+        if free >= 256 { try exec(db, "PRAGMA incremental_vacuum") }
     }
 
     /// Runs `operation` on the actor's connection, opening it on the first call. A failed call drops the handle,
@@ -391,8 +439,20 @@ public actor ChatSearchIndex {
         try Self.exec(db, "PRAGMA journal_mode=WAL")
         var version: String?
         if (try? Self.query(db, "SELECT value FROM meta WHERE key='schema'", [], { version = $0.text(0) })) == nil || version != Self.schemaVersion {
-            try Self.exec(db, """
-                DROP TABLE IF EXISTS message_rows; DROP TABLE IF EXISTS messages; DROP TABLE IF EXISTS chats; DROP TABLE IF EXISTS meta;
+            let drop = """
+                DROP TABLE IF EXISTS message_digests; DROP TABLE IF EXISTS message_rows; DROP TABLE IF EXISTS messages;
+                DROP TABLE IF EXISTS chats; DROP TABLE IF EXISTS meta;
+                """
+            var vacuum = 0
+            try Self.query(db, "PRAGMA auto_vacuum") { vacuum = $0.int(0) }
+            if vacuum != 2 {
+                // Incremental auto-vacuum takes effect through VACUUM, which also drops the old file's free pages.
+                try Self.transaction(db) { try Self.exec(db, drop) }
+                try Self.exec(db, "PRAGMA auto_vacuum=INCREMENTAL")
+                try Self.exec(db, "VACUUM")
+            }
+            // One transaction, so a reader on another connection sees either the old tables or the new ones.
+            try Self.transaction(db) { try Self.exec(db, drop + """
                 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE chats (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, project TEXT NOT NULL, project_path TEXT NOT NULL,
                     title TEXT NOT NULL, agent TEXT NOT NULL, archived INTEGER NOT NULL, updated REAL NOT NULL, summary TEXT NOT NULL,
@@ -401,8 +461,9 @@ public actor ChatSearchIndex {
                     tokenize='unicode61 remove_diacritics 2');
                 CREATE TABLE message_rows (chat_id TEXT NOT NULL, row INTEGER NOT NULL, position INTEGER NOT NULL);
                 CREATE INDEX message_rows_chat ON message_rows (chat_id);
+                CREATE TABLE message_digests (chat_id TEXT PRIMARY KEY, digest TEXT NOT NULL);
                 INSERT INTO meta (key, value) VALUES ('schema', '\(Self.schemaVersion)');
-                """)
+                """) }
         }
         self.connection = connection
         return connection
