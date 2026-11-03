@@ -28,7 +28,6 @@ import Darwin
         model.state.projects = [project]; model.projectID = project.id
         model.state.chats = (0..<4).map { Chat(id: "fixture-\($0)", projectID: project.id, title: "CPU fixture \($0)", model: "fixture") }
         model.chatID = model.state.chats[0].id
-        model.authenticated = true
         model.items = [.init(id: "user", kind: "user", text: "Синтетический тест / Synthetic test")]
         let sessions = model.state.chats.map { $0.nativeSession! }
         let host = NSHostingView(rootView: DeskView(model: model))
@@ -46,13 +45,13 @@ import Darwin
         defer { observer.cancel() }
         var results: [[String: Any]] = []
         for scenario in ["idle", "waiting", "streaming", "long-history", "four-chats", "hidden"] {
-            if scenario == "waiting" { await model.receive(.init(session: sessions[0], payload: .started(turn: "turn"))) }
+            if scenario == "waiting" { await model.receive(.init(session: sessions[0], payload: .started(turn: "turn")), from: .originalCodex) }
             if scenario == "long-history" {
                 model.items = (0..<200).map { .init(id: "history-\($0)", kind: $0.isMultiple(of: 2) ? "user" : "assistant",
                     text: String(repeating: "Строка истории / History line.\n", count: 8)) }
             }
             if scenario == "four-chats" {
-                for session in sessions.dropFirst() { await model.receive(.init(session: session, payload: .started(turn: "turn"))) }
+                for session in sessions.dropFirst() { await model.receive(.init(session: session, payload: .started(turn: "turn")), from: .originalCodex) }
             }
             if scenario == "hidden" { window.orderOut(nil) }
             try await Task.sleep(for: .milliseconds(400))
@@ -61,7 +60,7 @@ import Darwin
             for _ in 0..<180 {
                 if !["idle", "waiting"].contains(scenario) {
                     for session in scenario == "four-chats" ? sessions : [sessions[0]] {
-                        await model.receive(.init(session: session, payload: .delta(turn: "turn", item: "reply", text: "word ")))
+                        await model.receive(.init(session: session, payload: .delta(turn: "turn", item: "reply", text: "word ")), from: .originalCodex)
                     }
                 }
                 try await Task.sleep(for: .milliseconds(10))

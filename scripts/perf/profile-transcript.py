@@ -14,6 +14,8 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent.parent
+MODULES = ['ContextDesk', 'AgentContract', 'ContextCore', 'ContextTranscript', 'ClaudeAdapter', 'CodexAdapter',
+           'ACPAdapter', 'FringeProtocol', 'TOMLDecoder']
 
 
 def run(command, **kwargs):
@@ -33,17 +35,14 @@ def main():
     intermediate = ROOT / '.build/out/Intermediates.noindex/ContextDesk.build/Release'
     objects = list(intermediate.glob('ContextDesk--*-testable-t.build/Objects-normal/*/*.o'))
     if objects:
-        objects += [release / (name + '.o') for name in
-                    ['AgentContract', 'ContextCore', 'ContextTranscript', 'ClaudeAdapter', 'CodexAdapter', 'FringeProtocol', 'TOMLDecoder']]
+        objects += [release / (name + '.o') for name in MODULES if name != 'ContextDesk']
         includes = [release]
     else:
         # Standard SwiftPM backend.
         bin_path = subprocess.check_output(['xcrun', 'swift', 'build', '--sdk', sdk, '-c', 'release', '--show-bin-path'],
                                            cwd=ROOT, text=True).strip()
         release = Path(bin_path)
-        objects = [p for name in ['ContextDesk', 'AgentContract', 'ContextCore', 'ContextTranscript',
-                                 'ClaudeAdapter', 'CodexAdapter', 'FringeProtocol', 'TOMLDecoder']
-                   for p in (release / (name + '.build')).glob('*.o')]
+        objects = [p for name in MODULES for p in (release / (name + '.build')).glob('*.o')]
         includes = [release / 'Modules']
     if not objects or not all(p.is_file() for p in objects):
         raise RuntimeError('Release object layout unavailable; no measurement was made.')
