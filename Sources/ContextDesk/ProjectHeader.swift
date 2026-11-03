@@ -10,10 +10,10 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
     let activate: () -> Void
     let move: (UUID) -> Bool
     let targeted: (Bool) -> Void
-    /// The right-click menu; the same list as the row's "…" menu (`ProjectMenu.actions`).
-    var actions: [SidebarMenuAction] = []
-    /// Move up/down for VoiceOver; sighted users reorder by dragging.
-    var reorder: [SidebarMenuAction] = []
+    /// The right-click menu, built when it opens; the same list as the row's "…" menu (`ProjectMenu.actions`).
+    var actions: () -> [SidebarMenuAction] = { [] }
+    /// Move up/down for VoiceOver, built when VoiceOver asks; sighted users reorder by dragging.
+    var reorder: () -> [SidebarMenuAction] = { [] }
     var menuShown: (Bool) -> Void = { _ in }
     var hovered: (Bool) -> Void = { _ in }
     var pressed: (Bool) -> Void = { _ in }
@@ -45,6 +45,7 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
         view.move = move
         view.targeted = targeted
         view.actions = actions
+        view.reorder = reorder
         view.menuShown = menuShown
         view.hovered = hovered
         view.pressed = pressed
@@ -52,7 +53,6 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
         view.setAccessibilityRole(.button)
         view.setAccessibilityLabel(project.name)
         view.setAccessibilityValue(expanded ? L10n.text("Развёрнуто", "Expanded") : L10n.text("Свёрнуто", "Collapsed"))
-        view.setAccessibilityCustomActions(SidebarMenuAction.accessibilityActions(reorder))
     }
 }
 
@@ -110,6 +110,11 @@ class SidebarRowView: NSView, NSDraggingSource {
     /// Reports mouse-down until release or drag start, so the row darkens at once, as Finder rows do.
     var pressed: (Bool) -> Void = { _ in }
     var canDrag: Bool { true }
+    /// Move up/down for VoiceOver; built only when VoiceOver reads the row's actions.
+    var reorder: () -> [SidebarMenuAction] = { [] }
+    override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
+        SidebarMenuAction.accessibilityActions(reorder())
+    }
     private var pressedEvent: NSEvent?
     private var startedDrag = false
     private var isHovered = false
@@ -235,7 +240,7 @@ class SidebarRowView: NSView, NSDraggingSource {
 }
 
 class ProjectHeaderView: SidebarRowView {
-    var actions: [SidebarMenuAction] = []
+    var actions: () -> [SidebarMenuAction] = { [] }
     static let pasteboardType = NSPasteboard.PasteboardType("local.daniil.switchboard.project-order")
     var projectID = UUID()
     var move: (UUID) -> Bool = { _ in false }
@@ -250,6 +255,6 @@ class ProjectHeaderView: SidebarRowView {
         return move(source.projectID)
     }
     override func menu(for event: NSEvent) -> NSMenu? {
-        SidebarMenuAction.menu(actions)
+        SidebarMenuAction.menu(actions())
     }
 }

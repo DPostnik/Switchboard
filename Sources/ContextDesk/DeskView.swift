@@ -339,7 +339,7 @@ struct DeskView: View {
                 }, targeted: { targeted in
                     if targeted { dropTargetProjectID = project.id }
                     else if dropTargetProjectID == project.id { dropTargetProjectID = nil }
-                }, actions: projectActions(project), reorder: projectReorderActions(project),
+                }, actions: { projectActions(project) }, reorder: { projectReorderActions(project) },
                    menuShown: menuShown("project:\(project.id)"),
                    hovered: hover("project:\(project.id)"), pressed: press("project:\(project.id)"),
                    details: model.projectHeaderDetails(project.path)) {
@@ -379,15 +379,10 @@ struct DeskView: View {
                 .frame(height: .ui(32))
 
                 HStack(spacing: .ui(2)) {
-                    Menu {
-                        SidebarMenuItems(actions: projectActions(project))
-                    } label: {
+                    SidebarMenuButton(actions: { projectActions(project) }, menuShown: menuShown("project:\(project.id)")) {
                         Image(systemName: "ellipsis").frame(width: .ui(28), height: .ui(28)).contentShape(Rectangle())
                     }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
                     .fixedSize()
-                    .pointingHandCursor()
                     .help(L10n.text("Действия проекта", "Project actions"))
                     .accessibilityLabel(L10n.text("Действия проекта: \(project.name)", "Project actions: \(project.name)"))
 
@@ -536,7 +531,7 @@ struct DeskView: View {
                         ChatRow(chat: chat, enabled: !model.isChangingChat(chat.id), activate: {
                             Task { await model.openChat(chat) }
                         }, move: { _ in false }, targeted: { _ in },
-                           actions: chatActions(chat), favorite: true, menuShown: menuShown(rowID), hovered: hover(rowID), pressed: press(rowID))
+                           actions: { chatActions(chat) }, favorite: true, menuShown: menuShown(rowID), hovered: hover(rowID), pressed: press(rowID))
                     }
             } else {
                 // Measure and render the same label; the native overlay only handles interaction.
@@ -554,7 +549,7 @@ struct DeskView: View {
                         }, move: { model.moveChat($0, to: chat.id) }, targeted: { targeted in
                             if targeted { dropTargetChatID = chat.id }
                             else if dropTargetChatID == chat.id { dropTargetChatID = nil }
-                        }, actions: chatActions(chat), reorder: chatReorderActions(chat), menuShown: menuShown(rowID), hovered: hover(rowID), pressed: press(rowID))
+                        }, actions: { chatActions(chat) }, reorder: { chatReorderActions(chat) }, menuShown: menuShown(rowID), hovered: hover(rowID), pressed: press(rowID))
                     }
             }
         }

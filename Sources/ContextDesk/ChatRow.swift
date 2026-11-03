@@ -10,9 +10,10 @@ struct ChatRow: NSViewRepresentable {
     var select: (ChatRowSelection) -> Void = { _ in }
     let move: (String) -> Bool
     let targeted: (Bool) -> Void
-    let actions: [SidebarMenuAction]
-    /// Move up/down for VoiceOver; sighted users reorder by dragging.
-    var reorder: [SidebarMenuAction] = []
+    /// The right-click menu, built when it opens: building every row's menu on every render cost more than the rows.
+    let actions: () -> [SidebarMenuAction]
+    /// Move up/down for VoiceOver, built when VoiceOver asks; sighted users reorder by dragging.
+    var reorder: () -> [SidebarMenuAction] = { [] }
     /// Favorites only open the chat: no reordering or multi-selection.
     var favorite = false
     var menuShown: (Bool) -> Void = { _ in }
@@ -34,6 +35,7 @@ struct ChatRow: NSViewRepresentable {
         view.move = move
         view.targeted = targeted
         view.actions = actions
+        view.reorder = reorder
         view.favorite = favorite
         view.menuShown = menuShown
         view.hovered = hovered
@@ -42,14 +44,13 @@ struct ChatRow: NSViewRepresentable {
         view.setAccessibilityRole(.button)
         view.setAccessibilityLabel(chat.title)
         view.setAccessibilityEnabled(enabled)
-        view.setAccessibilityCustomActions(SidebarMenuAction.accessibilityActions(reorder))
     }
 }
 
 enum ChatRowSelection { case toggle, extend }
 
 /// One item of a sidebar row's menu: an action, a separator or a submenu (`children`).
-/// The same list feeds the native right-click menu and, for projects, the SwiftUI "…" menu.
+/// The same list feeds the native right-click menu and, for projects, the "…" button (`SidebarMenuButton`).
 struct SidebarMenuAction {
     let title: String
     var systemImage: String? = nil
@@ -72,7 +73,7 @@ struct SidebarMenuAction {
                 menu.addItem(.separator())
             } else if !action.children.isEmpty {
                 let item = NSMenuItem(title: action.title, action: nil, keyEquivalent: "")
-                item.image = action.systemImage.flatMap { NSImage(systemSymbolName: $0, accessibilityDescription: nil) }
+                item.image = action.systemImage.flatMap { symbol($0) }
                 item.submenu = Self.menu(action.children)
                 menu.addItem(item)
             } else {
@@ -80,6 +81,22 @@ struct SidebarMenuAction {
             }
         }
         return menu
+    }
+
+    @MainActor private static var symbols: [String: NSImage] = [:]
+    /// Menu icons by symbol name; looking a symbol up took most of a project menu's build time.
+    @MainActor static func symbol(_ name: String) -> NSImage? {
+        if let image = symbols[name] { return image }
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)
+        symbols[name] = image
+        return image
+    }
+
+    /// Pops the menu under `view`, as a pull-down button does.
+    @MainActor static func popUp(_ actions: [SidebarMenuAction], below view: NSView) {
+        guard !actions.isEmpty else { return }
+        let menu = menu(actions)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: view.isFlipped ? view.bounds.maxY + 4 : -4), in: view)
     }
 
     /// Enabled plain actions as VoiceOver custom actions.
@@ -90,27 +107,39 @@ struct SidebarMenuAction {
     }
 }
 
-/// SwiftUI rendering of a `SidebarMenuAction` list, for `Menu` content.
-struct SidebarMenuItems: View {
-    let actions: [SidebarMenuAction]
+/// A "…" button whose menu is built when it is clicked, from the same list as the row's right-click menu.
+struct SidebarMenuButton<Label: View>: View {
+    let actions: () -> [SidebarMenuAction]
+    var menuShown: (Bool) -> Void = { _ in }
+    @ViewBuilder var label: Label
+    @State private var anchor = SidebarMenuAnchor()
+
     var body: some View {
-        ForEach(actions.indices, id: \.self) { index in
-            let action = actions[index]
-            if action.isSeparator {
-                Divider()
-            } else if !action.children.isEmpty {
-                Menu(action.title) { SidebarMenuItems(actions: action.children) }
-            } else if let help = action.help {
-                button(action).help(help)
-            } else {
-                button(action)
-            }
-        }
+        Button {
+            guard let view = anchor.view else { return }
+            menuShown(true)
+            SidebarMenuAction.popUp(actions(), below: view)
+            menuShown(false)
+        } label: { label }
+        .buttonStyle(PointerButtonStyle(base: .plain))
+        .background(SidebarMenuAnchorView(anchor: anchor))
     }
-    private func button(_ action: SidebarMenuAction) -> some View {
-        Button(action: action.perform) {
-            if let icon = action.systemImage { Label(action.title, systemImage: icon) } else { Text(action.title) }
-        }.disabled(!action.enabled)
+}
+
+final class SidebarMenuAnchor {
+    weak var view: NSView?
+}
+
+private struct SidebarMenuAnchorView: NSViewRepresentable {
+    let anchor: SidebarMenuAnchor
+    func makeNSView(context: Context) -> NSView {
+        let view = PassthroughView()
+        anchor.view = view
+        return view
+    }
+    func updateNSView(_ view: NSView, context: Context) { anchor.view = view }
+    private final class PassthroughView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
 }
 
@@ -121,7 +150,7 @@ final class ChatRowView: SidebarRowView {
     var archived = false
     var move: (String) -> Bool = { _ in false }
     var select: (ChatRowSelection) -> Void = { _ in }
-    var actions: [SidebarMenuAction] = []
+    var actions: () -> [SidebarMenuAction] = { [] }
     var favorite = false
     override var dragType: NSPasteboard.PasteboardType { Self.pasteboardType }
     override var dragID: String { chatID }
@@ -139,18 +168,18 @@ final class ChatRowView: SidebarRowView {
     }
     override func menu(for event: NSEvent) -> NSMenu? {
         guard isInteractionEnabled else { return nil }
-        return SidebarMenuAction.menu(actions)
+        return SidebarMenuAction.menu(actions())
     }
 }
 
 private final class SidebarMenuActionItem: NSMenuItem {
     private let callback: () -> Void
-    init(_ action: SidebarMenuAction) {
+    @MainActor init(_ action: SidebarMenuAction) {
         callback = action.perform
         super.init(title: action.title, action: #selector(invoke), keyEquivalent: "")
         target = self
         isEnabled = action.enabled
-        image = action.systemImage.flatMap { NSImage(systemSymbolName: $0, accessibilityDescription: nil) }
+        image = action.systemImage.flatMap { SidebarMenuAction.symbol($0) }
         toolTip = action.help
     }
     required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }

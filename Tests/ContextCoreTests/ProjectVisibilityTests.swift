@@ -122,7 +122,7 @@ import Testing
 @Test @MainActor func projectContextMenuRemovesThroughItsCallback() throws {
     let view = ProjectHeaderView()
     var removed = false
-    view.actions = projectMenuActions(remove: { removed = true })
+    view.actions = { projectMenuActions(remove: { removed = true }) }
     let event = try #require(NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [],
         timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
     let menu = try #require(view.menu(for: event))
@@ -138,7 +138,7 @@ import Testing
 /// The "…" button and the right-click menu render the same list; reordering is by drag, not by menu items.
 @Test @MainActor func projectMenuListsSettingsFirstAndRemoveLast() throws {
     let view = ProjectHeaderView()
-    view.actions = projectMenuActions()
+    view.actions = { projectMenuActions() }
     let event = try #require(NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [],
         timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
     let menu = try #require(view.menu(for: event))
@@ -155,10 +155,10 @@ import Testing
 @Test @MainActor func chatRowMenuNestsAgentToolsInASubmenu() throws {
     let view = ChatRowView()
     var copied = 0
-    view.actions = [
+    view.actions = {[
         SidebarMenuAction(title: "Pin") {}, .separator,
         .submenu(L10n.text("Для агентов", "For agents"), [SidebarMenuAction(title: "Copy chat ID") { copied += 1 }]),
-    ]
+    ]}
     let event = try #require(NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [],
         timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
     let menu = try #require(view.menu(for: event))
@@ -194,7 +194,7 @@ import Testing
 @Test @MainActor func projectHeaderMenuOffersRename() throws {
     let view = ProjectHeaderView(frame: NSRect(x: 0, y: 0, width: 260, height: 32))
     var renamed = 0
-    view.actions = projectMenuActions(rename: { renamed += 1 })
+    view.actions = { projectMenuActions(rename: { renamed += 1 }) }
     let event = try #require(NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
                                                 windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
     let menu = try #require(view.menu(for: event))
