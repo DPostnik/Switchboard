@@ -173,6 +173,36 @@ import ContextCore
     #expect(text.enabledTextCheckingTypes == 0)
 }
 
+@Test @MainActor func cardEdgesFromFirstAndLastLineMatchTheirBoundingRect() throws {
+    let view = TranscriptScrollView()
+    view.isDocument = true
+    view.frame = NSRect(x: 0, y: 0, width: 700, height: 500)
+    let code = (1...400).map { "let value\($0) = \"строка \($0)\" // comment" }.joined(separator: "\n")
+    let text = "Текст\n\n```swift\n" + code + "\n\n\n```\n\n> [!WARNING]\n> Осторожно: длинная строка " + String(repeating: "слово ", count: 80)
+        + "\n\n```\nкоротко\n```\n"
+    view.update(items: [TranscriptItem(id: "doc", kind: "assistant", text: text)], conversationID: "d", followOutput: false)
+    view.layoutSubtreeIfNeeded()
+    let manager = try #require(view.transcript.layoutManager as? BubbleLayoutManager)
+    let container = try #require(view.transcript.textContainer)
+    let storage = try #require(view.transcript.textStorage)
+    manager.ensureLayout(for: container)
+    var checked = 0
+    for key in [NSAttributedString.Key.codeCard, .calloutCard] {
+        storage.enumerateAttribute(key, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            guard value != nil else { return }
+            let full = manager.cardRange(key, at: range.location, in: storage)
+            #expect(manager.cardRange(key, at: NSMaxRange(full) - 1, in: storage) == full)
+            let glyphs = manager.glyphRange(forCharacterRange: full, actualCharacterRange: nil)
+            let bounds = manager.boundingRect(forGlyphRange: glyphs, in: container)
+            let extent = manager.lineExtent(forGlyphRange: glyphs)
+            #expect(abs(extent.top - bounds.minY) < 0.5)
+            #expect(abs(extent.bottom - bounds.maxY) < 0.5)
+            checked += 1
+        }
+    }
+    #expect(checked >= 3)
+}
+
 @Test @MainActor func expandingActionsDoesNotLoseFollowingMessages() {
     let view = TranscriptScrollView()
     let command = String(repeating: "длинная команда ", count: 3_000)

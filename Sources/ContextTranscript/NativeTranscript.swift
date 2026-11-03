@@ -1468,7 +1468,7 @@ extension NSAttributedString.Key {
 }
 
 /// Paint only visible message fragments; keep native selection and TextKit's bounded layout.
-private final class BubbleLayoutManager: NSLayoutManager {
+final class BubbleLayoutManager: NSLayoutManager {
     /// A user bubble reaches this far above and below its text, outside the text's line fragments.
     static let bubbleOverhang: CGFloat = 10
     /// Hairline between tool calls in an open card, a step darker than its `subtle` fill.
@@ -1476,6 +1476,25 @@ private final class BubbleLayoutManager: NSLayoutManager {
     static let diffAdded = DeskPalette.ns.accent.withAlphaComponent(0.13)
     static let diffRemoved = DeskPalette.ns.problem.withAlphaComponent(0.11)
     static let lineNumberColor = DeskPalette.ns.muted.withAlphaComponent(0.75)
+    nonisolated(unsafe) static let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+    /// Full runs of the card attributes found while drawing; a long card's run is merged from many attribute runs
+    /// (syntax colours), so finding it again on every scroll frame cost as much as the card is long.
+    private var cardRanges: [NSAttributedString.Key: [NSRange]] = [:]
+
+    override func processEditing(for textStorage: NSTextStorage, edited editMask: NSTextStorageEditActions, range newCharRange: NSRange,
+                                 changeInLength delta: Int, invalidatedRange invalidatedCharRange: NSRange) {
+        cardRanges.removeAll()
+        super.processEditing(for: textStorage, edited: editMask, range: newCharRange, changeInLength: delta, invalidatedRange: invalidatedCharRange)
+    }
+
+    /// The whole run of `key` around `location`.
+    func cardRange(_ key: NSAttributedString.Key, at location: Int, in storage: NSTextStorage) -> NSRange {
+        if let known = cardRanges[key]?.first(where: { NSLocationInRange(location, $0) }) { return known }
+        var full = NSRange()
+        _ = storage.attribute(key, at: location, longestEffectiveRange: &full, in: NSRange(location: 0, length: storage.length))
+        cardRanges[key, default: []].append(full)
+        return full
+    }
     static func calloutWash(_ kind: String) -> NSColor {
         switch kind {
         case "warning": DeskPalette.ns.attentionWash
@@ -1519,6 +1538,14 @@ private final class BubbleLayoutManager: NSLayoutManager {
         path.appendArc(from: NSPoint(x: rect.minX, y: rect.minY), to: NSPoint(x: rect.maxX, y: rect.minY), radius: r)
         path.close()
         return path
+    }
+    /// Top of the first and bottom of the last line fragment holding `glyphs`, as `boundingRect` reports them, from two
+    /// lookups instead of a walk over every line in between.
+    func lineExtent(forGlyphRange glyphs: NSRange) -> (top: CGFloat, bottom: CGFloat) {
+        guard glyphs.length > 0, glyphs.location < numberOfGlyphs else { return (0, 0) }
+        let first = lineFragmentUsedRect(forGlyphAt: glyphs.location, effectiveRange: nil)
+        let last = lineFragmentUsedRect(forGlyphAt: min(numberOfGlyphs, NSMaxRange(glyphs)) - 1, effectiveRange: nil)
+        return (first.minY, last.maxY)
     }
     /// Top and bottom of the text between two characters: the first line's ascender to the last line's descender.
     private func textExtent(from first: Int, to last: Int, in storage: NSTextStorage) -> (top: CGFloat, bottom: CGFloat) {
@@ -1631,16 +1658,23 @@ private final class BubbleLayoutManager: NSLayoutManager {
         }
         let whole = NSRange(location: 0, length: storage.length)
         let padding = container.lineFragmentPadding
-        /// A card spans its whole attribute run; its sides follow the first paragraph's indents.
+        // Only the part of a long card near the drawn area is filled; its rounded ends lie beyond the clip.
+        let clip = NSGraphicsContext.current.map { $0.cgContext.boundingBoxOfClipPath.insetBy(dx: 0, dy: -24) }
+        /// A card spans its whole attribute run; its sides follow the first paragraph's indents. Its top and bottom
+        /// come from its first and last line, so a long code block or previewed file costs the same as a short one.
         func card(_ key: NSAttributedString.Key, at location: Int, inset: CGFloat) -> (NSRect, NSRange) {
-            var full = NSRange()
-            _ = storage.attribute(key, at: location, longestEffectiveRange: &full, in: whole)
-            let bounds = boundingRect(forGlyphRange: glyphRange(forCharacterRange: full, actualCharacterRange: nil), in: container)
+            let full = cardRange(key, at: location, in: storage)
+            let extent = lineExtent(forGlyphRange: glyphRange(forCharacterRange: full, actualCharacterRange: nil))
             let style = storage.attribute(.paragraphStyle, at: full.location, effectiveRange: nil) as? NSParagraphStyle
             let left = padding + (style?.firstLineHeadIndent ?? inset) - inset
             let right = container.containerSize.width - padding + (style?.tailIndent ?? 0) + inset + 4
             // The last paragraph's spacing is not part of its line fragment; pad the card below.
-            return (NSRect(x: origin.x + left, y: origin.y + bounds.minY - 2, width: max(1, right - left), height: bounds.height + 12), full)
+            var rect = NSRect(x: origin.x + left, y: origin.y + extent.top - 2, width: max(1, right - left), height: extent.bottom - extent.top + 12)
+            if let clip, !clip.isNull, !clip.isInfinite {
+                let top = max(rect.minY, clip.minY), bottom = min(rect.maxY, clip.maxY)
+                if bottom > top { rect = NSRect(x: rect.minX, y: top, width: rect.width, height: bottom - top) }
+            }
+            return (rect, full)
         }
         var drawn = Set<String>()
         storage.enumerateAttribute(.changesCard, in: characters) { value, range, _ in
@@ -1717,7 +1751,7 @@ private final class BubbleLayoutManager: NSLayoutManager {
             }
             NSGraphicsContext.restoreGraphicsState()
         }
-        let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+        let numberFont = Self.numberFont
         storage.enumerateAttribute(.codeLineNumber, in: characters) { value, range, _ in
             guard let number = value as? Int else { return }
             let glyph = glyphIndexForCharacter(at: range.location)

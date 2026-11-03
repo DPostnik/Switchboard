@@ -21,6 +21,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Changed
 
+- Long code blocks and previewed source files scroll with less CPU.
 - Searching the sidebar no longer stalls in large workspaces: results follow a short pause in typing, show at most 50 chats with Show all (N), and sidebar rows build their menus only when opened.
 - Filtering large project file trees, the archive and the command palette no longer lags while typing.
 - The chat search index takes less disk space and updates only new messages after a turn; it is rebuilt once after this update.
