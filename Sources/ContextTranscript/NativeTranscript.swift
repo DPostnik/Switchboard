@@ -283,6 +283,7 @@ public struct NativeTranscript: NSViewRepresentable {
         self.unreadCompletionID = unreadCompletionID
         let workingStatus = isWorking ? Self.currentActivity(items).map { headline(of: $0) } ?? workingStatus : workingStatus
         var items = isDocument ? items : groupedItems(items, conversationID: conversationID, isWorking: isWorking)
+        streamingItemID = isWorking && !isDocument ? items.last?.id : nil
         if isWorking {
             items.append(Self.workingRow(status: workingStatus, since: workingSince))
         }
@@ -296,7 +297,7 @@ public struct NativeTranscript: NSViewRepresentable {
         // Rows opened during the turn close when it finishes; they are re-rendered in place below.
         let closing = finished && !switched ? expandedActions : []
         if switched || finished { expandedActions.removeAll() }
-        if switched { expandedMetrics.removeAll(); expandedBlocks.removeAll(); expandedDetails.removeAll() }
+        if switched { expandedMetrics.removeAll(); expandedBlocks.removeAll(); expandedDetails.removeAll(); sourcesDeferred.removeAll() }
         // A finished answer is rendered once more from scratch: file chips and images it mentioned may exist by now.
         if switched || finished || projectChanged { renderCache.removeAll() }
         if let feedback = copyFeedback,
@@ -399,12 +400,19 @@ public struct NativeTranscript: NSViewRepresentable {
                 contentView.scroll(to: oldOrigin); reflectScrolledClipView(contentView)
             }
         }
+        // An answer that stopped streaming before the turn finished (more tool calls followed) gets its sources now.
+        for id in sourcesDeferred where id != streamingItemID { sourcesDeferred.remove(id); rerenderItem(id: id) }
         // A reading position inside the older history needs its row now.
         if case let .anchor(itemID, _, _, _)? = pendingPosition, let index = historyBacklog.firstIndex(where: { $0.id == itemID }) {
             renderHistory(from: index)
         }
         scheduleHistoryChunk()
     }
+
+    /// The row being written while the agent works; its web sources wait until it stops growing.
+    private(set) var streamingItemID: String?
+    /// Answers rendered while streaming whose text may hold a sources list.
+    var sourcesDeferred: Set<String> = []
 
     /// Older rows of the open chat not rendered yet, oldest first; `previous` holds the rows after them.
     private(set) var historyBacklog: [TranscriptItem] = []
@@ -1163,6 +1171,20 @@ public struct NativeTranscript: NSViewRepresentable {
         TranscriptLinks.Options(chips: true, baseDirectory: projectPath.map { URL(fileURLWithPath: $0, isDirectory: true) }, source: documentURL)
     }
 
+    /// Configured control symbols, shared by every message: looking one up and configuring it per message was a
+    /// visible part of opening a chat. The colour is kept with its image, so the key's identity stays its own.
+    private struct ControlKey: Hashable { var symbol: String; var size: CGFloat; var description: String; var color: ObjectIdentifier }
+    private static var controlImages: [ControlKey: (color: NSColor, image: NSImage?)] = [:]
+    static func controlImage(_ symbol: String, size: CGFloat, color: NSColor, description: String) -> NSImage? {
+        let key = ControlKey(symbol: symbol, size: size, description: description, color: ObjectIdentifier(color))
+        if let known = controlImages[key], known.color === color { return known.image }
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
+            .withSymbolConfiguration(.init(pointSize: size, weight: .regular).applying(.init(paletteColors: [color])))
+        if controlImages.count >= 256 { controlImages.removeAll() }
+        controlImages[key] = (color, image)
+        return image
+    }
+
     func copyControl(feedback: Bool?, description: String, hoverItemID: String? = nil, label: String? = nil, tint: NSColor? = nil,
                      visible: (@MainActor @Sendable () -> Bool)? = nil, attributes: [NSAttributedString.Key: Any]) -> NSAttributedString {
         let feedbackText = feedback.map { $0 ? L10n.text("Скопировано", "Copied") : L10n.text("Не удалось скопировать", "Could not copy") }
@@ -1170,9 +1192,7 @@ public struct NativeTranscript: NSViewRepresentable {
         let color: NSColor = feedback.map { $0 ? DeskPalette.ns.accent : DeskPalette.ns.problem } ?? tint ?? DeskPalette.ns.muted
         let symbol = feedback.map { $0 ? "checkmark" : "exclamationmark.circle" } ?? "doc.on.doc"
         let attachment = NSTextAttachment()
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
-            .withSymbolConfiguration(.init(pointSize: label == nil ? 13 : 11, weight: .regular)
-                .applying(.init(paletteColors: [color])))
+        let image = Self.controlImage(symbol, size: label == nil ? 13 : 11, color: color, description: description)
         if visible != nil || hoverItemID != nil, feedback == nil {
             // Message and section copy controls appear while the pointer is over their content.
             let cell = HoverAttachmentCell(imageCell: image ?? NSImage())
@@ -1273,8 +1293,21 @@ public struct NativeTranscript: NSViewRepresentable {
         if outgoing { text.addAttribute(.outgoingBubble, value: inset, range: bubble) }
     }
 
+    private struct InsetKey: Hashable { var text: String; var phase: String?; var width: CGFloat }
+    /// Measured bubble insets: a user message is measured once per column width, not on every restyle and reopen.
+    private static var insets: [InsetKey: CGFloat] = [:]
+
     /// Left edge of a user bubble that hugs its text, up to 78% of the column.
     static func outgoingInset(_ item: TranscriptItem, width: CGFloat) -> CGFloat {
+        let key = InsetKey(text: item.text, phase: item.phase, width: width)
+        if let known = insets[key] { return known }
+        let inset = measureOutgoingInset(item, width: width)
+        if insets.count >= 4_096 { insets.removeAll() }
+        insets[key] = inset
+        return inset
+    }
+
+    private static func measureOutgoingInset(_ item: TranscriptItem, width: CGFloat) -> CGFloat {
         let maxText = max(80, width * 0.78 - 32)
         let body = NSAttributedString(string: item.text.isEmpty ? " " : item.text, attributes: [.font: NSFont.systemFont(ofSize: 14)])
         var textWidth = body.boundingRect(with: NSSize(width: maxText, height: .greatestFiniteMagnitude),

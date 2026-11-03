@@ -239,7 +239,7 @@ extension NSAttributedString.Key {
             style[.inlineChip] = Chip.file.rawValue
             if let line, let number = Int(line.dropFirst().split(separator: ":").first ?? "") { style[.fileLine] = number }
             let attachment = NSTextAttachment()
-            attachment.image = fileIcon(url)
+            attachment.image = chipIcon(url)
             attachment.bounds = NSRect(x: 0, y: -2.5, width: 14, height: 14)
             result.append(NSAttributedString(attachment: attachment))
             // A full path as the visible text is shortened to the file name; written titles stay.
@@ -301,6 +301,36 @@ extension NSAttributedString.Key {
         icon.size = NSSize(width: 14, height: 14)
         icons[ext] = icon
         return icon
+    }
+
+    /// The 14 pt chip icon of a file type as plain bitmaps (`rasterized`), cached.
+    private static var chipIcons: [String: NSImage] = [:]
+    static func chipIcon(_ url: URL) -> NSImage {
+        let ext = url.pathExtension.lowercased()
+        if let icon = chipIcons[ext] { return icon }
+        let icon = rasterized(fileIcon(url))
+        chipIcons[ext] = icon
+        return icon
+    }
+
+    /// The icon as plain 1x and 2x bitmaps: a system icon holds many representations, and choosing one on every
+    /// draw was about a quarter of the transcript's drawing time while scrolling.
+    static func rasterized(_ image: NSImage) -> NSImage {
+        let size = image.size
+        let result = NSImage(size: size)
+        for scale in [1, 2] as [CGFloat] {
+            guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale),
+                                                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+                  let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return image }
+            bitmap.size = size
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = context
+            image.draw(in: NSRect(origin: .zero, size: size), from: .zero, operation: .copy, fraction: 1)
+            NSGraphicsContext.restoreGraphicsState()
+            result.addRepresentation(bitmap)
+        }
+        return result
     }
 
     /// Long documents cite the same files many times; existence is cached for a few seconds.

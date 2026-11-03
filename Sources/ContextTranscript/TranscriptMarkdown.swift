@@ -88,7 +88,13 @@ final class TableBox: NSObject {
             }
         }
         cache.trim(item: item.id, blockCount: nodes.count)
-        if !view.isDocument { appendSources(into: result, nodes: nodes, lines: lines) }
+        // A streaming answer gets its sources when it finishes: scanning the growing text every tick was wasted work.
+        if !view.isDocument {
+            if view.streamingItemID != item.id {
+                view.sourcesDeferred.remove(item.id)
+                appendSources(into: result, nodes: nodes, lines: lines)
+            } else if Self.mayHaveSources(item.text) { view.sourcesDeferred.insert(item.id) }
+        }
     }
 
     /// Images are looked up on disk at render time (the file may appear or change later), so they are always rendered.
@@ -545,6 +551,9 @@ final class TableBox: NSObject {
 
     /// A collapsed list of the web pages an answer links to.
     private mutating func appendSources(into result: NSMutableAttributedString, nodes: [MarkdownNode], lines: [String]) {
+        // Every source has a scheme or starts with www.; fewer such marks than the threshold cannot make a list,
+        // and most answers skip the link detector entirely.
+        guard Self.mayHaveSources(item.text) else { return }
         let sources = Self.webSources(in: item.text, nodes: nodes, lines: lines)
         guard sources.count >= Self.sourcesThreshold else { return }
         let key = item.id + "#sources"
@@ -573,6 +582,20 @@ final class TableBox: NSObject {
                 $0.headIndent = 28; $0.tabStops = [NSTextTab(textAlignment: .left, location: 28)]; $0.lineSpacing = 1
             }, after: number == sources.count - 1 ? 6 : 2)
         }
+    }
+
+    /// At least `sourcesThreshold` occurrences of "://" or "www." in the text.
+    static func mayHaveSources(_ text: String) -> Bool {
+        var count = 0
+        for marker in ["://", "www."] {
+            var rest = text[...]
+            while let found = rest.range(of: marker) {
+                count += 1
+                if count >= sourcesThreshold { return true }
+                rest = rest[found.upperBound...]
+            }
+        }
+        return false
     }
 
     /// Web pages the answer links to, in order of first appearance. Parses the Markdown once more;

@@ -287,6 +287,41 @@ $ swift test
     #expect(!renderedView("Одна [ссылка](https://a.example)").transcript.string.contains(title))
 }
 
+@Test @MainActor func streamingAnswerGetsItsSourcesWhenItStopsGrowing() {
+    let text = "См. [один](https://a.example/1), [два](https://b.example/2) и https://c.example/3."
+    let title = L10n.text("Источники · 3", "Sources · 3")
+    #expect(TranscriptMarkdown.mayHaveSources(text))
+    #expect(!TranscriptMarkdown.mayHaveSources("Только https://a.example и www.b.example"))
+    let view = TranscriptScrollView()
+    let question = TranscriptItem(id: "q", kind: "user", text: "Найди")
+    var items = [question, TranscriptItem(id: "a", kind: "assistant", text: text)]
+    view.update(items: items, conversationID: "s", followOutput: true, isWorking: true)
+    #expect(!view.transcript.string.contains(title))
+    // A tool call follows: the answer above no longer grows and shows its sources.
+    items.append(TranscriptItem(id: "t", kind: "activity", text: "Read file"))
+    view.update(items: items, conversationID: "s", followOutput: true, isWorking: true)
+    #expect(view.transcript.string.contains(title))
+    // A streamed final answer gets them when the turn finishes.
+    items.append(TranscriptItem(id: "b", kind: "assistant", text: text.replacingOccurrences(of: ".example", with: ".test"), phase: "final_answer"))
+    view.update(items: items, conversationID: "s", followOutput: true, isWorking: true)
+    #expect(view.transcript.string.components(separatedBy: title).count == 2)
+    view.update(items: items, conversationID: "s", followOutput: true, isWorking: false)
+    #expect(view.transcript.string.components(separatedBy: title).count == 3)
+}
+
+@Test @MainActor func messageControlsAndInsetsAreMeasuredOnce() {
+    let user = TranscriptItem(id: "u", kind: "user", text: "Короткий вопрос")
+    let inset = TranscriptScrollView.outgoingInset(user, width: 600)
+    #expect(TranscriptScrollView.outgoingInset(user, width: 600) == inset)
+    #expect(TranscriptScrollView.outgoingInset(user, width: 400) != inset)
+    let image = TranscriptScrollView.controlImage("doc.on.doc", size: 13, color: DeskPalette.ns.muted, description: "Copy")
+    #expect(image != nil)
+    #expect(TranscriptScrollView.controlImage("doc.on.doc", size: 13, color: DeskPalette.ns.muted, description: "Copy") === image)
+    let chip = TranscriptLinks.chipIcon(URL(fileURLWithPath: "/tmp/a.swift"))
+    #expect(chip.size == NSSize(width: 14, height: 14))
+    #expect(chip.representations.count == 2 && chip.representations.allSatisfy { $0 is NSBitmapImageRep })
+}
+
 @Test func webSourcesReuseParsedBlocksAndRepeatTheSameAnswer() {
     // CRLF text, a code block, a trailing slash, a bare URL and a non-web scheme.
     let text = "Intro [doc](https://docs.example/guide/) and https://docs.example/guide again.\r\n\r\n" +
