@@ -196,6 +196,7 @@ private struct MainWindowContent: View {
             .modifier(MainWindowOpener(delegate: delegate))
             .task {
                 delegate.model = model
+                TranscriptFlushTriggers.install(model)
                 TranscriptLinks.openChat = { [weak model] id in model?.openChatLink(id) }
                 TranscriptLinks.openTurnChanges = { [weak model] chatID, changes, file in
                     if let model { TurnChangesWindow.show(changes, chatID: chatID, model: model, file: file) }

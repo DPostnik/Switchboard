@@ -27,6 +27,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Fixed
 
+- Long-running answers write far less to disk: a chat that keeps recording rewrites its stored transcript at most every 10 seconds, and at once on chat switch, archive, deactivation, sleep and quit.
 - The sidebar's project list always uses the thin overlay scroll bar: with "Show scroll bars: Always" or a mouse connected it no longer draws a light track that takes a column of the sidebar's width.
 - The PR badge in the composer (#123) no longer opens an empty popover with only its arrow and border: when the details cannot be measured beforehand, the popover sizes itself to them.
 - The changed-files card under an answer keeps a gap above the next message; the next user bubble no longer touches it.

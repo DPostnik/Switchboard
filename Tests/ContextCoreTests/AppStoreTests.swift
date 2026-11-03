@@ -54,12 +54,67 @@ private func savedChat(_ store: AppStore, id: String = "chat") async throws -> (
     #expect(restored.items.map(\.text) == ["Hello", "Answer"] && restored.completeness == .partial)
     #expect(try await store.loadTranscript(conversationID: chat.id) == restored)
     #expect(try withRawDatabase(file) { try rawBlob($0, "transcript-revision:" + chat.id) } != nil)
-    // The scheduled flush writes without an explicit call (about 1 s; a loaded test run may delay the task).
+    // The scheduled flush writes without an explicit call (about 10 s after the previous write; a loaded test run may
+    // delay the task).
     try await store.recordTranscriptItem(TranscriptItem(id: "c", kind: "assistant", text: "Later"), conversationID: chat.id, source: source)
-    let deadline = Date().addingTimeInterval(15)
+    let deadline = Date().addingTimeInterval(25)
     while await store.transcriptWriteCount < 2, Date() < deadline { try await Task.sleep(for: .milliseconds(100)) }
     #expect(await store.transcriptWriteCount == 2)
     #expect(try await AppStore(file: file).loadTranscript(conversationID: chat.id)?.items.map(\.text) == ["Hello", "Answer", "Later"])
+}
+
+@Test func recordingChatsAreWrittenAtMostOncePerIntervalAndAtOnceOnRequest() async throws {
+    let file = temporaryStoreFile()
+    defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+    let store = AppStore(file: file, flushDelay: .milliseconds(50), flushInterval: .seconds(30))
+    let (chat, source) = try await savedChat(store)
+    func waitForWrites(_ count: Int) async throws {
+        let deadline = Date().addingTimeInterval(15)
+        while await store.transcriptWriteCount < count, Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
+    }
+    // The first item into a clean chat is written after the short delay.
+    try await store.recordTranscriptItem(TranscriptItem(id: "a", kind: "user", text: "Hello"), conversationID: chat.id, source: source)
+    try await waitForWrites(1)
+    #expect(await store.transcriptWriteCount == 1)
+    // Further items wait for the interval (a cap from the previous write, not reset per item).
+    for index in 0..<5 {
+        try await store.recordTranscriptItem(TranscriptItem(id: "b", kind: "assistant", text: "Part \(index)"), conversationID: chat.id, source: source)
+        try await Task.sleep(for: .milliseconds(60))
+    }
+    #expect(await store.transcriptWriteCount == 1)
+    #expect(try await store.loadTranscript(conversationID: chat.id)?.items.map(\.text) == ["Hello", "Part 4"])
+    // A chat switch writes the pending items at once; a second request has nothing left to write.
+    await store.flushTranscript(conversationID: chat.id)
+    await store.flushTranscript(conversationID: chat.id)
+    #expect(await store.transcriptWriteCount == 2)
+    #expect(try await AppStore(file: file).loadTranscript(conversationID: chat.id)?.items.map(\.text) == ["Hello", "Part 4"])
+    // A repeated identical item changes nothing: no revision bump, no pending write.
+    let revision = await store.transcriptRevision(conversationID: chat.id)
+    try await store.recordTranscriptItem(TranscriptItem(id: "b", kind: "assistant", text: "Part 4"), conversationID: chat.id, source: source)
+    #expect(await store.transcriptRevision(conversationID: chat.id) == revision)
+    await store.flushTranscripts()
+    #expect(await store.transcriptWriteCount == 2)
+    // Quit flushes whatever is still pending, inside the interval.
+    try await store.recordTranscriptItem(TranscriptItem(id: "c", kind: "assistant", text: "Last"), conversationID: chat.id, source: source)
+    await store.flushTranscripts()
+    #expect(await store.transcriptWriteCount == 3)
+    #expect(try await AppStore(file: file).loadTranscript(conversationID: chat.id)?.items.map(\.text) == ["Hello", "Part 4", "Last"])
+}
+
+@Test func archivingWritesTheChatsPendingItems() async throws {
+    let file = temporaryStoreFile()
+    defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+    let store = AppStore(file: file, flushDelay: .seconds(30), flushInterval: .seconds(30))
+    let (chat, source) = try await savedChat(store)
+    let (other, otherSource) = try await savedChat(store, id: "other")
+    try await store.recordTranscriptItem(TranscriptItem(id: "a", kind: "assistant", text: "Archived"), conversationID: chat.id, source: source)
+    try await store.recordTranscriptItem(TranscriptItem(id: "b", kind: "assistant", text: "Open"), conversationID: other.id, source: otherSource)
+    var state = try await store.load()
+    state.chats[try #require(state.chats.firstIndex { $0.id == chat.id })].archived = true
+    try await store.saveArchivingChat(state, summary: nil)
+    #expect(await store.transcriptWriteCount == 1)
+    #expect(try await AppStore(file: file).loadTranscript(conversationID: chat.id)?.items.map(\.text) == ["Archived"])
+    #expect(try await AppStore(file: file).loadTranscript(conversationID: other.id) == nil)
 }
 
 @Test func identicalTranscriptSavesDoNotRewriteTheBlob() async throws {

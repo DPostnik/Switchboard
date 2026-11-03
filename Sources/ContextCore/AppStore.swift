@@ -8,13 +8,18 @@ import os
 /// One SQLite connection lives for the actor's lifetime (WAL, busy timeout, one-time identity migration).
 /// The decoded `app` state and the four most recently used transcripts are cached; `PRAGMA data_version`
 /// detects commits by other connections and drops the caches. Items recorded by `recordTranscriptItem`
-/// are merged in memory and written about one second later, so up to ~1 s of items can be lost on a crash;
-/// the turn-end history refresh restores them from the agent.
+/// are merged in memory and written about a second later, but a chat that keeps recording is written at most once
+/// every `flushInterval` (10 s): a long turn no longer rewrites its whole blob every second. Up to ~10 s of items can
+/// be lost on a crash; the turn-end history refresh restores them from the agent. `flushTranscript(conversationID:)`
+/// and `flushTranscripts()` write at once (chat switch, archive, deactivation, sleep, quit).
 public actor AppStore {
     private let file: URL
     private static let log = Logger(subsystem: "local.daniil.switchboard", category: "app-store")
     private static let transcriptCacheLimit = 4
-    private static let flushDelay: Duration = .seconds(1)
+    /// Wait after the first item recorded into a clean chat.
+    private let flushDelay: Duration
+    /// Minimum time between two scheduled writes of one chat while it keeps recording (a cap, not reset per item).
+    private let flushInterval: Duration
 
     /// Closes the handle when released, so dropping the property (or the actor) closes the database.
     private final class Connection: @unchecked Sendable {
@@ -58,12 +63,18 @@ public actor AppStore {
     private var transcriptOrder: [String] = []
     private var stamps: [String: TranscriptStamp] = [:]
     private var flushTasks: [String: Task<Void, Never>] = [:]
+    /// When each chat's transcript was last written; the next scheduled flush waits until `flushInterval` after it.
+    private var lastFlush: [String: ContinuousClock.Instant] = [:]
     /// Bumped on every transcript write or delete so readers can skip re-decoding unchanged transcripts.
     private var transcriptRevisions: [String: Int] = [:]
     /// Number of transcript blobs written to the file; exposed for tests.
     var transcriptWriteCount = 0
 
-    public init(file: URL) { self.file = file }
+    public init(file: URL) { self.init(file: file, flushDelay: .seconds(1), flushInterval: .seconds(10)) }
+    /// Tests shorten the delays.
+    init(file: URL, flushDelay: Duration, flushInterval: Duration) {
+        self.file = file; self.flushDelay = flushDelay; self.flushInterval = flushInterval
+    }
     deinit { for task in flushTasks.values { task.cancel() } }
     public func transcriptRevision(conversationID: String) -> Int { transcriptRevisions[conversationID, default: 0] }
     public func loadRoutines() throws -> [PortableRoutine] {
@@ -339,6 +350,11 @@ public actor AppStore {
                 for summary in summaries { try putRaw(db, key: "archiveSummary:" + summary.threadID, bytes: JSONEncoder().encode(summary)) }
             }
             app = CachedApp(bytes: bytes, state: migrated)
+            // An archived chat records nothing more: its pending items are written now, not at the next interval.
+            for chat in migrated.chats where chat.isArchived && transcripts[chat.id]?.dirty == true {
+                do { try flushEntry(db, chat.id); cancelFlush(chat.id) }
+                catch { Self.log.error("Transcript flush failed for \(chat.id, privacy: .public): \(error.localizedDescription, privacy: .public)") }
+            }
         }
     }
     public func loadUsage() throws -> [String: UsageSnapshot] {
@@ -427,7 +443,8 @@ public actor AppStore {
             return result
         }
     }
-    /// Merges the item into the cached transcript and writes it about a second later (one pending flush per chat).
+    /// Merges the item into the cached transcript and schedules its write (one pending flush per chat, see `scheduleFlush`).
+    /// An item identical to the one already merged changes nothing: no revision, no write.
     public func recordTranscriptItem(_ item: TranscriptItem, conversationID: String, source: AgentSessionReference) throws {
         try withDatabase { db in
             try checkIdentity(db, conversationID: conversationID, source: source)
@@ -438,12 +455,26 @@ public actor AppStore {
             let now = Date()
             if entry.capturedAt > now { return }
             var items = entry.items ?? LocalHistory.items(entry.snapshot)
-            TranscriptItem.merge(ActivityRetention.cap(item), into: &items)
+            let capped = ActivityRetention.cap(item)
+            // Cheap check before any re-encode: engines repeat finished items, which would only re-hash the same snapshot.
+            if let index = items.firstIndex(where: { $0.id == capped.id }) {
+                var merged = [items[index]]
+                TranscriptItem.merge(capped, into: &merged)
+                if merged == [items[index]] { return }
+            }
+            TranscriptItem.merge(capped, into: &items)
             entry.items = items; entry.snapshotStale = true; entry.dirty = true; entry.capturedAt = now
             try insertEntry(db, conversationID, entry)
             transcriptRevisions[conversationID, default: 0] += 1
             scheduleFlush(conversationID)
         }
+    }
+    /// Writes the chat's pending recorded items now (a chat switch); nothing when none are pending.
+    public func flushTranscript(conversationID id: String) async {
+        guard transcripts[id]?.dirty == true else { return }
+        cancelFlush(id)
+        do { try withDatabase { db in try flushEntry(db, id) } }
+        catch { Self.log.error("Transcript flush failed for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)") }
     }
     /// Writes every pending recorded item now. Failures are logged; the items stay pending for the next flush.
     public func flushTranscripts() async {
@@ -455,10 +486,14 @@ public actor AppStore {
         }
     }
 
+    /// The first item into a clean chat is written after `flushDelay`; while the chat keeps recording, the next write
+    /// waits until `flushInterval` after the previous one, so a streaming turn costs one blob rewrite per interval.
     private func scheduleFlush(_ id: String) {
         guard flushTasks[id] == nil else { return }
-        flushTasks[id] = Task { [weak self] in
-            try? await Task.sleep(for: Self.flushDelay)
+        var delay = flushDelay
+        if let last = lastFlush[id] { delay = max(delay, flushInterval - (ContinuousClock.now - last)) }
+        flushTasks[id] = Task { [weak self, delay] in
+            try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }
             await self?.flushScheduled(id)
         }
@@ -511,6 +546,7 @@ public actor AppStore {
         let snapshot = try materialized(id)
         blobBytes = try writeTranscript(db, snapshot)
         transcripts[id]?.dirty = false
+        lastFlush[id] = .now
     }
     /// Blob and stamp commit together. Returns the blob size, or nil when the stored content already matches.
     @discardableResult
@@ -612,7 +648,7 @@ public actor AppStore {
     }
     private func dropTranscript(_ id: String) {
         cancelFlush(id)
-        transcripts[id] = nil; stamps[id] = nil
+        transcripts[id] = nil; stamps[id] = nil; lastFlush[id] = nil
         transcriptOrder.removeAll { $0 == id }
     }
     /// Pending items survive a cache reset; everything else is re-read from the file on demand.
