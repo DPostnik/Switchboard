@@ -947,8 +947,13 @@ public struct NativeTranscript: NSViewRepresentable {
 
     @objc private func viewportChanged() {
         if !changingLayout { lastScrolled = ProcessInfo.processInfo.systemUptime }
-        layoutTowardEnd()
+        refreshHover()
         workingIndicator.refreshAnimation()
+        // Past an edge the rubber band owns the origin. Layout here (the end check lays out the last rows) could resize
+        // the text view, and the clip view then clamped the origin back to the edge for one frame mid-bounce.
+        let viewport = contentView.bounds
+        guard viewport.minY >= -0.5, viewport.maxY <= transcript.frame.maxY + 0.5 else { return }
+        layoutTowardEnd()
         keepEndPinned()
         updateJumpToLatest()
         rememberPosition()
@@ -1130,6 +1135,14 @@ public struct NativeTranscript: NSViewRepresentable {
     static func currentActivity(_ items: [TranscriptItem]) -> TranscriptItem? {
         guard let last = items.last(where: { $0.kind != "loading" }), last.kind == "activity" else { return nil }
         return last
+    }
+
+    /// Text moves under a still pointer while scrolling, and AppKit rebuilds the tracking area with an exit event, so the
+    /// copy control of the message under the pointer went out mid-scroll and stayed out until the mouse moved.
+    private func refreshHover() {
+        guard let window = transcript.window, window.isKeyWindow else { return }
+        let point = transcript.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        updateHover(at: transcript.visibleRect.contains(point) ? point : nil)
     }
 
     private func updateHover(at point: NSPoint?) {
@@ -1913,6 +1926,10 @@ private final class TranscriptTextView: NSTextView {
         let point = convert(event.locationInWindow, from: nil)
         if changesLink(at: point) != nil { NSCursor.pointingHand.set() }
         hoverChanged?(point)
+    }
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        hoverChanged?(convert(event.locationInWindow, from: nil))
     }
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
