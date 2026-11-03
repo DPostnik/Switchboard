@@ -157,6 +157,22 @@ import ContextCore
     #expect(view.transcript.string == "Другой чат\n\u{FFFC}\n\n")
 }
 
+@Test @MainActor func transcriptTextViewChecksNothingInTheBackground() {
+    // Read-only text: the global spelling and substitution defaults must not queue background checks.
+    let view = TranscriptScrollView()
+    let text = view.transcript
+    #expect(!text.isContinuousSpellCheckingEnabled)
+    #expect(!text.isGrammarCheckingEnabled)
+    #expect(!text.isAutomaticSpellingCorrectionEnabled)
+    #expect(!text.isAutomaticTextReplacementEnabled)
+    #expect(!text.isAutomaticQuoteSubstitutionEnabled)
+    #expect(!text.isAutomaticDashSubstitutionEnabled)
+    #expect(!text.isAutomaticDataDetectionEnabled)
+    #expect(!text.isAutomaticTextCompletionEnabled)
+    #expect(!text.isAutomaticLinkDetectionEnabled)
+    #expect(text.enabledTextCheckingTypes == 0)
+}
+
 @Test @MainActor func expandingActionsDoesNotLoseFollowingMessages() {
     let view = TranscriptScrollView()
     let command = String(repeating: "длинная команда ", count: 3_000)

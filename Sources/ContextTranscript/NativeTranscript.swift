@@ -166,6 +166,7 @@ public struct NativeTranscript: NSViewRepresentable {
         transcript.drawsBackground = false
         transcript.isRichText = true; transcript.importsGraphics = false
         transcript.isAutomaticLinkDetectionEnabled = false
+        Self.disableTextChecking(transcript)
         // Keep our link styling, but explicitly retain the hand cursor for links
         // and linked attachments such as the message-copy icon.
         transcript.linkTextAttributes = [.cursor: NSCursor.pointingHand]
@@ -204,6 +205,21 @@ public struct NativeTranscript: NSViewRepresentable {
         }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    /// The text is read-only, but NSTextView inherits the global spelling, grammar and substitution defaults and
+    /// checks every paragraph scrolled into view on a background queue: one pass through a long chat kept a core
+    /// busy for minutes. The composer keeps its own settings.
+    static func disableTextChecking(_ view: NSTextView) {
+        view.isContinuousSpellCheckingEnabled = false
+        view.isGrammarCheckingEnabled = false
+        view.isAutomaticSpellingCorrectionEnabled = false
+        view.isAutomaticTextReplacementEnabled = false
+        view.isAutomaticQuoteSubstitutionEnabled = false
+        view.isAutomaticDashSubstitutionEnabled = false
+        view.isAutomaticDataDetectionEnabled = false
+        view.isAutomaticTextCompletionEnabled = false
+        view.enabledTextCheckingTypes = 0
+    }
 
     /// The open chat's conversation; one main window shows at most one. Document previews are not registered.
     public fileprivate(set) static weak var chatTranscript: TranscriptScrollView?

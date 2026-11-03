@@ -34,6 +34,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Fixed
 
+- Long chats and previewed documents no longer keep a CPU core busy after scrolling (automatic spelling, grammar and substitution checks are off in read-only transcript text).
 - Long-running answers write far less to disk: a chat that keeps recording rewrites its stored transcript at most every 10 seconds, and at once when the answer finishes, on chat switch, archive, deactivation, sleep and quit.
 - Long-running Claude answers write far less to disk: the chat's session record is saved at most every 10 seconds while the answer streams instead of every second, and at once when the turn starts, finishes or the app quits.
 - The sidebar's project list always uses the thin overlay scroll bar: with "Show scroll bars: Always" or a mouse connected it no longer draws a light track that takes a column of the sidebar's width.
