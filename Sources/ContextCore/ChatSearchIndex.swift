@@ -196,10 +196,11 @@ public actor ChatSearchIndex {
                     // FTS5's snippet() over every ranked row was most of the time.
                     var best: [(row: Int, chat: String)] = [], seen: Set<String> = []
                     let order = recent ? "rowid DESC" : "bm25(messages)"
-                    try ChatSearchIndex.query(db, "SELECT rowid, chat_id FROM messages WHERE messages MATCH ? ORDER BY \(order) LIMIT 3000", [match]) { row in
-                        guard best.count < limit else { return }
+                    // Stops reading once `limit` chats are found; newest-first rows then never reach the rest.
+                    try ChatSearchIndex.queryWhile(db, "SELECT rowid, chat_id FROM messages WHERE messages MATCH ? ORDER BY \(order) LIMIT 3000", [match]) { row in
                         let id = row.text(1)
                         if seen.insert(id).inserted { best.append((row.int(0), id)) }
+                        return best.count < limit
                     }
                     guard !best.isEmpty else { return [] }
                     var texts: [Int: String] = [:]
@@ -524,13 +525,18 @@ public actor ChatSearchIndex {
     }
 
     private static func query(_ db: OpaquePointer, _ sql: String, _ values: [Any?] = [], _ each: (Row) -> Void) throws {
+        try queryWhile(db, sql, values) { each($0); return true }
+    }
+
+    /// Steps until the rows end or `each` returns false.
+    private static func queryWhile(_ db: OpaquePointer, _ sql: String, _ values: [Any?], _ each: (Row) -> Bool) throws {
         try prepare(db, sql) { statement in
             bind(statement, values)
             while true {
                 let result = sqlite3_step(statement)
                 if result == SQLITE_DONE { return }
                 guard result == SQLITE_ROW else { throw failure }
-                each(Row(statement: statement))
+                guard each(Row(statement: statement)) else { return }
             }
         }
     }
