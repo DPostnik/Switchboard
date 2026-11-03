@@ -86,6 +86,8 @@ def main():
     parser.add_argument('--work', type=Path, default=Path('/tmp/switchboard-perf-desk-stream'))
     parser.add_argument('--worktree', action='store_true', help='measure the working tree instead of HEAD')
     parser.add_argument('--runs', type=int, default=1)
+    parser.add_argument('--mode', choices=['stream', 'publish'], default='stream',
+                        help='publish: no stream, five bare model publications per second')
     parser.add_argument('--skip-build', action='store_true', help='reuse the built package; only link the probe again')
     args = parser.parse_args()
     executable = build(args)
@@ -94,7 +96,8 @@ def main():
     for index in range(args.runs):
         report_path = output.with_suffix(f'.run{index}.json')
         trace = output.with_suffix(f'.run{index}.sample.txt')
-        env = {**os.environ, 'SWITCHBOARD_DESK_STREAM_REPORT': str(report_path), 'SWITCHBOARD_DESK_STREAM_SECONDS': '16'}
+        env = {**os.environ, 'SWITCHBOARD_DESK_STREAM_REPORT': str(report_path), 'SWITCHBOARD_DESK_STREAM_SECONDS': '16',
+               'SWITCHBOARD_DESK_STREAM_MODE': args.mode}
         process = subprocess.Popen([str(executable)], env=env)
         time.sleep(6.5)  # window, sidebar expansion, 2 s settle, turn start; streaming runs 16 s from about here
         scroll.run(['/usr/bin/sample', str(process.pid), '8', '1', '-mayDie', '-file', trace])

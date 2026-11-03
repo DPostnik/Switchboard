@@ -12,6 +12,8 @@ import AgentContract
 /// network, credentials or app state. Run through `scripts/perf/profile-desk-stream.py`. Environment:
 ///   SWITCHBOARD_DESK_STREAM_REPORT   output JSON path (required)
 ///   SWITCHBOARD_DESK_STREAM_SECONDS  streaming time after the warm-up (default 16)
+///   SWITCHBOARD_DESK_STREAM_MODE     "publish": no stream; five bare model publications per second (`objectWillChange`),
+///                                    to measure what one publication costs the window (sidebar, chat, composer)
 ///
 /// Event mix per 8 s (one tool call every 1.6 s): 200 text deltas (40 ms apart), 10 tool items (start and finish),
 /// 5 status lines, 10 usage reports and 2-3 sub-agent updates.
@@ -43,6 +45,7 @@ import AgentContract
         let env = ProcessInfo.processInfo.environment
         guard let path = env["SWITCHBOARD_DESK_STREAM_REPORT"] else { throw NSError(domain: "probe", code: 1) }
         let seconds = Double(env["SWITCHBOARD_DESK_STREAM_SECONDS"] ?? "16") ?? 16
+        let publishOnly = env["SWITCHBOARD_DESK_STREAM_MODE"] == "publish"
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("desk-stream-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -111,6 +114,11 @@ import AgentContract
             let due = start + Double(index) * tick
             let wait = due - CACurrentMediaTime()
             if wait > 0 { try await Task.sleep(for: .milliseconds(Int(wait * 1000))) } else { late.append(-wait) }
+            if publishOnly {
+                // A model publication no view depends on, five times a second: the cost every observing view pays.
+                if index % 5 == 0 { model.objectWillChange.send() }
+                continue
+            }
             await send(.delta(turn: turn, item: "answer:\(index / 40)", text: "word\(index) "))
             let cycle = index / 40, phase = index % 40
             if phase == 0 {
@@ -139,7 +147,7 @@ import AgentContract
         let elapsed = CACurrentMediaTime() - start
         let scale = 8 / elapsed
         let report: [String: Any] = [
-            "seconds": elapsed, "ticks": ticks,
+            "seconds": elapsed, "ticks": ticks, "mode": publishOnly ? "publish" : "stream",
             "per_8s": [
                 "model_publications": Double(willChange - changes0) * scale,
                 "transcript_publications": Double(transcriptChanges - transcript0) * scale,

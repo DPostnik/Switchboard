@@ -139,14 +139,16 @@ struct DeskView: View {
                     .padding(.horizontal, .ui(12))
                 needsYouRow.padding(.horizontal, .ui(12))
                 ScrollView {
-                    Group {
+                    // Rendered from values only: a publication that changes neither skips every row (`SidebarSnapshot`).
+                    SidebarRowsList(snapshot: model.sidebarSnapshot(sidebarListing), state: sidebarListState) { snapshot, list in
                         // Search results build only the rows on screen; the full list keeps its eager stack.
-                        if appliedSearch.isEmpty {
-                            VStack(alignment: .leading, spacing: .ui(4)) { sidebarRows }
+                        if list.searching {
+                            LazyVStack(alignment: .leading, spacing: .ui(4)) { sidebarRows(snapshot, list) }
                         } else {
-                            LazyVStack(alignment: .leading, spacing: .ui(4)) { sidebarRows }
+                            VStack(alignment: .leading, spacing: .ui(4)) { sidebarRows(snapshot, list) }
                         }
-                    }.padding(.horizontal, .ui(12)).padding(.bottom, .ui(8))
+                    }.equatable()
+                        .padding(.horizontal, .ui(12)).padding(.bottom, .ui(8))
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { sidebarContentHeight = $0 }
                         // Overlay scrollers sit in the list's trailing padding and keep the rows' width.
                         .background(OverlayScrollers())
@@ -161,32 +163,37 @@ struct DeskView: View {
                 .navigationSplitViewColumnWidth(min: .ui(240), ideal: .ui(285), max: .ui(380))
                 .background(SidebarWidthLimits(min: .ui(240), ideal: .ui(285), max: .ui(380)))
     }
-    @ViewBuilder private var sidebarRows: some View {
-        let listed = model.sidebarSections(sidebarListing)
-        if !model.state.visiblePinnedChats.isEmpty {
+    private var sidebarListState: SidebarListState {
+        SidebarListState(selection: selection, menuRowID: menuRowID, dropTargetProjectID: dropTargetProjectID,
+                         dropTargetChatID: dropTargetChatID, pressedRowID: pressedRowID, searching: !appliedSearch.isEmpty,
+                         reduceMotion: reduceMotion)
+    }
+    /// The rows read only `snapshot` and `list` (and Observation stores); actions read the current state when they run.
+    @ViewBuilder private func sidebarRows(_ snapshot: SidebarSnapshot, _ list: SidebarListState) -> some View {
+        if snapshot.hasFavorites {
             Text(L10n.text("Избранное", "Favorites"))
                 .sidebarSectionHeader()
-            ForEach(model.state.visiblePinnedChats.filter { model.state.sidebarShowsFavorite($0, search: appliedSearch) }) { chat in
-                chatEntry(chat, favorite: true)
+            ForEach(snapshot.favorites) { row in
+                chatEntry(row, favorite: true, snapshot, list)
             }
             Divider().padding(.vertical, .ui(6))
         }
         projectsHeader
-        ForEach(listed.sections, id: \.project.id) { section in
-            projectEntries(section)
+        ForEach(snapshot.projects) { entry in
+            projectEntries(entry, snapshot, list)
         }
-        if listed.hidden > 0 {
+        if snapshot.hidden > 0 {
             Button {
                 showsAllSearchResults = true
             } label: {
-                Label(L10n.text("Показать все (\(listed.matching))", "Show all (\(listed.matching))"), systemImage: "ellipsis")
+                Label(L10n.text("Показать все (\(snapshot.matching))", "Show all (\(snapshot.matching))"), systemImage: "ellipsis")
                     .font(.ui(.callout)).foregroundStyle(.secondary)
                     .padding(.leading, .ui(8)).padding(.vertical, .ui(8))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
             }
             .buttonStyle(PointerButtonStyle(base: .plain))
-            .help(L10n.text("Ещё найдено чатов: \(listed.hidden)", "More matching chats: \(listed.hidden)"))
+            .help(L10n.text("Ещё найдено чатов: \(snapshot.hidden)", "More matching chats: \(snapshot.hidden)"))
         }
     }
     /// A new search opens every matching project at once: animating hundreds of rows in cost more than the search.
@@ -359,10 +366,10 @@ struct DeskView: View {
         }
     }
 
-    @ViewBuilder private func projectEntries(_ section: SidebarSection) -> some View {
-        let project = section.project
-        let isExpanded = section.expanded
-        let projectChats = model.activeChatsByProject[project.id] ?? []
+    @ViewBuilder private func projectEntries(_ entry: SidebarProjectRow, _ snapshot: SidebarSnapshot, _ list: SidebarListState) -> some View {
+        let project = entry.project
+        let isExpanded = entry.expanded
+        let sidebarAnimation = DeskMotion.standard(list.reduceMotion)
         VStack(spacing: 0) {
             HStack(spacing: .ui(2)) {
                 ProjectHeader(project: project, expanded: isExpanded, activate: {
@@ -396,7 +403,7 @@ struct DeskView: View {
                             .animation(sidebarAnimation, value: isExpanded)
                             .frame(width: .ui(10), height: .ui(16))
                             .foregroundStyle(.secondary)
-                        Image(systemName: model.projectID == project.id ? "folder.fill" : "folder")
+                        Image(systemName: snapshot.projectID == project.id ? "folder.fill" : "folder")
                         ProjectTitleLayout {
                             Text(project.name).fontWeight(.semibold).lineLimit(1)
                             if let git = model.gitStatus.status(for: project.path) {
@@ -406,11 +413,11 @@ struct DeskView: View {
                                 }.font(.ui(.caption))
                             }
                         }
-                        if projectChats.contains(where: { chat in model.pending.contains { $0.threadID == chat.id } || model.restartWaitingChatIDs.contains(chat.id) }) {
+                        if entry.waiting {
                             Circle().fill(DeskPalette.attention).frame(width: .ui(7), height: .ui(7))
                                 .help(L10n.text("Есть чаты, которые ждут действия или перезапуска", "Chats are waiting for action or a restart"))
                                 .accessibilityLabel(L10n.text("Есть чаты, которые ждут действия или перезапуска", "Chats are waiting for action or a restart"))
-                        } else if projectChats.contains(where: \.hasUnreadResponse) {
+                        } else if entry.unread {
                             Circle().fill(DeskPalette.accent).frame(width: .ui(7), height: .ui(7))
                                 .help(L10n.text("Есть непрочитанные ответы", "Unread responses"))
                                 .accessibilityLabel(L10n.text("Есть непрочитанные ответы", "Unread responses"))
@@ -441,14 +448,14 @@ struct DeskView: View {
             }
             .padding(.trailing, .ui(4))
             .frame(height: .ui(32))
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(dropTargetProjectID == project.id || menuRowID == "project:\(project.id)" ? DeskPalette.accent : .clear, lineWidth: 2).allowsHitTesting(false))
-            .background(SidebarRowBackground(hover: rowHover, rowID: "project:\(project.id)", base: pressedRowID == "project:\(project.id)" || model.projectID == project.id && model.chatID == nil && !model.showingJobs && !model.showingAttention && !model.showingArchive ? DeskPalette.selection
-                        : rowHighlighted("project:\(project.id)") ? DeskPalette.rowHover : Color.clear))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(list.dropTargetProjectID == project.id || list.menuRowID == "project:\(project.id)" ? DeskPalette.accent : .clear, lineWidth: 2).allowsHitTesting(false))
+            .background(SidebarRowBackground(hover: rowHover, rowID: "project:\(project.id)", base: list.pressedRowID == "project:\(project.id)" || snapshot.projectID == project.id && snapshot.chatID == nil && !snapshot.pageOpen ? DeskPalette.selection
+                        : list.menuRowID == "project:\(project.id)" ? DeskPalette.rowHover : Color.clear))
 
             SidebarDisclosure(isExpanded: isExpanded, animation: sidebarAnimation) {
                 VStack(alignment: .leading, spacing: .ui(4)) {
-                    chatEntries(section.chats, limit: section.limit, projectID: project.id)
-                    if projectChats.isEmpty {
+                    chatEntries(entry, snapshot, list)
+                    if !entry.hasChats {
                         Text(L10n.text("Пока нет чатов", "No chats yet")).font(.ui(.caption)).foregroundStyle(.secondary).padding(.leading, .ui(24))
                     }
                 }
@@ -472,15 +479,16 @@ struct DeskView: View {
         }
     }
 
-    @ViewBuilder private func chatEntries(_ chats: [Chat], limit: Int, projectID: UUID) -> some View {
-        ForEach(chats.prefix(limit)) { chat in
-            chatEntry(chat)
+    @ViewBuilder private func chatEntries(_ entry: SidebarProjectRow, _ snapshot: SidebarSnapshot, _ list: SidebarListState) -> some View {
+        let limit = entry.limit, projectID = entry.project.id
+        ForEach(entry.rows) { row in
+            chatEntry(row, favorite: false, snapshot, list)
                 .transition(.opacity.combined(with: .move(edge: .top)))
         }
         // A search's rows past its limit wait behind "Show all" at the end of the list.
-        if appliedSearch.isEmpty && chats.count > limit {
+        if !list.searching && entry.total > limit {
             Button {
-                withAnimation(sidebarAnimation) {
+                withAnimation(DeskMotion.standard(list.reduceMotion)) {
                     visibleChatCounts[projectID] = limit + chatPageSize
                 }
             } label: {
@@ -491,7 +499,7 @@ struct DeskView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(PointerButtonStyle(base: .plain))
-            .help(L10n.text("Осталось чатов: \(chats.count - limit)", "More chats: \(chats.count - limit)"))
+            .help(L10n.text("Осталось чатов: \(entry.total - limit)", "More chats: \(entry.total - limit)"))
         }
     }
 
@@ -563,24 +571,25 @@ struct DeskView: View {
         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
     }
 
-    private func chatEntry(_ chat: Chat, favorite: Bool = false) -> some View {
+    private func chatEntry(_ row: SidebarChatRow, favorite: Bool, _ snapshot: SidebarSnapshot, _ list: SidebarListState) -> some View {
+        let chat = row.chat
         let rowID = (favorite ? "favorite:" : "chat:") + chat.id
         return Group {
             if favorite {
-                chatLabel(chat, favorite: true)
+                chatLabel(row, favorite: true, list)
                     .accessibilityHidden(true)
                     .overlay {
-                        ChatRow(chat: chat, enabled: !model.isChangingChat(chat.id), activate: {
+                        ChatRow(chat: chat, enabled: !row.changing, activate: {
                             Task { await model.openChat(chat) }
                         }, move: { _ in false }, targeted: { _ in },
                            actions: { chatActions(chat) }, favorite: true, menuShown: menuShown(rowID), hovered: hover(rowID), pressed: press(rowID))
                     }
             } else {
                 // Measure and render the same label; the native overlay only handles interaction.
-                chatLabel(chat, favorite: false)
+                chatLabel(row, favorite: false, list)
                     .accessibilityHidden(true) // The overlay exposes the row as one accessible button.
                     .overlay {
-                        ChatRow(chat: chat, enabled: !model.isChangingChat(chat.id), activate: {
+                        ChatRow(chat: chat, enabled: !row.changing, activate: {
                             selection.clear()
                             Task { await model.openChat(chat) }
                         }, select: { gesture in
@@ -595,11 +604,12 @@ struct DeskView: View {
                     }
             }
         }
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder((!favorite && dropTargetChatID == chat.id) || menuRowID == rowID ? DeskPalette.accent : .clear, lineWidth: 2).allowsHitTesting(false))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder((!favorite && list.dropTargetChatID == chat.id) || list.menuRowID == rowID ? DeskPalette.accent : .clear, lineWidth: 2).allowsHitTesting(false))
         .background(SidebarRowBackground(hover: rowHover, rowID: rowID,
-                                         base: pressedRowID == rowID ? DeskPalette.selection : chatBackground(chat, favorite: favorite, highlighted: rowHighlighted(rowID)),
-                                         marked: chatSelected(chat, favorite: favorite)))
-        .disabled(model.isChangingChat(chat.id))
+                                         base: list.pressedRowID == rowID ? DeskPalette.selection
+                                            : chatBackground(chat, favorite: favorite, highlighted: list.menuRowID == rowID, snapshot, list),
+                                         marked: chatSelected(chat, favorite: favorite, snapshot, list)))
+        .disabled(row.changing)
     }
 
     private var activeChatIDs: Set<String> {
@@ -608,14 +618,14 @@ struct DeskView: View {
     private var canArchiveSelection: Bool {
         !archivingSelection && selection.ids.allSatisfy { model.canDeleteChat($0) }
     }
-    private func chatBackground(_ chat: Chat, favorite: Bool, highlighted: Bool) -> Color {
-        if !favorite && selection.contains(chat.id) { return DeskPalette.accentWash }
-        if model.chatID == chat.id && !model.showingJobs && !model.showingAttention && !model.showingArchive { return DeskPalette.selection }
+    private func chatBackground(_ chat: Chat, favorite: Bool, highlighted: Bool, _ snapshot: SidebarSnapshot, _ list: SidebarListState) -> Color {
+        if !favorite && list.selection.contains(chat.id) { return DeskPalette.accentWash }
+        if snapshot.chatID == chat.id && !snapshot.pageOpen { return DeskPalette.selection }
         return highlighted ? DeskPalette.rowHover : .clear
     }
     /// The open chat's row carries the moss bar at its leading edge; a multi-selected row shows its check instead.
-    private func chatSelected(_ chat: Chat, favorite: Bool) -> Bool {
-        model.chatID == chat.id && !model.showingJobs && !model.showingAttention && !model.showingArchive && (favorite || !selection.contains(chat.id))
+    private func chatSelected(_ chat: Chat, favorite: Bool, _ snapshot: SidebarSnapshot, _ list: SidebarListState) -> Bool {
+        snapshot.chatID == chat.id && !snapshot.pageOpen && (favorite || !list.selection.contains(chat.id))
     }
     private func menuShown(_ rowID: String) -> (Bool) -> Void {
         { shown in
@@ -631,10 +641,6 @@ struct DeskView: View {
         { down in
             if down { pressedRowID = rowID } else if pressedRowID == rowID { pressedRowID = nil }
         }
-    }
-    /// Hover is drawn by `SidebarRowBackground`; reading it here would re-render the window on every hover change.
-    private func rowHighlighted(_ rowID: String) -> Bool {
-        menuRowID == rowID
     }
     private func archiveSelection() {
         // Archive in sidebar order so partial failures are predictable.
@@ -666,24 +672,25 @@ struct DeskView: View {
         .padding(.horizontal, .ui(12))
     }
 
-    private func chatLabel(_ chat: Chat, favorite: Bool) -> some View {
-            HStack(spacing: .ui(8)) {
-                if !favorite && selection.contains(chat.id) {
+    private func chatLabel(_ row: SidebarChatRow, favorite: Bool, _ list: SidebarListState) -> some View {
+            let chat = row.chat
+            return HStack(spacing: .ui(8)) {
+                if !favorite && list.selection.contains(chat.id) {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(DeskPalette.accent)
                         .accessibilityLabel(L10n.text("Выбран", "Selected"))
                 } else if chat.isArchived {
                     Image(systemName: "archivebox").foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: .ui(3)) {
-                    ChatRowTitle(title: chat.title, branch: favorite || model.isBusy(threadID: chat.id) ? nil
-                                 : model.gitStatus.branchChange(for: chat, projectPath: model.workingDirectory(forChat: chat.id))?.from,
+                    ChatRowTitle(title: chat.title, branch: favorite || row.busy ? nil
+                                 : model.gitStatus.branchChange(for: chat, projectPath: row.workingDirectory)?.from,
                                  worktreeBranch: chat.worktree.map { model.gitStatus.status(for: $0.workingDirectory)?.displayName ?? WorktreeText.name($0) })
-                    if favorite, let project = model.state.projects.first(where: { $0.id == chat.projectID }) {
-                        Text(project.name).font(.ui(.caption2)).foregroundStyle(.secondary).lineLimit(1)
-                            .help(project.path)
+                    if favorite, let name = row.projectName {
+                        Text(name).font(.ui(.caption2)).foregroundStyle(.secondary).lineLimit(1)
+                            .help(row.projectPath ?? "")
                     }
                 }
-                if model.runningBrowserChats[chat.id] != nil {
+                if row.browserOpen {
                     Image(systemName: "globe").font(.ui(.caption2)).foregroundStyle(DeskPalette.browser)
                         .help(L10n.text("Браузер этого чата открыт. Показать его можно из контекстного меню чата или меню «Браузеры».",
                                         "This chat’s browser is open. Show it from the chat’s context menu or the Browsers menu."))
@@ -695,12 +702,12 @@ struct DeskView: View {
                 }
                 Spacer(minLength: 0)
                 // Amber: the chat waits for the user or for the app restart. Moss: an unread response.
-                if model.restartWaitingChatIDs.contains(chat.id) {
+                if row.restartWaiting {
                     Image(systemName: "arrow.clockwise.circle.fill").font(.ui(.caption)).foregroundStyle(DeskPalette.attention)
                         .help(L10n.text("Ждёт перезапуска приложения", "Waiting for the app restart"))
                         .accessibilityLabel(L10n.text("Ждёт перезапуска приложения", "Waiting for the app restart"))
                 }
-                if model.pending.contains(where: { $0.threadID == chat.id }) {
+                if row.pending {
                     Circle().fill(DeskPalette.attention).frame(width: .ui(7), height: .ui(7))
                         .help(L10n.text("Требуется действие", "Action required"))
                         .accessibilityLabel(L10n.text("Требуется действие", "Action required"))
@@ -713,8 +720,9 @@ struct DeskView: View {
                         .help(L10n.text("Непрочитанный ответ", "Unread response"))
                         .accessibilityLabel(L10n.text("Непрочитанный ответ", "Unread response"))
                 }
-                if model.isBusy(threadID: chat.id) { ProgressView().uiSmallSpinner() }
-                else if let notice = model.backgroundWaitNotice(chat.id) {
+                if row.busy { ProgressView().uiSmallSpinner() }
+                // Read from the Observation store here: a changed count renders the list without a model publication.
+                else if let notice = model.activity.backgroundWaits[chat.id].map(DeskModel.backgroundWaitText) {
                     Image(systemName: "hourglass").font(.ui(.caption)).foregroundStyle(.secondary)
                         .help(notice).accessibilityLabel(notice)
                 }

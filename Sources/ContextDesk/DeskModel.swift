@@ -414,8 +414,7 @@ private struct ChatRunState: Equatable {
     /// An idle chat whose agent will continue on its own once its background tasks finish.
     func backgroundWaitNotice(_ threadID: String) -> String? {
         guard !isBusy(threadID: threadID), let count = backgroundWaits[threadID] else { return nil }
-        return L10n.text("Агент ждёт фоновые задачи (\(count)) и продолжит сам, когда они завершатся. Писать можно как обычно.",
-                         "The agent is waiting for background tasks (\(count)) and will continue on its own when they finish. You can still write as usual.")
+        return Self.backgroundWaitText(count)
     }
     static func stopKey(threadID: String, task: String?) -> String { threadID + ":" + (task ?? "*") }
     /// Stops one background task or sub-agent of a chat (`task`), or all of them (`nil`). The request is sent once.
