@@ -35,6 +35,9 @@ public struct NativeTranscript: NSViewRepresentable {
         TranscriptScrollView.chatTranscript = view
         return view
     }
+    public static func dismantleNSView(_ view: TranscriptScrollView, coordinator: ()) {
+        view.tearDown()
+    }
     public func sizeThatFits(_ proposal: ProposedViewSize, nsView: TranscriptScrollView, context: Context) -> CGSize? {
         proposal.replacingUnspecifiedDimensions(by: .zero)
     }
@@ -156,6 +159,9 @@ public struct NativeTranscript: NSViewRepresentable {
         let storage = NSTextStorage(), manager = BubbleLayoutManager()
         let container = NSTextContainer(containerSize: NSSize(width: 600, height: CGFloat.greatestFiniteMagnitude))
         manager.allowsNonContiguousLayout = true
+        // AppKit's shared typesetter keeps the last text it laid out; a closed chat's whole text stack stayed alive
+        // through it until some other text was laid out. An own typesetter goes away with the view.
+        manager.typesetter = NSATSTypesetter()
         storage.addLayoutManager(manager); manager.addTextContainer(container)
         transcript = TranscriptTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 1), textContainer: container)
         super.init(frame: .zero)
@@ -219,6 +225,19 @@ public struct NativeTranscript: NSViewRepresentable {
         view.isAutomaticDataDetectionEnabled = false
         view.isAutomaticTextCompletionEnabled = false
         view.enabledTextCheckingTypes = 0
+    }
+
+    /// Called when SwiftUI removes the view (a chat switch shows the loading state instead). Its text stack can outlive
+    /// it, for a while in an autorelease pool or the shared typesetter, so the text is emptied: whatever still holds the
+    /// storage holds no chat. Reading positions were saved while scrolling and are not touched.
+    public func tearDown() {
+        changingLayout = true
+        copyFeedbackTask?.cancel(); copyFeedbackTask = nil
+        workingTimer?.invalidate(); workingTimer = nil
+        afterClick.removeAll()
+        historyBacklog.removeAll(); previous = []; ranges = []
+        groupingMemo = nil; actionGroups = [:]; renderCache.removeAll()
+        transcript.textStorage?.setAttributedString(NSAttributedString())
     }
 
     /// The open chat's conversation; one main window shows at most one. Document previews are not registered.

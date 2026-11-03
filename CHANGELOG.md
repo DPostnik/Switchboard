@@ -21,6 +21,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Changed
 
+- Long chats take less memory, and a closed chat's text is released right away.
 - Long chats open instantly: the last screens are shown first and older messages are added above while you read; find, Select All and jumps to old messages load the whole history at once.
 - Streaming answers in long chats use less CPU: only the running request is regrouped on each update.
 - Long code blocks and previewed source files scroll with less CPU.

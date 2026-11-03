@@ -271,6 +271,40 @@ import ContextCore
     #expect(view.transcript.string.contains("Строка 0 истории."))
 }
 
+@MainActor private final class TranscriptShown: ObservableObject { @Published var shown = true }
+private struct TranscriptOrLoading: View {
+    @ObservedObject var state: TranscriptShown
+    let items: [TranscriptItem]
+    var body: some View {
+        if state.shown { NativeTranscript(items: items, conversationID: "torn", followOutput: true) } else { Text("…") }
+    }
+}
+
+@Test @MainActor func removedTranscriptLeavesNoTextBehind() async throws {
+    let items = (0..<200).map { TranscriptItem(id: "m\($0)", kind: $0 % 2 == 0 ? "user" : "assistant",
+                                               text: "Сообщение `\($0)` " + String(repeating: "текст ", count: 150)) }
+    let state = TranscriptShown()
+    let host = NSHostingView(rootView: TranscriptOrLoading(state: state, items: items))
+    host.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+    host.layoutSubtreeIfNeeded()
+    func find(_ view: NSView) -> TranscriptScrollView? {
+        (view as? TranscriptScrollView) ?? view.subviews.lazy.compactMap(find).first
+    }
+    weak var view = find(host)
+    // Stands in for whatever keeps a closed chat's text stack alive for a while (an autorelease pool, a typesetter).
+    let storage = view?.transcript.textStorage
+    #expect((storage?.length ?? 0) > 0)
+    // The view's own typesetter: AppKit's shared one would keep the last laid-out text alive.
+    #expect(view?.transcript.layoutManager?.typesetter !== NSATSTypesetter.shared)
+    state.shown = false
+    host.layoutSubtreeIfNeeded()
+    // Other tests share the main actor; give SwiftUI time to dismantle the view.
+    for _ in 0..<60 where view != nil { try await Task.sleep(for: .milliseconds(50)) }
+    #expect(view == nil)
+    // Whatever still holds the text stack for a while holds an empty one.
+    #expect((storage?.length ?? 0) == 0)
+}
+
 @Test @MainActor func reusedEarlierRequestsGroupLikeAFullRegroup() {
     let view = TranscriptScrollView()
     var items: [TranscriptItem] = []
