@@ -42,6 +42,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Fixed
 
+- Claude chats whose role allows sub-agents can send follow-up instructions to their own running or finished sub-agents (SendMessage); messages to other Claude sessions stay blocked.
 - Scrolling fast to the end of a long chat no longer overshoots into blank space below the last message and snaps back.
 - Scrolling right after opening a long chat no longer stutters while older messages fill in.
 - Long chats and previewed documents no longer keep a CPU core busy after scrolling (automatic spelling, grammar and substitution checks are off in read-only transcript text).

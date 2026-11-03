@@ -167,7 +167,7 @@ private func settings(_ args: [String]) throws -> JSONValue {
 @Test func claudeEncodesReaderDeveloperAndRoutineRoles() throws {
     let project = project(extraRoots: [.init(path: "/Users/me/fringe", writable: true)])
     let reader = try claudeArguments(preset(AgentRoleID.reader), browser: true)
-    #expect(value(after: "--tools", in: reader) == "Read,Glob,Grep,Write,Edit,WebFetch,WebSearch,Agent,AskUserQuestion")
+    #expect(value(after: "--tools", in: reader) == "Read,Glob,Grep,Write,Edit,WebFetch,WebSearch,Agent,SendMessage,AskUserQuestion")
     #expect(value(after: "--permission-mode", in: reader) == "default" && reader.contains("--restricted") && !reader.contains("--strict-mcp-config"))
     let readerSettings = try settings(reader)["permissions"]
     #expect(readerSettings["allow"].array == [.string("Write(research/**)"), .string("Edit(research/**)"), .string("WebFetch"), .string("WebSearch"), .string("mcp__claude_ai_*")])
@@ -175,7 +175,7 @@ private func settings(_ args: [String]) throws -> JSONValue {
     #expect(readerSettings["deny"].array.contains { ($0.string ?? "").hasPrefix("mcp__claude_ai_*__*send") })
     #expect(reader.contains("--mcp-config") && reader.contains("mcp__switchboard_browser"))
     let developer = try claudeArguments(preset(AgentRoleID.developer), agents: #"{"w":{"description":"d","prompt":"p","tools":["Read","Bash","Write"]}}"#, project: project)
-    #expect(value(after: "--tools", in: developer) == "Read,Glob,Grep,Write,Edit,Bash,WebFetch,WebSearch,Agent,AskUserQuestion")
+    #expect(value(after: "--tools", in: developer) == "Read,Glob,Grep,Write,Edit,Bash,WebFetch,WebSearch,Agent,SendMessage,AskUserQuestion")
     #expect(value(after: "--permission-mode", in: developer) == "acceptEdits" && !developer.contains("--restricted"))
     #expect(value(after: "--add-dir", in: developer) == "/Users/me/fringe" && developer.contains("--strict-mcp-config"))
     let developerSettings = try settings(developer)["permissions"]
@@ -195,6 +195,9 @@ private func settings(_ args: [String]) throws -> JSONValue {
 @Test func claudeHookInspectsCommandsByRole() {
     let developer = ClaudeLaunchPolicy(preset(AgentRoleID.developer).profile, scheduled: false, userChromeEnabled: false)
     #expect(developer.inspectsCommands && developer.hooks["PreToolUse"].array.first?["matcher"].string == "Bash")
+    // Delegating roles may continue their sub-agents; the sub-agents themselves get no SendMessage.
+    #expect(developer.permits(tool: "SendMessage") && developer.hooks["PreToolUse"].array.last?["matcher"].string == "SendMessage")
+    #expect(developer.subagentTools?.contains("SendMessage") == false && developer.subagentTools?.contains("Agent") == true)
     #expect(developer.inspect(command: "swift build") == .allow)
     #expect(developer.inspect(command: "rm -rf .build") == .ask) // no cwd known: ask
     #expect(developer.inspect(command: "rm -rf .build Tests/tmp", cwd: "/p/proj") == .allow)
@@ -215,6 +218,7 @@ private func settings(_ args: [String]) throws -> JSONValue {
     #expect(noNetwork.inspect(command: "echo curl") == .allow)
     let editor = ClaudeLaunchPolicy(preset(AgentRoleID.editor).profile, scheduled: false, userChromeEnabled: false)
     #expect(!editor.inspectsCommands && editor.hooks == .null && !editor.permits(tool: "Bash") && editor.permits(tool: "Write"))
+    #expect(!editor.permits(tool: "SendMessage"))
     let operatorPolicy = ClaudeLaunchPolicy(.unrestricted, scheduled: false, userChromeEnabled: true)
     #expect(operatorPolicy.permits(tool: "Bash") && operatorPolicy.permits(tool: "mcp__claude_ai_Gmail__send_message") && operatorPolicy.hooks == .null)
     let audit = ClaudeLaunchPolicy(preset(AgentRoleID.routineOperator).profile, scheduled: true, userChromeEnabled: false)

@@ -17,6 +17,8 @@ struct ClaudeLaunchPolicy: Equatable {
     static let editTools = ["Write", "Edit"]
     static let fetchTools = ["WebFetch", "WebSearch"]
     static let hookCallback = "switchboard-bash"
+    /// `SendMessage` also reaches the user's other Claude sessions; the hook lets it through only to the chat's own sub-agents.
+    static let sendCallback = "switchboard-send"
     /// Secrets no restricted role may read even inside its roots.
     static let secretDenyRules = ["Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(~/.gnupg/**)", "Read(~/.config/gh/**)",
                                   "Read(**/.env)", "Read(**/.env.*)", "Read(~/.codex/auth.json)", "Read(~/.claude/.credentials.json)"]
@@ -75,7 +77,7 @@ struct ClaudeLaunchPolicy: Equatable {
         if let cap = profile.subagentRole {
             // A capped worker gets no scratch writes: the parent's edit mode would widen them beyond the scratch folder.
             var capped = AgentRoleCatalog.preset(cap).profile.effective; capped.scratch = nil
-            subagentTools = Self.toolList(capped).map { $0.filter { $0 != "AskUserQuestion" } }
+            subagentTools = Self.toolList(capped).map { $0.filter { $0 != "AskUserQuestion" && $0 != "SendMessage" } }
         } else { subagentTools = [] }
         delegation = profile.subagentRole != nil
         inspectsCommands = profile.shell == .on && !unrestricted && (!profile.commandInspection.isEmpty || !profile.network)
@@ -91,7 +93,8 @@ struct ClaudeLaunchPolicy: Equatable {
         }
         if profile.shell == .on { list.append("Bash") }
         if profile.network { list += fetchTools } else if profile.webSearch { list.append("WebSearch") }
-        if profile.subagentRole != nil { list.append("Agent") }
+        // `SendMessage` continues a sub-agent (new instructions, a resumed finished one); the send hook limits its targets.
+        if profile.subagentRole != nil { list += ["Agent", "SendMessage"] }
         list.append("AskUserQuestion")
         return list
     }
@@ -106,8 +109,15 @@ struct ClaudeLaunchPolicy: Equatable {
     }
     /// `hooks` for the control-protocol `initialize`; the app answers each callback with the role's decision.
     var hooks: JSONValue {
-        guard inspectsCommands || audit else { return .null }
-        return .object(["PreToolUse": .array([.object(["matcher": .string("Bash"), "hookCallbackIds": .array([.string(Self.hookCallback)]), "timeout": .number(600)])])])
+        var matchers: [JSONValue] = []
+        if inspectsCommands || audit {
+            matchers.append(.object(["matcher": .string("Bash"), "hookCallbackIds": .array([.string(Self.hookCallback)]), "timeout": .number(600)]))
+        }
+        // Unrestricted roles keep the CLI's full SendMessage, other sessions included.
+        if delegation, tools != nil {
+            matchers.append(.object(["matcher": .string("SendMessage"), "hookCallbackIds": .array([.string(Self.sendCallback)]), "timeout": .number(60)]))
+        }
+        return matchers.isEmpty ? .null : .object(["PreToolUse": .array(matchers)])
     }
 
     enum CommandDecision: Equatable { case allow, ask, deny(String) }

@@ -795,7 +795,7 @@ public actor ClaudeIntegration: AgentIntegration {
             return isWithinProject(path, cwd: cwd) ? .writeInProject : .writeOutside
         case "Bash", "PowerShell": return .shell
         case "WebFetch", "WebSearch": return .network
-        case "Agent", "Task": return .subagent
+        case "Agent", "Task", "SendMessage": return .subagent
         case "AskUserQuestion": return .question
         default:
             if tool.hasPrefix("mcp__switchboard_browser__") || tool.hasPrefix("mcp__claude-in-chrome__") { return .browser }
@@ -818,16 +818,27 @@ public actor ClaudeIntegration: AgentIntegration {
         guard let requestID = value["request_id"].string else { await wire.close(); return }
         guard seenRequests[id, default: []].insert(requestID).inserted else { await wire.close(); return }
         let request = value["request"]
-        guard request["callback_id"].string == ClaudeLaunchPolicy.hookCallback, request["input"]["hook_event_name"].string == "PreToolUse" else {
+        let callback = request["callback_id"].string
+        guard callback == ClaudeLaunchPolicy.hookCallback || callback == ClaudeLaunchPolicy.sendCallback,
+              request["input"]["hook_event_name"].string == "PreToolUse" else {
             try? await respond(wire, requestID: requestID, response: .object([:])); return
         }
-        let command = request["input"]["tool_input"]["command"].string ?? ""
         let turn = sessions[id]?.active
         func output(_ decision: String, _ reason: String?) -> JSONValue {
             var fields: [String: JSONValue] = ["hookEventName": .string("PreToolUse"), "permissionDecision": .string(decision)]
             if let reason { fields["permissionDecisionReason"] = .string(reason) }
             return .object(["hookSpecificOutput": .object(fields)])
         }
+        if callback == ClaudeLaunchPolicy.sendCallback {
+            let target = request["input"]["tool_input"]["to"].string ?? ""
+            if Self.ownSubagent(target, started: subagents[id]?.startedIDs ?? []) {
+                try? await respond(wire, requestID: requestID, response: output("allow", nil)); return
+            }
+            let audit = auditPolicy(id) != nil
+            record(.init(tool: "SendMessage", capability: .subagent, target: target, decision: audit ? .wouldDeny : .hookDenied, turn: turn), session: id)
+            try? await respond(wire, requestID: requestID, response: audit ? .object([:]) : output("deny", Self.sendRefusal())); return
+        }
+        let command = request["input"]["tool_input"]["command"].string ?? ""
         if let audit = auditPolicy(id) {
             if case .deny = audit.inspect(command: command, cwd: sessions[id]?.cwd) {
                 record(.init(tool: "Bash", capability: .shell, target: command, decision: .wouldDeny, turn: turn), session: id)
@@ -843,6 +854,12 @@ public actor ClaudeIntegration: AgentIntegration {
             record(.init(tool: "Bash", capability: .shell, target: command, decision: .hookDenied, turn: turn), session: id)
             try? await respond(wire, requestID: requestID, response: output("deny", reason))
         }
+    }
+    /// `SendMessage` targets this chat may reach: sub-agents its CLI session started (`to` is their agent ID).
+    static func ownSubagent(_ target: String, started: Set<String>) -> Bool { !target.isEmpty && started.contains(target) }
+    static func sendRefusal() -> String {
+        L10n.text("В этом чате SendMessage доходит только до его подагентов: укажи в `to` agentId из результата Agent. Другие сессии недоступны.",
+                  "In this chat SendMessage reaches only its own sub-agents: set `to` to the agentId from the Agent result. Other sessions are not reachable.")
     }
     private func permission(_ value: JSONValue, session id: String, wire: ClaudeWire) async {
         guard let requestID = value["request_id"].string else { await wire.close(); return }
@@ -890,6 +907,10 @@ public actor ClaudeIntegration: AgentIntegration {
             if profile.network || (name == "WebSearch" && profile.webSearch) { await allow(); return }
             await deny(outside); return
         case "AskUserQuestion": break
+        case "SendMessage":
+            // Normally the send hook answers first; this covers a CLI that asks anyway.
+            if Self.ownSubagent(input["to"].string ?? "", started: subagents[id]?.startedIDs ?? []) { await allow(); return }
+            await deny(Self.sendRefusal()); return
         default:
             if name.hasPrefix("mcp__switchboard_browser__") || name.hasPrefix("mcp__claude-in-chrome__") { await allow(); return }
             // The chat directory only reads the app's snapshot; it is attached only to chats the user opted in.

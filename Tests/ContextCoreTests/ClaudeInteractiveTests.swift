@@ -178,6 +178,12 @@ private func interactiveFixture(_ root: URL) throws -> URL {
                 out({'type':'control_request','request_id':'hook-'+prompt[5:],'request':{'subtype':'hook_callback','callback_id':'switchboard-bash','tool_use_id':'t-hook',
                      'input':{'hook_event_name':'PreToolUse','tool_name':'Bash','tool_input':{'command':prompt[5:]},'session_id':sid,'cwd':os.getcwd()}}})
                 continue
+            if prompt.startswith('send:'):
+                # The chat's own sub-agent a1b2 was started earlier in this session; SendMessage goes through the send hook.
+                out({'type':'system','subtype':'task_started','session_id':sid,'task_id':'a1b2','tool_use_id':'call-send','description':'Worker','subagent_type':'general-purpose','task_type':'local_agent'})
+                out({'type':'control_request','request_id':'send-'+prompt[5:],'request':{'subtype':'hook_callback','callback_id':'switchboard-send','tool_use_id':'t-send',
+                     'input':{'hook_event_name':'PreToolUse','tool_name':'SendMessage','tool_input':{'to':prompt[5:],'message':'news'},'session_id':sid,'cwd':os.getcwd()}}})
+                continue
             if prompt.startswith('background'):
                 tasks('b1')
                 out({'type':'system','subtype':'task_started','session_id':sid,'task_id':'b1','tool_use_id':'call1','description':'Check sources','subagent_type':'general-purpose','is_backgrounded':True,'task_type':'local_agent','prompt':'Look'})
@@ -363,19 +369,32 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
         if decision == nil { #expect(reply["response"] == .object([:])) }
     }
     expected.removeAll()
+    // SendMessage reaches the chat's own sub-agent only; another session's name or socket is refused.
+    for (target, decision) in [("a1b2", "allow"), ("my-terminal", "deny"), ("uds:/tmp/cc-socks/1.sock", "deny"), ("", "deny")] {
+        let before = await events.completionCount()
+        _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "send:" + target, role: developer)).value()
+        try await waitFor { await events.completionCount() == before + 1 }
+        let reply = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: home.appendingPathComponent("answer")))["response"]
+        #expect(reply["request_id"].string == "send-" + target)
+        #expect(reply["response"]["hookSpecificOutput"]["permissionDecision"].string == decision, "\(target)")
+    }
+    let refusals = await events.capabilities().filter { $0.tool == "SendMessage" }
+    #expect(refusals.map(\.decision) == [.hookDenied, .hookDenied, .hookDenied] && refusals.first?.target == "my-terminal")
     let launch = try String(contentsOf: home.appendingPathComponent("submitted"), encoding: .utf8)
     #expect(launch.contains("acceptEdits") && launch.contains("Grep,Write,Edit,Bash,WebFetch") && !launch.contains("--restricted"))
+    #expect(launch.contains("Agent,SendMessage,AskUserQuestion"))
     let controls = try String(contentsOf: home.appendingPathComponent("controls"), encoding: .utf8).split(separator: "\n")
         .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
     let initialize = try #require(controls.first { $0["request"]["subtype"].string == "initialize" })
     #expect(initialize["request"]["hooks"]["PreToolUse"].array.first?["matcher"].string == "Bash")
     #expect(initialize["request"]["hooks"]["PreToolUse"].array.first?["hookCallbackIds"].array == [.string("switchboard-bash")])
+    #expect(initialize["request"]["hooks"]["PreToolUse"].array.last?["matcher"].string == "SendMessage")
     let recorded = await events.capabilities().filter { $0.capability == .shell }
     #expect(recorded.map(\.decision) == [.hookDenied, .hookAsked] && recorded.first?.target == "sudo ls")
     // The editor role registers no hook at all.
     let editor = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
     _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: editor)).value()
-    try await waitFor { await events.completionCount() == 5 }
+    try await waitFor { await events.completionCount() == 9 }
     let later = try String(contentsOf: home.appendingPathComponent("controls"), encoding: .utf8).split(separator: "\n")
         .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }.filter { $0["request"]["subtype"].string == "initialize" }
     #expect(later.count == 2 && later.last?["request"]["hooks"] == .null)

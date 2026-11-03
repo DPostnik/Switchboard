@@ -12,6 +12,8 @@ struct ClaudeSubagentTracker {
     private(set) var agents: [AgentSubagent] = []
     /// Agent tool call ID -> task ID.
     private var calls: [String: String] = [:]
+    /// Every sub-agent this CLI session started, including ones cleared from the list: `SendMessage` may resume a finished one.
+    private(set) var startedIDs: Set<String> = []
 
     /// Returns true when the list changed.
     mutating func observe(_ value: JSONValue, now: Date = Date()) -> Bool {
@@ -90,6 +92,7 @@ struct ClaudeSubagentTracker {
         case "task_started":
             guard value["task_type"].string == "local_agent" || value["subagent_type"].string != nil else { return false }
             if let call = value["tool_use_id"].string { calls[call] = task }
+            startedIDs.insert(task)
             if let index = agents.firstIndex(where: { $0.id == task }) {
                 // A background sub-agent resumes when its own background work finishes.
                 agents[index].status = .running; agents[index].endedAt = nil; agents[index].activity = nil
