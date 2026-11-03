@@ -884,6 +884,7 @@ private struct ChatRunState: Equatable {
     }
     func openChat(_ chat: Chat) async {
         guard !isChangingChat(chat.id), state.chats.contains(where: { $0.id == chat.id }) else { return }
+        Perf.begin("chat.open", id: chat.id); let perfLoad = Perf.span("chat.load", id: chat.id); defer { perfLoad.end() }
         transcript.cancelPending()
         showingArchive = isArchived(chat.id)
         archiveViewingChat = showingArchive

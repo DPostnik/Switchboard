@@ -1,3 +1,4 @@
+import ContextCore
 import os
 
 /// Unified-log categories for background work that never surfaces errors in the UI.
@@ -12,4 +13,6 @@ enum AppLog {
     static let browser = Logger(subsystem: subsystem, category: "browser")
     static let processes = Logger(subsystem: subsystem, category: "processes")
     static let ui = Logger(subsystem: subsystem, category: "ui")
+    /// Developer timings, only with `PerfSignposts` set; intervals and events go through `Perf` (ContextCore).
+    static var perf: Logger { Perf.log }
 }

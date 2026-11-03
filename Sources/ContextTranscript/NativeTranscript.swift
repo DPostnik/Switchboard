@@ -238,6 +238,7 @@ public struct NativeTranscript: NSViewRepresentable {
                          workingSince: workingSince, unreadCompletionID: unreadCompletionID, unreadResponseItemID: unreadResponseItemID,
                          projectPath: projectPath)
         }) { return }
+        let perfSpan = Perf.span("transcript.update", id: "\(items.count) items"); defer { perfSpan.end() }
         // Relative file links resolve against the project; a different project re-renders everything.
         let projectChanged = self.projectPath != projectPath
         self.projectPath = projectPath
@@ -412,6 +413,7 @@ public struct NativeTranscript: NSViewRepresentable {
             if let container = transcript.textContainer { transcript.layoutManager?.ensureLayout(for: container) }
             transcript.scrollRangeToVisible(NSRange(location: transcript.textStorage?.length ?? 0, length: 0))
         }
+        if Perf.end("chat.open", id: conversationID, "\(previous.count) rows") { Perf.watchHitches(in: self, for: 2) }
     }
 
     public override func viewDidEndLiveResize() {

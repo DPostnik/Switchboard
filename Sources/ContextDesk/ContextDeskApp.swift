@@ -17,6 +17,7 @@ import UserNotifications
         NSApplication.shared.setActivationPolicy(.regular)
         restart.start(delegate: self)
         nightlyTestsObserver = NightlyTestsReport.observe()
+        Perf.start()
     }
     private var nightlyTestsObserver: NSObjectProtocol?
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

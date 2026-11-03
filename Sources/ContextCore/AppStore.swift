@@ -507,8 +507,9 @@ public actor AppStore {
     }
     private func flushEntry(_ db: OpaquePointer, _ id: String) throws {
         guard transcripts[id]?.dirty == true else { return }
+        let perfSpan = Perf.span("store.flush", id: id); var blobBytes: Int?; defer { perfSpan.end(blobBytes.map { "\($0) bytes" } ?? "unchanged") }
         let snapshot = try materialized(id)
-        _ = try writeTranscript(db, snapshot)
+        blobBytes = try writeTranscript(db, snapshot)
         transcripts[id]?.dirty = false
     }
     /// Blob and stamp commit together. Returns the blob size, or nil when the stored content already matches.

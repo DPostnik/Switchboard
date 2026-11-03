@@ -115,6 +115,7 @@ public actor ChatSearchIndex {
     /// Best match per chat, best chats first. Every word must occur, each as a word prefix.
     public func search(_ text: String, limit: Int = 300) throws -> [Hit] {
         guard let match = Self.matchQuery(text) else { return [] }
+        let perfSpan = Perf.span("search.index", id: "\(text.count) chars"); defer { perfSpan.end() }
         return try withDatabase { db in
             var hits: [Hit] = [], seen: Set<String> = []
             try Self.query(db, "SELECT chat_id, snippet(messages, 4, '', '', '…', 12) FROM messages WHERE messages MATCH ? ORDER BY bm25(messages) LIMIT 3000",
