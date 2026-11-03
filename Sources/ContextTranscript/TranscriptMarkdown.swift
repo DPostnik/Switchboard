@@ -726,6 +726,8 @@ final class TableBox: NSObject {
     }
 
     private static let images = NSCache<NSString, NSImage>()
+    /// Memory pressure (`TranscriptCaches.release`).
+    static func releaseImages() { images.removeAllObjects() }
 
     static func image(at url: URL) -> NSImage? {
         let path = url.path

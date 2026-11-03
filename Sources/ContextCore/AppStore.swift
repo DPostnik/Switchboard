@@ -651,6 +651,14 @@ public actor AppStore {
         transcripts[id] = nil; stamps[id] = nil; lastFlush[id] = nil
         transcriptOrder.removeAll { $0 == id }
     }
+    /// Memory pressure: drops every cached transcript except `kept` (the open chat); entries with pending items stay
+    /// until their write. A dropped transcript is re-read from the file on demand.
+    public func releaseCachedTranscripts(keeping kept: String?) {
+        for (id, entry) in transcripts where id != kept && !entry.dirty { transcripts[id] = nil }
+        transcriptOrder.removeAll { transcripts[$0] == nil }
+    }
+    /// Test seam: transcripts held in the cache.
+    var cachedTranscriptCount: Int { transcripts.count }
     /// Pending items survive a cache reset; everything else is re-read from the file on demand.
     private func dropCleanTranscripts() {
         for (id, entry) in transcripts where !entry.dirty { transcripts[id] = nil }

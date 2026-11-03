@@ -239,3 +239,26 @@ private func savedChat(_ store: AppStore, id: String = "chat") async throws -> (
         #expect(try await AppStore(file: file).loadTranscript(conversationID: id)?.items.map(\.text) == ["Text " + id])
     }
 }
+
+@Test func memoryPressureReleasesCachedTranscriptsButKeepsTheOpenChatAndPendingItems() async throws {
+    let file = temporaryStoreFile()
+    defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+    let store = AppStore(file: file, flushDelay: .seconds(30), flushInterval: .seconds(30))
+    var sources: [String: AgentSessionReference] = [:]
+    for index in 0..<3 {
+        let (chat, source) = try await savedChat(store, id: "chat-\(index)")
+        sources[chat.id] = source
+        try await store.saveTranscript(LocalHistory.snapshot(conversation: chat.conversationID, source: source,
+            items: [TranscriptItem(id: "a", kind: "user", text: "Stored " + chat.id)]))
+    }
+    try await store.recordTranscriptItem(TranscriptItem(id: "b", kind: "assistant", text: "Pending"), conversationID: "chat-2",
+                                         source: try #require(sources["chat-2"]))
+    #expect(await store.cachedTranscriptCount == 3)
+    await store.releaseCachedTranscripts(keeping: "chat-0")
+    // chat-1 is dropped; the open chat and the chat with a pending item stay.
+    #expect(await store.cachedTranscriptCount == 2)
+    #expect(try await store.loadTranscript(conversationID: "chat-1")?.items.map(\.text) == ["Stored chat-1"])
+    #expect(try await store.loadTranscript(conversationID: "chat-2")?.items.map(\.text) == ["Stored chat-2", "Pending"])
+    await store.flushTranscripts()
+    #expect(try await AppStore(file: file).loadTranscript(conversationID: "chat-2")?.items.map(\.text) == ["Stored chat-2", "Pending"])
+}
