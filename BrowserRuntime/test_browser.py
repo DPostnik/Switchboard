@@ -299,8 +299,21 @@ class BrowserTests(unittest.TestCase):
         record(uncertain, state='disconnected', outcomeUnknown=True, targetId='D' * 32)
         chrome = browser.chrome = Mock(owner={'pid': 123})
         chrome.process_gone.return_value = False
-        chrome.close_target.return_value = True
-        chrome.page_targets.return_value = {k * 32: 'https://jobs.test/' for k in 'ABCD'}
+        tabs = {k * 32: 'https://jobs.test/' for k in 'ABCD'}
+        tabs['E' * 32] = 'about:blank'
+        closing, reads = {}, []
+        def close_target(owner, target):
+            closing[target] = len(reads)
+            return True
+        def page_targets(owner):
+            # Chrome accepts /json/close at once but lists the tab for a few more reads.
+            reads.append(1)
+            for target, at in list(closing.items()):
+                if len(reads) - at > 3:
+                    tabs.pop(target, None)
+            return dict(tabs)
+        chrome.close_target.side_effect = close_target
+        chrome.page_targets.side_effect = page_targets
         # A live task of this chat, an unknown outcome and a malformed token keep the old answer.
         for token in (live, uncertain, '../' + earlier, 'e' * 32):
             with self.subTest(token=token), self.assertRaisesRegex(Rejected, 'session_not_owned'):
@@ -311,12 +324,14 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(sorted(c.args[1] for c in chrome.close_target.call_args_list), ['A' * 32, 'B' * 32])
         self.assertEqual([state(t) for t in (earlier, other, live, uncertain)],
                          ['orphan_closed', 'orphan_closed', 'navigated', 'disconnected'])
-        # A second close of the same token is never resent.
-        with self.assertRaisesRegex(Rejected, 'session_not_owned'):
-            dispatch(browser, 'browser_close', {'session': earlier})
+        # The close waited until Chrome removed both tabs, so the idle check sees what is left.
+        self.assertEqual(sorted(tabs), ['C' * 32, 'D' * 32, 'E' * 32])
+        # A second close of the same token sends nothing again; the executor may still quit an idle Chrome.
+        result = dispatch(browser, 'browser_close', {'session': earlier})
+        self.assertEqual(result, {'closed': True, 'earlierSession': True, 'alreadyClosed': True})
         self.assertEqual(chrome.close_target.call_count, 2)
         # Only blank tabs remain: the executor's follow-up quits the chat's Chrome.
-        chrome.page_targets.return_value = {'E' * 32: 'about:blank'}
+        tabs.pop('C' * 32), tabs.pop('D' * 32)
         chrome.process_gone.return_value = True  # Confirmed exit after the one graceful close.
         self.assertEqual(browser.quit_idle_chrome(), 'quit')
         chrome.graceful_close.assert_called_once_with({'pid': 123})

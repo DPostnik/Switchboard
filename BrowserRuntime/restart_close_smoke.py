@@ -66,9 +66,11 @@ def main():
             assert host.process_gone(owner), 'chat Chrome still runs'
             assert json.loads(record.read_text())['state'] == 'orphan_closed'
             failed, again = call(after, 'browser_close', session=opened['session'])
-            assert failed, again  # The earlier token is spent; nothing is resent.
+            # The tab is already closed: nothing is resent and no Chrome is launched.
+            assert not failed and again.get('alreadyClosed') and again.get('browserQuit') == 'none', again
+            assert host.process_gone(owner), 'second close started Chrome'
             print(json.dumps({'result': 'passed', 'earlierSessionClosed': True, 'browserQuit': closed['browserQuit'],
-                              'secondCloseRejected': True, 'externalSitesOrSubmissions': False}))
+                              'secondCloseAlreadyClosed': True, 'externalSitesOrSubmissions': False}))
         finally:
             for c in clients:
                 c.close()

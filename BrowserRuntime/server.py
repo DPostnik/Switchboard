@@ -345,13 +345,14 @@ class Browser:
         Their session tokens are dead, so no agent can use them, yet each keeps a
         renderer alive. Only the recorded target ID identifies a tab; sessions
         with an unknown outcome, user tabs and other chats' browsers are kept.
-        One close request per tab, never retried.
+        One close request per tab, never retried. Returns the targets Chrome accepted to close.
         """
+        closed_targets = []
         if self.chrome is None or self.chrome.owner is None:
-            return
+            return closed_targets
         targets = self.chrome.page_targets(self.chrome.owner)
         if not isinstance(targets, dict) or not targets:
-            return
+            return closed_targets
         for path in sorted(self.records.glob('*.json')):
             try:
                 record = json.loads(path.read_text())
@@ -365,6 +366,9 @@ class Browser:
             closed = self.chrome.close_target(self.chrome.owner, record['targetId'])
             record['state'] = 'orphan_closed' if closed else 'orphan_close_uncertain'
             save(path, record)
+            if closed:
+                closed_targets.append(record['targetId'])
+        return closed_targets
 
     def persist(self):
         if self.session:
@@ -1636,13 +1640,17 @@ class Browser:
         self.chrome = host
         return host
 
-    def close_earlier_session(self, token):
+    def close_earlier_session(self, token, confirmation_timeout=2):
         """browser_close with the token of an earlier session of this chat whose MCP connection ended.
 
         After a Claude or Codex restart the new connection owns no tab, so the agent's
         remembered token used to fail with session_not_owned and the tab kept this chat's
         Chrome open. The record in this chat's root proves the token; only a disconnected
         session with a known outcome qualifies. One close request per tab, never retried.
+        Chrome closes a tab asynchronously, so the inventory is reread until the closed tabs
+        leave it; otherwise the executor's idle check still saw them and kept Chrome running.
+        The same token again finds its tab already closed: no request is sent, and the
+        executor's idle check may still quit a Chrome that has only blank tabs left.
         """
         require(not self.stopped.is_set(), 'executor_stopped_outcome_may_be_unknown')
         path = self.records / (token + '.json') if isinstance(token, str) and re.fullmatch(r'[0-9a-f]{32}', token) else None
@@ -1650,8 +1658,13 @@ class Browser:
             record = json.loads(path.read_text()) if path else None
         except (OSError, ValueError):
             record = None
-        require(isinstance(record, dict) and record.get('session') == token and record.get('state') == 'disconnected'
-                and record.get('outcomeUnknown') is False, 'session_not_owned')
+        require(isinstance(record, dict) and record.get('session') == token and record.get('outcomeUnknown') is False
+                and record.get('state') in ('disconnected', 'orphan_closed', 'orphan_already_closed', 'orphan_browser_exited'),
+                'session_not_owned')
+        if record['state'] != 'disconnected':
+            chrome = self.attached_chrome()
+            return {'closed': True, 'earlierSession': True, 'alreadyClosed': True,
+                    **({} if chrome is not None else {'browserQuit': 'none'})}
         require(isinstance(record.get('targetId'), str), tr(
             'Вкладку прошлой сессии нельзя определить, поэтому ничего не закрыто. Сообщи пользователю, что окно Chrome for Testing можно закрыть через Cmd+Q.',
             'The earlier session’s tab cannot be identified, so nothing was closed. Tell the user they can quit the Chrome for Testing window with Cmd+Q.'))
@@ -1665,7 +1678,12 @@ class Browser:
             'Не удалось проверить вкладки Chrome этого чата. Ничего не закрыто; можно вызвать browser_close позже.',
             'Could not inspect the tabs of this chat’s Chrome. Nothing was closed; you may call browser_close later.'))
         if record['targetId'] in targets:
-            self.close_orphaned_tabs()  # This tab and any other dead tab of this chat, one request each.
+            closed = self.close_orphaned_tabs()  # This tab and any other dead tab of this chat, one request each.
+            end = time.monotonic() + confirmation_timeout
+            while closed and time.monotonic() < end and not self.stopped.wait(0.1):
+                left = chrome.page_targets(chrome.owner)  # Only repeat the read.
+                if not isinstance(left, dict) or not any(t in left for t in closed):
+                    break
         else:
             record['state'] = 'orphan_already_closed'
             save(path, record)
