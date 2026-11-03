@@ -919,8 +919,35 @@ public struct NativeTranscript: NSViewRepresentable {
         if contentView.bounds.maxY >= end - 2 { scrollToEnd() }
     }
 
+    /// Text not laid out yet has an estimated height, TextKit's guess from its length (about half the real height of a
+    /// chat with code, more than the real one for long prose). A fast scroll or a scroller drag skips parts of the text,
+    /// which stay estimated, so reaching the end laid them out and moved the end by hundreds of points under the reader:
+    /// the scroll overshot into blank space, then snapped. Once the viewport comes within a few heights of the end,
+    /// everything from it to the end is laid out, so the end is exact before the reader gets there. Text below the
+    /// reader moves nothing in view; when it is all laid out already this costs next to nothing.
+    private func layoutTowardEnd() {
+        guard !changingLayout, !layingOutTowardEnd, let manager = transcript.layoutManager, let container = transcript.textContainer,
+              let storage = transcript.textStorage, storage.length > 0 else { return }
+        let viewport = contentView.bounds
+        guard viewport.height > 0, viewport.maxY >= transcript.frame.maxY - Self.endLayoutViewports * viewport.height else { return }
+        layingOutTowardEnd = true
+        changingLayout = true
+        defer { changingLayout = false; layingOutTowardEnd = false }
+        let point = NSPoint(x: container.lineFragmentPadding, y: max(0, viewport.minY - transcript.textContainerOrigin.y))
+        let glyph = manager.glyphIndex(for: point, in: container)
+        let start = glyph < manager.numberOfGlyphs ? manager.characterIndexForGlyph(at: glyph) : storage.length
+        guard start < storage.length else { return }
+        manager.ensureLayout(forCharacterRange: NSRange(location: start, length: storage.length - start))
+    }
+
+    /// How close to the end (in viewport heights below the viewport) the rest of the text is laid out: a flick or a
+    /// drag on a busy main thread moves one to two viewports per frame.
+    static let endLayoutViewports: CGFloat = 3
+    private var layingOutTowardEnd = false
+
     @objc private func viewportChanged() {
         if !changingLayout { lastScrolled = ProcessInfo.processInfo.systemUptime }
+        layoutTowardEnd()
         workingIndicator.refreshAnimation()
         keepEndPinned()
         updateJumpToLatest()

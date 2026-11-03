@@ -210,6 +210,35 @@ import ContextCore
     #expect(!reopened.isAtTranscriptEnd)
 }
 
+/// Text not laid out yet has an estimated height. A reader who comes near the end fast (a flick, a scroller drag) gets the
+/// rest of the text laid out before reaching it, so the end does not move under them when the last part is shown.
+@Test @MainActor func endIsExactBeforeAFastScrollReachesIt() throws {
+    let items = (0..<300).map { TranscriptItem(id: "fast-\($0)", kind: "assistant",
+        text: "Message \($0)\n" + String(repeating: "Reading line / Строка чтения\n", count: 40)) }
+    let view = readingView(TranscriptReadingPositions())
+    view.update(items: items, conversationID: "a", followOutput: true)
+    view.layoutSubtreeIfNeeded()
+    // At the top the whole history goes in; inserting it drops the layout of the end.
+    view.contentView.scroll(to: .zero)
+    view.reflectScrolledClipView(view.contentView)
+    view.renderHistory()
+    view.layoutSubtreeIfNeeded()
+    #expect(view.historyBacklog.isEmpty)
+    let manager = try #require(view.transcript.layoutManager), container = try #require(view.transcript.textContainer)
+    let storage = try #require(view.transcript.textStorage)
+    // One long step to two viewports above the (estimated) end.
+    let viewport = view.contentView.bounds.height
+    view.contentView.scroll(to: NSPoint(x: 0, y: view.transcript.frame.height - 3 * viewport))
+    view.reflectScrolledClipView(view.contentView)
+    let below = view.transcript.frame.maxY - view.contentView.bounds.maxY
+    // Showing the rest on the way down lays it out; the end stays where it was.
+    let point = NSPoint(x: 0, y: view.contentView.bounds.minY - view.transcript.textContainerOrigin.y)
+    let start = manager.characterIndexForGlyph(at: manager.glyphIndex(for: point, in: container))
+    manager.ensureLayout(forCharacterRange: NSRange(location: start, length: storage.length - start))
+    #expect(abs(view.transcript.frame.maxY - view.contentView.bounds.maxY - below) < 2)
+    #expect(below > viewport)
+}
+
 /// Text put above the reader makes TextKit lay out everything from the top to their place again, so a reader far below
 /// a long history gets it only near the top, in slices; a selection moves with its text.
 @Test @MainActor func renderedHistoryWaitsAboveADistantReaderAndGoesInNearTheTop() async throws {

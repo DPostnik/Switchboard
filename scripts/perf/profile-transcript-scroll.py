@@ -29,7 +29,7 @@ def run(command, **kwargs):
     subprocess.run(list(map(str, command)), check=True, **kwargs)
 
 
-def snapshot(source, worktree):
+def snapshot(source, worktree, revision='HEAD'):
     """A private copy of the package: HEAD via git archive, or the working tree's tracked files."""
     if source.exists():
         shutil.rmtree(source)
@@ -43,7 +43,7 @@ def snapshot(source, worktree):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, target)
     else:
-        archive = subprocess.Popen(['git', 'archive', 'HEAD'], cwd=ROOT, stdout=subprocess.PIPE)
+        archive = subprocess.Popen(['git', 'archive', revision], cwd=ROOT, stdout=subprocess.PIPE)
         subprocess.run(['tar', '-x', '-C', str(source)], stdin=archive.stdout, check=True)
         if archive.wait() != 0:
             raise RuntimeError('git archive failed')
@@ -59,17 +59,18 @@ def main():
     parser.add_argument('--phases', default='open,scroll,stream,desk', help='phases of the full run')
     parser.add_argument('--no-text-checking', action='store_true',
                         help='experiment: turn off NSTextView automatic text checking in the probe views')
-    parser.add_argument('--only', choices=['open', 'scroll', 'stream', 'scrollidle', 'scrollfull', 'afteropen', 'fill'])
+    parser.add_argument('--only', choices=['open', 'scroll', 'stream', 'scrollidle', 'scrollfull', 'afteropen', 'fill', 'endgap', 'wheelgap'])
     parser.add_argument('--seconds', type=int, default=20)
     parser.add_argument('--sample', action='store_true', help='attach /usr/bin/sample during --only')
     parser.add_argument('--skip-build', action='store_true')
+    parser.add_argument('--revision', default='HEAD', help='revision to measure (default HEAD; ignored with --worktree)')
     args = parser.parse_args()
     info = json.loads((ROOT / '.build/local-build/build-info.json').read_text())
     sdk = info['sdk']
     source, scratch = args.work / 'src', args.work / 'build'
     executable = args.work / 'TranscriptScrollProbe'
     if not args.skip_build:
-        snapshot(source, args.worktree)
+        snapshot(source, args.worktree, args.revision)
         # The app's entry point is renamed so its objects link into the probe; the alias keeps the app's own
         # (unused) executable link working.
         run(['xcrun', 'swift', 'build', '--sdk', sdk, '-c', 'release', '--scratch-path', scratch, '--force-resolved-versions',
@@ -114,7 +115,7 @@ def main():
     for path in sorted((source / 'Sources').rglob('*.swift')):
         digest.update(str(path.relative_to(source)).encode()); digest.update(path.read_bytes())
     report.update(source_sha256=digest.hexdigest(), sdk=sdk, worktree=args.worktree,
-                  revision=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+                  revision=subprocess.check_output(['git', 'rev-parse', 'HEAD' if args.worktree else args.revision], cwd=ROOT, text=True).strip(),
                   machine=subprocess.check_output(['sysctl', '-n', 'machdep.cpu.brand_string'], text=True).strip())
     output.write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
     for row in report.get('open', []):
@@ -125,6 +126,8 @@ def main():
         print('after open', {k: row.get(k) for k in ('open_total_ms', 'frames', 'hitches', 'over_33ms', 'max_ms', 'backlog_left')})
     for row in report.get('fill', []):
         print('fill', row)
+    for row in report.get('end_gap', []):
+        print('end gap', row['scenario'], {k: v for k, v in row.items() if k not in ('trace', 'scenario')})
     for row in report.get('streaming', []):
         print('stream', row['messages'], 'tick p50/p95/max', row['tick_total'].get('p50_ms'), row['tick_total'].get('p95_ms'),
               row['tick_total'].get('max_ms'), 'cpu', row['cpu_percent_one_core'], 'finish', row['finish_turn'].get('total_ms'))

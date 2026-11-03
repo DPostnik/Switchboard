@@ -42,6 +42,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Fixed
 
+- Scrolling fast to the end of a long chat no longer overshoots into blank space below the last message and snaps back.
 - Scrolling right after opening a long chat no longer stutters while older messages fill in.
 - Long chats and previewed documents no longer keep a CPU core busy after scrolling (automatic spelling, grammar and substitution checks are off in read-only transcript text).
 - After an agent restart, browser_close with the earlier session's token quits the chat's Chrome again: it waits until Chrome actually removes the closed tab before the idle check (which used to keep Chrome open because of that same tab), and a repeated close of an already closed tab no longer fails with session_not_owned but lets an idle Chrome quit.
