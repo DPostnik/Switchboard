@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import SQLite3
 import AgentContract
 @testable import ContextCore
 @testable import CodexAdapter
@@ -264,6 +265,41 @@ private func settings(_ args: [String]) throws -> JSONValue {
     #expect(daily.map(\.count).reduce(0, +) == 249 && Set(daily.map(\.decision)) == [.used, .hookDenied])
     try await ledger.sweep()
     #expect(try await ledger.count() == 249)
+    #expect(await ledger.lastError == nil)
+}
+
+@Test func capabilityLedgerBatchesOnOneWALConnectionReadableByAnotherOne() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("ledger.sqlite")
+    let ledger = CapabilityLedger(file: file, flushDelay: .milliseconds(300))
+    func decision(_ index: Int) -> CapabilityDecision {
+        .init(chatID: "chat", runID: nil, projectID: nil, roleID: AgentRoleID.developer, agent: "claude",
+              record: .init(tool: "Bash", capability: .shell, target: "step \(index)", decision: .used), audit: false)
+    }
+    // Rows recorded within the delay share one commit.
+    for index in 0..<20 { await ledger.record(decision(index)) }
+    #expect(await ledger.commitCount == 0)
+    let deadline = Date().addingTimeInterval(15)
+    while await ledger.commitCount < 1, Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
+    #expect(await ledger.commitCount == 1)
+    // Another connection (an older build opens the file per write) reads the rows while the ledger keeps its own open.
+    func raw(_ sql: String) throws -> String? {
+        var handle: OpaquePointer?
+        guard sqlite3_open(file.path, &handle) == SQLITE_OK, let db = handle else { throw ClientFailure("open") }
+        defer { sqlite3_close(db) }
+        var statement: OpaquePointer?; defer { sqlite3_finalize(statement) }
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, sqlite3_step(statement) == SQLITE_ROW,
+              let text = sqlite3_column_text(statement, 0) else { return nil }
+        return String(cString: text)
+    }
+    #expect(try raw("PRAGMA journal_mode") == "wal")
+    #expect(try raw("SELECT COUNT(*) FROM decisions") == "20")
+    // Quit writes the buffer at once; a second ledger on the same file sees every row.
+    await ledger.record(decision(20))
+    await ledger.flush()
+    #expect(await ledger.commitCount == 2)
+    #expect(try await CapabilityLedger(file: file).count() == 21)
     #expect(await ledger.lastError == nil)
 }
 

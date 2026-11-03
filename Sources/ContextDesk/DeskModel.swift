@@ -2411,6 +2411,7 @@ private struct ChatRunState: Equatable {
             slot.eventTask?.cancel()
         }
         step("plugins"); await stopPlugins()
+        step("capability ledger"); await capabilityLedger.flush()
         step("orphan processes"); await orphanProcesses.shutdown()
         step("done")
     }

@@ -38,6 +38,8 @@ public struct CapabilityDailyCount: Codable, Hashable, Sendable {
 
 /// Phase 0 of the roles plan: every decision is a row, written in batches off the main actor, never blocking a decision.
 /// Raw rows live 30 days (hard cap 500,000, oldest first); daily aggregates live one year.
+/// One connection stays open in WAL mode (older builds open the same file; WAL is persistent and readable by them) and
+/// rows are written at most every `flushDelay` (5 s) or per 200 rows; reads and `flush()` (quit) write the buffer first.
 public actor CapabilityLedger {
     public static let rawRetention: TimeInterval = 30 * 86_400
     public static let aggregateRetention: TimeInterval = 366 * 86_400
@@ -47,9 +49,19 @@ public actor CapabilityLedger {
     private var buffer: [CapabilityDecision] = []
     private var flushTask: Task<Void, Never>?
     private let flushDelay: Duration
+    /// Closes the handle when released; dropped after a failure so the next write reopens the file.
+    private final class Connection: @unchecked Sendable {
+        let db: OpaquePointer
+        init(_ db: OpaquePointer) { self.db = db }
+        deinit { sqlite3_close(db) }
+    }
+    private var connection: Connection?
+    /// Write transactions committed; exposed for tests.
+    var commitCount = 0
     /// Write failures are reported once per failure streak, not per row.
     public private(set) var lastError: String?
-    public init(file: URL, flushDelay: Duration = .seconds(1)) { self.file = file; self.flushDelay = flushDelay }
+    public init(file: URL, flushDelay: Duration = .seconds(5)) { self.file = file; self.flushDelay = flushDelay }
+    deinit { flushTask?.cancel() }
 
     public func record(_ decision: CapabilityDecision) {
         buffer.append(decision)
@@ -66,7 +78,7 @@ public actor CapabilityLedger {
     private func flushNow() {
         guard !buffer.isEmpty else { return }
         let rows = buffer; buffer.removeAll()
-        do { try withDatabase { db in try Self.insert(rows, db: db) }; lastError = nil }
+        do { try withDatabase { db in try Self.insert(rows, db: db) }; lastError = nil; commitCount += 1 }
         catch { lastError = error.localizedDescription }
     }
 
@@ -143,11 +155,18 @@ public actor CapabilityLedger {
         return formatter.string(from: date)
     }
     private func withDatabase<T>(_ operation: (OpaquePointer) throws -> T) throws -> T {
+        let db = try open()
+        do { return try operation(db) } catch { connection = nil; throw error }
+    }
+    /// The open connection, or a new one: WAL, busy timeout, schema created once per connection.
+    private func open() throws -> OpaquePointer {
+        if let connection { return connection.db }
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        var db: OpaquePointer?
-        guard sqlite3_open(file.path, &db) == SQLITE_OK, let db else { if let db { sqlite3_close(db) }; throw Self.failure }
-        defer { sqlite3_close(db) }
+        var handle: OpaquePointer?
+        guard sqlite3_open(file.path, &handle) == SQLITE_OK, let handle else { if let handle { sqlite3_close(handle) }; throw Self.failure }
+        let opened = Connection(handle), db = handle
         sqlite3_busy_timeout(db, 2000)
+        try Self.exec(db, "PRAGMA journal_mode=WAL")
         try Self.exec(db, """
             CREATE TABLE IF NOT EXISTS decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, date REAL NOT NULL, chat TEXT, run TEXT, project TEXT,
                 role TEXT NOT NULL, agent TEXT NOT NULL, tool TEXT NOT NULL, capability TEXT NOT NULL, target TEXT, decision TEXT NOT NULL, turn TEXT, audit INTEGER NOT NULL);
@@ -157,7 +176,8 @@ public actor CapabilityLedger {
                 decision TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY (day, project, role, agent, capability, decision));
             """)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
-        return try operation(db)
+        connection = opened
+        return db
     }
     private static func insert(_ rows: [CapabilityDecision], db: OpaquePointer) throws {
         try exec(db, "BEGIN IMMEDIATE")
