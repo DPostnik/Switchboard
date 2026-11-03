@@ -10,6 +10,8 @@ struct ArchiveView: View {
     @State private var projectFilter: UUID?
     /// Chats whose messages match the search, with a snippet, from the local chat index, and the search they answer.
     @State private var textMatches: (query: String, matches: [String: String]) = ("", [:])
+    @State private var matchesRevision = 0
+    @State private var cache = ListingCache()
 
     /// Everything the list needs, computed once per render: the archive can hold hundreds of chats,
     /// and the body reruns on every model change.
@@ -31,31 +33,63 @@ struct ArchiveView: View {
 
     nonisolated static func listing(_ state: SavedState, project filter: UUID?, search: String, textMatches: [String: String] = [:]) -> Listing {
         var result = Listing()
+        // One pass over the chats instead of one per project; positions, so no chat is copied before it matches.
+        var archivedByProject: [UUID: [Int]] = [:], activeByProject: [UUID: [Int]] = [:]
+        for (position, chat) in state.chats.enumerated() {
+            if chat.isArchived { archivedByProject[chat.projectID, default: []].append(position) }
+            else if !search.isEmpty, filter == nil || filter == chat.projectID, !chat.isScheduledRecord, chat.chatSearch != true {
+                activeByProject[chat.projectID, default: []].append(position)
+            }
+        }
         for project in state.projects {
             result.projects[project.id] = project
-            let archived = state.orderedChats(projectID: project.id, archived: true)
+            let archived = archivedByProject[project.id] ?? []
             result.counts[project.id] = archived.count
             result.total += archived.count
             guard filter == nil || filter == project.id else { continue }
             let projectMatches = search.isEmpty || project.name.localizedCaseInsensitiveContains(search)
                 || project.path.localizedCaseInsensitiveContains(search)
-            func matches(_ chat: Chat) -> Bool {
-                if projectMatches || chat.title.localizedCaseInsensitiveContains(search) { return true }
-                guard let snippet = textMatches[chat.id] else { return false }
-                result.snippets[chat.id] = snippet
-                return true
+            func matching(_ positions: [Int]) -> [Chat] {
+                positions.compactMap { position in
+                    let chat = state.chats[position]
+                    if projectMatches || chat.title.localizedCaseInsensitiveContains(search) { return chat }
+                    guard let snippet = textMatches[chat.id] else { return nil }
+                    result.snippets[chat.id] = snippet
+                    return chat
+                }.sorted(by: sidebarOrder)
             }
-            result.chats += archived.filter(matches)
-            if !search.isEmpty {
-                result.active += state.orderedChats(projectID: project.id, archived: false).filter { !$0.isScheduledRecord && $0.chatSearch != true && matches($0) }
-            }
+            result.chats += matching(archived)
+            if !search.isEmpty { result.active += matching(activeByProject[project.id] ?? []) }
         }
         return result
     }
 
+    /// `SavedState.orderedChats`' order: saved sidebar positions, new chats above them, otherwise newest first.
+    nonisolated static func sidebarOrder(_ a: Chat, _ b: Chat) -> Bool {
+        switch (a.sidebarOrder, b.sidebarOrder) {
+        case let (x?, y?) where x != y: return x < y
+        case (nil, _?): return true
+        case (_?, nil): return false
+        default: return a.updated == b.updated ? a.id < b.id : a.updated > b.updated
+        }
+    }
+
+    /// The last listing and what it was built from; a class, so reusing it during a body run changes no view state.
+    private final class ListingCache {
+        struct Key: Equatable { let state: Int; let filter: UUID?; let search: String; let matches: Int }
+        var key: Key?
+        var listing = Listing()
+    }
+
     private func makeListing() -> Listing {
-        var result = Self.listing(model.state, project: projectFilter, search: search,
-                                  textMatches: search.isEmpty || textMatches.query != search ? [:] : textMatches.matches)
+        // Model publications that leave the chats alone (streaming in another chat) reuse the last listing.
+        let key = ListingCache.Key(state: model.state.listingFingerprint, filter: projectFilter, search: search, matches: matchesRevision)
+        if cache.key != key {
+            cache.key = key
+            cache.listing = Self.listing(model.state, project: projectFilter, search: search,
+                                         textMatches: search.isEmpty || textMatches.query != search ? [:] : textMatches.matches)
+        }
+        var result = cache.listing
         // The same chats `queueMissingArchiveSummaries` queues: every archived one, not just the search results.
         result.missing = model.state.chats.count(where: { $0.isArchived && model.supportsSummaries($0) && model.archiveSummaries[$0.id] == nil })
         for chat in result.chats where model.archiveSummaries[chat.id] == nil {
@@ -104,12 +138,12 @@ struct ArchiveView: View {
                     .task(id: search) {
                         // Debounced: the index query runs after typing pauses.
                         let query = search
-                        guard !query.isEmpty else { textMatches = ("", [:]); return }
+                        guard !query.isEmpty else { textMatches = ("", [:]); matchesRevision &+= 1; return }
                         do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
                         let matches = await model.chatTextMatches(query)
                         // A newer search replaced this one while it ran: its matches would show under other text.
                         guard !Task.isCancelled, query == search else { return }
-                        textMatches = (query, matches)
+                        textMatches = (query, matches); matchesRevision &+= 1
                     }
                 projectChips(listing)
                 if listing.missing > 0, listing.shownMissing {
@@ -222,6 +256,25 @@ struct ArchiveView: View {
         let singular = count % 10 == 1 && count % 100 != 11
         return L10n.text(singular ? "Подготовить итоги \(count) архивного чата" : "Подготовить итоги \(count) архивных чатов",
                          count == 1 ? "Summarize 1 archived chat" : "Summarize \(count) archived chats")
+    }
+}
+
+extension SavedState {
+    /// Hash of what the archive and the command palette list and order by: projects (name, path, hidden) and chats
+    /// (project, title, archive state, sidebar order, last activity, kind). A list built from an equal value can be
+    /// reused; hashing about a thousand chats costs a fraction of building the list again.
+    var listingFingerprint: Int {
+        var hasher = Hasher()
+        hasher.combine(projects.count)
+        for project in projects {
+            hasher.combine(project.id); hasher.combine(project.name); hasher.combine(project.path); hasher.combine(project.isHidden)
+        }
+        hasher.combine(chats.count)
+        for chat in chats {
+            hasher.combine(chat.id); hasher.combine(chat.projectID); hasher.combine(chat.title); hasher.combine(chat.isArchived)
+            hasher.combine(chat.sidebarOrder); hasher.combine(chat.updated); hasher.combine(chat.isScheduledRecord); hasher.combine(chat.chatSearch)
+        }
+        return hasher.finalize()
     }
 }
 

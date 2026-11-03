@@ -63,3 +63,38 @@ private func archive() -> (SavedState, Project, Project) {
     // A title match needs no snippet.
     #expect(ArchiveView.listing(state, project: nil, search: "digest", textMatches: ["b": "…"]).snippets.isEmpty)
 }
+
+@Test func archiveListingKeepsTheSidebarOrderOfEveryProject() {
+    var (state, wiki, desk) = archive()
+    let base = Date(timeIntervalSince1970: 1_800_000_000)
+    for index in 0..<40 {
+        var chat = Chat(id: "x\(index)", projectID: index % 3 == 0 ? desk.id : wiki.id, title: "Chat \(index)", model: "fixture-model")
+        chat.archived = index % 4 == 0 ? nil : true
+        chat.sidebarOrder = index % 5 == 0 ? nil : (index * 7) % 11
+        chat.updated = base.addingTimeInterval(Double((index * 13) % 17))
+        state.chats.append(chat)
+    }
+    let listing = ArchiveView.listing(state, project: nil, search: "")
+    #expect(listing.chats.map(\.id) == state.projects.flatMap { state.orderedChats(projectID: $0.id, archived: true) }.map(\.id))
+    let searched = ArchiveView.listing(state, project: nil, search: "chat")
+    #expect(searched.active.map(\.id) == state.projects.flatMap { state.orderedChats(projectID: $0.id, archived: false) }
+        .filter { $0.title.localizedCaseInsensitiveContains("chat") }.map(\.id))
+    #expect(searched.chats.count + searched.active.count == state.chats.count(where: { $0.title.localizedCaseInsensitiveContains("chat") }))
+}
+
+@Test func listingFingerprintFollowsWhatTheListsShow() {
+    let (state, _, _) = archive()
+    var unrelated = state
+    // Fields no list shows or orders by leave it alone.
+    unrelated.chats[0].model = "other-model"; unrelated.chats[0].effort = "high"
+    #expect(unrelated.listingFingerprint == state.listingFingerprint)
+    let changes: [(inout SavedState) -> Void] = [
+        { $0.chats[0].title = "Renamed" }, { $0.chats[1].archived = nil }, { $0.chats[2].sidebarOrder = 3 },
+        { $0.chats[3].updated = Date() }, { $0.chats.removeLast() }, { $0.projects[0].name = "renamed" }, { $0.projects[0].hidden = true },
+    ]
+    for change in changes {
+        var changed = state
+        change(&changed)
+        #expect(changed.listingFingerprint != state.listingFingerprint)
+    }
+}

@@ -185,3 +185,31 @@ import Testing
     #expect(ChatKey.action(keyCode: 18, modifiers: [.command, .option]) == nil)
     #expect(ChatKey.action(keyCode: 18, modifiers: []) == nil)
 }
+
+@MainActor @Test func paletteRankingRunsOncePerQueryAndState() {
+    var state = SavedState()
+    var project = Project(path: "/tmp/switchboard"); project.name = "switchboard"
+    state.projects = [project]
+    state.chats = (0..<30).map { index in
+        var chat = Chat(id: "c\(index)", projectID: project.id, title: index % 2 == 0 ? "Archive search \(index)" : "Digest \(index)", model: "m")
+        chat.updated = Date(timeIntervalSince1970: 1_800_000_000 + Double(index))
+        chat.archived = index == 4 ? true : nil
+        return chat
+    }
+    let ranking = PaletteRanking()
+    ranking.update(state, query: "arch", chatLimit: 8, projectLimit: 6)
+    let candidates = state.chats.filter { !$0.isArchived }
+        .map { PaletteSearch.Candidate(id: $0.id, title: $0.title, detail: "switchboard", recency: $0.updated) }
+    #expect(ranking.chatIDs == PaletteSearch.rank(candidates, query: "arch", limit: 8))
+    #expect(!ranking.chatIDs.contains("c4") && ranking.positions["c7"] == 7)
+    #expect(ranking.projectIDs.isEmpty)
+    // The same query and state (another chat streaming, an arrow key): no new ranking.
+    state.chats[0].model = "other"
+    ranking.update(state, query: "arch", chatLimit: 8, projectLimit: 6)
+    #expect(ranking.runs == 1)
+    ranking.update(state, query: "switch", chatLimit: 8, projectLimit: 6)
+    #expect(ranking.runs == 2 && ranking.projectIDs == [project.id])
+    state.chats[1].title = "Archive renamed"
+    ranking.update(state, query: "switch", chatLimit: 8, projectLimit: 6)
+    #expect(ranking.runs == 3)
+}

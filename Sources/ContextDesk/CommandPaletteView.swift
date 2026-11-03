@@ -63,6 +63,7 @@ private struct CommandPalette: View {
     /// Full-text hits from the local chat index and the query they answer.
     @State private var messageHits: (query: String, hits: [ChatSearchIndex.Hit]) = ("", [])
     @State private var keys = PaletteKeys()
+    @State private var ranking = PaletteRanking()
     @FocusState private var focused: Bool
 
     private static let chatLimit = 8, projectLimit = 6, messageLimit = 6
@@ -170,25 +171,23 @@ private struct CommandPalette: View {
     // MARK: Entries
 
     private var sections: [PaletteSection] {
-        let hidden = Set(model.state.projects.filter(\.isHidden).map(\.id))
-        let projects = Dictionary(model.state.projects.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let active = model.state.chats.filter { !$0.isArchived && !hidden.contains($0.projectID) }
-        let chatsByID = Dictionary(model.state.chats.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-
-        let chatIDs = PaletteSearch.rank(active.map { PaletteSearch.Candidate(id: $0.id, title: $0.title, detail: projects[$0.projectID]?.name ?? "", recency: $0.updated) },
-                                         query: query, limit: Self.chatLimit)
+        let state = model.state
+        ranking.update(state, query: query, chatLimit: Self.chatLimit, projectLimit: Self.projectLimit)
+        let hidden = Set(state.projects.filter(\.isHidden).map(\.id))
+        let projects = Dictionary(state.projects.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        // Fresh values for the few listed chats: status, pin and unread are not part of the ranking.
+        func chat(_ id: String) -> Chat? {
+            ranking.positions[id].flatMap { state.chats.indices.contains($0) && state.chats[$0].id == id ? state.chats[$0] : nil }
+        }
+        let chatIDs = ranking.chatIDs
         // With an empty query the list is the recent order of Cmd+1…9, so the first nine show their shortcut.
-        let chats = chatIDs.compactMap { chatsByID[$0] }.enumerated().map { index, chat in
+        let chats = chatIDs.compactMap(chat).enumerated().map { index, chat in
             var entry = chatEntry(chat, project: projects[chat.projectID])
             if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, index < 9 { entry.shortcut = "⌘\(index + 1)" }
             return entry
         }
 
-        let lastActivity = Dictionary(active.map { ($0.projectID, $0.updated) }, uniquingKeysWith: { max($0, $1) })
-        let visible = model.state.visibleProjects
-        let projectIDs = PaletteSearch.rank(visible.map { PaletteSearch.Candidate(id: $0.id, title: $0.name, detail: $0.path, recency: lastActivity[$0.id]) },
-                                            query: query, limit: Self.projectLimit)
-        let projectEntries = projectIDs.compactMap { projects[$0] }.map { project in
+        let projectEntries = ranking.projectIDs.compactMap { projects[$0] }.map { project in
             PaletteEntry(id: "project:\(project.id)", icon: "folder", title: project.name, subtitle: (project.path as NSString).abbreviatingWithTildeInPath) {
                 model.selectProject(project.id)
             }
@@ -204,7 +203,7 @@ private struct CommandPalette: View {
         if messageHits.query == query {
             let listed = Set(chatIDs)
             for hit in messageHits.hits where messageEntries.count < Self.messageLimit && !listed.contains(hit.chatID) {
-                guard let chat = chatsByID[hit.chatID], !hidden.contains(chat.projectID) else { continue }
+                guard let chat = chat(hit.chatID), !hidden.contains(chat.projectID) else { continue }
                 let base = chatEntry(chat, project: projects[chat.projectID])
                 messageEntries.append(PaletteEntry(id: "message:\(chat.id)", icon: chat.isArchived ? "archivebox" : "text.magnifyingglass",
                                                    title: chat.title, subtitle: hit.snippet, status: base.status, perform: base.perform))
@@ -304,6 +303,40 @@ private struct CommandPalette: View {
         let hits = (try? await model.chatSearchIndex.search(text, limit: 40, scope: "palette")) ?? []
         guard !Task.isCancelled else { return }
         messageHits = (query, hits)
+    }
+}
+
+/// The chats and projects ranked for one query and one state, so arrow keys and model publications that change
+/// neither (streaming in another chat) do not rank again. A class: refreshing it inside a body run changes no view state.
+@MainActor final class PaletteRanking {
+    struct Key: Equatable { let query: String; let state: Int; let chatLimit: Int; let projectLimit: Int }
+    private(set) var key: Key?
+    private(set) var chatIDs: [String] = []
+    private(set) var projectIDs: [UUID] = []
+    /// Chat ID -> position in `state.chats` for the state of `key`.
+    private(set) var positions: [String: Int] = [:]
+    /// Rankings computed so far, for tests.
+    private(set) var runs = 0
+
+    func update(_ state: SavedState, query: String, chatLimit: Int, projectLimit: Int) {
+        let key = Key(query: query, state: state.listingFingerprint, chatLimit: chatLimit, projectLimit: projectLimit)
+        guard key != self.key else { return }
+        let stateChanged = key.state != self.key?.state
+        self.key = key; runs += 1
+        if stateChanged {
+            positions = Dictionary(state.chats.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
+        }
+        let hidden = Set(state.projects.filter(\.isHidden).map(\.id))
+        let names = Dictionary(state.projects.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+        var candidates: [PaletteSearch.Candidate<String>] = []
+        var lastActivity: [UUID: Date] = [:]
+        for chat in state.chats where !chat.isArchived && !hidden.contains(chat.projectID) {
+            candidates.append(PaletteSearch.Candidate(id: chat.id, title: chat.title, detail: names[chat.projectID] ?? "", recency: chat.updated))
+            lastActivity[chat.projectID] = max(lastActivity[chat.projectID] ?? chat.updated, chat.updated)
+        }
+        chatIDs = PaletteSearch.rank(candidates, query: query, limit: chatLimit)
+        projectIDs = PaletteSearch.rank(state.visibleProjects.map { PaletteSearch.Candidate(id: $0.id, title: $0.name, detail: $0.path, recency: lastActivity[$0.id]) },
+                                        query: query, limit: projectLimit)
     }
 }
 
