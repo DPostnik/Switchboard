@@ -21,6 +21,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Changed
 
+- Lower memory use with long chats, Claude and Gemini history, long Codex command output and large inline images (the image cache is capped and large images are decoded at display size).
 - When macOS runs low on memory, Switchboard frees cached chat history (except the open chat) and decoded transcript images.
 - Chat files can be hidden completely: right-click the tile or the panel and choose "Don't Show Chat Files"; View → Show Chat Files brings them back in every chat. The panel now grows out of the tile's corner and shrinks back into it, and the tile's hover fades in one colour without a darker step.
 - Agent answer format: the shared instructions now also ask agents to explain directly with examples from the task, without everyday analogies or metaphors.

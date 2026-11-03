@@ -735,9 +735,33 @@ final class TableBox: NSObject {
         let key = "\(path)#\(modified)" as NSString
         if let cached = images.object(forKey: key) { return cached }
         guard ["png", "jpg", "jpeg", "gif", "heic", "tiff", "tif", "bmp", "webp", "pdf"].contains(url.pathExtension.lowercased()),
-              let image = NSImage(contentsOf: url), image.size.width > 0, image.size.height > 0 else { return nil }
-        images.setObject(image, forKey: key)
+              let (image, pixels) = downsampled(url) ?? NSImage(contentsOf: url).map({ image in
+                  (image, image.representations.map { $0.pixelsWide * $0.pixelsHigh }.max() ?? 0) }),
+              image.size.width > 0, image.size.height > 0 else { return nil }
+        images.totalCostLimit = imageCacheBytes
+        images.setObject(image, forKey: key, cost: max(pixels, Int(image.size.width * image.size.height)) * 4)
         return image
+    }
+    /// Decoded bitmap bytes the image cache keeps; older images are re-read from their files.
+    static let imageCacheBytes = 64 << 20
+    /// Raster images are decoded at most at this many pixels on the long side: twice the widest inline image (520 pt).
+    static let imagePixels = 1040
+    /// A raster image larger than `imagePixels` as a thumbnail of that size with the original point size (so the layout
+    /// is unchanged), with its pixel count; nil for PDFs, small images and unreadable files, which load as they are.
+    static func downsampled(_ url: URL) -> (image: NSImage, pixels: Int)? {
+        guard url.pathExtension.lowercased() != "pdf", let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
+              let width = properties[kCGImagePropertyPixelWidth as String] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight as String] as? Int,
+              max(width, height) > imagePixels,
+              let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: imagePixels] as CFDictionary),
+              thumbnail.width > 0, thumbnail.height > 0 else { return nil }
+        // Points as NSImage(contentsOf:) gives them (pixels at the file's DPI); the thumbnail is already oriented.
+        let dpi = (properties[kCGImagePropertyDPIWidth as String] as? Double).flatMap { $0 > 0 ? $0 : nil } ?? 72
+        let scale = Double(max(width, height)) * 72 / dpi / Double(max(thumbnail.width, thumbnail.height))
+        return (NSImage(cgImage: thumbnail, size: NSSize(width: Double(thumbnail.width) * scale, height: Double(thumbnail.height) * scale)),
+                thumbnail.width * thumbnail.height)
     }
 }
 
