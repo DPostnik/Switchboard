@@ -59,7 +59,7 @@ def main():
     parser.add_argument('--phases', default='open,scroll,stream,desk', help='phases of the full run')
     parser.add_argument('--no-text-checking', action='store_true',
                         help='experiment: turn off NSTextView automatic text checking in the probe views')
-    parser.add_argument('--only', choices=['open', 'scroll', 'stream', 'scrollidle', 'scrollfull'])
+    parser.add_argument('--only', choices=['open', 'scroll', 'stream', 'scrollidle', 'scrollfull', 'afteropen', 'fill'])
     parser.add_argument('--seconds', type=int, default=20)
     parser.add_argument('--sample', action='store_true', help='attach /usr/bin/sample during --only')
     parser.add_argument('--skip-build', action='store_true')
@@ -120,12 +120,16 @@ def main():
     for row in report.get('open', []):
         print('open', row['messages'], row['scenario'], {k: row[k] for k in row if k.endswith('_ms')})
     for row in report.get('scroll', []):
-        print('scroll', row['messages'], row['scenario'], {k: row.get(k) for k in ('p50_ms', 'p95_ms', 'max_ms', 'hitches', 'hitch_ms_per_s', 'ms', 'cpu_percent')})
+        print('scroll', row['messages'], row['scenario'], {k: row.get(k) for k in ('p50_ms', 'p95_ms', 'max_ms', 'hitches', 'over_33ms', 'hitch_ms_per_s', 'ms', 'cpu_percent')})
+    for row in report.get('after_open', []):
+        print('after open', {k: row.get(k) for k in ('open_total_ms', 'frames', 'hitches', 'over_33ms', 'max_ms', 'backlog_left')})
+    for row in report.get('fill', []):
+        print('fill', row)
     for row in report.get('streaming', []):
         print('stream', row['messages'], 'tick p50/p95/max', row['tick_total'].get('p50_ms'), row['tick_total'].get('p95_ms'),
               row['tick_total'].get('max_ms'), 'cpu', row['cpu_percent_one_core'], 'finish', row['finish_turn'].get('total_ms'))
     for row in report.get('desk_switch', {}).get('rows', []):
-        print('desk', row['messages'], row['total_ms'], 'ms')
+        print('desk', row['messages'], 'first frame', row.get('first_frame_ms'), 'ms, complete', row['total_ms'], 'ms')
     print(output)
 
 

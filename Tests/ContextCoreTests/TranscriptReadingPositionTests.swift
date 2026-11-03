@@ -209,3 +209,53 @@ import ContextCore
     #expect(reopened.contentView.bounds.origin.y > top)
     #expect(!reopened.isAtTranscriptEnd)
 }
+
+/// Text put above the reader makes TextKit lay out everything from the top to their place again, so a reader far below
+/// a long history gets it only near the top, in slices; a selection moves with its text.
+@Test @MainActor func renderedHistoryWaitsAboveADistantReaderAndGoesInNearTheTop() async throws {
+    let positions = TranscriptReadingPositions()
+    let items = (0..<300).map { TranscriptItem(id: "far-\($0)", kind: "assistant",
+        text: "Message \($0)\n" + String(repeating: "Reading line / Строка чтения\n", count: 40)) }
+    let view = readingView(positions)
+    view.update(items: items, conversationID: "a", followOutput: true)
+    view.layoutSubtreeIfNeeded()
+    let waiting = view.historyBacklog.count
+    #expect(waiting > 0)
+    // Read up from the end a little: well above the end, far below the top of a long history.
+    let storage = try #require(view.transcript.textStorage)
+    let top = view.contentView.bounds.minY
+    view.contentView.scroll(to: NSPoint(x: 0, y: top - 300))
+    view.reflectScrolledClipView(view.contentView)
+    guard case let .anchor(id, character, _, _) = try #require(positions.values["a"]) else {
+        Issue.record("Expected a reading anchor"); return
+    }
+    let marked = (storage.string as NSString).range(of: "Message 299")
+    view.transcript.setSelectedRange(marked)
+    // Parts wait while the reader scrolls far from the top; this one has stopped.
+    try await Task.sleep(for: .milliseconds(350))
+    // The whole backlog renders, and waits: the text above the reader is far longer than a cheap layout.
+    var parts = 0
+    while view.historyPendingStart > 0, parts < 1_000 { view.renderHistoryChunk(); view.layoutSubtreeIfNeeded(); parts += 1 }
+    view.renderHistoryChunk(); view.layoutSubtreeIfNeeded()
+    #expect(view.historyPendingStart == 0)
+    #expect(view.historyBacklog.count == waiting)
+    guard case let .anchor(sameID, sameCharacter, _, _)? = positions.values["a"] else { Issue.record("Lost the anchor"); return }
+    #expect(sameID == id && sameCharacter == character)
+    // Near the top the rows just above go in, a slice at a time, until the history is complete.
+    view.contentView.scroll(to: .zero)
+    view.reflectScrolledClipView(view.contentView)
+    view.renderHistoryChunk(); view.layoutSubtreeIfNeeded()
+    #expect(view.historyBacklog.count < waiting)
+    #expect(!view.historyBacklog.isEmpty)
+    parts = 0
+    while !view.historyBacklog.isEmpty, parts < 1_000 {
+        view.contentView.scroll(to: .zero); view.reflectScrolledClipView(view.contentView)
+        view.renderHistoryChunk(); view.layoutSubtreeIfNeeded(); parts += 1
+    }
+    #expect(view.previous.map(\.id) == items.map(\.id))
+    #expect((storage.string as NSString).substring(with: view.transcript.selectedRange()) == "Message 299")
+    let once = readingView(TranscriptReadingPositions())
+    once.update(items: items, conversationID: "a", followOutput: true)
+    once.renderHistory()
+    #expect(once.transcript.string == view.transcript.string)
+}

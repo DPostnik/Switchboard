@@ -245,6 +245,7 @@ func stats(_ values: [Double]) -> [String: Any] {
         result["refresh_hz"] = (1 / nominal).rounded()
         result["frames"] = intervals.count
         result["hitches"] = late.count
+        result["over_33ms"] = intervals.filter { $0 > 0.033 }.count
         result["hitch_ms_per_s"] = total > 0 ? ms(hitchTime / total) : 0
         result["seconds"] = (total * 100).rounded() / 100
         result["distance_pt"] = Int(abs(y - origin))
@@ -556,9 +557,15 @@ func stats(_ values: [Double]) -> [String: Any] {
         // Each transcript view seen gets a tag; identifiers of freed views could be reused and undercount.
         var views = 0
         var rows: [[String: Any]] = []
+        var shown: Double?
         func waitForTranscript(_ id: String, count: Int) async throws -> Bool {
             let deadline = now() + 10
+            shown = nil
             while now() < deadline {
+                if let view = TranscriptScrollView.chatTranscript, view.window != nil, view.conversationIDForProbe == id {
+                    // The end of the chat is on screen; older history may still be filling in above it.
+                    if shown == nil, !view.previous.isEmpty { window.displayIfNeeded(); CATransaction.flush(); shown = now() }
+                }
                 if let view = TranscriptScrollView.chatTranscript, view.window != nil, view.conversationIDForProbe == id,
                    view.previous.count >= count {
                     if view.identifier?.rawValue != "probe-seen" { view.identifier = NSUserInterfaceItemIdentifier("probe-seen"); views += 1 }
@@ -587,7 +594,8 @@ func stats(_ values: [Double]) -> [String: Any] {
             let rendered = now()
             window.displayIfNeeded(); CATransaction.flush()
             let drawn = now()
-            rows.append(["messages": size, "ok": ok, "loading_state_ms": ms(loading - start), "items_to_transcript_ms": ms(rendered - loading),
+            rows.append(["messages": size, "ok": ok, "loading_state_ms": ms(loading - start), "first_frame_ms": shown.map { ms($0 - start) } ?? -1,
+                         "items_to_transcript_ms": ms(rendered - loading),
                          "draw_ms": ms(drawn - rendered), "total_ms": ms(drawn - start), "cpu_s": ((cpuSeconds() - cpu) * 1000).rounded() / 1000,
                          "workspace_publications": publications - published])
             try await Task.sleep(for: .milliseconds(400))
@@ -620,6 +628,42 @@ func stats(_ values: [Double]) -> [String: Any] {
             var samples: [Double] = []
             while now() < end { samples.append(try await idleCPU()) }
             report["idle_after_scroll_cpu_percent"] = samples
+        case "afteropen":
+            // The scroll right after a chat opens, repeated: older history fills in above while the reader scrolls up.
+            var runs: [[String: Any]] = []
+            while now() < end {
+                freshView()
+                try await Task.sleep(for: .milliseconds(150))
+                let open = timedUpdate(items, id: "afteropen-\(cycles)")
+                let maxY = max(0, view.transcript.frame.height - view.contentView.bounds.height)
+                let scroller = LinkScroller(view: view, speed: 3000, limit: 25)
+                await scroller.run(from: maxY, to: 0)
+                var row = scroller.summary()
+                row["open_total_ms"] = open["total_ms"]
+                row["backlog_left"] = view.historyBacklog.count
+                runs.append(row)
+                cycles += 1
+                try await settle()
+            }
+            report["after_open"] = runs
+        case "fill":
+            // Open and wait at the end until the older history is all in the text; the longest main-thread gap counts.
+            var runs: [[String: Any]] = []
+            while now() < end {
+                freshView()
+                try await Task.sleep(for: .milliseconds(150))
+                let start = now()
+                _ = timedUpdate(items, id: "fill-\(cycles)")
+                var longest = 0.0, last = now()
+                while !view.historyBacklog.isEmpty, now() - start < 60 {
+                    try await Task.sleep(for: .milliseconds(1))
+                    let t = now(); longest = max(longest, t - last); last = t
+                }
+                runs.append(["fill_ms": ms(now() - start), "longest_gap_ms": ms(longest), "complete": view.historyBacklog.isEmpty,
+                             "storage_chars": view.transcript.textStorage?.length ?? 0])
+                cycles += 1
+            }
+            report["fill"] = runs
         case "scrollidle":
             // One scroll pass, then nothing: shows work the scroll leaves running after it stops.
             freshView(); _ = timedUpdate(items, id: "loop")

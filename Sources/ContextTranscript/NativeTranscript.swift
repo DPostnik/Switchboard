@@ -235,7 +235,7 @@ public struct NativeTranscript: NSViewRepresentable {
         copyFeedbackTask?.cancel(); copyFeedbackTask = nil
         workingTimer?.invalidate(); workingTimer = nil
         afterClick.removeAll()
-        historyBacklog.removeAll(); previous = []; ranges = []
+        clearHistoryBacklog(); previous = []; ranges = []
         groupingMemo = nil; actionGroups = [:]; renderCache.removeAll()
         transcript.textStorage?.setAttributedString(NSAttributedString())
     }
@@ -315,7 +315,7 @@ public struct NativeTranscript: NSViewRepresentable {
                 items = Array(items[historyBacklog.count...])
             } else { restart = true }
         }
-        if restart { historyBacklog.removeAll() }
+        if restart { clearHistoryBacklog() }
         // From the end first: a streaming delta changes the last rows.
         let changed = restart || items.count != previous.count || items.last != previous.last || items != previous
         guard switched || finished || projectChanged || changed else {
@@ -414,14 +414,31 @@ public struct NativeTranscript: NSViewRepresentable {
     /// Answers rendered while streaming whose text may hold a sources list.
     var sourcesDeferred: Set<String> = []
 
-    /// Older rows of the open chat not rendered yet, oldest first; `previous` holds the rows after them.
+    /// Older rows of the open chat not in the text yet, oldest first; `previous` holds the rows after them.
     private(set) var historyBacklog: [TranscriptItem] = []
+    /// The newest rows of the backlog, already rendered but not inserted (`historyBacklog[historyPendingStart...]`).
+    /// TextKit 1 keeps absolute line positions, so text inserted above the reader makes it lay out everything from the
+    /// top to the reading place again: inserting every part at once cost 100-660 ms per part in a 1000-message chat.
+    /// Parts therefore wait here until the reader nears the top of the text (then a small slice goes in), or until
+    /// inserting them is cheap (the reader is at the end, or little text lies above the reading place).
+    private var historyPending: [NSAttributedString] = []
+    private var historyPendingLength = 0
+    var historyPendingStart: Int { historyBacklog.count - historyPending.count }
     private var historyChunkScheduled = false
     /// Rendered synchronously when a chat opens: about two tall viewports from its end.
     static let firstScreenCharacters = 12_000
-    /// Main-thread time rendering one part of the older history may take (its layout adds about half as much);
-    /// the run loop handles input between parts.
+    /// Main-thread time rendering one part of the older history may take; the run loop handles input between parts.
     static let historyChunkSeconds = 0.02
+    /// The same while the reader scrolls near the top, where a turn renders or inserts, not both: each fits in a frame or two.
+    static let scrollingChunkSeconds = 0.006
+    /// Most text one insertion puts above a reader near the top (it is laid out at once): idle, and while scrolling.
+    static let historySliceCharacters = 24_000
+    static let scrollingSliceCharacters = 6_000
+    /// A reader at the end gets the rest in one insertion once it is all rendered (each insertion copies the text);
+    /// a reader further up too, if laying out the text above their place stays this short.
+    static let historyRelayoutCharacters = 120_000
+    /// Up to this size an insertion at the start costs less than copying the text (`prepend`).
+    static let directInsertCharacters = 4_000
     /// When the viewport last moved other than by the transcript itself: parts wait while the reader scrolls.
     private var lastScrolled: TimeInterval = 0
 
@@ -435,7 +452,12 @@ public struct NativeTranscript: NSViewRepresentable {
         }
     }
 
-    /// Puts the next part of the older history above the rendered rows, keeping the reader's place (or the end).
+    private func clearHistoryBacklog() {
+        historyBacklog.removeAll(); historyPending.removeAll(); historyPendingLength = 0
+    }
+
+    /// Renders the next part of the older history and puts rendered parts above the text when that is needed or cheap,
+    /// keeping the reader's place (or the end).
     func renderHistoryChunk() {
         guard !historyBacklog.isEmpty else { return }
         // A click, or scrolling anywhere but near the top of what is rendered, owns the main thread; the history waits.
@@ -443,23 +465,68 @@ public struct NativeTranscript: NSViewRepresentable {
         let nearTop = contentView.bounds.minY < 2 * max(contentView.bounds.height, 1)
         if isTrackingClick || (scrolling && !nearTop) { scheduleHistoryChunk(after: 0.1); return }
         let started = ProcessInfo.processInfo.systemUptime
-        var index = historyBacklog.count
-        var parts: [NSAttributedString] = []
-        renderingHistory {
-            repeat {
-                index -= 1
-                parts.append(render(historyBacklog[index], expanded: expandedActions.contains(historyBacklog[index].id)))
-            } while index > 0 && ProcessInfo.processInfo.systemUptime - started < Self.historyChunkSeconds
+        // While the reader scrolls near the top, a turn either renders or inserts, so neither adds to the other's frame;
+        // rows already rendered go in first.
+        let insertOnly = scrolling && nearTop && !historyPending.isEmpty
+        var didRender = false
+        if historyPendingStart > 0, !insertOnly {
+            didRender = true
+            let budget = scrolling ? Self.scrollingChunkSeconds : Self.historyChunkSeconds
+            var index = historyPendingStart
+            var parts: [NSAttributedString] = []
+            renderingHistory {
+                repeat {
+                    index -= 1
+                    parts.append(render(historyBacklog[index], expanded: expandedActions.contains(historyBacklog[index].id)))
+                } while index > 0 && ProcessInfo.processInfo.systemUptime - started < budget
+            }
+            historyPending.insert(contentsOf: parts.reversed(), at: 0)
+            historyPendingLength += parts.reduce(0) { $0 + $1.length }
         }
-        prepend(parts.reversed(), from: index)
-        scheduleHistoryChunk()
+        if nearTop, !(scrolling && didRender) {
+            // Only the rows just above the text: the reader scrolls into them, and less text means less layout.
+            let limit = scrolling ? Self.scrollingSliceCharacters : Self.historySliceCharacters
+            var count = 0, length = 0
+            for part in historyPending.reversed() {
+                if count > 0, length + part.length > limit { break }
+                count += 1; length += part.length
+            }
+            insertPending(count)
+        } else if historyPendingStart == 0 {
+            var cheap = true
+            if case let .anchor(itemID, character, _, _)? = pendingPosition ?? capturePosition() {
+                let above = previous.firstIndex { $0.id == itemID }.map { ranges[$0].location + character } ?? Int.max
+                cheap = above <= Self.historyRelayoutCharacters - historyPendingLength
+            }
+            if cheap { insertPending(historyPending.count) }
+        }
+        // All rendered, waiting for the reader to come near the top: only the viewport needs checking now and then.
+        scheduleHistoryChunk(after: historyPendingStart == 0 && !historyPending.isEmpty ? 0.25 : 0.005)
     }
 
-    /// Renders the older history from row `index` on at once (find, select all, a reveal or a reading position needs it).
+    /// Moves the newest `count` rendered parts into the text.
+    private func insertPending(_ count: Int) {
+        guard count > 0 else { return }
+        let parts = Array(historyPending.suffix(count))
+        historyPending.removeLast(count)
+        historyPendingLength -= parts.reduce(0) { $0 + $1.length }
+        prepend(parts, from: historyBacklog.count - count)
+    }
+
+    /// Puts the older history from row `index` on into the text at once (find, select all, a reveal or a reading
+    /// position needs it); rows rendered earlier are reused.
     func renderHistory(from index: Int = 0) {
         guard index < historyBacklog.count else { return }
+        let start = historyPendingStart
         var parts: [NSAttributedString] = []
-        renderingHistory { parts = historyBacklog[index...].map { render($0, expanded: expandedActions.contains($0.id)) } }
+        if index < start {
+            renderingHistory { parts = historyBacklog[index..<start].map { render($0, expanded: expandedActions.contains($0.id)) } }
+        }
+        let reused = max(0, index - start)
+        let kept = historyPending[reused...]
+        historyPendingLength -= kept.reduce(0) { $0 + $1.length }
+        parts += kept
+        historyPending.removeSubrange(reused...)
         prepend(parts, from: index)
     }
 
@@ -492,9 +559,25 @@ public struct NativeTranscript: NSViewRepresentable {
             text.append(part)
         }
         for row in ranges.indices { ranges[row].location += text.length }
-        storage.beginEditing()
-        storage.insert(text, at: 0)
-        storage.endEditing()
+        // Inserting at the start shifts the storage's whole attribute-run array once per inserted run (a memmove each):
+        // 0.1-0.6 s per 200 k characters in a long chat; replacing the whole text does the same. Beyond a few thousand
+        // characters the old text is appended behind the new one instead, and the emptied storage takes the result by
+        // appending, so runs are only ever added at the end (one copy, about 50 ms per million characters).
+        // The selection moves with the text it covered.
+        if text.length <= Self.directInsertCharacters {
+            storage.beginEditing()
+            storage.insert(text, at: 0)
+            storage.endEditing()
+        } else {
+            let selection = transcript.selectedRanges.map { NSValue(range: NSRange(location: $0.rangeValue.location + text.length,
+                                                                                    length: $0.rangeValue.length)) }
+            text.append(storage)
+            storage.beginEditing()
+            storage.deleteCharacters(in: NSRange(location: 0, length: storage.length))
+            storage.append(text)
+            storage.endEditing()
+            transcript.selectedRanges = selection
+        }
         ranges = added + ranges
         previous = Array(historyBacklog[index...]) + previous
         historyBacklog.removeSubrange(index...)
