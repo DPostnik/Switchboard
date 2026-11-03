@@ -118,21 +118,61 @@ public enum ProjectFiles {
     /// Paths matching every word of `query` (case-insensitive), best first: the whole file name without its
     /// extension, a file-name prefix, anywhere in the file name, then the folder part; shorter paths win ties.
     public static func search(_ query: String, in paths: [String], limit: Int = 200) -> [String] {
-        let words = query.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
-        guard !words.isEmpty else { return [] }
-        var scored: [(score: Int, path: String)] = []
-        for path in paths {
-            let lower = path.lowercased()
-            guard words.allSatisfy({ lower.contains($0) }) else { continue }
-            let name = lower.split(separator: "/").last.map(String.init) ?? lower
-            let stem = (name as NSString).deletingPathExtension
-            let score = words.reduce(0) { total, word in
-                total + (stem == word ? 0 : name.hasPrefix(word) ? 1 : name.contains(word) ? 2 : 3)
+        search(query, in: SearchIndex(paths), limit: limit).paths
+    }
+
+    /// Lowercased paths, names and stems of a listing, made once so a keystroke in the filter only compares.
+    public struct SearchIndex: Sendable {
+        struct Entry: Sendable { let path: String; let lower: String; let name: String; let stem: String; let length: Int }
+        let entries: [Entry]
+        public var count: Int { entries.count }
+        public init(_ paths: [String]) {
+            entries = paths.map { path in
+                let lower = path.lowercased()
+                let name = lower.split(separator: "/").last.map(String.init) ?? lower
+                return Entry(path: path, lower: lower, name: name, stem: (name as NSString).deletingPathExtension, length: path.count)
             }
-            scored.append((score, path))
         }
-        return scored.sorted { $0.score != $1.score ? $0.score < $1.score : $0.path.count != $1.path.count ? $0.path.count < $1.path.count : $0.path < $1.path }
-            .prefix(limit).map(\.path)
+    }
+
+    /// The best `limit` paths for a query, and every match, so a longer query can filter these instead of the listing.
+    public struct SearchResult: Sendable, Equatable {
+        public let query: String
+        public let paths: [String]
+        let words: [String]
+        let matched: [Int]
+        public static let empty = SearchResult(query: "", paths: [], words: [], matched: [])
+    }
+
+    static func words(_ query: String) -> [String] { query.lowercased().split(whereSeparator: \.isWhitespace).map(String.init) }
+
+    /// `search(_:in:limit:)` over a prepared index. With `previous` from the same index, only its matches are checked
+    /// when every earlier word is part of a new one (typing on), since nothing else can match.
+    public static func search(_ query: String, in index: SearchIndex, narrowing previous: SearchResult? = nil, limit: Int = 200) -> SearchResult {
+        let words = words(query)
+        guard !words.isEmpty else { return SearchResult(query: query, paths: [], words: [], matched: []) }
+        let candidates: [Int]
+        if let previous, !previous.words.isEmpty, previous.words.allSatisfy({ old in words.contains { $0.contains(old) } }) {
+            candidates = previous.matched
+        } else {
+            candidates = Array(index.entries.indices)
+        }
+        var matched: [Int] = [], scored: [(score: Int, entry: Int)] = []
+        for position in candidates {
+            if position & 1023 == 0, Task.isCancelled { break }
+            let entry = index.entries[position]
+            guard words.allSatisfy({ entry.lower.contains($0) }) else { continue }
+            matched.append(position)
+            let score = words.reduce(0) { total, word in
+                total + (entry.stem == word ? 0 : entry.name.hasPrefix(word) ? 1 : entry.name.contains(word) ? 2 : 3)
+            }
+            scored.append((score, position))
+        }
+        let paths = scored.sorted { a, b in
+            let x = index.entries[a.entry], y = index.entries[b.entry]
+            return a.score != b.score ? a.score < b.score : x.length != y.length ? x.length < y.length : x.path < y.path
+        }.prefix(limit).map { index.entries[$0.entry].path }
+        return SearchResult(query: query, paths: paths, words: words, matched: matched)
     }
 
     /// The folders that hold `path`, for revealing a file in the tree.

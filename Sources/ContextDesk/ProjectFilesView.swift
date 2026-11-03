@@ -13,29 +13,56 @@ import ContextTranscript
     @Published private(set) var loading = false
     @Published var expanded: Set<String> = []
     @Published var selection: String?
-    @Published var query = ""
+    @Published var query = "" { didSet { if query != oldValue { scheduleSearch() } } }
+    /// Filter results and the query they answer; filled off the main thread shortly after typing pauses.
+    @Published private(set) var result = ProjectFiles.SearchResult.empty
     private var generation = UUID()
+    private var searchIndex = ProjectFiles.SearchIndex([])
+    private var searchTask: Task<Void, Never>?
 
     var rows: [ProjectFiles.Row] { ProjectFiles.rows(tree, expanded: expanded) }
-    var matches: [String] { ProjectFiles.search(query, in: listing?.paths ?? []) }
+    var matches: [String] { result.paths }
+    /// The results answer the current text; until then the previous ones stay on screen.
+    var matchesCurrent: Bool { result.query == query }
+
+    /// The best match for the current text, computed now when the background search has not caught up (Return).
+    func firstMatch() -> String? {
+        matchesCurrent ? matches.first : ProjectFiles.search(query, in: searchIndex, limit: 1).paths.first
+    }
+
+    /// Filters in a detached task 80 ms after the last keystroke; a newer keystroke cancels it. When the text
+    /// extends the previous query, only the previous matches are checked.
+    private func scheduleSearch() {
+        searchTask?.cancel()
+        let query = query
+        guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { result = .empty; return }
+        let index = searchIndex, previous = result.query.isEmpty ? nil : result
+        searchTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(80)) } catch { return }
+            let found = await Task.detached(priority: .userInitiated) { ProjectFiles.search(query, in: index, narrowing: previous) }.value
+            guard !Task.isCancelled, let self, self.query == query else { return }
+            self.result = found
+        }
+    }
 
     /// Lists `folder` once; a new folder starts with a collapsed tree. Read errors are shown, never retried.
     func load(_ folder: String?, force: Bool = false) async {
         guard force || folder != root || listing == nil && issue == nil else { return }
         if folder != root { expanded = []; selection = nil; query = "" }
         root = folder
-        guard let folder else { listing = nil; tree = []; issue = nil; return }
+        guard let folder else { listing = nil; tree = []; issue = nil; replaceSearchIndex(.init([])); return }
         let token = UUID(); generation = token
         loading = true
         defer { if generation == token { loading = false } }
         do {
-            let result = try await ProjectFiles.list(root: folder)
-            let built = await Task.detached(priority: .userInitiated) { ProjectFiles.tree(result.paths) }.value
+            let listed = try await ProjectFiles.list(root: folder)
+            let built = await Task.detached(priority: .userInitiated) { (ProjectFiles.tree(listed.paths), ProjectFiles.SearchIndex(listed.paths)) }.value
             guard generation == token else { return }
-            listing = result; tree = built; issue = nil
+            listing = listed; tree = built.0; issue = nil
+            replaceSearchIndex(built.1)
         } catch {
             guard generation == token else { return }
-            listing = nil; tree = []
+            listing = nil; tree = []; replaceSearchIndex(.init([]))
             switch error {
             case .tooBroad:
                 issue = L10n.text("Папка слишком широкая для дерева файлов (домашняя папка или корень диска).",
@@ -44,6 +71,13 @@ import ContextTranscript
                 issue = L10n.text("Не удалось прочитать папку: ", "Could not read the folder: ") + path
             }
         }
+    }
+
+    /// A new listing: earlier matches index the old one, so they cannot be narrowed further.
+    private func replaceSearchIndex(_ index: ProjectFiles.SearchIndex) {
+        searchIndex = index
+        result = .empty
+        scheduleSearch()
     }
 
     func url(_ path: String) -> URL? { root.map { URL(fileURLWithPath: $0).appendingPathComponent(path) } }
@@ -91,7 +125,7 @@ struct ProjectFilesView: View {
             .padding(.horizontal, 14).padding(.vertical, 10)
             TextField(L10n.text("Найти файл", "Find a file"), text: $files.query)
                 .textFieldStyle(.roundedBorder).focused($searchFocused)
-                .onSubmit { if let first = files.matches.first { activate(first) } }
+                .onSubmit { if let first = files.firstMatch() { activate(first) } }
                 .padding(.horizontal, 12).padding(.bottom, 8)
             Divider()
             content.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -111,7 +145,12 @@ struct ProjectFilesView: View {
         } else if !files.query.trimmingCharacters(in: .whitespaces).isEmpty {
             let matches = files.matches
             if matches.isEmpty {
-                Text(L10n.text("Ничего не найдено", "No matches")).font(.ui(.callout)).foregroundStyle(.secondary)
+                if files.matchesCurrent {
+                    Text(L10n.text("Ничего не найдено", "No matches")).font(.ui(.callout)).foregroundStyle(.secondary)
+                } else {
+                    // The first results are a moment away; a spinner would only flash.
+                    Color.clear
+                }
             } else {
                 List(matches, id: \.self, selection: selectionBinding) { path in
                     FileRow(name: URL(fileURLWithPath: path).lastPathComponent, detail: (path as NSString).deletingLastPathComponent,

@@ -21,6 +21,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Changed
 
+- Filtering large project file trees, the archive and the command palette no longer lags while typing.
 - The chat search index takes less disk space and updates only new messages after a turn; it is rebuilt once after this update.
 - Archive search answers short queries immediately (one or two characters list the newest matches first) and never shows results of an older query.
 - Diff windows scroll smoothly; copy a diff line or its hunk from the line's context menu (Copy Line, Copy Hunk). Text can no longer be drag-selected inside a single diff line.

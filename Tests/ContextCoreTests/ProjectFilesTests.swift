@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import ContextCore
+@testable import ContextDesk
 
 @Test func projectTreePutsFoldersFirstInFinderOrderAndExpandsOnRequest() {
     let tree = ProjectFiles.tree(["b.txt", "Sources/App/main.swift", "a10.txt", "a2.txt", "Sources/Core.swift", "README.md"])
@@ -25,6 +26,48 @@ import ContextCore
     #expect(ProjectFiles.search("view desk", in: paths).count == 3)
     #expect(ProjectFiles.search("  ", in: paths).isEmpty)
     #expect(ProjectFiles.search("swift", in: paths, limit: 2).count == 2)
+}
+
+@Test func projectFileSearchNarrowsThePreviousMatchesOnlyWhenTheQueryExtendsThem() {
+    var paths = (0..<500).map { "Sources/Module\($0 % 7)/File\($0).swift" }
+    paths += ["Docs/desk-notes.md", "Sources/DeskView.swift", "Tests/DeskViewTests.swift"]
+    let index = ProjectFiles.SearchIndex(paths)
+    #expect(index.count == paths.count)
+    var previous: ProjectFiles.SearchResult?
+    // Every step gives what a fresh search over all paths gives, whether or not it narrowed.
+    for query in ["d", "de", "desk", "desk v", "desk vi", "deskv", "dek", "file1", "file12", "module3 file12", "file", ""] {
+        let narrowed = ProjectFiles.search(query, in: index, narrowing: previous)
+        #expect(narrowed.paths == ProjectFiles.search(query, in: paths), "\(query)")
+        #expect(narrowed.query == query)
+        previous = narrowed
+    }
+    // More than `limit` matches: narrowing still sees all of them, not just the listed ones.
+    let wide = ProjectFiles.search("swift", in: index, limit: 5)
+    #expect(wide.paths.count == 5)
+    #expect(ProjectFiles.search("swift file49", in: index, narrowing: wide).paths == ProjectFiles.search("swift file49", in: paths))
+}
+
+@Test @MainActor func projectFilesModelFiltersInTheBackgroundAndAnswersReturnAtOnce() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("project-filter-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root.appendingPathComponent("docs"), withIntermediateDirectories: true)
+    for name in ["docs/guide.md", "docs/notes.md", "main.swift"] {
+        try "x".write(to: root.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+    let files = ProjectFilesModel()
+    await files.load(root.path)
+    files.query = "note"
+    // Return before the debounced search ends still opens the best match of the current text.
+    #expect(!files.matchesCurrent)
+    #expect(files.firstMatch() == "docs/notes.md")
+    for _ in 0..<200 where !files.matchesCurrent { try await Task.sleep(for: .milliseconds(10)) }
+    #expect(files.matchesCurrent && files.matches == ["docs/notes.md"])
+    files.query = "notes.md"
+    files.query = "zzz"
+    for _ in 0..<200 where !files.matchesCurrent { try await Task.sleep(for: .milliseconds(10)) }
+    #expect(files.matches.isEmpty && files.result.query == "zzz")
+    files.query = ""
+    #expect(files.matchesCurrent && files.matches.isEmpty)
 }
 
 @Test func projectFilesListGitFilesWithoutIgnoredOrDeletedOnes() async throws {
