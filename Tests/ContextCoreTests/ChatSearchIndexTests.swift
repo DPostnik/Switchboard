@@ -1,6 +1,7 @@
 import AgentContract
 import Foundation
 import Testing
+import os
 @testable import ContextCore
 @testable import ContextDesk
 @testable import ContextTranscript
@@ -171,6 +172,92 @@ private func fragileDate() -> Date {
     await try #require(model.chatIndexTask).value
     #expect(try await model.chatSearchIndex.search("Second").count == 1)
     #expect(model.chatIndexedInfos?.first?.title == "Second title")
+}
+
+@Test func chatIndexReturnsTheBestRowPerChatWithASnippet() async throws {
+    let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let index = ChatSearchIndex(file: root.appendingPathComponent(ChatSearchIndex.fileName))
+    let long = info("long", title: "Long chat"), short = info("short", title: "Short chat")
+    let words = (1...40).map { "word\($0)" }.joined(separator: " ")
+    try await index.index([(long, blob(long, [("user", "\(words) needle \(words)"), ("assistant", "needle again"), ("user", "a needle")])),
+                           (short, blob(short, [("user", "needles")]))])
+    let hits = try await index.search("needle")
+    #expect(hits.count == 2 && Set(hits.map(\.chatID)) == ["long", "short"])
+    let snippets = Dictionary(uniqueKeysWithValues: hits.map { ($0.chatID, $0.snippet) })
+    #expect(snippets["short"] == "needles")
+    #expect(try await index.search("needle", limit: 1).count == 1)
+    // The row that ranks best per chat carries the snippet; every candidate row is a short one here.
+    #expect(["needle again", "a needle"].contains(snippets["long"]))
+}
+
+@Test func chatIndexSnippetKeepsAWindowAroundTheFirstMatch() {
+    let words = (1...30).map { "w\($0)" }
+    let text = (words[0..<10] + ["Анкета,"] + words[10...]).joined(separator: " ")
+    // Five words before the match, the match, six after; cuts on both sides.
+    #expect(ChatSearchIndex.snippet(text, terms: ["анкет"]) == "…w6 w7 w8 w9 w10 Анкета, w11 w12 w13 w14 w15 w16…")
+    // At the start and the end the window shifts instead of shrinking.
+    #expect(ChatSearchIndex.snippet(text, terms: ["w1"]) == "w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 Анкета, w11…")
+    #expect(ChatSearchIndex.snippet(text, terms: ["w30"]) == "…w19 w20 w21 w22 w23 w24 w25 w26 w27 w28 w29 w30")
+    // Only a word start counts; a short text stays whole; line breaks become spaces.
+    #expect(ChatSearchIndex.snippet("x subword\nword", terms: ["word"]) == "x subword word")
+    #expect(ChatSearchIndex.snippet("Café crème", terms: ["creme"]) == "Café crème")
+    #expect(ChatSearchIndex.snippet("", terms: ["a"]) == "")
+}
+
+@Test func chatIndexOrdersOneAndTwoCharacterQueriesByRecency() async throws {
+    let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let index = ChatSearchIndex(file: root.appendingPathComponent(ChatSearchIndex.fileName))
+    // "older" matches the short word many times, so bm25 ranks it first; "newer" was indexed last.
+    let older = info("older", title: "Older"), newer = info("newer", title: "Newer")
+    try await index.index([(older, blob(older, [("user", "ab ab ab ab ab")]))])
+    try await index.index([(newer, blob(newer, [("user", "ab and a much longer message with many other words in it")]))])
+    #expect(try await index.search("ab").map(\.chatID) == ["newer", "older"])
+    #expect(try await index.search("ab ab").map(\.chatID) == ["newer", "older"])
+    #expect(try await index.search("ab and").map(\.chatID) == ["newer"])
+}
+
+@Test func chatIndexCancelledOrSupersededSearchReturnsNothing() async throws {
+    let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let index = ChatSearchIndex(file: root.appendingPathComponent(ChatSearchIndex.fileName))
+    let chats = (0..<200).map { info("c\($0)", title: "Chat \($0)") }
+    try await index.index(try chats.map { ($0, try blob($0, [("user", "common words here"), ("assistant", "common reply")])) })
+    // A later search in the same scope supersedes an earlier one; other scopes are independent.
+    let first = index.interrupt(scope: "archive"), other = index.interrupt(scope: "palette")
+    let second = index.interrupt(scope: "archive")
+    #expect(first.isSet && !second.isSet && !other.isSet)
+    await #expect(throws: CancellationError.self) { try await index.search("common", limit: 300, interrupt: first) }
+    // Stops inside the query: the first progress check passes, later ones report a newer search.
+    let checks = OSAllocatedUnfairLock(initialState: 0)
+    let midway = ChatSearchIndex.Interrupt { checks.withLock { $0 += 1; return $0 > 1 } }
+    await #expect(throws: CancellationError.self) { try await index.search("common", limit: 300, interrupt: midway) }
+    #expect(checks.withLock { $0 } > 1)
+    // A cancelled task gets nothing; the connection keeps working afterwards.
+    let task = Task {
+        withUnsafeCurrentTask { $0?.cancel() }
+        return try await index.search("common", scope: "archive")
+    }
+    await #expect(throws: CancellationError.self) { try await task.value }
+    #expect(try await index.search("common", scope: "archive").count == 200)
+}
+
+@Test func chatIndexSearchDoesNotWaitForIndexing() async throws {
+    let root = try temporaryRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let index = ChatSearchIndex(file: root.appendingPathComponent(ChatSearchIndex.fileName))
+    let small = info("small", title: "Ready chat")
+    try await index.index([(small, blob(small, [("user", "already indexed")]))])
+    _ = try await index.search("already")
+    let big = info("big", title: "Big chat")
+    let text = (1...200).map { "filler\($0)" }.joined(separator: " ")
+    let bigBlob = try blob(big, (0..<4000).map { ($0 % 2 == 0 ? "user" : "assistant", "\(text) \($0)") })
+    let order = OSAllocatedUnfairLock(initialState: [String]())
+    let writer = Task { try await index.index([(big, bigBlob)]); order.withLock { $0.append("index") } }
+    try await Task.sleep(for: .milliseconds(20))
+    // Served from the last commit on the reader connection while the writer is still busy.
+    #expect(try await index.search("already").map(\.chatID) == ["small"])
+    order.withLock { $0.append("search") }
+    try await writer.value
+    #expect(order.withLock { $0 } == ["search", "index"])
+    #expect(try await index.search("filler1").map(\.chatID) == ["big"])
 }
 
 @Test func chatIndexMatchQueryQuotesEveryWord() {

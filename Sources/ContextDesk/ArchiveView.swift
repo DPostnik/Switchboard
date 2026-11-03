@@ -8,8 +8,8 @@ struct ArchiveView: View {
     @State private var summary: ArchiveSummaryRecord?
     /// Narrows the list and the search to one project; nil shows every project.
     @State private var projectFilter: UUID?
-    /// Chats whose messages match the search, with a snippet, from the local chat index.
-    @State private var textMatches: [String: String] = [:]
+    /// Chats whose messages match the search, with a snippet, from the local chat index, and the search they answer.
+    @State private var textMatches: (query: String, matches: [String: String]) = ("", [:])
 
     /// Everything the list needs, computed once per render: the archive can hold hundreds of chats,
     /// and the body reruns on every model change.
@@ -54,7 +54,8 @@ struct ArchiveView: View {
     }
 
     private func makeListing() -> Listing {
-        var result = Self.listing(model.state, project: projectFilter, search: search, textMatches: search.isEmpty ? [:] : textMatches)
+        var result = Self.listing(model.state, project: projectFilter, search: search,
+                                  textMatches: search.isEmpty || textMatches.query != search ? [:] : textMatches.matches)
         // The same chats `queueMissingArchiveSummaries` queues: every archived one, not just the search results.
         result.missing = model.state.chats.count(where: { $0.isArchived && model.supportsSummaries($0) && model.archiveSummaries[$0.id] == nil })
         for chat in result.chats where model.archiveSummaries[chat.id] == nil {
@@ -102,9 +103,13 @@ struct ArchiveView: View {
                 }.padding([.horizontal, .top])
                     .task(id: search) {
                         // Debounced: the index query runs after typing pauses.
-                        guard !search.isEmpty else { textMatches = [:]; return }
+                        let query = search
+                        guard !query.isEmpty else { textMatches = ("", [:]); return }
                         do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
-                        textMatches = await model.chatTextMatches(search)
+                        let matches = await model.chatTextMatches(query)
+                        // A newer search replaced this one while it ran: its matches would show under other text.
+                        guard !Task.isCancelled, query == search else { return }
+                        textMatches = (query, matches)
                     }
                 projectChips(listing)
                 if listing.missing > 0, listing.shownMissing {

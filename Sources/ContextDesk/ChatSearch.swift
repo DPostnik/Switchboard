@@ -57,9 +57,10 @@ extension DeskModel {
         }
     }
 
-    /// Text matches for the archive search: chat id and a short snippet. Empty while the index is not built.
+    /// Text matches for the archive search: chat id and a short snippet. Empty while the index is not built, and for
+    /// a search that a newer archive search replaced.
     func chatTextMatches(_ query: String) async -> [String: String] {
-        let hits = (try? await chatSearchIndex.search(query)) ?? []
+        let hits = (try? await chatSearchIndex.search(query, scope: "archive")) ?? []
         return Dictionary(hits.map { ($0.chatID, $0.snippet) }, uniquingKeysWith: { first, _ in first })
     }
 

@@ -301,7 +301,7 @@ private struct CommandPalette: View {
         // Wait for a pause in typing; each keystroke cancels the previous search.
         try? await Task.sleep(for: .milliseconds(150))
         guard !Task.isCancelled else { return }
-        let hits = (try? await model.chatSearchIndex.search(text, limit: 40)) ?? []
+        let hits = (try? await model.chatSearchIndex.search(text, limit: 40, scope: "palette")) ?? []
         guard !Task.isCancelled else { return }
         messageHits = (query, hits)
     }

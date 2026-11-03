@@ -1,6 +1,7 @@
 import Foundation
 import CSQLite
 import AgentContract
+import os
 
 /// Local full-text index of chat dialogue (plan `docs/agent-chat-search-plan.md`): user and assistant text only,
 /// no tool output. The app keeps it current from saved transcripts; the archive search and the chat-search MCP
@@ -55,7 +56,12 @@ public actor ChatSearchIndex {
     private let file: URL
     /// Opened on first use and kept for the actor's lifetime; dropped after a failed call so the next call reopens.
     private var connection: Connection?
-    public init(file: URL) { self.file = file }
+    /// Searches run on their own read-only connection, so a query never waits behind `index()` (WAL lets it read
+    /// the last commit while a write is in progress).
+    private let reader: Reader
+    /// The newest search per scope; an older one still running in that scope stops at its next progress check.
+    private let generations = OSAllocatedUnfairLock(initialState: [String: UInt64]())
+    public init(file: URL) { self.file = file; reader = Reader(file: file) }
 
     public func plan(_ chats: [ChatInfo]) throws -> Plan {
         try withDatabase { db in
@@ -112,20 +118,158 @@ public actor ChatSearchIndex {
         try withDatabase { db in try Self.transaction(db) { for id in ids { try Self.removeRows(db, id: id) } } }
     }
 
-    /// Best match per chat, best chats first. Every word must occur, each as a word prefix.
-    public func search(_ text: String, limit: Int = 300) throws -> [Hit] {
+    /// Best match per chat, best chats first. Every word must occur, each as a word prefix. When every word has at
+    /// most two characters, the newest matching messages come first instead: ranking thousands of matches costs
+    /// more than it tells. A search whose task is cancelled, or which a newer search in the same `scope` replaces,
+    /// stops early and throws `CancellationError`.
+    public nonisolated func search(_ text: String, limit: Int = 300, scope: String? = nil) async throws -> [Hit] {
+        try await search(text, limit: limit, interrupt: interrupt(scope: scope))
+    }
+
+    /// A stop signal for a new search; it also fires once a later search in the same scope begins.
+    nonisolated func interrupt(scope: String?) -> Interrupt {
+        guard let scope else { return Interrupt { false } }
+        let generation = generations.withLock { $0[scope, default: 0] += 1; return $0[scope]! }
+        return Interrupt { [generations] in generations.withLock { $0[scope] } != generation }
+    }
+
+    nonisolated func search(_ text: String, limit: Int, interrupt: Interrupt) async throws -> [Hit] {
         guard let match = Self.matchQuery(text) else { return [] }
         let perfSpan = Perf.span("search.index", id: "\(text.count) chars"); defer { perfSpan.end() }
-        return try withDatabase { db in
-            var hits: [Hit] = [], seen: Set<String> = []
-            try Self.query(db, "SELECT chat_id, snippet(messages, 4, '', '', '…', 12) FROM messages WHERE messages MATCH ? ORDER BY bm25(messages) LIMIT 3000",
-                           [match]) { row in
-                let id = row.text(0)
-                guard hits.count < limit, seen.insert(id).inserted else { return }
-                hits.append(Hit(chatID: id, snippet: row.text(1).replacingOccurrences(of: "\n", with: " ")))
+        let terms = Self.terms(text)
+        return try await withTaskCancellationHandler {
+            try await reader.search(match: match, recent: terms.allSatisfy { $0.count <= 2 }, terms: terms, limit: limit, interrupt: interrupt)
+        } onCancel: { interrupt.cancel() }
+    }
+
+    /// Searchable words as `matchQuery` keeps them.
+    static func terms(_ text: String) -> [String] {
+        text.split(whereSeparator: \.isWhitespace).map { $0.replacingOccurrences(of: "\"", with: "") }
+            .filter { $0.contains { $0.isLetter || $0.isNumber } }
+    }
+
+    /// Set once a search should stop; SQLite's progress handler reads it between virtual machine steps.
+    final class Interrupt: Sendable {
+        private let cancelled = OSAllocatedUnfairLock(initialState: false)
+        private let superseded: @Sendable () -> Bool
+        init(superseded: @escaping @Sendable () -> Bool) { self.superseded = superseded }
+        func cancel() { cancelled.withLock { $0 = true } }
+        var isSet: Bool { cancelled.withLock { $0 } || superseded() }
+    }
+
+    /// Owns the read-only search connection. Opened on first use; a missing file means the index is not built yet.
+    private actor Reader {
+        let file: URL
+        private var connection: Connection?
+        init(file: URL) { self.file = file }
+
+        func search(match: String, recent: Bool, terms: [String], limit: Int, interrupt: Interrupt) throws -> [Hit] {
+            guard !interrupt.isSet, !Task.isCancelled else { throw CancellationError() }
+            guard FileManager.default.fileExists(atPath: file.path) else { return [] }
+            let connection = try connection ?? open()
+            let db = connection.db
+            let context = Unmanaged.passUnretained(interrupt).toOpaque()
+            sqlite3_progress_handler(db, 1000, { context in
+                Unmanaged<Interrupt>.fromOpaque(context!).takeUnretainedValue().isSet ? 1 : 0
+            }, context)
+            defer { sqlite3_progress_handler(db, 0, nil, nil) }
+            do {
+                return try withExtendedLifetime(interrupt) {
+                    // Rank without snippets, keep the best row per chat, then read only those rows' text by rowid:
+                    // FTS5's snippet() over every ranked row was most of the time.
+                    var best: [(row: Int, chat: String)] = [], seen: Set<String> = []
+                    let order = recent ? "rowid DESC" : "bm25(messages)"
+                    try ChatSearchIndex.query(db, "SELECT rowid, chat_id FROM messages WHERE messages MATCH ? ORDER BY \(order) LIMIT 3000", [match]) { row in
+                        guard best.count < limit else { return }
+                        let id = row.text(1)
+                        if seen.insert(id).inserted { best.append((row.int(0), id)) }
+                    }
+                    guard !best.isEmpty else { return [] }
+                    var texts: [Int: String] = [:]
+                    try ChatSearchIndex.query(db, "SELECT rowid, text FROM messages WHERE rowid IN (\(best.map { String($0.row) }.joined(separator: ",")))") { row in
+                        texts[row.int(0)] = row.text(1)
+                    }
+                    if interrupt.isSet { throw CancellationError() }
+                    return best.map { Hit(chatID: $0.chat, snippet: ChatSearchIndex.snippet(texts[$0.row] ?? "", terms: terms)) }
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                if interrupt.isSet || sqlite3_errcode(db) == SQLITE_INTERRUPT { throw CancellationError() }
+                self.connection = nil
+                throw error
             }
-            return hits
         }
+
+        private func open() throws -> Connection {
+            var db: OpaquePointer?
+            guard sqlite3_open_v2(file.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db else {
+                if let db { sqlite3_close(db) }
+                throw ChatSearchIndex.failure
+            }
+            let connection = Connection(db: db)
+            sqlite3_busy_timeout(db, 5000)
+            self.connection = connection
+            return connection
+        }
+    }
+
+    /// About `tokens` words of `text` around the first word that starts with a query term, with `…` where text was
+    /// left out: the window FTS5's `snippet()` would choose for a single match. Line breaks become spaces.
+    static func snippet(_ text: String, terms: [String], tokens: Int = 12) -> String {
+        let scalars = text.unicodeScalars
+        func isToken(_ scalar: Unicode.Scalar) -> Bool {
+            if scalar.isASCII {
+                let value = scalar.value
+                return (48...57).contains(value) || (65...90).contains(value) || (97...122).contains(value)
+            }
+            switch scalar.properties.generalCategory {
+            case .uppercaseLetter, .lowercaseLetter, .titlecaseLetter, .modifierLetter, .otherLetter,
+                 .decimalNumber, .letterNumber, .otherNumber, .privateUse, .nonspacingMark, .spacingMark: return true
+            default: return false
+            }
+        }
+        // The earliest occurrence of a term at the start of a word.
+        var hit: String.Index?
+        for term in terms where !term.isEmpty {
+            var from = text.startIndex
+            let upper = hit ?? text.endIndex
+            while from < upper, let range = text.range(of: term, options: [.caseInsensitive, .diacriticInsensitive], range: from..<upper) {
+                if range.lowerBound == text.startIndex || !isToken(scalars[scalars.index(before: range.lowerBound)]) { hit = range.lowerBound; break }
+                from = scalars.index(after: range.lowerBound)
+            }
+        }
+        var start = hit ?? text.startIndex
+        // Move to the start of a word if the text begins with separators.
+        while start < text.endIndex, !isToken(scalars[start]) { start = scalars.index(after: start) }
+        guard start < text.endIndex else { return text.replacingOccurrences(of: "\n", with: " ") }
+        // Word starts before the hit (nearest first), one more than a window can use, so a cut is visible.
+        var before: [String.Index] = []
+        var cursor = start
+        while before.count < tokens, cursor > text.startIndex {
+            var index = scalars.index(before: cursor)
+            while index > text.startIndex, !isToken(scalars[index]) { index = scalars.index(before: index) }
+            guard isToken(scalars[index]) else { break }
+            while index > text.startIndex, isToken(scalars[scalars.index(before: index)]) { index = scalars.index(before: index) }
+            before.append(index); cursor = index
+        }
+        // Word ends from the hit on, again one more than needed.
+        var ends: [String.Index] = []
+        cursor = start
+        while ends.count <= tokens, cursor < text.endIndex {
+            while cursor < text.endIndex, !isToken(scalars[cursor]) { cursor = scalars.index(after: cursor) }
+            guard cursor < text.endIndex else { break }
+            while cursor < text.endIndex, isToken(scalars[cursor]) { cursor = scalars.index(after: cursor) }
+            ends.append(cursor)
+        }
+        // FTS5 centres a single hit, then shifts the window back when the text ends sooner.
+        let lead = min(before.count, max((tokens - 1) / 2, tokens - ends.count))
+        let taken = min(tokens - lead, ends.count)
+        let from = lead > 0 ? before[lead - 1] : start
+        let to = ends[taken - 1]
+        let cutBefore = before.count > lead, cutAfter = ends.count > taken
+        let body = String(text[from..<to]).replacingOccurrences(of: "\n", with: " ")
+        return (cutBefore ? "…" : "") + body + (cutAfter ? "…" : "")
     }
 
     /// Text columns of every row of `sql`; tests read query plans, pragmas and counts through it.
@@ -139,8 +283,7 @@ public actor ChatSearchIndex {
 
     /// FTS5 query for free text: each word becomes a quoted prefix term, all required. Nil when nothing is searchable.
     public static func matchQuery(_ text: String) -> String? {
-        let words = text.split(whereSeparator: \.isWhitespace).map { $0.replacingOccurrences(of: "\"", with: "") }
-            .filter { $0.contains { $0.isLetter || $0.isNumber } }
+        let words = terms(text)
         return words.isEmpty ? nil : words.map { "\"\($0)\"*" }.joined(separator: " ")
     }
 

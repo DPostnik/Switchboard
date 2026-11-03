@@ -21,6 +21,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Changed
 
+- Archive search answers short queries immediately (one or two characters list the newest matches first) and never shows results of an older query.
 - Diff windows scroll smoothly; copy a diff line or its hunk from the line's context menu (Copy Line, Copy Hunk). Text can no longer be drag-selected inside a single diff line.
 - Lower memory use with long chats, Claude and Gemini history, long Codex command output and large inline images (the image cache is capped and large images are decoded at display size).
 - When macOS runs low on memory, Switchboard frees cached chat history (except the open chat) and decoded transcript images.
