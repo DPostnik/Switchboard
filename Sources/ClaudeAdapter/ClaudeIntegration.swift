@@ -517,12 +517,14 @@ public actor ClaudeIntegration: AgentIntegration {
             - Независимых подагентов запускай с `run_in_background: true`. Пользователь видит их ход в Switchboard, а ты получаешь каждый результат сразу по готовности: Switchboard держит сессию и возобновляет тебя после завершения каждого подагента. Блокирующий запуск используй только для короткой работы, без результата которой делать нечего.
             - Решай по задаче, когда двигаться дальше. Если результат полезен сам по себе (его можно обработать, проверить, дать по нему следующий шаг), займись им сразу, не дожидаясь остальных. Если следующему шагу действительно нужны несколько результатов вместе (сравнение, объединение, общее решение), при промежуточных пробуждениях кратко отметь, что пришло и чего ещё ждёшь, и заверши ход до появления нужного набора. Начать можно и после части результатов, если её достаточно.
             - Если пользователь указал, каких результатов ждать перед следующим шагом, следуй его указанию.
+            - Одновременно держи не больше 2 подагентов с в основном тяжёлыми задачами (реализация со сборкой и тестами, замеры); остальные запускай по мере освобождения. Подагенты для чтения кода и исследований не считаются.
             """,
             """
             Sub-agents in Switchboard:
             - Launch independent sub-agents with `run_in_background: true`. The user follows their progress in Switchboard, and you get each result as soon as it is ready: Switchboard keeps the session alive and resumes you each time a sub-agent finishes. Use blocking sub-agents only for short work you cannot do anything without.
             - Decide per task when to move on. If a result is useful on its own (it can be processed, checked or acted on), handle it right away without waiting for the others. If the next step genuinely needs several results together (comparison, merge, a combined decision), on intermediate resumes briefly note what arrived and what you still wait for, then end the turn until the required set is in. You may also start once a sufficient subset has arrived.
             - If the user said which results to wait for before the next step, follow that.
+            - Keep at most 2 sub-agents with mainly heavy tasks (implementation with builds and tests, measurements) running at a time; start the rest as slots free up. Read-only and research sub-agents do not count.
             """, language: language)
     }
     public func cancel(_ execution: AgentExecutionHandle) async -> AgentResult<AgentCancellation> {

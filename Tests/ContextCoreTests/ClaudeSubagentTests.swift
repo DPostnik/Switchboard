@@ -79,4 +79,6 @@ private func frame(_ json: String) throws -> JSONValue { try JSONDecoder().decod
     }
     #expect(ClaudeIntegration.delegationInstructions(language: .russian).hasPrefix("Подагенты в Switchboard"))
     #expect(ClaudeIntegration.delegationInstructions(language: .english).hasPrefix("Sub-agents in Switchboard"))
+    #expect(ClaudeIntegration.delegationInstructions(language: .russian).contains("не больше 2 подагентов"))
+    #expect(ClaudeIntegration.delegationInstructions(language: .english).contains("at most 2 sub-agents"))
 }
