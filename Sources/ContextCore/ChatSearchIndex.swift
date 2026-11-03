@@ -234,12 +234,15 @@ public actor ChatSearchIndex {
     /// About `tokens` words of `text` around the first word that starts with a query term, with `…` where text was
     /// left out: the window FTS5's `snippet()` would choose for a single match. Line breaks become spaces.
     static func snippet(_ text: String, terms: [String], tokens: Int = 12) -> String {
-        let scalars = text.unicodeScalars
-        func isToken(_ scalar: Unicode.Scalar) -> Bool {
-            if scalar.isASCII {
-                let value = scalar.value
-                return (48...57).contains(value) || (65...90).contains(value) || (97...122).contains(value)
-            }
+        // Searched and walked as NSString in UTF-16 offsets: `String.range(of:options:)` with these options is
+        // several times slower on a late match in a long message, and a copy would cost every row its length.
+        let units = text as NSString
+        let length = units.length
+        func isToken(_ offset: Int) -> Bool {
+            let unit = units.character(at: offset)
+            if unit < 0x80 { return (48...57).contains(unit) || (65...90).contains(unit) || (97...122).contains(unit) }
+            // Surrogate halves count as separators: emoji are, and letters outside the BMP are rare.
+            guard let scalar = Unicode.Scalar(unit) else { return false }
             switch scalar.properties.generalCategory {
             case .uppercaseLetter, .lowercaseLetter, .titlecaseLetter, .modifierLetter, .otherLetter,
                  .decimalNumber, .letterNumber, .otherNumber, .privateUse, .nonspacingMark, .spacingMark: return true
@@ -247,36 +250,38 @@ public actor ChatSearchIndex {
             }
         }
         // The earliest occurrence of a term at the start of a word.
-        var hit: String.Index?
+        var hit: Int?
         for term in terms where !term.isEmpty {
-            var from = text.startIndex
-            let upper = hit ?? text.endIndex
-            while from < upper, let range = text.range(of: term, options: [.caseInsensitive, .diacriticInsensitive], range: from..<upper) {
-                if range.lowerBound == text.startIndex || !isToken(scalars[scalars.index(before: range.lowerBound)]) { hit = range.lowerBound; break }
-                from = scalars.index(after: range.lowerBound)
+            var from = 0
+            let upper = hit ?? length
+            while from < upper {
+                let range = units.range(of: term, options: [.caseInsensitive, .diacriticInsensitive], range: NSRange(location: from, length: upper - from))
+                guard range.location != NSNotFound else { break }
+                if range.location == 0 || !isToken(range.location - 1) { hit = range.location; break }
+                from = range.location + 1
             }
         }
-        var start = hit ?? text.startIndex
+        var start = hit ?? 0
         // Move to the start of a word if the text begins with separators.
-        while start < text.endIndex, !isToken(scalars[start]) { start = scalars.index(after: start) }
-        guard start < text.endIndex else { return text.replacingOccurrences(of: "\n", with: " ") }
+        while start < length, !isToken(start) { start += 1 }
+        guard start < length else { return text.replacingOccurrences(of: "\n", with: " ") }
         // Word starts before the hit (nearest first), one more than a window can use, so a cut is visible.
-        var before: [String.Index] = []
+        var before: [Int] = []
         var cursor = start
-        while before.count < tokens, cursor > text.startIndex {
-            var index = scalars.index(before: cursor)
-            while index > text.startIndex, !isToken(scalars[index]) { index = scalars.index(before: index) }
-            guard isToken(scalars[index]) else { break }
-            while index > text.startIndex, isToken(scalars[scalars.index(before: index)]) { index = scalars.index(before: index) }
+        while before.count < tokens, cursor > 0 {
+            var index = cursor - 1
+            while index > 0, !isToken(index) { index -= 1 }
+            guard isToken(index) else { break }
+            while index > 0, isToken(index - 1) { index -= 1 }
             before.append(index); cursor = index
         }
         // Word ends from the hit on, again one more than needed.
-        var ends: [String.Index] = []
+        var ends: [Int] = []
         cursor = start
-        while ends.count <= tokens, cursor < text.endIndex {
-            while cursor < text.endIndex, !isToken(scalars[cursor]) { cursor = scalars.index(after: cursor) }
-            guard cursor < text.endIndex else { break }
-            while cursor < text.endIndex, isToken(scalars[cursor]) { cursor = scalars.index(after: cursor) }
+        while ends.count <= tokens, cursor < length {
+            while cursor < length, !isToken(cursor) { cursor += 1 }
+            guard cursor < length else { break }
+            while cursor < length, isToken(cursor) { cursor += 1 }
             ends.append(cursor)
         }
         // FTS5 centres a single hit, then shifts the window back when the text ends sooner.
@@ -285,7 +290,7 @@ public actor ChatSearchIndex {
         let from = lead > 0 ? before[lead - 1] : start
         let to = ends[taken - 1]
         let cutBefore = before.count > lead, cutAfter = ends.count > taken
-        let body = String(text[from..<to]).replacingOccurrences(of: "\n", with: " ")
+        let body = units.substring(with: NSRange(location: from, length: to - from)).replacingOccurrences(of: "\n", with: " ")
         return (cutBefore ? "…" : "") + body + (cutAfter ? "…" : "")
     }
 
