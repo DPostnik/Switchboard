@@ -49,3 +49,46 @@ index 1..2 100644
     #expect(DiffComment.editorLine(0, in: lines) == 10) // the hunk header: its first line
     #expect(DiffComment.editorLine(99, in: lines) == nil)
 }
+
+private let twoHunks = """
+diff --git a/a.swift b/a.swift
+old mode 100644
+new mode 100755
+--- a/a.swift
++++ b/a.swift
+@@ -1,2 +1,2 @@
+-let a = 1
++let a = 2
+ let b = 2
+@@ -20,2 +20,1 @@ func f() {
+ let y = 0
+-let z = 1
+\\ No newline at end of file
+"""
+
+@Test func diffHunkSpansItsHeaderToTheNextOne() throws {
+    let lines = DiffLine.parse(twoHunks)
+    #expect(lines.map(\.kind) == [.note, .note, .hunk, .removed, .added, .context, .hunk, .context, .removed, .note])
+    // File start: the first hunk, from any of its lines, the header included.
+    for index in 2...5 { #expect(DiffLine.hunk(containing: index, in: lines)?.indices == 2..<6) }
+    // File end: the last hunk runs to the last line, the "no newline" note included.
+    let last = try #require(DiffLine.hunk(containing: 8, in: lines))
+    #expect(last.indices == 6..<10)
+    #expect(DiffComment.copyText(last) == "@@ -20,2 +20,1 @@ func f() {\n let y = 0\n-let z = 1\n\\ No newline at end of file")
+    // Mode notes before the first header belong to no hunk; out of range is nil.
+    #expect(DiffLine.hunk(containing: 0, in: lines) == nil)
+    #expect(DiffLine.hunk(containing: 10, in: lines) == nil)
+    #expect(DiffLine.hunk(containing: -1, in: lines) == nil)
+}
+
+@Test func diffCopyTextDropsTheSignOfALineAndKeepsItInAHunk() throws {
+    let deleted = DiffLine.parse("@@ -1,2 +0,0 @@\n-gone\n-also gone\n")
+    let hunk = try #require(DiffLine.hunk(containing: 2, in: deleted))
+    #expect(DiffComment.copyText(hunk) == "@@ -1,2 +0,0 @@\n-gone\n-also gone")
+    #expect(DiffComment.copyText(deleted[1]) == "gone")
+    let lines = DiffLine.parse(patch)
+    #expect(DiffComment.copyText(lines[1]) == "let a = 1") // context
+    #expect(DiffComment.copyText(lines[3]) == "let b = 3") // added
+    #expect(DiffComment.copyText(try #require(DiffLine.hunk(containing: 4, in: lines)))
+            == "@@ -10,4 +10,4 @@ struct A {\n let a = 1\n-let b = 2\n+let b = 3\n+let c = 4\n let d = 5")
+}

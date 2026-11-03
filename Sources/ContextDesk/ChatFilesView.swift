@@ -772,7 +772,6 @@ private struct ChatChangeDiffView: View {
                         patch(files.patches[entry.turn.itemID] ?? .loading, change: entry.change)
                     }
                 }
-                .textSelection(.enabled)
             }
             .background(Color(nsColor: .textBackgroundColor))
         }
@@ -826,6 +825,7 @@ private struct ChatChangeDiffView: View {
             ForEach(lines) { line in
                 DiffLineRow(line: line, allowsComments: false)
                     .contextMenu {
+                        DiffLineCopyItems(line: line, lines: lines)
                         if change.status != .deleted, let number = DiffComment.editorLine(line.id, in: lines) {
                             Button(EditorLauncher.openTitle + L10n.text(" на строке \(number)", " at line \(number)")) {
                                 EditorLauncher.open(file.absolutePath, line: number)

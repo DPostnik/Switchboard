@@ -21,6 +21,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Changed
 
+- Diff windows scroll smoothly; copy a diff line or its hunk from the line's context menu (Copy Line, Copy Hunk). Text can no longer be drag-selected inside a single diff line.
 - Lower memory use with long chats, Claude and Gemini history, long Codex command output and large inline images (the image cache is capped and large images are decoded at display size).
 - When macOS runs low on memory, Switchboard frees cached chat history (except the open chat) and decoded transcript images.
 - Chat files can be hidden completely: right-click the tile or the panel and choose "Don't Show Chat Files"; View → Show Chat Files brings them back in every chat. The panel now grows out of the tile's corner and shrinks back into it, and the tile's hover fades in one colour without a darker step.

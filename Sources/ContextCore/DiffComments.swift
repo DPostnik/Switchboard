@@ -41,4 +41,31 @@ public enum DiffComment {
         if let new = lines[index].new { return new }
         return lines[index...].lazy.compactMap(\.new).first ?? lines[..<index].reversed().lazy.compactMap(\.new).first
     }
+
+    /// A diff line as plain text for the pasteboard: its text without the `+`/`-` sign.
+    public static func copyText(_ line: DiffLine) -> String { line.text }
+
+    /// Lines as unified diff text for the pasteboard: changed and context lines with their sign, hunk headers and
+    /// notes (`\ No newline at end of file`) as they are.
+    public static func copyText(_ lines: ArraySlice<DiffLine>) -> String {
+        lines.map { line in
+            switch line.kind {
+            case .added: "+" + line.text
+            case .removed: "-" + line.text
+            case .context: " " + line.text
+            case .hunk, .note: line.text
+            }
+        }
+        .joined(separator: "\n")
+    }
+}
+
+extension DiffLine {
+    /// The hunk a line belongs to: its `@@` header through the line before the next header. Lines before the first
+    /// header (mode or rename notes) belong to no hunk. Scans only the hunk, so it is meant for a click, not a render.
+    public static func hunk(containing index: Int, in lines: [DiffLine]) -> ArraySlice<DiffLine>? {
+        guard lines.indices.contains(index), let start = lines[...index].lastIndex(where: { $0.kind == .hunk }) else { return nil }
+        let end = lines[(start + 1)...].firstIndex { $0.kind == .hunk } ?? lines.endIndex
+        return lines[start..<end]
+    }
 }

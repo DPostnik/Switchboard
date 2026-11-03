@@ -403,7 +403,6 @@ struct TurnChangesView: View {
                             .font(.system(size: 12)).foregroundStyle(DeskPalette.attentionInk).padding(12)
                     }
                 }
-                .textSelection(.enabled)
             }
             .background(Color(nsColor: .textBackgroundColor))
         }
@@ -413,6 +412,7 @@ struct TurnChangesView: View {
         if line.kind != .hunk && line.kind != .note {
             Button(L10n.text("Прокомментировать для агента", "Comment for the agent")) { viewer.selectLine(line.id, extend: false) }
         }
+        DiffLineCopyItems(line: line, lines: lines)
         if let file = selectedFile, file.status != .deleted, let number = DiffComment.editorLine(line.id, in: lines) {
             Button(EditorLauncher.openTitle + L10n.text(" на строке \(number)", " at line \(number)")) {
                 EditorLauncher.open(viewer.absolutePath(file.path), line: number)
@@ -544,6 +544,28 @@ struct DiffLineRow: View {
             .foregroundStyle(DeskPalette.muted.opacity(0.75))
             .frame(width: 44, alignment: .trailing)
             .padding(.trailing, 6)
+    }
+}
+
+/// "Copy Line" and "Copy Hunk" for a diff line's menu. Diff rows have no text selection (it made every row an
+/// AppKit view and dropped frames while scrolling), so these are how diff text reaches the pasteboard.
+/// The hunk is looked up on click, not while the menu is built with each row.
+struct DiffLineCopyItems: View {
+    let line: DiffLine
+    let lines: [DiffLine]
+
+    var body: some View {
+        Button(L10n.text("Скопировать строку", "Copy Line")) { Self.copy(DiffComment.copyText(line)) }
+        // Changed, context and header lines only occur inside a hunk; notes may sit outside one.
+        if line.kind != .note {
+            Button(L10n.text("Скопировать фрагмент", "Copy Hunk")) {
+                if let hunk = DiffLine.hunk(containing: line.id, in: lines) { Self.copy(DiffComment.copyText(hunk)) }
+            }
+        }
+    }
+
+    private static func copy(_ text: String) {
+        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
     }
 }
 
