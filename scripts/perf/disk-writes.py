@@ -6,6 +6,7 @@ sizes, counts, process names and file names (no file contents).
 
   python3 -I scripts/perf/disk-writes.py record --duration 900 --out /tmp/sb-disk/run.jsonl
   python3 -I scripts/perf/disk-writes.py summary /tmp/sb-disk/run.jsonl
+  python3 -I scripts/perf/disk-writes.py reports      # system disk-write reports, stacks by app frame
 
 record:
   every --interval s (default 5): proc_pid_rusage(RUSAGE_INFO_V4) of Switchboard and all descendants
@@ -303,6 +304,37 @@ def summary(args):
             print(f"  {k[-90:]:90} {fmt(rw):>10} {fmt(g):>10} {c:4}")
 
 
+def reports(args):
+    """Disk-write diagnostic reports: header numbers and the deepest Switchboard frame of each sampled leaf."""
+    import glob
+    import re
+    for f in sorted(glob.glob(args.glob)):
+        lines = open(f, errors="replace").read().splitlines()
+        start = next((i for i, l in enumerate(lines) if l.startswith("Powerstats for:")), None)
+        if start is None:
+            continue
+        hdr = {l.split(":", 1)[0]: l.split(":", 1)[1].strip() for l in lines[:40] if ":" in l}
+        if hdr.get("Event") != "disk writes":
+            continue
+        nodes = []
+        for l in lines[start:]:
+            m = re.match(r"^(\s+)\*?(\d+)\s+(.*)$", l)
+            if m:
+                nodes.append((len(m.group(1)), int(m.group(2)), m.group(3)))
+        res, stack = collections.Counter(), []
+        for i, (ind, cnt, txt) in enumerate(nodes):
+            while stack and stack[-1][0] >= ind:
+                stack.pop()
+            stack.append((ind, cnt, txt))
+            if i + 1 == len(nodes) or nodes[i + 1][0] <= ind:
+                sb = [t for _, _, t in stack if "(Switchboard +" in t or ".swift:" in t]
+                key = " <- ".join(re.sub(r" \+ \d+.*", "", t).strip() for t in sb[::-1][:2]) if sb else "(no app frame)"
+                res[key] += cnt
+        print(os.path.basename(f), hdr.get("Version"), hdr.get("Writes caused"), hdr.get("Duration"))
+        for k, v in res.most_common(args.top):
+            print(f"   {v:4} {k[:160]}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -316,8 +348,11 @@ def main():
     s = sub.add_parser("summary")
     s.add_argument("file")
     s.add_argument("--top", type=int, default=30)
+    d = sub.add_parser("reports")
+    d.add_argument("--glob", default="/Library/Logs/DiagnosticReports/Switchboard_*.diag")
+    d.add_argument("--top", type=int, default=8)
     args = ap.parse_args()
-    record(args) if args.cmd == "record" else summary(args)
+    {"record": record, "summary": summary, "reports": reports}[args.cmd](args)
 
 
 if __name__ == "__main__":

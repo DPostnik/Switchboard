@@ -13,7 +13,7 @@ staging="$(mktemp -d "$PWD/build/app-stage.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT
 app="$staging/Switchboard.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp .build/local-build/ContextDesk "$app/Contents/MacOS/Switchboard"
+cp -c .build/local-build/ContextDesk "$app/Contents/MacOS/Switchboard" 2>/dev/null || cp .build/local-build/ContextDesk "$app/Contents/MacOS/Switchboard"
 python3 - .build/local-build/build-info.json "$app/Contents/Resources/build-info.json" "$version" "$build" "$commit" "$dirty" <<'PY'
 import json, sys
 source, target, version, build, commit, dirty = sys.argv[1:]

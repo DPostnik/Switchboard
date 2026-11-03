@@ -96,6 +96,13 @@ def run_tests(execute, command, filters, serial=False):
           'Not a regression in the tested code; do not rerun the suite. Report it.', flush=True)
 
 
+def clone(source, destination):
+    """Copy as an APFS clone (no data written); fall back to a plain copy on other volumes."""
+    Path(destination).unlink(missing_ok=True)
+    if subprocess.run(['cp', '-c', '-p', str(source), str(destination)], capture_output=True).returncode != 0:
+        shutil.copy2(source, destination)
+
+
 def capture(args):
     return run(args, capture_output=True, text=True).stdout.strip()
 
@@ -210,7 +217,7 @@ def main():
             command = [swift, 'build', '--sdk', sdk, '-c', 'release', '--product', 'ContextDesk', '--force-resolved-versions'] + index_flags
             run(command)
             bin_path = capture([swift, 'build', '--sdk', sdk, '-c', 'release', '--show-bin-path'])
-            shutil.copy2(Path(bin_path) / 'ContextDesk', OUT / 'ContextDesk')
+            clone(Path(bin_path) / 'ContextDesk', OUT / 'ContextDesk')
         else:
             command = [swift, 'test', '--sdk', sdk, '--disable-xctest', '--force-resolved-versions'] + index_flags
             if macros.is_dir():
@@ -245,7 +252,7 @@ def main():
             libraries = ['-lClaudeAdapter', '-lCodexAdapter', '-lContextTranscript', '-lContextCore', '-lTOMLDecoder', '-lAgentContract', '-lFringeProtocol']
             if args.task == 'build':
                 run(base + ['-module-name', 'ContextDesk'] + sources('Sources/ContextDesk') + libraries + ['-o', work / 'ContextDesk'])
-                shutil.copy2(work / 'ContextDesk', OUT / 'ContextDesk')
+                clone(work / 'ContextDesk', OUT / 'ContextDesk')
             else:
                 runner = work / 'Runner.swift'
                 # New Testing releases also expose a CInt-returning overload. Keep
