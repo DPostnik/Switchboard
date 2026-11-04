@@ -43,6 +43,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Fixed
 
+- Switchboard no longer quits with a crash when a chat's text changes while the pointer is over the transcript: the hover lookup no longer runs mid-edit, when the message list and its text ranges briefly disagree.
 - Scrolling to the end of a chat while another chat is working no longer snaps the bounce back to the edge for one frame.
 - Claude chats: a message sent after Stop no longer looks unanswered when the restarted Claude Code first reports a stopped background task; the reply now shows in the chat.
 - The chat and the message field also always use the thin overlay scroll bar: the light track with a divider line beside the conversation is gone.

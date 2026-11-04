@@ -946,8 +946,12 @@ public struct NativeTranscript: NSViewRepresentable {
     private var layingOutTowardEnd = false
 
     @objc private func viewportChanged() {
-        if !changingLayout { lastScrolled = ProcessInfo.processInfo.systemUptime }
-        refreshHover()
+        // An edit resizes the text view from `endEditing`, before `previous` matches the new `ranges`; the hover lookup
+        // then indexed past the end of `previous` and crashed. The next scroll or mouse move finds the hover again.
+        if !changingLayout {
+            lastScrolled = ProcessInfo.processInfo.systemUptime
+            refreshHover()
+        }
         workingIndicator.refreshAnimation()
         // Past an edge the rubber band owns the origin. Layout here (the end check lays out the last rows) could resize
         // the text view, and the clip view then clamped the origin back to the edge for one frame mid-bounce.
@@ -1157,7 +1161,8 @@ public struct NativeTranscript: NSViewRepresentable {
             if line.minY - 8 <= local.y, local.y <= line.maxY + 8 {
                 let character = manager.characterIndexForGlyph(at: glyph)
                 if character < storage.length { section = storage.attribute(.sectionKey, at: character, effectiveRange: nil) as? String }
-                if let index = ranges.firstIndex(where: { NSLocationInRange(character, $0) }), previous[index].showsCopyControl {
+                if let index = ranges.firstIndex(where: { NSLocationInRange(character, $0) }), index < previous.count,
+                   previous[index].showsCopyControl {
                     id = previous[index].id
                 }
             }
