@@ -1147,17 +1147,18 @@ struct ChatView: View {
                         .accessibilityLabel(model.roleApproximationNotice)
                 }
                 HStack(spacing: 2) {
-                    ChipMenu(title: ([model.roleSelection.flatMap { model.roleCatalog.role($0)?.title } ?? model.projectRoleTitle]
-                                     + RoleAddOn.allCases.filter(model.currentAddOns.contains).map { $0.shortTitle() }).joined(separator: " + "),
-                             systemImage: model.accessMode == .fullAccess ? "lock.open" : "lock") {
+                    ChipMenu(title: model.roleSelection.flatMap { model.roleCatalog.role($0)?.title } ?? model.projectRoleTitle,
+                             systemImage: model.accessMode == .fullAccess ? "lock.open" : "lock",
+                             badges: RoleAddOn.allCases.filter(model.currentAddOns.contains).map(\.symbol)) {
                         Picker(L10n.text("Роль", "Role"), selection: Binding(get: { model.roleSelection }, set: { model.selectRole($0) })) {
                             Text(model.projectRoleTitle).tag(Optional<String>.none)
                             ForEach(model.roleCatalog.interactive) { role in Text(role.title).tag(Optional(role.id)) }
                         }.pickerStyle(.inline).labelsHidden()
                         Section(L10n.text("Добавить к роли", "Add to the role")) {
                             ForEach(RoleAddOn.allCases) { addOn in
-                                Toggle(addOn.title, isOn: Binding(get: { model.currentAddOns.contains(addOn) }, set: { _ in model.toggleAddOn(addOn) }))
-                                    .help(addOn.summary)
+                                Toggle(isOn: Binding(get: { model.currentAddOns.contains(addOn) }, set: { _ in model.toggleAddOn(addOn) })) {
+                                    Label(addOn.title, systemImage: addOn.symbol)
+                                }.help(addOn.summary)
                             }
                         }
                     }.disabled(model.busy || model.sending)

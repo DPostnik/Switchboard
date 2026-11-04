@@ -63,11 +63,11 @@ public enum RoleAddOn: String, Codable, CaseIterable, Identifiable, Sendable {
         }
     }
     public var title: String { title() }
-    /// The word the role chip appends: "Developer + mail".
-    public func shortTitle(language: AppLanguage = L10n.language) -> String {
+    /// The SF Symbol the role chip shows after the role's name.
+    public var symbol: String {
         switch self {
-        case .mail: L10n.text("почта", "mail", language: language)
-        case .userChrome: "Chrome"
+        case .mail: "envelope"
+        case .userChrome: "globe"
         }
     }
     public func summary(language: AppLanguage = L10n.language) -> String {
