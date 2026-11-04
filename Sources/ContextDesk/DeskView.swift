@@ -1144,12 +1144,19 @@ struct ChatView: View {
                         .accessibilityLabel(model.roleApproximationNotice)
                 }
                 HStack(spacing: 2) {
-                    ChipMenu(title: model.roleSelection.flatMap { model.roleCatalog.role($0)?.title } ?? model.projectRoleTitle,
+                    ChipMenu(title: ([model.roleSelection.flatMap { model.roleCatalog.role($0)?.title } ?? model.projectRoleTitle]
+                                     + RoleAddOn.allCases.filter(model.currentAddOns.contains).map { $0.shortTitle() }).joined(separator: " + "),
                              systemImage: model.accessMode == .fullAccess ? "lock.open" : "lock") {
                         Picker(L10n.text("Роль", "Role"), selection: Binding(get: { model.roleSelection }, set: { model.selectRole($0) })) {
                             Text(model.projectRoleTitle).tag(Optional<String>.none)
                             ForEach(model.roleCatalog.interactive) { role in Text(role.title).tag(Optional(role.id)) }
                         }.pickerStyle(.inline).labelsHidden()
+                        Section(L10n.text("Добавить к роли", "Add to the role")) {
+                            ForEach(RoleAddOn.allCases) { addOn in
+                                Toggle(addOn.title, isOn: Binding(get: { model.currentAddOns.contains(addOn) }, set: { _ in model.toggleAddOn(addOn) }))
+                                    .help(addOn.summary)
+                            }
+                        }
                     }.disabled(model.busy || model.sending)
                         .help(model.currentRole.summary + " " + L10n.text("Роль этого чата; применяется со следующего сообщения. Роль по умолчанию задаётся в настройках проекта.", "This chat’s role; applies from the next message. The default role is set in the project settings."))
                     ModelChip(model: model)

@@ -116,6 +116,8 @@ private struct ChatRunState: Equatable {
     /// Project ID -> role picked in the composer for the project's next new chat; absent follows the project default.
     /// It applies to that chat only; the project default changes in the project settings.
     @Published var newChatRoles: [UUID: String] = [:]
+    /// Project ID -> role add-ons picked for the project's next new chat; absent follows the project's add-ons.
+    @Published var newChatAddOns: [UUID: Set<RoleAddOn>] = [:]
     /// Project ID -> where the project's next new chat works; absent is the project folder (`ChatWorktrees.swift`).
     @Published var newChatWorkspaces: [UUID: NewChatWorkspace] = [:]
     /// A new chat's worktree is being created; sending waits for it.
@@ -1388,7 +1390,25 @@ private struct ChatRunState: Equatable {
     /// Dimensions the current agent can only approximate for the current role; shown, never silently downgraded.
     var roleApproximations: [AgentPermissionDimension] {
         guard let project = state.projects.first(where: { $0.id == projectID }) else { return [] }
-        return agentState(currentAgent).descriptor?.permissions.approximations(currentRole.profile(for: project)) ?? []
+        return agentState(currentAgent).descriptor?.permissions.approximations(currentRole.profile(for: project, addOns: currentAddOns)) ?? []
+    }
+    /// Add-ons of the selected chat, or the ones picked for the new chat; both fall back to the project's.
+    var currentAddOns: Set<RoleAddOn> {
+        guard let project = state.projects.first(where: { $0.id == projectID }) else { return [] }
+        if let chat = selectedChat { return chat.resolvedAddOns(in: project) }
+        return newChatAddOns[project.id] ?? Set((project.chatRoleAddOns ?? []).compactMap(RoleAddOn.init(rawValue:)))
+    }
+    /// Turns one add-on on or off for the selected chat (from the next message) or for the new chat.
+    func toggleAddOn(_ addOn: RoleAddOn) {
+        guard !busy, !sending, !isChangingChat(currentRunKey) else { return }
+        var addOns = currentAddOns
+        if addOns.contains(addOn) { addOns.remove(addOn) } else { addOns.insert(addOn) }
+        if let index = state.chats.firstIndex(where: { $0.id == chatID }) {
+            state.chats[index].roleAddOns = RoleAddOn.allCases.filter(addOns.contains).map(\.rawValue)
+            persist()
+        } else if chatID == nil, let projectID, state.projects.contains(where: { $0.id == projectID }) {
+            newChatAddOns[projectID] = addOns
+        }
     }
     var roleApproximationNotice: String {
         let names = roleApproximations.map(Self.dimensionTitle).joined(separator: ", ")
@@ -1429,8 +1449,9 @@ private struct ChatRunState: Equatable {
     func selectAccessMode(_ mode: AccessMode?) { selectRole(mode?.legacyRoleID) }
     /// Project defaults for chats and jobs plus the declared extra roots; the agent never changes these.
     func updateProjectRoles(_ id: UUID, chatRole: String?, jobRole: String?, extraRoots: [AgentPermissionProfile.Root]?, cookieSites: [String]?,
-                            mcpServers: [String: String]? = nil) {
+                            mcpServers: [String: String]? = nil, chatAddOns: Set<RoleAddOn>? = nil) {
         guard let index = state.projects.firstIndex(where: { $0.id == id }) else { return }
+        if let chatAddOns { state.projects[index].chatRoleAddOns = chatAddOns.isEmpty ? nil : RoleAddOn.allCases.filter(chatAddOns.contains).map(\.rawValue) }
         if let chatRole, let role = roleCatalog.role(chatRole) {
             state.projects[index].chatRoleID = chatRole; state.projects[index].defaultChatAccessMode = role.legacyAccessMode
         }
@@ -1840,7 +1861,11 @@ private struct ChatRunState: Equatable {
         else { role = newChatRole(for: project) ?? project.chatRole(roleCatalog) }
         // A role picked for this new chat belongs to it; nil keeps the chat following the project default.
         let explicitNewChatRole = scheduledRun == nil && threadID == nil ? newChatRole(for: project) : nil
-        let access = role.profile(for: project)
+        // Add-ons belong to interactive chats; a scheduled run keeps exactly its job role.
+        let addOns: Set<RoleAddOn> = scheduledRun != nil ? [] : threadID.flatMap { id in state.chats.first { $0.id == id }?.resolvedAddOns(in: project) }
+            ?? newChatAddOns[project.id] ?? Set((project.chatRoleAddOns ?? []).compactMap(RoleAddOn.init(rawValue:)))
+        let explicitNewChatAddOns = scheduledRun == nil && threadID == nil ? newChatAddOns[project.id] : nil
+        let access = role.profile(for: project, addOns: addOns)
         let newWorktree = threadID == nil && scheduledRun == nil ? worktree : nil
         // The chat's own folder (`Chat.workingDirectory(in:)`): engine cwd, permission root and checkpoints.
         let workingDirectory = newWorktree?.workingDirectory ?? threadID.flatMap { workingDirectory(forChat: $0) } ?? project.path
@@ -1882,6 +1907,10 @@ private struct ChatRunState: Equatable {
                 chat.inheritsProjectAccess = explicitRole == nil
                 if let explicitNewChatRole, newChatRoles[project.id] == explicitNewChatRole.id {
                     newChatRoles.removeValue(forKey: project.id)
+                }
+                if let explicitNewChatAddOns {
+                    chat.roleAddOns = RoleAddOn.allCases.filter(explicitNewChatAddOns.contains).map(\.rawValue)
+                    if newChatAddOns[project.id] == explicitNewChatAddOns { newChatAddOns.removeValue(forKey: project.id) }
                 }
                 let created = chat.id
                 id = created
@@ -2728,7 +2757,7 @@ private struct ChatRunState: Equatable {
         }
         return [
             watch($configuringBrowserChats, "configuringBrowserChats"), watch($newChatBrowserProfiles, "newChatBrowserProfiles"),
-            watch($newChatRoles, "newChatRoles"), watch($newChatWorkspaces, "newChatWorkspaces"), watch($creatingWorktree, "creatingWorktree"),
+            watch($newChatRoles, "newChatRoles"), watch($newChatAddOns, "newChatAddOns"), watch($newChatWorkspaces, "newChatWorkspaces"), watch($creatingWorktree, "creatingWorktree"),
             watch($worktreeRemovalOffers, "worktreeRemovalOffers"), watch($runningBrowserChats, "runningBrowserChats"),
             watch($composerFocusRequest, "composerFocusRequest"), watch($plugins, "plugins"), watch($pluginIssues, "pluginIssues"),
             watch($pluginStatuses, "pluginStatuses"), watch($pluginMessages, "pluginMessages"), watch($notices, "notices"),

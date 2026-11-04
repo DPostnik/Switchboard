@@ -28,6 +28,7 @@ struct ProjectSettingsView: View {
     @State private var section: Pane = .roles
     @State private var chatRole: String
     @State private var jobRole: String
+    @State private var chatAddOns: Set<RoleAddOn>
     @State private var extraRoots: [AgentPermissionProfile.Root]
     @State private var foldersExpanded = false
     @State private var cookieSites: String
@@ -46,6 +47,7 @@ struct ProjectSettingsView: View {
         let catalog = model.roleCatalog
         _chatRole = State(initialValue: project.chatRole(catalog).id)
         _jobRole = State(initialValue: project.jobRole(catalog).id)
+        _chatAddOns = State(initialValue: Set((project.chatRoleAddOns ?? []).compactMap(RoleAddOn.init(rawValue:))))
         _extraRoots = State(initialValue: project.extraRoots ?? [])
         _cookieSites = State(initialValue: (project.cookieSites ?? []).joined(separator: "\n"))
         _mcpServers = State(initialValue: project.mcpServers ?? [:])
@@ -122,6 +124,20 @@ struct ProjectSettingsView: View {
                 }
             }
             if let role = model.roleCatalog.role(chatRole) { hint(role.summary) }
+            VStack(alignment: .leading, spacing: .ui(6)) {
+                ForEach(RoleAddOn.allCases) { addOn in
+                    Toggle(isOn: Binding(get: { chatAddOns.contains(addOn) },
+                                         set: { if $0 { chatAddOns.insert(addOn) } else { chatAddOns.remove(addOn) } })) {
+                        VStack(alignment: .leading, spacing: .ui(1)) {
+                            Text(addOn.title).font(.ui(.body)).foregroundStyle(DeskPalette.ink)
+                            Text(addOn.summary).font(.ui(.caption)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .toggleStyle(.checkbox).pointingHandCursor()
+                }
+            }
+            hint(L10n.text("Добавляется к роли чатов проекта, где галочки не меняли в чипе с замком. Задания по расписанию это не получают.",
+                           "Added to the role of the project's chats unless a chat changed it in the lock chip. Scheduled jobs do not get it."))
             Divider()
             row(L10n.text("Задания по расписанию", "Scheduled jobs use"),
                 L10n.text("Роль для заданий этого проекта", "Role for jobs of this project")) {
@@ -307,7 +323,8 @@ struct ProjectSettingsView: View {
 
     private func save() {
         model.updateProjectRoles(project.id, chatRole: chatRole, jobRole: jobRole, extraRoots: extraRoots,
-                                 cookieSites: cookieSites.split(whereSeparator: \.isNewline).map(String.init), mcpServers: mcpServers)
+                                 cookieSites: cookieSites.split(whereSeparator: \.isNewline).map(String.init), mcpServers: mcpServers,
+                                 chatAddOns: chatAddOns)
         if shownOnPhone != initiallyShownOnPhone { phone.setProject(project.id, shown: shownOnPhone) }
         dismiss()
     }

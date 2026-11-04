@@ -350,7 +350,7 @@ public actor ClaudeIntegration: AgentIntegration {
                 // Every descendant of this CLI (also after `setsid`) carries the chat label for the orphan sweeper.
                 environment.merge(ProcessLabels.environment(chat: id)) { _, new in new }
                 // Same startup/tool limits as the Codex MCP entry (30 s / 90 s).
-                if server != nil || policy.connectors || !projectServers.isEmpty { environment.merge(Self.browserEnvironment) { _, new in new } }
+                if server != nil || policy.connectors || policy.userChrome || !projectServers.isEmpty { environment.merge(Self.browserEnvironment) { _, new in new } }
                 if policy.connectors { environment.merge(Self.connectorEnvironment) { _, new in new } }
                 try await wire.start(executable: executable, arguments: arguments, environment: environment, cwd: URL(fileURLWithPath: record.cwd))
                 wires[id] = wire; wireArguments[id] = launch; backgroundTasks[id] = []; stopWaiting(id)
@@ -446,8 +446,8 @@ public actor ClaudeIntegration: AgentIntegration {
             // The app's browser server (its tools run without a prompt, like scheduled runs) and the project's approved servers.
             // `--disable-slash-commands` turns off skills only; the servers' prompts stay available as `/mcp__<server>__<prompt>`.
             args += ["--disable-slash-commands"] + (try ClaudeJobRunner.mcpArguments(browser: browser, project: projectServers, chats: chatDirectory))
-        } else if connectors {
-            // `--safe-mode` would also drop claude.ai connectors, so its isolation is spelled out as in browser chats.
+        } else if connectors || chrome {
+            // `--safe-mode` would also drop claude.ai connectors and the user's Chrome, so its isolation is spelled out as in browser chats.
             args += ["--disable-slash-commands", "--mcp-config", "{\"mcpServers\":{}}"]
         } else { args += ["--safe-mode", "--mcp-config", "{\"mcpServers\":{}}"] }
         // `--setting-sources ""` also skips the profile's settings.json; only its commit/PR attribution is carried over.
@@ -881,11 +881,13 @@ public actor ClaudeIntegration: AgentIntegration {
             record(.init(tool: name, capability: capability, target: target, decision: .allowed, turn: turn), session: id)
             try? await respond(wire, requestID: requestID, response: .object(["behavior": .string("allow"), "updatedInput": input]))
         }
-        guard let turn, policy.permits(tool: name) else {
+        guard policy.permits(tool: name) else {
             await deny(L10n.text("Неподдерживаемый запрос", "Unsupported request"), .unsupportedTool); return
         }
         // An unattended run never waits: anything the engine asks about is outside the role and is refused.
-        let attended = profile.approvals == .ask && !policy.scheduled
+        // A request outside an active turn (a background sub-agent or task after the turn ended) gets the role's own
+        // answer; only what would need the user is refused, since no turn is there to show the prompt.
+        let attended = turn != nil && profile.approvals == .ask && !policy.scheduled
         let outside = L10n.text("Действие выходит за разрешённые границы роли", "Outside the role's permitted scope")
         switch name {
         case "Read", "Glob", "Grep", "Write", "Edit":
@@ -893,7 +895,7 @@ public actor ClaudeIntegration: AgentIntegration {
             if profile.filesystem != .unrestricted, let path = input["file_path"].string ?? input["path"].string {
                 let roots = writing ? policy.writableRoots : policy.readableRoots
                 let inProject = Self.isWithinProject(path, cwd: cwd)
-                var inside = inProject || roots.contains { Self.isWithinProject(path, cwd: $0) }
+                var inside = inProject || roots.contains { Self.isWithinProject(path, cwd: $0) } || (!writing && ClaudeLaunchPolicy.isAttachment(path))
                 if writing, profile.filesystem == .readOnly {
                     inside = profile.scratch.map { Self.isWithinProject(path, cwd: cwd + "/" + $0) } ?? false
                 }
@@ -929,6 +931,9 @@ public actor ClaudeIntegration: AgentIntegration {
                     guard !policy.scheduled else { await deny(outside); return }
                 }
             } else if !attended { await deny(outside); return }
+        }
+        guard let turn else {
+            await deny(L10n.text("Ход завершён: действие вне роли некому подтвердить", "The turn has ended: nobody can approve an action outside the role")); return
         }
         var questions: Set<String>?
         let kind: AgentInteraction.Kind

@@ -57,7 +57,7 @@ struct ClaudeLaunchPolicy: Equatable {
         // `--restricted` confines files to the project and drops code-running tools unless named; roots or a shell need the open form.
         restricted = !unrestricted && profile.extraRoots.isEmpty && profile.shell != .on
         connectors = profile.connectors != .off
-        userChrome = userChromeEnabled && profile.browser == .appAndUserChrome && !scheduled && connectors
+        userChrome = userChromeEnabled && profile.browser == .appAndUserChrome && !scheduled
         var allow: [String] = [], deny: [String] = [], ask: [String] = []
         if let scratch = profile.scratch, profile.filesystem == .readOnly {
             allow += Self.editTools.map { "\($0)(\(scratch)/**)" }
@@ -197,6 +197,21 @@ struct ClaudeLaunchPolicy: Equatable {
     /// Roots the role may read (all) and write (writable ones); the project itself is implied.
     var readableRoots: [String] { profile.extraRoots.map(\.path) }
     var writableRoots: [String] { profile.extraRoots.filter(\.writable).map(\.path) }
+
+    static let mediaExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic", "tif", "tiff", "bmp", "pdf"]
+    /// Files any role reads without a prompt: the user's attachments in the app's own home, and screenshots or PDFs
+    /// in temporary folders (where agents save their own captures). Reading only; writes keep the role's roots.
+    static func isAttachment(_ path: String, attachments: [String] = attachmentRoots) -> Bool {
+        // A relative path would resolve against the root being tested, not against the chat's folder.
+        guard path.hasPrefix("/") else { return false }
+        if attachments.contains(where: { ClaudeIntegration.isWithinProject(path, cwd: $0) }) { return true }
+        guard mediaExtensions.contains((path as NSString).pathExtension.lowercased()) else { return false }
+        let temporary = ["/tmp", "/var/folders"] + [ProcessInfo.processInfo.environment["TMPDIR"]].compactMap { $0 }
+        return temporary.contains { ClaudeIntegration.isWithinProject(path, cwd: $0) }
+    }
+    static var attachmentRoots: [String] {
+        [DroppedFiles.directory.path, Locations.root.appendingPathComponent("mobile-photos", isDirectory: true).path]
+    }
 }
 
 extension ProjectAgents {

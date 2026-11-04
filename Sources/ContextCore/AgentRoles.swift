@@ -39,6 +39,53 @@ public struct AgentRole: Codable, Hashable, Identifiable, Sendable {
         result.mcpServers = project.mcpServers.flatMap { $0.isEmpty ? nil : $0 }
         return result
     }
+    /// The project profile widened by the chat's add-ons; the rest of the role stays as it is.
+    public func profile(for project: Project, addOns: Set<RoleAddOn>) -> AgentPermissionProfile {
+        var result = profile(for: project)
+        guard !result.audit else { return result }
+        for addOn in addOns { addOn.apply(to: &result) }
+        return result
+    }
+}
+
+/// An extra permission a chat adds to its role instead of switching to a wider one.
+public enum RoleAddOn: String, Codable, CaseIterable, Identifiable, Sendable {
+    /// claude.ai connectors (Gmail, Calendar…): reads run silently, sends and other writes are asked.
+    case mail
+    /// The user's own Chrome next to the app's browser.
+    case userChrome
+
+    public var id: String { rawValue }
+    public func title(language: AppLanguage = L10n.language) -> String {
+        switch self {
+        case .mail: L10n.text("Почта и коннекторы", "Mail and connectors", language: language)
+        case .userChrome: L10n.text("Мой Chrome", "My Chrome", language: language)
+        }
+    }
+    public var title: String { title() }
+    /// The word the role chip appends: "Developer + mail".
+    public func shortTitle(language: AppLanguage = L10n.language) -> String {
+        switch self {
+        case .mail: L10n.text("почта", "mail", language: language)
+        case .userChrome: "Chrome"
+        }
+    }
+    public func summary(language: AppLanguage = L10n.language) -> String {
+        switch self {
+        case .mail: L10n.text("Gmail, Календарь и другие коннекторы: чтение без вопросов, отправка и изменения с подтверждением.",
+                              "Gmail, Calendar and other connectors: reads without prompts, sends and changes ask first.", language: language)
+        case .userChrome: L10n.text("Агент может работать в вашем Chrome, где вы уже вошли на сайты.",
+                                    "The agent can work in your Chrome, where you are already signed in to sites.", language: language)
+        }
+    }
+    public var summary: String { summary() }
+    /// Widens only; a role that already allows more keeps it.
+    public func apply(to profile: inout AgentPermissionProfile) {
+        switch self {
+        case .mail: if profile.connectors == .off || profile.connectors == .read { profile.connectors = .askWrites }
+        case .userChrome: profile.browser = .appAndUserChrome
+        }
+    }
 }
 
 public enum AgentRoleID {
@@ -112,6 +159,7 @@ extension Chat {
         return AgentRoleCatalog.preset((accessMode ?? .standard).legacyRoleID)
     }
     public var inheritsProjectRole: Bool { roleID == nil && inheritsProjectAccess == true }
+    public func resolvedAddOns(in project: Project) -> Set<RoleAddOn> { Set((roleAddOns ?? project.chatRoleAddOns ?? []).compactMap(RoleAddOn.init(rawValue:))) }
 }
 
 /// One-time mapping of stored access modes to explicit roles; reversible while the access fields stay populated.

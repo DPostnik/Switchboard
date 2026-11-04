@@ -6,6 +6,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Added
 
+- Your own skills in chats: Claude chats load `~/.claude/skills` and the app profile's skills, Codex chats `~/.codex/skills` (read-only, nothing is copied). The agent picks a skill by its description, a used skill shows as a "Skill: name" row in the chat, and typing `/` in the message field lists the engine's skills to insert (`/name` for Claude, `$name` for Codex). Claude Code's own bundled skills stay off.
+- Role add-ons "Mail and connectors" and "My Chrome": the lock chip and the project settings add Gmail and other connectors (reads silent, sends asked) or the user's Chrome to a chat's role, so a Developer chat no longer has to switch to Operator for them; scheduled jobs never get them.
 - Binary files in a turn's changes card and in the chat files panel (PDF, images) open in the preview beside the chat instead of an empty diff; PDF documents are shown with PDFKit as scrollable pages fitted to the pane's width.
 - Protocol drift diagnostics: events, item types and fields from Codex or Claude Code that the adapter does not recognize are counted by name (never content) instead of disappearing silently; Settings → Accounts shows a one-line summary per agent and the first occurrence of each is written to the system log (category compatibility).
 - Nightly agent CLI check: after the nightly tests, on AC power only, Switchboard compares the installed Codex and Claude Code with the verified versions and the latest published ones (npm, at most once a day), runs the no-inference live tests only for a newly installed unverified version, writes compat-status beside latest-status and notifies once per new problem or version.
@@ -43,6 +45,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Fixed
 
+- Claude chats: screenshots and PDFs in temporary folders and the user's own attachments are read without a prompt in every role, and a background sub-agent still working after the turn ended gets the role's normal answer instead of a silent refusal of every tool.
 - Switchboard no longer quits with a crash when a chat's text changes while the pointer is over the transcript: the hover lookup no longer runs mid-edit, when the message list and its text ranges briefly disagree.
 - Scrolling to the end of a chat while another chat is working no longer snaps the bounce back to the edge for one frame.
 - Claude chats: a message sent after Stop no longer looks unanswered when the restarted Claude Code first reports a stopped background task; the reply now shows in the chat.

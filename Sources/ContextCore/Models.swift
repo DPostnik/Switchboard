@@ -11,6 +11,8 @@ public struct Project: Identifiable, Codable, Hashable, Sendable {
     /// Role defaults (`AgentRoleID`); nil falls back to the legacy access modes above.
     public var chatRoleID: String?
     public var jobRoleID: String?
+    /// Add-ons (`RoleAddOn` raw values; unknown ones are skipped) new chats get on top of the chat role; scheduled jobs never use them.
+    public var chatRoleAddOns: [String]?
     /// Folders outside the project a `developer` or `routine-operator` role may use; declared here, never by the agent.
     public var extraRoots: [AgentPermissionProfile.Root]?
     /// Sites a `routine-operator` job may import Chrome cookies for.
@@ -79,6 +81,8 @@ public struct Chat: Identifiable, Codable, Hashable, Sendable {
     public var inheritsProjectAccess: Bool?
     /// Explicit role (`AgentRoleID`); nil with `inheritsProjectAccess` follows the project, otherwise the legacy `accessMode`.
     public var roleID: String?
+    /// Add-ons on top of the role (`RoleAddOn`); nil follows the project's `chatRoleAddOns`.
+    public var roleAddOns: [String]?
     /// Derived from the resolved role; kept for the phone protocol and older call sites.
     public func resolvedAccessMode(in project: Project, catalog: AgentRoleCatalog = AgentRoleCatalog()) -> AccessMode {
         resolvedRole(in: project, catalog: catalog).legacyAccessMode

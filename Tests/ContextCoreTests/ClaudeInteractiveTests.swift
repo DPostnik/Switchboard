@@ -96,6 +96,7 @@ private func interactiveFixture(_ root: URL) throws -> URL {
     browser='--mcp-config' in sys.argv and 'switchboard_browser' in sys.argv[sys.argv.index('--mcp-config')+1]
     full=sys.argv[sys.argv.index('--permission-mode')+1]=='bypassPermissions'
     twice=False
+    late=False
     editor='--restricted' in sys.argv and sys.argv[sys.argv.index('--tools')+1]=='Read,Glob,Grep,Write,Edit,AskUserQuestion'
     connectors='--strict-mcp-config' not in sys.argv
     assert ('--safe-mode' in sys.argv) == (not browser and not connectors) and '--setting-sources' in sys.argv
@@ -267,6 +268,14 @@ private func interactiveFixture(_ root: URL) throws -> URL {
                 out({'type':'assistant','session_id':sid,'parent_tool_use_id':None,'message':{'id':'w-'+sid,'content':[{'type':'tool_use','id':'w1','name':'Write','input':{'file_path':path,'content':'x'}}]}})
                 out({'type':'control_request','request_id':'permission','request':{'subtype':'can_use_tool','tool_name':'Write','input':{'file_path':path,'content':'x'},'tool_use_id':'w1'}})
                 continue
+            if prompt=='after-turn':
+                # A background sub-agent keeps working after the turn ended: a screenshot read, then a write outside the project.
+                result()
+                late=True
+                shot=str(pathlib.Path(os.environ.get('TMPDIR','/tmp'))/'late-shot.png')
+                out({'type':'control_request','request_id':'late-read','request':{'subtype':'can_use_tool','tool_name':'Read','input':{'file_path':shot}}})
+                out({'type':'control_request','request_id':'late-write','request':{'subtype':'can_use_tool','tool_name':'Write','input':{'file_path':'/outside-project/file','content':'x'}}})
+                continue
             if prompt in ['approval','question','outside','connector','approval-twice']:
                 name='AskUserQuestion' if prompt=='question' else 'mcp__claude_ai_Gmail__send_message' if prompt=='connector' else 'Write'
                 args={'questions':[{'question':'Choose','options':[{'label':'Yes','description':'Go ahead','preview':'print(1)'},{'label':'No','description':' '}]}]} if prompt=='question' else {'file_path':'/outside-project/file' if prompt=='outside' else str(pathlib.Path.cwd()/'fixture.txt'),'content':'content'}
@@ -296,6 +305,7 @@ private func interactiveFixture(_ root: URL) throws -> URL {
             if twice and value['response']['request_id']=='permission-2':
                 out({'type':'control_request','request_id':'permission-3','request':{'subtype':'can_use_tool','tool_name':'Bash','input':{'command':'echo hi'}}})
                 continue
+            if late: continue
             result()
     """#
     try Data(script.utf8).write(to: executable)
@@ -335,6 +345,41 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     let launch = try String(contentsOf: home.appendingPathComponent("submitted"), encoding: .utf8)
     #expect(launch.contains("acceptEdits") && launch.contains("--restricted"))
     await adapter.disconnect()
+}
+
+@Test func claudeRequestsAfterTheTurnGetTheRoleAnswerWithoutAPrompt() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let developer = AgentRoleCatalog.preset(AgentRoleID.developer).profile
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root, role: developer)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "after-turn", role: developer)).value()
+    try await waitFor { await events.capabilities().count == 2 }
+    // The screenshot read is inside every role; the outside write would need the user, and no turn is there to ask.
+    #expect(await events.capabilities().map(\.decision) == [.allowed, .denied])
+    #expect(await events.interaction() == nil)
+    await adapter.disconnect()
+}
+
+@Test func claudeAttachmentsAreScreenshotsInTemporaryFoldersAndTheAppsOwnFiles() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let attachments = root.appendingPathComponent("dropped-files")
+    try FileManager.default.createDirectory(at: attachments, withIntermediateDirectories: true)
+    #expect(ClaudeLaunchPolicy.isAttachment(attachments.appendingPathComponent("A/notes.txt").path, attachments: [attachments.path]))
+    #expect(ClaudeLaunchPolicy.isAttachment("/tmp/check.PNG", attachments: []))
+    #expect(ClaudeLaunchPolicy.isAttachment(root.appendingPathComponent("doc.pdf").path, attachments: []))
+    #expect(!ClaudeLaunchPolicy.isAttachment("/tmp/notes.txt", attachments: []))
+    #expect(!ClaudeLaunchPolicy.isAttachment("shot.png", attachments: []))
+    #expect(!ClaudeLaunchPolicy.isAttachment(NSHomeDirectory() + "/Desktop/shot.png", attachments: []))
+    // A temporary link to a file elsewhere is judged by its target.
+    let link = root.appendingPathComponent("escape.png")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: URL(fileURLWithPath: NSHomeDirectory() + "/secret.png"))
+    #expect(!ClaudeLaunchPolicy.isAttachment(link.path, attachments: []))
 }
 
 @Test func claudeTurnStoppedOnThePlanLimitCarriesItsResetTime() async throws {
