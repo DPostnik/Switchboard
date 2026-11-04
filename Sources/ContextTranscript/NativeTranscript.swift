@@ -1,4 +1,5 @@
 import AppKit
+import os
 import SwiftUI
 import ContextCore
 
@@ -315,6 +316,11 @@ public struct NativeTranscript: NSViewRepresentable {
         if let id = conversationID, let position = pendingPosition ?? capturePosition() { positions.values[id] = position }
         pendingPosition = nil; needsEndScroll = false; deferredEndScroll = nil
         hoveredItemID = nil; hoveredSection = nil
+        // Swapping the text resizes the text view and moves the viewport while `previous` and `ranges` still describe the
+        // chat being left: saved as its reading place, that move reopened it near the top.
+        let wasChanging = changingLayout
+        changingLayout = true
+        defer { changingLayout = wasChanging }
         guard !isDocument, let manager = transcript.layoutManager, let storage = transcript.textStorage else { return false }
         // A search belongs to the chat it ran in (the view used to be rebuilt on every switch).
         if isFindBarVisible { isFindBarVisible = false }
@@ -545,6 +551,7 @@ public struct NativeTranscript: NSViewRepresentable {
         if switched {
             needsEndScroll = false
             pendingPosition = conversationID.flatMap { positions.values[$0] }
+            openRestorePending = pendingPosition != nil
             if pendingPosition == nil { scrollToEnd() }
         } else if followOutput && (resumeFollowing || sentMessage) { scrollToEnd() }
         else if wasAtEnd && !(liveScrolling && tailOnly) { scrollToEnd() }
@@ -953,6 +960,7 @@ public struct NativeTranscript: NSViewRepresentable {
             refreshHover()
         }
         workingIndicator.refreshAnimation()
+        logJumpAfterRestore()
         // Past an edge the rubber band owns the origin. Layout here (the end check lays out the last rows) could resize
         // the text view, and the clip view then clamped the origin back to the edge for one frame mid-bounce.
         let viewport = contentView.bounds
@@ -1019,6 +1027,37 @@ public struct NativeTranscript: NSViewRepresentable {
             contentView.scroll(to: NSPoint(x: 0, y: max(0, y)))
             reflectScrolledClipView(contentView)
         }
+        guard !isDocument, openRestorePending else { return }
+        openRestorePending = false
+        // A chat sometimes reopened at its top (2026-11-04, not reproduced): the restore and any jump after it are logged.
+        let found: String
+        if case let .anchor(itemID, _, _, _) = position {
+            found = previous.contains { $0.id == itemID } ? "found" : historyBacklog.contains { $0.id == itemID } ? "in backlog" : "missing"
+        } else { found = "end" }
+        restoredAt = ProcessInfo.processInfo.systemUptime
+        Self.placeLog.notice("""
+            restore \(self.conversationID ?? "", privacy: .public) \(found, privacy: .public): y \(Int(self.contentView.bounds.minY)) \
+            of \(Int(self.transcript.frame.height)), \(self.previous.count) rows, backlog \(self.historyBacklog.count)
+            """)
+    }
+
+    /// Reading-place diagnostics: identifiers and coordinates only, never message text.
+    private static let placeLog = Logger(subsystem: "local.daniil.switchboard", category: "transcript")
+    private var restoredAt: TimeInterval = 0
+    private var openRestorePending = false
+    private var lastViewportY: CGFloat = 0
+
+    /// Logs a viewport that moves up by more than two heights at once without a gesture soon after a restore.
+    private func logJumpAfterRestore() {
+        let y = contentView.bounds.minY
+        defer { lastViewportY = y }
+        guard !isDocument, !liveScrolling, ProcessInfo.processInfo.systemUptime - restoredAt < 5,
+              lastViewportY - y > 2 * max(contentView.bounds.height, 1) else { return }
+        Self.placeLog.notice("""
+            jump \(self.conversationID ?? "", privacy: .public): y \(Int(self.lastViewportY)) -> \(Int(y)) of \
+            \(Int(self.transcript.frame.height)), layout \(self.changingLayout), pending \(self.pendingPosition != nil), \
+            backlog \(self.historyBacklog.count)
+            """)
     }
 
     /// Non-contiguous TextKit layout can place the final glyph at an estimated position. Lay out the last rows

@@ -864,6 +864,54 @@ func stats(_ values: [Double]) -> [String: Any] {
             try await Task.sleep(for: .milliseconds(400))
         }
         report["desk_switch"] = ["rows": rows, "distinct_transcript_views": views, "switches": order.count]
+        guard env["SWITCHBOARD_SCROLL_DESK_SWITCHBACK"] == "1", let long = sizes.max(), let short = sizes.min(), long != short else { return }
+        // The reader leaves the long chat near its end and comes back through the loading state, the stored transcript and
+        // the engine's history (reported: the chat sometimes opened at the top).
+        var backRows: [[String: Any]] = []
+        func open(_ size: Int, items: [TranscriptItem]? = nil) async throws {
+            model.transcript.cancelPending()
+            model.chatID = "desk-\(size)"
+            model.loadingChat = true; model.items = []
+            try await Task.sleep(for: .milliseconds(1))
+            model.items = items ?? transcripts[size]!
+            model.loadingChat = false
+            try await Task.sleep(for: .milliseconds(150))
+            model.items = (items ?? transcripts[size]!).map { $0 }
+            _ = try await waitForTranscript("desk-\(size)", count: 1)
+            try await Task.sleep(for: .milliseconds(400))
+        }
+        func place() -> [String: Any] {
+            guard let view = TranscriptScrollView.chatTranscript else { return [:] }
+            let y = view.contentView.bounds.minY
+            return ["chat": view.conversationIDForProbe ?? "", "y": Int(y),
+                    "from_end": Int(view.transcript.frame.height - view.contentView.bounds.height - y),
+                    "position": String(describing: TranscriptReadingPositions.session.values["desk-\(long)"] ?? .end)
+                        .replacingOccurrences(of: "ContextTranscript.TranscriptReadingPositions.Position.", with: "")]
+        }
+        for scenario in ["idle", "answer away", "two returns"] {
+            try await open(long)
+            while (TranscriptScrollView.chatTranscript?.backlogCountForProbe ?? 0) > 0 { try await Task.sleep(for: .milliseconds(20)) }
+            guard let view = TranscriptScrollView.chatTranscript else { continue }
+            let bottom = view.transcript.frame.height - view.contentView.bounds.height
+            view.contentView.scroll(to: NSPoint(x: 0, y: max(0, bottom - 1.5 * view.contentView.bounds.height)))
+            view.reflectScrolledClipView(view.contentView); window.displayIfNeeded()
+            try await Task.sleep(for: .milliseconds(300))
+            var row: [String: Any] = ["scenario": scenario, "before": place()]
+            try await open(short)
+            row["away"] = place()
+            var items = transcripts[long]!
+            if scenario == "answer away" { items += [TranscriptItem(id: "desk-live-user", kind: "user", text: "Stream"),
+                                                   TranscriptItem(id: "desk-live", kind: "assistant", text: String(repeating: "Live answer line\n", count: 80))] }
+            try await open(long, items: items)
+            row["returned"] = place()
+            if scenario == "two returns" {
+                try await open(short); try await open(long)
+                row["returned_again"] = place()
+            }
+            backRows.append(row)
+            fputs("desk switchback \(row)\n", stderr)
+        }
+        report["desk_switchback"] = backRows
     }
 
     // MARK: Profiler loops
@@ -1012,6 +1060,68 @@ func stats(_ values: [Double]) -> [String: Any] {
                 try await settle()
             }
             report["end_gap"] = runs
+        case "switchback":
+            // The reader leaves a chat near its end and comes back: the place should survive (reported: the chat opened at the top).
+            var runs: [[String: Any]] = []
+            let other = Array(items.prefix(40))
+            var synth = Synth(seed: 9)
+            let answer = synth.answer(size: 9000)
+            for scenario in ["idle", "finished away", "started away", "streaming away", "recreated view"] {
+                let positions = TranscriptReadingPositions()
+                func show(_ shown: [TranscriptItem], _ id: String, working: Bool = false) async throws {
+                    view.update(items: shown, conversationID: id, followOutput: true, isWorking: working, workingStatus: working ? "Writing" : nil,
+                                workingSince: working ? Date() : nil, projectPath: project)
+                    window.contentView?.layoutSubtreeIfNeeded(); flushFrame()
+                    try await Task.sleep(for: .milliseconds(30))
+                }
+                func place() -> [String: Any] {
+                    let y = view.contentView.bounds.minY
+                    let bottom = view.transcript.frame.height - view.contentView.bounds.height
+                    return ["y": Int(y), "from_end": Int(bottom - y), "position": String(describing: positions.values["a"] ?? .end)
+                        .replacingOccurrences(of: "ContextTranscript.TranscriptReadingPositions.Position.", with: "")]
+                }
+                let next = TranscriptScrollView(positions: positions)
+                window.contentView = next; window.contentView?.layoutSubtreeIfNeeded(); view = next
+                try await show(other, "b")
+                var a = items
+                let working = scenario == "finished away" || scenario == "streaming away"
+                if working { a += [TranscriptItem(id: "live-user", kind: "user", text: "Stream"),
+                                   TranscriptItem(id: "live", kind: "assistant", text: String(answer.prefix(3000)))] }
+                try await show(a, "a", working: working)
+                while view.backlogCountForProbe > 0 { try await Task.sleep(for: .milliseconds(20)) }
+                try await Task.sleep(for: .milliseconds(300))
+                let bottom = view.transcript.frame.height - view.contentView.bounds.height
+                view.contentView.scroll(to: NSPoint(x: 0, y: max(0, bottom - 1.5 * view.contentView.bounds.height)))
+                view.reflectScrolledClipView(view.contentView); flushFrame()
+                try await Task.sleep(for: .milliseconds(200))
+                var row: [String: Any] = ["scenario": scenario, "before": place()]
+                if scenario == "recreated view" {
+                    let fresh = TranscriptScrollView(positions: positions)
+                    window.contentView = fresh; window.contentView?.layoutSubtreeIfNeeded(); view = fresh
+                }
+                try await show(other, "b")
+                try await Task.sleep(for: .milliseconds(300))
+                row["away"] = place()
+                switch scenario {
+                case "finished away": a[a.count - 1].text = answer
+                case "started away": a += [TranscriptItem(id: "live-user", kind: "user", text: "Stream"),
+                                           TranscriptItem(id: "live", kind: "assistant", text: String(answer.prefix(2000)))]
+                case "streaming away": a[a.count - 1].text = String(answer.prefix(6000))
+                default: break
+                }
+                let returnWorking = scenario == "started away" || scenario == "streaming away"
+                try await show(a, "a", working: returnWorking)
+                row["returned"] = place()
+                // The engine's history replaces the stored transcript shortly after an open.
+                try await Task.sleep(for: .milliseconds(300))
+                if returnWorking { a[a.count - 1].text += "\nMore streamed text." }
+                try await show(a, "a", working: returnWorking)
+                try await Task.sleep(for: .milliseconds(1000))
+                row["settled"] = place()
+                runs.append(row)
+                fputs("switchback \(row)\n", stderr)
+            }
+            report["switchback"] = runs
         case "scrollidle":
             // One scroll pass, then nothing: shows work the scroll leaves running after it stops.
             freshView(); _ = timedUpdate(items, id: "loop")

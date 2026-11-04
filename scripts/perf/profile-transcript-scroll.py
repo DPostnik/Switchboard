@@ -59,7 +59,7 @@ def main():
     parser.add_argument('--phases', default='open,scroll,stream,desk', help='phases of the full run')
     parser.add_argument('--no-text-checking', action='store_true',
                         help='experiment: turn off NSTextView automatic text checking in the probe views')
-    parser.add_argument('--only', choices=['open', 'scroll', 'stream', 'scrollidle', 'scrollfull', 'afteropen', 'fill', 'endgap', 'wheelgap'])
+    parser.add_argument('--only', choices=['open', 'scroll', 'stream', 'scrollidle', 'scrollfull', 'afteropen', 'fill', 'endgap', 'wheelgap', 'switchback'])
     parser.add_argument('--seconds', type=int, default=20)
     parser.add_argument('--sample', action='store_true', help='attach /usr/bin/sample during --only')
     parser.add_argument('--skip-build', action='store_true')
