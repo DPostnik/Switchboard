@@ -1048,6 +1048,8 @@ struct ChatView: View {
     /// Files the open chat changed or cited, in a column on the chat's right; it appears once the chat has any.
     /// Held without observing it: only `ChatFilesOverlay` redraws when the lists change, not the whole chat.
     @State private var chatFiles = ChatFilesModel()
+    /// The composer's `/` skill list, held without observing it like `chatFiles`: only its menu redraws as it changes.
+    @State private var skillSuggestions = SkillSuggestionController()
     /// Composer column: the transcript's readable text width (magnified with the interface zoom) plus the composer's side insets.
     private var columnWidth: CGFloat { InterfaceZoom.shared.scaled(TranscriptScrollView.readableWidth) + 48 }
     /// The composer grows and shrinks smoothly; past its cap the height no longer changes, so nothing animates.
@@ -1134,7 +1136,8 @@ struct ChatView: View {
                 ComposerEditor(composer: model.composer,
                                placeholder: model.selectedChat?.isScheduledRecord == true ? L10n.text("Ответить в новом чате…", "Reply in a new chat…") : L10n.text("Напиши сообщение…", "Write a message…"),
                                focused: $composerFocused, focusRequest: model.composerFocusRequest,
-                               height: min(max(composerHeight, 40), 220), onContentHeight: resizeComposer) { Task { await model.send() } }
+                               height: min(max(composerHeight, 40), 220), onContentHeight: resizeComposer,
+                               completion: skillSuggestions) { Task { await model.send() } }
                 if !model.roleApproximations.isEmpty {
                     // No vertical fixedSize here: during the window's minimum-size pass it wrapped the notice one
                     // character per line, so both columns got a ~1500 pt minimum height and overflowed the window.
@@ -1172,6 +1175,12 @@ struct ChatView: View {
             }.background(RoundedRectangle(cornerRadius: 20).fill(DeskPalette.canvas).shadow(color: DeskPalette.shadow, radius: 14, y: 4))
                 .overlay(RoundedRectangle(cornerRadius: 20.75).stroke(DeskPalette.focusBorder, lineWidth: 1.5).padding(-0.75)
                     .opacity(composerFocused ? 1 : 0).allowsHitTesting(false))
+                // Rises above the composer's top edge, over the transcript.
+                .overlay(alignment: .topLeading) {
+                    SkillSuggestionMenu(controller: skillSuggestions)
+                        .padding(.horizontal, .ui(8))
+                        .alignmentGuide(.top) { $0[.bottom] + 6 }
+                }
                 .frame(maxWidth: columnWidth).padding(.horizontal, .ui(24)).padding(.top, .ui(10))
                 .padding(.bottom, showsComposerFooter ? 0 : .ui(14))
             }
@@ -1273,6 +1282,10 @@ struct ChatView: View {
         // The column appears by itself once the chat has files, so its lists follow the transcript; the update is
         // throttled and parses only changed messages.
         .onChange(of: model.chatID, initial: true) { _, _ in refreshChatFiles(immediately: true) }
+        .onChange(of: model.chatID) { _, _ in skillSuggestions.reset() }
+        .onChange(of: model.currentAgent, initial: true) { _, agent in
+            skillSuggestions.setEngine(SkillSuggestions.syntax(for: agent.agent))
+        }
         .onReceive(model.transcript.$items) { _ in refreshChatFiles() }
         .overlay {
             ZStack {
@@ -1371,13 +1384,15 @@ private struct ComposerEditor: View {
     let focusRequest: UUID?
     let height: CGFloat
     let onContentHeight: (CGFloat) -> Void
+    let completion: SkillSuggestionController
     let onSubmit: () -> Void
     var body: some View {
         ZStack(alignment: .topLeading) {
             if !composer.hasText {
                 Text(placeholder).font(.ui(size: 14)).foregroundStyle(.secondary).padding(.horizontal, 21).padding(.top, 16).allowsHitTesting(false)
             }
-            MessageComposer(state: composer, focused: $focused, focusRequest: focusRequest, onContentHeight: onContentHeight, onSubmit: onSubmit)
+            MessageComposer(state: composer, focused: $focused, focusRequest: focusRequest, onContentHeight: onContentHeight,
+                            completion: completion, onSubmit: onSubmit)
                 .frame(height: height).padding(.horizontal, 16).padding(.top, 14).accessibilityLabel(L10n.text("Сообщение", "Message"))
         }
     }

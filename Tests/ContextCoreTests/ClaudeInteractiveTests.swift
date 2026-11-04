@@ -97,7 +97,7 @@ private func interactiveFixture(_ root: URL) throws -> URL {
     full=sys.argv[sys.argv.index('--permission-mode')+1]=='bypassPermissions'
     twice=False
     late=False
-    editor='--restricted' in sys.argv and sys.argv[sys.argv.index('--tools')+1]=='Read,Glob,Grep,Write,Edit,AskUserQuestion'
+    editor='--restricted' in sys.argv and sys.argv[sys.argv.index('--tools')+1]=='Read,Glob,Grep,Write,Edit,Skill,AskUserQuestion'
     connectors='--strict-mcp-config' not in sys.argv
     assert ('--safe-mode' in sys.argv) == (not browser and not connectors) and '--setting-sources' in sys.argv
     # The editor and operator roles keep the old standard/full flags; scheduled operator turns run without connector approval rules.
@@ -440,7 +440,7 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     #expect(refusals.map(\.decision) == [.hookDenied, .hookDenied, .hookDenied] && refusals.first?.target == "my-terminal")
     let launch = try String(contentsOf: home.appendingPathComponent("submitted"), encoding: .utf8)
     #expect(launch.contains("acceptEdits") && launch.contains("Grep,Write,Edit,Bash,WebFetch") && !launch.contains("--restricted"))
-    #expect(launch.contains("Agent,SendMessage,AskUserQuestion"))
+    #expect(launch.contains("Agent,SendMessage,Skill,AskUserQuestion"))
     let controls = try String(contentsOf: home.appendingPathComponent("controls"), encoding: .utf8).split(separator: "\n")
         .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
     let initialize = try #require(controls.first { $0["request"]["subtype"].string == "initialize" })

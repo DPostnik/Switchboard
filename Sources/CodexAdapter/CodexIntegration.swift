@@ -24,8 +24,10 @@ public actor CodexIntegration: AgentIntegration {
     private var interactionContexts: [UUID: AgentContext] = [:]
     /// The last model list `models()` returned; it names the choices of the model and effort config options.
     private var knownModels: [AgentModelInfo] = []
-    public init(client: CodexClient = CodexClient()) {
-        self.client = client
+    /// The user's own skill folder (`~/.codex/skills` in the app), registered read-only next to the app's workflows.
+    private let userSkills: URL?
+    public init(client: CodexClient = CodexClient(), userSkills: URL? = nil) {
+        self.client = client; self.userSkills = userSkills
         let pair = AsyncStream<AgentEvent>.makeStream(); events = pair.stream; sink = pair.continuation
     }
     deinit { observer?.cancel(); sink.finish() }
@@ -153,8 +155,12 @@ public actor CodexIntegration: AgentIntegration {
     public func limits() async -> AgentResult<AccountLimits> { await perform(readOnly: true) { try await self.client.limits() } }
     public func configure(_ tools: AgentToolConfiguration, context: AgentContext) async -> AgentResult<Void> {
         guard tools.servers.isEmpty else { return .rejected(.unsupported(.toolRegistration)) }
+        // `skills/extraRoots/set` replaces the whole list, so the user's folder rides along with every registration.
+        var isDirectory: ObjCBool = false
+        let user = userSkills.flatMap { FileManager.default.fileExists(atPath: $0.path, isDirectory: &isDirectory) && isDirectory.boolValue ? $0 : nil }
+        let roots = tools.workflowDirectories + (user.map { tools.workflowDirectories.contains($0) ? [] : [$0] } ?? [])
         return await perform(context) {
-            try await self.client.registerWorkflows(at: tools.workflowDirectories)
+            try await self.client.registerWorkflows(at: roots)
         }
     }
     private func access(_ permission: AgentPermissionIntent) throws -> AgentPermissionProfile {

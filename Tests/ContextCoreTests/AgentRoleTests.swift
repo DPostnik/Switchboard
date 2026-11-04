@@ -146,7 +146,7 @@ private func settings(_ args: [String]) throws -> JSONValue {
 @Test func claudeEncodesEditorAndOperatorExactlyAsTheOldModes() throws {
     let editor = try claudeArguments(preset(AgentRoleID.editor), agents: #"{"w":{"description":"d","prompt":"p"}}"#)
     #expect(editor.contains("--strict-mcp-config") && editor.contains("--safe-mode") && editor.contains("--restricted"))
-    #expect(value(after: "--tools", in: editor) == "Read,Glob,Grep,Write,Edit,AskUserQuestion")
+    #expect(value(after: "--tools", in: editor) == "Read,Glob,Grep,Write,Edit,Skill,AskUserQuestion")
     #expect(value(after: "--permission-mode", in: editor) == "acceptEdits") // project writes no longer ask
     #expect(try settings(editor) == .object(["crossSessionInbound": .string("refuse")]))
     #expect(!editor.contains("--agents") && !editor.contains("--chrome") && !editor.contains("--add-dir"))
@@ -167,7 +167,7 @@ private func settings(_ args: [String]) throws -> JSONValue {
 @Test func claudeEncodesReaderDeveloperAndRoutineRoles() throws {
     let project = project(extraRoots: [.init(path: "/Users/me/fringe", writable: true)])
     let reader = try claudeArguments(preset(AgentRoleID.reader), browser: true)
-    #expect(value(after: "--tools", in: reader) == "Read,Glob,Grep,Write,Edit,WebFetch,WebSearch,Agent,SendMessage,AskUserQuestion")
+    #expect(value(after: "--tools", in: reader) == "Read,Glob,Grep,Write,Edit,WebFetch,WebSearch,Agent,SendMessage,Skill,AskUserQuestion")
     #expect(value(after: "--permission-mode", in: reader) == "default" && reader.contains("--restricted") && !reader.contains("--strict-mcp-config"))
     let readerSettings = try settings(reader)["permissions"]
     #expect(readerSettings["allow"].array == [.string("Write(research/**)"), .string("Edit(research/**)"), .string("WebFetch"), .string("WebSearch"), .string("mcp__claude_ai_*")])
@@ -175,7 +175,7 @@ private func settings(_ args: [String]) throws -> JSONValue {
     #expect(readerSettings["deny"].array.contains { ($0.string ?? "").hasPrefix("mcp__claude_ai_*__*send") })
     #expect(reader.contains("--mcp-config") && reader.contains("mcp__switchboard_browser"))
     let developer = try claudeArguments(preset(AgentRoleID.developer), agents: #"{"w":{"description":"d","prompt":"p","tools":["Read","Bash","Write"]}}"#, project: project)
-    #expect(value(after: "--tools", in: developer) == "Read,Glob,Grep,Write,Edit,Bash,WebFetch,WebSearch,Agent,SendMessage,AskUserQuestion")
+    #expect(value(after: "--tools", in: developer) == "Read,Glob,Grep,Write,Edit,Bash,WebFetch,WebSearch,Agent,SendMessage,Skill,AskUserQuestion")
     #expect(value(after: "--permission-mode", in: developer) == "acceptEdits" && !developer.contains("--restricted"))
     #expect(value(after: "--add-dir", in: developer) == "/Users/me/fringe" && developer.contains("--strict-mcp-config"))
     let developerSettings = try settings(developer)["permissions"]

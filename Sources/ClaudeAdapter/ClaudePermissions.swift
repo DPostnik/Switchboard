@@ -95,7 +95,8 @@ struct ClaudeLaunchPolicy: Equatable {
         if profile.network { list += fetchTools } else if profile.webSearch { list.append("WebSearch") }
         // `SendMessage` continues a sub-agent (new instructions, a resumed finished one); the send hook limits its targets.
         if profile.subagentRole != nil { list += ["Agent", "SendMessage"] }
-        list.append("AskUserQuestion")
+        // `Skill` only loads a skill's instructions into the turn; the tools the skill then uses keep this list's limits.
+        list += ["Skill", "AskUserQuestion"]
         return list
     }
     /// `permissions` for `--settings`; nil when the launch carries none.

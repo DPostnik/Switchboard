@@ -10,7 +10,18 @@ public enum ToolCallText {
         let last = (path as NSString).lastPathComponent
         return last.isEmpty ? path : last
     }
-    public static func read(_ path: String) -> String { L10n.text("Чтение \(name(path))", "Read \(name(path))") }
+    /// Reading a skill's `SKILL.md` is loading that skill (Codex reads it like any file).
+    public static func read(_ path: String) -> String {
+        if let skill = skillName(reading: path) { return self.skill(skill) }
+        return L10n.text("Чтение \(name(path))", "Read \(name(path))")
+    }
+    public static func skill(_ name: String) -> String { L10n.text("Скилл: \(name)", "Skill: \(name)") }
+    /// The skill a path's file holds: the folder of a `SKILL.md`; nil for any other file.
+    public static func skillName(reading path: String) -> String? {
+        guard (path as NSString).lastPathComponent == "SKILL.md" else { return nil }
+        let folder = ((path as NSString).deletingLastPathComponent as NSString).lastPathComponent
+        return folder.isEmpty || folder == "/" ? nil : folder
+    }
     public static func edit(_ path: String) -> String { L10n.text("Изменение \(name(path))", "Edit \(name(path))") }
     public static func write(_ path: String) -> String { L10n.text("Запись \(name(path))", "Write \(name(path))") }
     public static func create(_ path: String) -> String { L10n.text("Создание \(name(path))", "Create \(name(path))") }

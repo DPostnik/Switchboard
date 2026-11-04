@@ -9,8 +9,9 @@ import ACPAdapter
 /// A new agent is one more `AgentProfile` in `profiles` and a case in `registrations`; the app iterates them.
 enum AgentIntegrationFactory {
     static let claudeVersion = ClaudeJobRunner.version
-    static func codex() -> any AgentIntegration { CodexIntegration() }
-    static func claude() -> any AgentIntegration { ClaudeIntegration() }
+    /// The user's own skill folders, loaded read-only in chats (user decision 2026-11-04).
+    static func codex() -> any AgentIntegration { CodexIntegration(userSkills: SkillCatalog.codexRoots[0]) }
+    static func claude() -> any AgentIntegration { ClaudeIntegration(userSkills: SkillCatalog.claudeRoots[0]) }
     static func gemini() -> any AgentIntegration { ACPIntegration(profile: GeminiProfile.profile) }
 
     /// The presentation table: every agent this build supports, in the order the app lists them.

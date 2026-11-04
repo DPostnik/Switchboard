@@ -71,7 +71,9 @@ enum CodexToolCalls {
             }
         }
         let query = kind == .search ? actions.compactMap({ $0["query"].string }).first : nil
-        return AgentToolCall(id: id, kind: kind, status: status(raw["status"].string), title: command, locations: locations,
+        // Codex loads a skill by reading its `SKILL.md`; the row names the skill instead of the shell command.
+        let skill = kind == .read ? locations.lazy.compactMap({ ToolCallText.skillName(reading: $0.path) }).first : nil
+        return AgentToolCall(id: id, kind: kind, status: status(raw["status"].string), title: skill.map(ToolCallText.skill) ?? command, locations: locations,
                              content: [.terminal(.init(command: command, exitCode: raw["exitCode"].int))], inputSummary: query)
     }
 

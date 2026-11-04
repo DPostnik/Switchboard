@@ -36,6 +36,18 @@ import SwiftUI
     }
 }
 
+/// Keys the composer offers a completion list while it is open.
+public enum ComposerCompletionKey: Sendable { case up, down, accept, dismiss }
+
+/// A list that completes what is typed in the composer (the `/` skill list). The editor reports every change of its
+/// text or caret, and while `isActive` it offers the list's keys first, so Return accepts instead of sending.
+@MainActor public protocol ComposerCompletion: AnyObject {
+    var isActive: Bool { get }
+    func editorChanged(_ editor: NSTextView)
+    /// True when the list used the key.
+    func handle(_ key: ComposerCompletionKey, in editor: NSTextView) -> Bool
+}
+
 public struct MessageComposer: NSViewRepresentable {
     let state: ComposerState
     /// Read at render time so a write from the owner makes this value differ and the editor updates.
@@ -48,12 +60,15 @@ public struct MessageComposer: NSViewRepresentable {
     let onCancel: (() -> Void)?
     /// Reports the text's height so the composer can grow with what is typed.
     let onContentHeight: ((CGFloat) -> Void)?
+    /// Held weakly by the editor; nil leaves every key to the editor.
+    let completion: (any ComposerCompletion)?
     /// Read while the parent renders, so a zoom change updates the editor font.
     let fontSize = InterfaceZoom.shared.scaled(14)
     public init(state: ComposerState, focused: Binding<Bool>, focusRequest: UUID? = nil,
-                onContentHeight: ((CGFloat) -> Void)? = nil, onCancel: (() -> Void)? = nil, onSubmit: @escaping () -> Void) {
+                onContentHeight: ((CGFloat) -> Void)? = nil, onCancel: (() -> Void)? = nil,
+                completion: (any ComposerCompletion)? = nil, onSubmit: @escaping () -> Void) {
         self.state = state; revision = state.revision; _focused = focused; self.focusRequest = focusRequest; self.onSubmit = onSubmit
-        self.onContentHeight = onContentHeight; self.onCancel = onCancel
+        self.onContentHeight = onContentHeight; self.onCancel = onCancel; self.completion = completion
     }
     public func makeCoordinator() -> Coordinator { Coordinator(self) }
     public func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
@@ -75,7 +90,7 @@ public struct MessageComposer: NSViewRepresentable {
         editor.textContainer?.widthTracksTextView = true
         editor.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         editor.delegate = context.coordinator
-        editor.onSubmit = onSubmit; editor.onCancel = onCancel
+        editor.onSubmit = onSubmit; editor.onCancel = onCancel; editor.completion = completion
         editor.setAccessibilityLabel(L10n.text("Сообщение", "Message"))
         scroll.drawsBackground = false; scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = false
         scroll.autohidesScrollers = true
@@ -85,10 +100,18 @@ public struct MessageComposer: NSViewRepresentable {
     public func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? ComposerTextView else { return }
-        editor.onSubmit = onSubmit; editor.onCancel = onCancel
+        editor.onSubmit = onSubmit; editor.onCancel = onCancel; editor.completion = completion
         editor.onContentHeight = onContentHeight
         if editor.font?.pointSize != fontSize { editor.font = .systemFont(ofSize: fontSize); editor.reportContentHeight() }
-        if editor.string != state.text { editor.string = state.text; editor.reportContentHeight() }
+        if editor.string != state.text {
+            context.coordinator.applyingOwnerText = true
+            editor.string = state.text; editor.reportContentHeight()
+            context.coordinator.applyingOwnerText = false
+            // A write from the owner (send, chat switch) can end a `/` token; the list publishes, so not during this update.
+            if completion != nil {
+                DispatchQueue.main.async { [weak editor] in if let editor { editor.completion?.editorChanged(editor) } }
+            }
+        }
         if focusRequest != context.coordinator.focusRequest {
             context.coordinator.focusRequest = focusRequest
             // A freshly made editor is not in a window yet; focus after SwiftUI attaches it.
@@ -98,9 +121,17 @@ public struct MessageComposer: NSViewRepresentable {
     public final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: MessageComposer
         var focusRequest: UUID?
+        /// The owner's text is being written into the editor during a SwiftUI update; its selection change waits.
+        var applyingOwnerText = false
         init(_ parent: MessageComposer) { self.parent = parent }
         public func textDidChange(_ notification: Notification) {
-            if let editor = notification.object as? NSTextView { parent.state.editorChanged(editor.string) }
+            guard let editor = notification.object as? NSTextView else { return }
+            parent.state.editorChanged(editor.string)
+            parent.completion?.editorChanged(editor)
+        }
+        public func textViewDidChangeSelection(_ notification: Notification) {
+            guard !applyingOwnerText, let editor = notification.object as? NSTextView else { return }
+            parent.completion?.editorChanged(editor)
         }
         public func textDidBeginEditing(_ notification: Notification) { parent.focused = true }
         public func textDidEndEditing(_ notification: Notification) { parent.focused = false }
@@ -167,6 +198,8 @@ public final class ComposerTextView: NSTextView {
     /// Esc; without it the text view keeps its default handling.
     public var onCancel: (() -> Void)?
     public var onContentHeight: ((CGFloat) -> Void)?
+    /// While it is active, its navigation keys (arrows, Return, Tab, Esc without modifiers) go to it first.
+    public weak var completion: (any ComposerCompletion)?
     private var reportedHeight: CGFloat = 0
     public override func setFrameSize(_ newSize: NSSize) {
         let widthChanged = abs(newSize.width - frame.width) > 0.5
@@ -203,6 +236,8 @@ public final class ComposerTextView: NSTextView {
         return true
     }
     public override func keyDown(with event: NSEvent) {
+        if let completion, completion.isActive, !hasMarkedText(), let key = Self.completionKey(event),
+           completion.handle(key, in: self) { return }
         // Let the input method confirm marked text before interpreting Return.
         if (event.keyCode == 36 || event.keyCode == 76) && !hasMarkedText() {
             if event.modifierFlags.contains(.shift) { insertNewlineIgnoringFieldEditor(nil) }
@@ -210,6 +245,16 @@ public final class ComposerTextView: NSTextView {
             return
         }
         super.keyDown(with: event)
+    }
+    private static func completionKey(_ event: NSEvent) -> ComposerCompletionKey? {
+        guard event.modifierFlags.intersection([.shift, .control, .option, .command]).isEmpty else { return nil }
+        switch event.keyCode {
+        case 126: return .up
+        case 125: return .down
+        case 36, 76, 48: return .accept
+        case 53: return .dismiss
+        default: return nil
+        }
     }
     public override func cancelOperation(_ sender: Any?) {
         if let onCancel, !hasMarkedText() { onCancel() } else { super.cancelOperation(sender) }
