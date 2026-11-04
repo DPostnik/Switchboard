@@ -61,7 +61,7 @@ public struct MessageComposer: NSViewRepresentable {
         proposal.replacingUnspecifiedDimensions(by: CGSize(width: 0, height: 84))
     }
     public func makeNSView(context: Context) -> NSScrollView {
-        let scroll = WidthBoundTextScrollView()
+        let scroll = WidthBoundTextScrollView(frame: .zero)
         let editor = ComposerTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 22))
         editor.minSize = NSSize(width: 0, height: 22)
         editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -124,6 +124,22 @@ public struct MessageComposer: NSViewRepresentable {
         if window != nil { super.scrollerStyle = .overlay }
     }
 
+    /// From a scroll gesture's start through its momentum and rubber band.
+    private var boundLiveScrolling = false
+
+    public override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        NotificationCenter.default.addObserver(self, selector: #selector(boundLiveScrollStarted),
+                                               name: NSScrollView.willStartLiveScrollNotification, object: self)
+        NotificationCenter.default.addObserver(self, selector: #selector(boundLiveScrollEnded),
+                                               name: NSScrollView.didEndLiveScrollNotification, object: self)
+    }
+
+    public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    @objc private func boundLiveScrollStarted() { boundLiveScrolling = true }
+    @objc private func boundLiveScrollEnded() { boundLiveScrolling = false; needsLayout = true }
+
     public override func layout() {
         super.layout()
         // Clip bounds are in document points, which differ from the viewport under magnification.
@@ -134,9 +150,12 @@ public struct MessageComposer: NSViewRepresentable {
         }
         // A viewport that grew after an edit scrolled to the caret keeps its old offset;
         // pin it inside the document so the text does not hang below its top edge.
+        // Not during a scroll gesture: past the end the rubber band stretches the viewport beyond the document, and any
+        // layout pass mid-bounce (SwiftUI relaying out the window while another chat streams) snapped it to the edge for
+        // a frame. The pin runs once the gesture ends.
         let maxY = max(0, editor.frame.height - contentView.bounds.height)
         let origin = contentView.bounds.origin
-        if origin.x != 0 || origin.y > maxY {
+        if origin.x != 0 || (origin.y > maxY && !boundLiveScrolling) {
             contentView.scroll(to: NSPoint(x: 0, y: min(origin.y, maxY)))
             reflectScrolledClipView(contentView)
         }

@@ -159,6 +159,32 @@ import ContextCore
     #expect(abs(view.contentView.bounds.origin.y - 900) < 2)
 }
 
+/// Takes any origin, as AppKit's rubber band does past the end.
+private final class StretchableClipView: NSClipView {
+    override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect { proposedBounds }
+}
+
+@Test @MainActor func layoutLeavesTheRubberBandStretchedPastTheEnd() {
+    let view = readingView(TranscriptReadingPositions())
+    view.update(items: readingItems(), conversationID: "a", followOutput: true)
+    view.layoutSubtreeIfNeeded()
+    let clip = StretchableClipView()
+    clip.drawsBackground = false
+    view.contentView = clip
+    view.documentView = view.transcript
+    view.layoutSubtreeIfNeeded()
+    let maxY = view.transcript.frame.height - view.contentView.bounds.height
+    NotificationCenter.default.post(name: NSScrollView.willStartLiveScrollNotification, object: view)
+    // Mid-bounce: the viewport is past the end and a layout pass comes from outside.
+    view.contentView.setBoundsOrigin(NSPoint(x: 0, y: maxY + 60))
+    view.needsLayout = true
+    view.layoutSubtreeIfNeeded()
+    #expect(abs(view.contentView.bounds.origin.y - (maxY + 60)) < 1)
+    NotificationCenter.default.post(name: NSScrollView.didEndLiveScrollNotification, object: view)
+    view.layoutSubtreeIfNeeded()
+    #expect(view.contentView.bounds.origin.y <= maxY + 1)
+}
+
 @Test @MainActor func endStaysInViewWhenTheViewportShrinks() {
     let positions = TranscriptReadingPositions()
     let view = readingView(positions)
