@@ -20,6 +20,8 @@ import ContextCore
     private(set) var backgroundWaits: [String: Int] = [:]
     /// Thread ID -> sub-agents its agent delegated to (running ones and those finished since the last user message).
     private(set) var subagents: [String: [AgentSubagent]] = [:]
+    /// Thread ID -> background commands and watchers of its agent (running ones and those finished since the last user message).
+    private(set) var backgroundTasks: [String: [AgentBackgroundTask]] = [:]
     /// Thread ID -> running sub-agents silent longer than `SubagentWatch` allows; set by `SubagentWatching`.
     private(set) var stalledSubagents: [String: Set<String>] = [:]
     /// Fires after every change.
@@ -41,6 +43,7 @@ import ContextCore
     func replaceUsage(_ value: [String: UsageSnapshot]) { replace(\.usage, with: value, "usage") }
     func replaceBackgroundWaits(_ value: [String: Int]) { replace(\.backgroundWaits, with: value, "backgroundWaits") }
     func replaceSubagents(_ value: [String: [AgentSubagent]]) { replace(\.subagents, with: value, "subagents") }
+    func replaceBackgroundTasks(_ value: [String: [AgentBackgroundTask]]) { replace(\.backgroundTasks, with: value, "backgroundTasks") }
     func replaceStalledSubagents(_ value: [String: Set<String>]) { replace(\.stalledSubagents, with: value, "stalledSubagents") }
 
     /// Forgets the live run state of these chats (their engine reset); usage stays.
@@ -49,6 +52,7 @@ import ContextCore
             if statuses[id] != nil { statuses[id] = nil; changed("statuses") }
             if backgroundWaits[id] != nil { backgroundWaits[id] = nil; changed("backgroundWaits") }
             if subagents[id] != nil { subagents[id] = nil; changed("subagents") }
+            if backgroundTasks[id] != nil { backgroundTasks[id] = nil; changed("backgroundTasks") }
             if stalledSubagents[id] != nil { stalledSubagents[id] = nil; changed("stalledSubagents") }
         }
     }

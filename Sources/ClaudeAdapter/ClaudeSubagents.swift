@@ -78,10 +78,11 @@ struct ClaudeSubagentTracker {
         finish(index, status: .stopped, now: now)
         return true
     }
-    /// A new user message starts a fresh delegation round; running sub-agents stay visible.
-    mutating func clearFinished() -> Bool {
+    /// A new user message starts a fresh delegation round; running sub-agents and those in `keeping` (they wait for their
+    /// own background commands and resume when these finish) stay visible.
+    mutating func clearFinished(keeping: Set<String> = []) -> Bool {
         let before = agents.count
-        agents.removeAll { $0.status != .running }
+        agents.removeAll { $0.status != .running && !keeping.contains($0.id) }
         calls = calls.filter { call in agents.contains { $0.id == call.value } }
         return agents.count != before
     }

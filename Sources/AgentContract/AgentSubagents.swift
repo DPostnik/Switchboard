@@ -54,3 +54,40 @@ public struct AgentSubagent: Identifiable, Sendable, Equatable {
         self.lastActivityAt = lastActivityAt ?? startedAt; self.pendingTools = pendingTools
     }
 }
+
+/// A command, watcher or workflow the chat's agent (or one of its sub-agents) left running in the background, such as a
+/// dev server or a test run. All text is engine/tool output (data).
+public struct AgentBackgroundTask: Identifiable, Sendable, Equatable {
+    public enum Kind: String, Sendable { case shell, monitor, workflow, mcp, other }
+    public let id: String
+    public var kind: Kind
+    public var title: String
+    /// The command line of a shell task.
+    public var command: String?
+    public var status: AgentSubagent.Status
+    /// The sub-agent that started it; nil for the chat's own agent.
+    public var parentID: String?
+    /// Latest one-line status the engine reported.
+    public var activity: String?
+    /// The engine's closing summary, e.g. the exit code.
+    public var report: String?
+    public var startedAt: Date
+    public var endedAt: Date?
+    public init(id: String, kind: Kind, title: String, command: String? = nil, status: AgentSubagent.Status = .running, parentID: String? = nil,
+                activity: String? = nil, report: String? = nil, startedAt: Date, endedAt: Date? = nil) {
+        self.id = id; self.kind = kind; self.title = title; self.command = command; self.status = status; self.parentID = parentID
+        self.activity = activity; self.report = report; self.startedAt = startedAt; self.endedAt = endedAt
+    }
+    /// Shell commands and watchers have an output the engine can return (`AgentIntegration.taskOutput`).
+    public var hasOutput: Bool { kind == .shell || kind == .monitor }
+}
+
+/// The end of a background task's output as plain text.
+public struct AgentTaskOutput: Sendable, Equatable {
+    public var text: String
+    /// Size of the whole output in bytes.
+    public var totalBytes: Int
+    /// `text` holds only the end of a longer output.
+    public var truncated: Bool
+    public init(text: String, totalBytes: Int, truncated: Bool) { self.text = text; self.totalBytes = totalBytes; self.truncated = truncated }
+}

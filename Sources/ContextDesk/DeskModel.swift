@@ -376,6 +376,11 @@ private struct ChatRunState: Equatable {
         get { activity.subagents }
         set { activity.replaceSubagents(newValue) }
     }
+    /// Thread ID -> background commands and watchers of its agent (running ones and those finished since the last user message).
+    private(set) var backgroundTasks: [String: [AgentBackgroundTask]] {
+        get { activity.backgroundTasks }
+        set { activity.replaceBackgroundTasks(newValue) }
+    }
     /// Thread ID -> running sub-agents silent longer than `SubagentWatch` allows; set by `SubagentWatching`.
     var stalledSubagents: [String: Set<String>] {
         get { activity.stalledSubagents }
@@ -426,6 +431,10 @@ private struct ChatRunState: Equatable {
         defer { stoppingTasks.remove(key) }
         do { try await clientForChat(threadID).stopTasks(task, session: sessionForChat(threadID)) }
         catch { self.error = error.localizedDescription }
+    }
+    /// The end of a background task's output; read-only, so a panel may poll it.
+    func taskOutput(threadID: String, task: String) async throws -> AgentTaskOutput {
+        try await clientForChat(threadID).taskOutput(task, session: sessionForChat(threadID))
     }
     private var turnStarts: [String: Date] = [:]
     private var tokenTotals: [String: TokenCounters] = [:]
@@ -2736,6 +2745,10 @@ private struct ChatRunState: Equatable {
             // A marked sub-agent that reported again loses its mark at once; the loop runs while any sub-agent does.
             if stalledSubagents[thread] != nil { markStalledSubagents(thread) }
             if list.contains(where: { $0.status == .running }) { startSubagentWatch() }
+        case .backgroundTasks(let list):
+            guard let thread else { return }
+            let tasks = list.isEmpty ? nil : list
+            if backgroundTasks[thread] != tasks { backgroundTasks[thread] = tasks }
         case .commands(let list):
             guard let thread else { return }
             sessionCommands[thread] = list

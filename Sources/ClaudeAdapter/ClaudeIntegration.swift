@@ -27,6 +27,8 @@ public actor ClaudeIntegration: AgentIntegration {
     private var backgroundTasks: [String: Set<String>] = [:]
     /// Session -> its sub-agents (running ones and those finished since the last user message).
     private var subagents: [String: ClaudeSubagentTracker] = [:]
+    /// Session -> its background commands and watchers (running ones and those finished since the last user message).
+    private var tasks: [String: ClaudeBackgroundTaskTracker] = [:]
     /// Idle sessions whose CLI stays alive until its background tasks finish and the CLI resumes the agent itself.
     private var waiting: [String: UUID] = [:]
     /// Session -> launch arguments of its live CLI; a waiting CLI is reused only for an identical launch.
@@ -154,7 +156,8 @@ public actor ClaudeIntegration: AgentIntegration {
         sessions.removeAll(); messageIDs.removeAll(); summaries.removeAll(); interrupted.removeAll(); commands.removeAll(); meters.removeAll(); limitStops.removeAll()
         backgroundTasks.removeAll(); waiting.removeAll(); wireArguments.removeAll(); warm.removeAll(); pendingSaves.removeAll()
         for id in subagents.keys { sink.yield(.init(session: reference(id), payload: .subagents([]))) }
-        subagents.removeAll()
+        for id in tasks.keys { sink.yield(.init(session: reference(id), payload: .backgroundTasks([]))) }
+        subagents.removeAll(); tasks.removeAll()
         home = nil; executable = nil; engine = nil; signedIn = false; accountIdentity = nil; browserResources = nil; userChrome = false; wireGrants.removeAll()
         context = .init(connection: .appClaude, accountRevision: UUID())
     }
@@ -382,7 +385,9 @@ public actor ClaudeIntegration: AgentIntegration {
             // Turn-less report: the cumulative baseline for this turn's response tokens.
             sink.yield(.init(session: reference(id), payload: .usage(turn: nil, total: meter.total, snapshot: meter.snapshot())))
             sink.yield(.init(session: reference(id), payload: .started(turn: turn)))
-            if subagents[id]?.clearFinished() == true { publishSubagents(id) }
+            // A sub-agent that ended its turn but still waits for its own background commands stays visible.
+            if subagents[id]?.clearFinished(keeping: tasks[id]?.waitingParents ?? []) == true { publishSubagents(id) }
+            if tasks[id]?.clearFinished() == true { publishTasks(id) }
             sink.yield(.init(session: reference(id), payload: .item(prompt)))
             let command = UUID().uuidString.lowercased()
             commands[id] = (command, false, false)
@@ -566,6 +571,7 @@ public actor ClaudeIntegration: AgentIntegration {
                 // The CLI confirmed the stop; its `background_tasks_changed` may come later or not at all while it is idle.
                 backgroundTasks[id]?.remove(target)
                 if subagents[id]?.stop(target) == true { publishSubagents(id) }
+                if tasks[id]?.stop(target) == true { publishTasks(id) }
             } catch let refusal as ClaudeControlRefusal {
                 // A task that ended meanwhile needs no stop.
                 if runningTask(target, session: id) { refusals.append(refusal.localizedDescription) }
@@ -575,6 +581,20 @@ public actor ClaudeIntegration: AgentIntegration {
         if wires[id] === wire { settleStoppedTasks(id, wire: wire) }
         guard refusals.isEmpty else { return .failed(.init(delivery: .confirmed, diagnostic: refusals.joined(separator: "\n"))) }
         return .success(())
+    }
+    public func taskOutput(_ task: String, session: AgentSessionReference, context: AgentContext) async -> AgentResult<AgentTaskOutput> {
+        let id = session.nativeID
+        guard context == self.context, session.connection == .appClaude, tasks[id]?.task(task)?.hasOutput == true else { return .rejected(.unknownRequest) }
+        // The output lives with the CLI process; once it is gone there is nothing to read.
+        guard let wire = wires[id] else { return .rejected(.unsupported(.streaming)) }
+        do {
+            // Read-only: an unanswered read must not end the CLI and the commands it runs.
+            let response = try await wire.control(.object(["subtype": .string("get_task_output"), "task_id": .string(task)]), closesOnTimeout: false)
+            guard let output = ClaudeBackgroundTaskTracker.output(response) else { return .failed(.init(delivery: .confirmed, diagnostic: "get_task_output")) }
+            return .success(output)
+        } catch let refusal as ClaudeControlRefusal {
+            return .failed(.init(delivery: .confirmed, diagnostic: refusal.localizedDescription))
+        } catch { return failed(error) }
     }
     private func runningTask(_ task: String, session id: String) -> Bool {
         backgroundTasks[id]?.contains(task) == true || subagents[id]?.runningIDs.contains(task) == true
@@ -632,6 +652,7 @@ public actor ClaudeIntegration: AgentIntegration {
         ClaudeProtocolSurface.record(value, version: engineVersion)
         if let native = value["session_id"].string, native != id { await wire.close(); return }
         if subagents[id, default: .init()].observe(value) { publishSubagents(id) }
+        if tasks[id, default: .init()].observe(value) { publishTasks(id) }
         if sessions[id]?.active != nil { limitStops[id, default: .init()].observe(value) }
         switch value["type"].string {
         case "transport_closed":
@@ -1187,8 +1208,13 @@ public actor ClaudeIntegration: AgentIntegration {
     private func publishSubagents(_ id: String) {
         sink.yield(.init(session: reference(id), payload: .subagents(subagents[id]?.agents ?? [])))
     }
+    private func publishTasks(_ id: String) {
+        sink.yield(.init(session: reference(id), payload: .backgroundTasks(tasks[id]?.tasks ?? [])))
+    }
+    /// The CLI is gone or idle without background work: what it still ran ended with it.
     private func stopSubagents(_ id: String) {
         if subagents[id]?.stopRunning() == true { publishSubagents(id) }
+        if tasks[id]?.stopRunning() == true { publishTasks(id) }
     }
     /// The CLI holding background tasks is gone before they resumed the agent.
     private func abandonWait(_ id: String) {
@@ -1286,7 +1312,7 @@ public actor ClaudeIntegration: AgentIntegration {
         guard checked(session, context: context), sessions[session.nativeID]?.active == nil else { return .rejected(.wrongConnection) }
         warm[session.nativeID] = nil
         if let wire = wires.removeValue(forKey: session.nativeID) { waiting.removeValue(forKey: session.nativeID); await wire.close() }
-        subagents.removeValue(forKey: session.nativeID)
+        subagents.removeValue(forKey: session.nativeID); tasks.removeValue(forKey: session.nativeID)
         // Native execution files stay in the isolated engine home; app deletion only hides the chat.
         return .success(())
     }

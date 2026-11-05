@@ -194,6 +194,8 @@ public protocol AgentIntegration: Sendable {
     /// Stops one running background task or sub-agent (`task`), or all of the session's running ones (`nil`).
     /// The turn itself keeps running. Each stop request is sent once; an uncertain delivery is not retried.
     func stopTasks(_ task: String?, session: AgentSessionReference, context: AgentContext) async -> AgentResult<Void>
+    /// Reads the end of a background task's output (`AgentBackgroundTask.hasOutput`). Read-only; starts no model turn.
+    func taskOutput(_ task: String, session: AgentSessionReference, context: AgentContext) async -> AgentResult<AgentTaskOutput>
     func answer(_ id: UUID, session: AgentSessionReference, context: AgentContext, response: AgentInteractionResponse) async -> AgentResult<Void>
     func rejectInteraction(_ id: UUID) async
     func history(_ session: AgentSessionReference, context: AgentContext) async -> AgentResult<[AgentHistoryTurn]>
@@ -212,6 +214,9 @@ public protocol AgentIntegration: Sendable {
 extension AgentIntegration {
     public func stopTasks(_ task: String?, session: AgentSessionReference, context: AgentContext) async -> AgentResult<Void> {
         .rejected(.unsupported(.interruption))
+    }
+    public func taskOutput(_ task: String, session: AgentSessionReference, context: AgentContext) async -> AgentResult<AgentTaskOutput> {
+        .rejected(.unsupported(.streaming))
     }
     public func reduceHistory(_ session: AgentSessionReference, context: AgentContext) async -> AgentResult<AgentHistoryReduction?> {
         .rejected(.unsupported(.history))

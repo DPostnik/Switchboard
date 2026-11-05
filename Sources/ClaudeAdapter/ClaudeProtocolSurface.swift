@@ -61,7 +61,7 @@ enum ClaudeProtocolSurface {
         "user": ["message.content.*.tool_use_id", "message.content.*.content", "message.content.*.is_error"]
     ]
     /// Control requests the app sends to the CLI.
-    static let sentControlRequests: Set<String> = ["apply_flag_settings", "get_usage", "initialize", "interrupt", "stop_task"]
+    static let sentControlRequests: Set<String> = ["apply_flag_settings", "get_task_output", "get_usage", "initialize", "interrupt", "stop_task"]
 
     /// Drift in one frame, as (category, name). Missing-field names are `frame:path`.
     /// Only fields the decoders depend on are checked; the list is short on purpose.

@@ -116,6 +116,10 @@ public actor AgentClient {
     public func stopTasks(_ task: String?, session: AgentSessionReference) async throws {
         try await integration.stopTasks(task, session: session, context: descriptor().context).value()
     }
+    /// The end of a background task's output.
+    public func taskOutput(_ task: String, session: AgentSessionReference) async throws -> AgentTaskOutput {
+        try await integration.taskOutput(task, session: session, context: descriptor().context).value()
+    }
     public func answer(_ id: UUID, session: AgentSessionReference, response: AgentInteractionResponse) async throws {
         try await integration.answer(id, session: session, context: descriptor().context, response: response).value()
     }

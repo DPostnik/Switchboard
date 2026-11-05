@@ -23,6 +23,8 @@ public struct AgentEvent: Sendable {
         case background(tasks: Int)
         /// Full current list of the session's sub-agents (running ones and those finished since the last user message).
         case subagents([AgentSubagent])
+        /// Full current list of the session's background commands and watchers (running ones and those finished since the last user message).
+        case backgroundTasks([AgentBackgroundTask])
         /// One capability use or permission decision for the ledger (plan Phase 0); never a prompt to the user.
         case capability(AgentCapabilityRecord)
         /// The whole current plan of a turn; it replaces the turn's previous plan.

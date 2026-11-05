@@ -23,6 +23,9 @@ private actor ClaudeEvents {
     func subagents() -> [[AgentSubagent]] {
         values.compactMap { if case .subagents(let list) = $0.payload { return list }; return nil }
     }
+    func tasks() -> [[AgentBackgroundTask]] {
+        values.compactMap { if case .backgroundTasks(let list) = $0.payload { return list }; return nil }
+    }
     func background() -> [Int] {
         values.compactMap { if case .background(let tasks) = $0.payload { return tasks }; return nil }
     }
@@ -130,6 +133,9 @@ private func interactiveFixture(_ root: URL) throws -> URL {
             with (home/'controls').open('a') as f: f.write(json.dumps({'request':value['request'],'pid':os.getpid()})+'\n')
             if value['request']['subtype']=='stop_task' and (home/'refuse-stop').exists():
                 out({'type':'control_response','response':{'subtype':'error','request_id':value['request_id'],'error':'Task is busy'}}); continue
+            if value['request']['subtype']=='get_task_output':
+                out({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],
+                     'response':{'output':'\x1b[32mready\x1b[0m on :3000\nbuilding 10%\rbuilding 100%\n','total_bytes':20000,'truncated':True}}}); continue
             if value['request']['subtype']=='apply_flag_settings' and (home/'refuse-flags').exists():
                 out({'type':'control_response','response':{'subtype':'error','request_id':value['request_id'],'error':'Model switch blocked'}}); continue
             if value['request']['subtype']=='initialize' and (home/'own-turn').exists():
@@ -181,6 +187,14 @@ private func interactiveFixture(_ root: URL) throws -> URL {
                 continue
             if prompt=='unknown': out({'type':'control_request','request_id':'unknown','request':{'subtype':'unexpected_action'}}); continue
             if prompt=='wait': continue
+            if prompt=='background-shell':
+                # Claude Code 2.1.292: a dev server left running in the background; the turn ends while it runs.
+                out({'type':'assistant','session_id':sid,'message':{'id':'shell-'+sid,'content':[{'type':'tool_use','id':'bash-dev','name':'Bash',
+                     'input':{'command':'npm run dev','description':'Start the dev server','run_in_background':True}}]}})
+                out({'type':'system','subtype':'background_tasks_changed','session_id':sid,'tasks':[{'task_id':'s1','task_type':'local_bash','description':'Start the dev server'}]})
+                out({'type':'system','subtype':'task_started','session_id':sid,'task_id':'s1','tool_use_id':'bash-dev','description':'Start the dev server','task_type':'local_bash','is_backgrounded':True})
+                out({'type':'assistant','session_id':sid,'message':{'id':'shell-done-'+sid,'content':[{'type':'text','text':'started'}]}})
+                result(); continue
             if prompt=='limit':
                 # Claude Code 2.1.292 on an exhausted plan: a rejected rate_limit_event, an API-error assistant message, an error result.
                 out({'type':'rate_limit_event','session_id':sid,'uuid':'rl','rate_limit_info':{'status':'rejected','resetsAt':1791630000,'rateLimitType':'five_hour','overageStatus':'rejected','overageDisabledReason':'out_of_credits','isUsingOverage':False}})
@@ -1162,6 +1176,13 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     await model.receive(.init(session: claude.nativeSession, payload: .subagents([subagent])))
     #expect(model.subagents[claude.id] == [subagent] && model.subagents[codex.id] == nil)
     #expect(SubagentsBar.summary([subagent]) == L10n.text("Подагенты: работают 1", "Sub-agents: 1 running"))
+    // An ended sub-agent whose own command still runs waits for it.
+    let ended = AgentSubagent(id: "a2", title: "UI", type: nil, prompt: "", background: true, depth: 1, status: .completed, startedAt: Date())
+    let command = AgentBackgroundTask(id: "s1", kind: .shell, title: "UI tests", parentID: "a2", startedAt: Date())
+    #expect(SubagentsBar.summary([ended], tasks: [command]) == L10n.text("Подагенты: ждут фоновые задачи 1 · Фоновые задачи: работают 1",
+                                                                           "Sub-agents: 1 waiting for background tasks · Background tasks: 1 running"))
+    await model.receive(.init(session: claude.nativeSession, payload: .backgroundTasks([command])))
+    #expect(model.backgroundTasks[claude.id] == [command] && model.backgroundTasks[codex.id] == nil)
     // A running sub-agent holds a restart even before the background wait is reported; a finished one does not.
     await model.receive(.init(session: claude.nativeSession, payload: .completed(.init(id: "claude-turn", status: .completed, hasError: false, error: nil,
         history: AgentHistoryTurn(id: "claude-turn", items: [], startedAt: nil, completedAt: nil, duration: nil, isComplete: true)))))
@@ -1629,6 +1650,40 @@ private func completedClaudeSession(_ adapter: ClaudeIntegration, binary: URL, h
     _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session)).value()
     try await waitFor { await events.completionCount() == 2 }
     #expect(try String(contentsOf: home.appendingPathComponent("launches"), encoding: .utf8).split(separator: "\n").count == 1)
+    await adapter.disconnect()
+}
+
+@Test func claudeShowsAndStopsABackgroundCommand() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(backgroundWaitLimit: .seconds(60), backgroundSettleDelay: .milliseconds(100)), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "background-shell")).value()
+    try await waitFor { await events.background().last == 1 }
+    let task = try #require(await events.tasks().last?.first)
+    #expect(task.id == "s1" && task.kind == .shell && task.title == "Start the dev server" && task.command == "npm run dev" && task.status == .running)
+    // The output comes back as plain text: colors dropped, a redrawn progress line reduced to its last state.
+    let output = try await adapter.taskOutput("s1", session: session, context: descriptor.context).value()
+    #expect(output == .init(text: "ready on :3000\nbuilding 100%\n", totalBytes: 20000, truncated: true))
+    // Only this session's commands with an output can be read.
+    guard case .rejected = await adapter.taskOutput("b1", session: session, context: descriptor.context) else {
+        Issue.record("an unknown task was read"); return
+    }
+    guard case .success = await adapter.stopTasks("s1", session: session, context: descriptor.context) else {
+        Issue.record("stop failed"); return
+    }
+    try await waitFor { await events.tasks().last?.first?.status == .stopped }
+    try await waitFor { await events.background().last == 0 }
+    #expect(await events.diagnostics().isEmpty)
+    // The next message drops the finished command from the list.
+    _ = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root, session: session)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session)).value()
+    try await waitFor { await events.completionCount() == 2 }
+    #expect(await events.tasks().last?.isEmpty == true)
     await adapter.disconnect()
 }
 

@@ -13,6 +13,8 @@ actor ClaudeWire {
     private var reader: Task<Void, Never>?
     private var buffer = Data()
     private var pending: [String: CheckedContinuation<JSONValue, any Error>] = [:]
+    /// Read-only requests that timed out; their late answers are dropped.
+    private var abandoned: Set<String> = []
     private var ended = false
     /// Chat label of the launched process; its leftovers are swept when the stream closes.
     private var chatLabel: String?
@@ -45,19 +47,26 @@ actor ClaudeWire {
         var bytes = try JSONEncoder().encode(value); bytes.append(10)
         try input.fileHandleForWriting.write(contentsOf: bytes)
     }
-    func control(_ request: JSONValue) async throws -> JSONValue {
+    /// Sends a control request. A request left unanswered closes the stream, unless it is a read-only one (`closesOnTimeout`
+    /// false): that one only fails, and its late answer is dropped.
+    func control(_ request: JSONValue, closesOnTimeout: Bool = true) async throws -> JSONValue {
         let id = UUID().uuidString
         return try await withCheckedThrowingContinuation { continuation in
             pending[id] = continuation
             do {
                 try send(.object(["type": .string("control_request"), "request_id": .string(id), "request": request]))
                 Task { [weak self] in
-                    try? await Task.sleep(for: .seconds(15)); await self?.timeout(id)
+                    try? await Task.sleep(for: .seconds(15)); await self?.timeout(id, closes: closesOnTimeout)
                 }
             } catch { pending.removeValue(forKey: id)?.resume(throwing: error) }
         }
     }
-    private func timeout(_ id: String) { if pending[id] != nil { close() } }
+    private func timeout(_ id: String, closes: Bool) {
+        guard let continuation = pending[id] else { return }
+        guard !closes else { close(); return }
+        pending[id] = nil; abandoned.insert(id)
+        continuation.resume(throwing: ClientFailure(L10n.text("Claude не ответил на запрос.", "Claude did not answer the request.")))
+    }
     private func ingest(_ data: Data) {
         guard !ended else { return }
         buffer.append(data)
@@ -66,6 +75,7 @@ actor ClaudeWire {
             guard line.count <= 4 * 1024 * 1024 else { close(); return }
             if line.isEmpty { continue }
             guard let value = try? JSONDecoder().decode(JSONValue.self, from: line) else { close(); return }
+            if value["type"].string == "control_response", let id = value["response"]["request_id"].string, abandoned.remove(id) != nil { continue }
             if value["type"].string == "control_response", let id = value["response"]["request_id"].string,
                let continuation = pending.removeValue(forKey: id) {
                 if value["response"]["subtype"].string == "success" { continuation.resume(returning: value["response"]["response"]) }
