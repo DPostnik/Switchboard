@@ -95,6 +95,34 @@ public struct RemotePresence: Equatable, Sendable {
     func close() { task.cancel(with: .goingAway, reason: nil); session.invalidateAndCancel() }
 }
 
+/// A close always ends pending sends and receives. URLSessionWebSocketTask can leave a
+/// receive pending after cancellation, which would stop the reconnect loop for good.
+@MainActor final class ClosingRemoteSocket: RemoteSocket {
+    private let base: any RemoteSocket
+    private var closed = false
+    private var waiters: [UUID: CheckedContinuation<String, Error>] = [:]
+    init(_ base: any RemoteSocket) { self.base = base }
+    func send(_ text: String) async throws { _ = try await finishing { try await $0.send(text); return "" } }
+    func receive() async throws -> String { try await finishing { try await $0.receive() } }
+    func close() {
+        closed = true; base.close()
+        let pending = waiters; waiters = [:]
+        for waiter in pending.values { waiter.resume(throwing: URLError(.cancelled)) }
+    }
+    private func finishing(_ operation: @escaping @MainActor (any RemoteSocket) async throws -> String) async throws -> String {
+        guard !closed else { throw URLError(.cancelled) }
+        let id = UUID(), base = base
+        return try await withCheckedThrowingContinuation { continuation in
+            waiters[id] = continuation
+            Task { @MainActor [weak self] in
+                let result: Result<String, Error>
+                do { result = .success(try await operation(base)) } catch { result = .failure(error) }
+                self?.waiters.removeValue(forKey: id)?.resume(with: result)
+            }
+        }
+    }
+}
+
 /// Coalesces work caused by events, including events received during an await.
 /// No timer exists when clean. Cancellation/generation guards prevent stale workers
 /// from clearing or applying work belonging to a newer connection.
@@ -253,7 +281,7 @@ public struct RemotePresence: Equatable, Sendable {
                 try Task.checkCancellation()
                 guard generation == ticket else { return }
                 guard revision == networkRevision, online else { continue }
-                let connection = factory(auth.url); socket = connection
+                let connection = ClosingRemoteSocket(factory(auth.url)); socket = connection
                 let began = ContinuousClock.now
                 do { try await connected(connection, auth: auth, ticket: ticket) }
                 catch {

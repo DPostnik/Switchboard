@@ -109,6 +109,28 @@ private let remoteTestDevice = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
     }
 }
 
+/// Like URLSessionWebSocketTask after a cancel before the handshake: close never ends the pending receive.
+@MainActor private final class HangingRemoteSocket: RemoteSocket {
+    var closed = false
+    var pending: [CheckedContinuation<String, Error>] = []
+    func send(_ text: String) async throws {}
+    func receive() async throws -> String { try await withCheckedThrowingContinuation { pending.append($0) } }
+    func close() { closed = true }
+}
+
+@Test @MainActor func realtimeReconnectsWhenClosedSocketNeverFinishesReceive() async throws {
+    var sockets: [HangingRemoteSocket] = []
+    let client = RemoteRealtime(role: "mac", device: remoteTestDevice, credentials: { credentials() }, ready: {},
+        factory: { _ in let socket = HangingRemoteSocket(); sockets.append(socket); return socket },
+        deadline: .seconds(5), monitorNetwork: false)
+    client.start(); defer { client.stop() }
+    try await eventually { sockets.count == 1 && client.state == .subscribing }
+    client.networkChanged(available: false, route: "")
+    #expect(sockets[0].closed && client.state == .offline)
+    client.networkChanged(available: true, route: "wifi:en0")
+    try await eventually { sockets.count == 2 }
+}
+
 @Test @MainActor func realtimeReconnectReconcilesAndNeverSendsCommands() async throws {
     var sockets: [ScriptedRemoteSocket] = []; var reads = 0
     let client = RemoteRealtime(role: "mac", device: remoteTestDevice, credentials: { credentials() }, ready: { reads += 1 },

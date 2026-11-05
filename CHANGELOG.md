@@ -45,6 +45,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Fixed
 
+- Remote access: the connection to the server no longer stays down for good after a network drop during reconnect, so the iPhone sees the Mac again without turning remote access off and on.
 - Claude chats: screenshots and PDFs in temporary folders and the user's own attachments are read without a prompt in every role, and a background sub-agent still working after the turn ended gets the role's normal answer instead of a silent refusal of every tool.
 - Switchboard no longer quits with a crash when a chat's text changes while the pointer is over the transcript: the hover lookup no longer runs mid-edit, when the message list and its text ranges briefly disagree.
 - Scrolling to the end of a chat while another chat is working no longer snaps the bounce back to the edge for one frame.
