@@ -246,17 +246,42 @@ struct MobileChatKey: Hashable, Sendable {
         startConnection()
         needsFullSync = true; requestUpdates()
     }
+    /// Sends a chat command: `send`, `stop`, `allow`/`deny` of an approval, `queue`, or `interrupt` of the observed turn.
     func send(device: RemoteDevice, chat: RemoteChat, kind: String, text: String = "", approval: String? = nil, photos: [RemotePhoto] = []) async -> Bool {
+        if !photos.isEmpty, chat.supportsPhotos != true {
+            chatErrors[MobileChatKey(device: device.id, chat: chat.id)] = RemoteFailure.photoSetup.localizedDescription; return false
+        }
+        return await perform(device: device, chat: chat) { owner in
+            switch kind {
+            case "queue": .queue(owner: owner, device: device.id, project: chat.project, chat: chat.id, text: text, photos: photos)
+            case "interrupt": .interruptAndSend(owner: owner, device: device.id, project: chat.project, chat: chat.id, turn: chat.turn ?? "", text: text, photos: photos)
+            default: RemoteCommand(owner: owner, device: device.id, project: chat.project, chat: chat.id, kind: kind, text: text, approval: approval, turn: chat.turn, photos: photos)
+            }
+        }
+    }
+    /// Answers a pending question or form by its request handle. `answers` must pass `RemoteInteraction.validate(answers:)`.
+    func answer(device: RemoteDevice, chat: RemoteChat, interaction: RemoteInteraction, answers: [String: String]) async -> Bool {
+        do { try interaction.validate(answers: answers) }
+        catch { chatErrors[MobileChatKey(device: device.id, chat: chat.id)] = error.localizedDescription; return false }
+        return await perform(device: device, chat: chat) { owner in
+            .answer(owner: owner, device: device.id, project: chat.project, chat: chat.id, interaction: interaction.id, answers: answers)
+        }
+    }
+    /// The desktop's Decline of a form, link or unsupported request.
+    func decline(device: RemoteDevice, chat: RemoteChat, interaction: RemoteInteraction) async -> Bool {
+        guard interaction.canDecline else { return false }
+        return await perform(device: device, chat: chat) { owner in
+            .decline(owner: owner, device: device.id, project: chat.project, chat: chat.id, interaction: interaction.id)
+        }
+    }
+    /// Builds, checks (`RemoteAPI.preflight`) and submits one command of a chat; its receipt blocks the chat until resolved.
+    private func perform(device: RemoteDevice, chat: RemoteChat, make: (String) -> RemoteCommand) async -> Bool {
         let key = MobileChatKey(device: device.id, chat: chat.id)
         guard let api, !isBlocked(key) else { return false }
         inFlight.insert(key); defer { inFlight.remove(key) }
         do {
-            let command = RemoteCommand(owner: try await api.owner(), device: device.id, project: chat.project, chat: chat.id, kind: kind, text: text, approval: approval, turn: chat.turn, photos: photos)
-            try command.validate()
-            if !photos.isEmpty {
-                guard chat.supportsPhotos == true else { throw RemoteFailure.photoSetup }
-                try await api.checkPhotoSchema()
-            }
+            let command = make(try await api.owner())
+            try await api.preflight(command)
             try await submit(command, using: api)
             chatErrors[key] = nil
             return true
@@ -267,9 +292,8 @@ struct MobileChatKey: Hashable, Sendable {
         guard let api, !inFlight.contains(key), creationReceipt(device: device.id, project: project.id) == nil, project.canCreateChat == true else { return nil }
         inFlight.insert(key); defer { inFlight.remove(key) }
         do {
-            if options != nil { try await api.checkSettingsSchema() }
             let command = RemoteCommand.newChat(owner: try await api.owner(), device: device.id, project: project.id, text: text, options: options)
-            try command.validate()
+            try await api.preflight(command)
             try await submit(command, using: api)
             chatErrors[key] = nil
             return command
@@ -280,9 +304,8 @@ struct MobileChatKey: Hashable, Sendable {
         guard let api, !isBlocked(key), expected.canEdit else { return nil }
         inFlight.insert(key); defer { inFlight.remove(key) }
         do {
-            try await api.checkSettingsSchema()
             let command = RemoteCommand.configure(owner: try await api.owner(), device: device.id, project: chat.project, chat: chat.id, options: options, expected: expected)
-            try command.validate()
+            try await api.preflight(command)
             try await submit(command, using: api)
             chatErrors[key] = nil
             return command
@@ -333,6 +356,15 @@ struct MobileChatKey: Hashable, Sendable {
         guard let api else { throw RemoteFailure.signedOut }
         return try await api.takeFile(command: command)
     }
+    /// Messages this phone queued (or sent with Interrupt and send) that the chat's published queue does not show yet.
+    func unlistedQueueCommands(device: String, chat: RemoteChat) -> [RemoteCommand] {
+        let listed = Set((chat.queue ?? []).compactMap { $0.command?.lowercased() })
+        return commands.filter { command in
+            command.device == device && command.chat == chat.id && ["queue", "interrupt"].contains(command.kind)
+                && ["pending", "claimed"].contains(command.status) && !listed.contains(command.id.lowercased())
+        }.reversed()
+    }
+    /// The reply to an approval or a question (answer or decline): both carry the request handle.
     func approvalCommand(device: String, chat: String, approval: String) -> RemoteCommand? {
         commands.first { $0.device == device && $0.chat == chat && $0.approval.flatMap(UUID.init(uuidString:)) == UUID(uuidString: approval) }
     }

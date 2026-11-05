@@ -103,6 +103,42 @@ public struct RemoteAddOnOption: Codable, Sendable, Equatable, Identifiable {
         self.id = id; self.name = name; self.summary = summary; self.symbol = symbol
     }
 }
+/// One add-on toggle of the phone's role picker.
+public struct RemoteAddOnChoice: Sendable, Equatable, Identifiable {
+    public var option: RemoteAddOnOption
+    public var isOn: Bool
+    /// The phone may turn it on; turning an add-on off is always allowed.
+    public var canTurnOn: Bool
+    /// On at the Mac but not granted by the project default: once it is off there, only the Mac can turn it on again.
+    public var outsideDefault: Bool
+    public var id: String { option.id }
+    public init(option: RemoteAddOnOption, isOn: Bool, canTurnOn: Bool, outsideDefault: Bool) {
+        self.option = option; self.isOn = isOn; self.canTurnOn = canTurnOn; self.outsideDefault = outsideDefault
+    }
+}
+extension RemoteChatSettings {
+    /// The phone's add-on rule, from what the host published: `addOns` lists the selectable ones, `options.addOns` the ones on
+    /// at the Mac now. A phone may turn on only add-ons the project default grants (`granted`: the project's published
+    /// `addOns`; nil when these settings are the project's own, which list only granted ones) or the ones on now,
+    /// and may always turn off the ones that are on. `selected` is the edited choice.
+    public func addOnChoices(selected: [String], granted: [String]? = nil) -> [RemoteAddOnChoice] {
+        let current = Set(options.addOns ?? [])
+        let listed = addOns ?? []
+        let unlisted = selected.filter { id in !listed.contains { $0.id == id } }.map { RemoteAddOnOption(id: $0, name: $0) }
+        return (listed + unlisted).map { option in
+            let isGranted = listed.contains(option) && (granted?.contains(option.id) ?? true)
+            return RemoteAddOnChoice(option: option, isOn: selected.contains(option.id), canTurnOn: isGranted || current.contains(option.id),
+                                     outsideDefault: !isGranted && current.contains(option.id))
+        }
+    }
+    /// `selected` with one add-on switched, in the published order. Turning on an add-on the rule refuses changes nothing.
+    public func addOns(_ selected: [String], setting id: String, on: Bool, granted: [String]? = nil) -> [String] {
+        let choices = addOnChoices(selected: selected, granted: granted)
+        if on, choices.first(where: { $0.id == id })?.canTurnOn != true { return selected }
+        let next = on ? Set(selected).union([id]) : Set(selected).subtracting([id])
+        return choices.map(\.id).filter(next.contains)
+    }
+}
 public struct RemoteSettingsChange: Codable, Sendable, Equatable {
     public var options: RemoteChatOptions
     public var expected: RemoteChatOptions?

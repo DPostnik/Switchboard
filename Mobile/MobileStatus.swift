@@ -2,6 +2,16 @@ import SwiftUI
 
 /// Shared wording for command states.
 enum MobileText {
+    /// The status of a command, worded for its kind where "submitted" means something more specific.
+    static func command(_ status: String, kind: String) -> String {
+        guard status == "submitted" else { return command(status) }
+        switch kind {
+        case "queue": return L10n.text("Добавлено в очередь на Mac", "Added to the queue on the Mac")
+        case "interrupt": return L10n.text("Ход прерван, сообщение отправлено следом", "Turn interrupted, message sent next")
+        case "answer": return L10n.text("Ответ передан агенту", "Answer sent to the agent")
+        default: return command(status)
+        }
+    }
     static func command(_ status: String) -> String {
         switch status {
         case "pending": L10n.text("Ожидает Mac", "Waiting for Mac")

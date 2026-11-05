@@ -21,7 +21,7 @@ struct MobileChatList: View {
         let entries = model.devices.flatMap { device in
             device.snapshot.chats.map { chat in MobileChatEntry(device: device, chat: chat, project: device.snapshot.projects.first { $0.id == chat.project }) }
         }
-        let needsYou = entries.filter { !$0.chat.approvals.isEmpty || model.receipt(MobileChatKey(device: $0.device.id, chat: $0.chat.id)) != nil }
+        let needsYou = entries.filter { $0.chat.waitingRequests > 0 || model.receipt(MobileChatKey(device: $0.device.id, chat: $0.chat.id)) != nil }
         let working = entries.filter { $0.chat.running && !needsYou.map(\.id).contains($0.id) }
         let creations = model.pendingCreations
         List {
@@ -101,7 +101,7 @@ struct MobileChatSection<Extra: View>: View {
         let matches = search.isEmpty ? entries : entries.filter { $0.chat.title.localizedCaseInsensitiveContains(search) }
         let limit = search.isEmpty ? visibleCount : matches.count
         let remaining = max(0, matches.count - limit)
-        let hiddenApprovals = matches.dropFirst(limit).filter { !$0.chat.approvals.isEmpty }.count
+        let hiddenApprovals = matches.dropFirst(limit).filter { $0.chat.waitingRequests > 0 }.count
         let controls = disclosureID ?? id
         if !matches.isEmpty || search.isEmpty {
             Section {
@@ -172,6 +172,8 @@ struct ChatRow: View, Equatable {
     let activity: String?
     let runningSince: String?
     let approvals: Int
+    /// Pending questions and forms.
+    let questions: Int
     let readOnly: Bool
     let unconfirmed: Bool
     /// Project (and Mac) name in cross-project groups.
@@ -182,7 +184,7 @@ struct ChatRow: View, Equatable {
         let chat = entry.chat
         title = chat.title; preview = chat.messages.last.map { MarkdownInline.plain($0.text) }
         running = chat.running; activity = chat.activity; runningSince = chat.runningSince
-        approvals = chat.approvals.count; readOnly = chat.readOnly == true
+        approvals = chat.approvals.count; questions = chat.interactions?.count ?? 0; readOnly = chat.readOnly == true
         self.unconfirmed = unconfirmed
         let names = [showsProject ? entry.project?.name : nil, showsMac ? entry.device.name : nil].compactMap { $0 }
         context = names.isEmpty ? nil : names.joined(separator: " · ")
@@ -199,7 +201,7 @@ struct ChatRow: View, Equatable {
             }
             Spacer(minLength: 0)
             // One quiet status mark: orange when an answer is needed, a spinner while working.
-            if approvals > 0 || unconfirmed {
+            if approvals + questions > 0 || unconfirmed {
                 Circle().fill(Color.orange).frame(width: 10, height: 10).padding(.top, 6).accessibilityHidden(true)
             } else if running {
                 ProgressView().controlSize(.small).padding(.top, 2).accessibilityHidden(true)
@@ -212,9 +214,14 @@ struct ChatRow: View, Equatable {
     @ViewBuilder private var statusLine: some View {
         let meta = [context, agent].compactMap { $0 }.joined(separator: " · ")
         VStack(alignment: .leading, spacing: 2) {
-            if approvals > 0 {
-                RowStatus(text: approvals > 1 ? L10n.text("Ждут ответа: \(approvals)", "Waiting for you: \(approvals)") : L10n.text("Нужен ответ", "Needs your attention"),
-                          systemImage: "hand.raised.fill")
+            if approvals + questions > 1 {
+                RowStatus(text: L10n.text("Ждут ответа: \(approvals + questions)", "Waiting for you: \(approvals + questions)"), systemImage: "hand.raised.fill")
+                    .foregroundStyle(.orange)
+            } else if approvals > 0 {
+                RowStatus(text: L10n.text("Нужен ответ", "Needs your attention"), systemImage: "hand.raised.fill")
+                    .foregroundStyle(.orange)
+            } else if questions > 0 {
+                RowStatus(text: L10n.text("Агент задал вопрос", "The agent asks a question"), systemImage: "questionmark.bubble.fill")
                     .foregroundStyle(.orange)
             } else if unconfirmed {
                 RowStatus(text: L10n.text("Доставка не подтверждена", "Delivery unconfirmed"), systemImage: "questionmark.circle")
@@ -267,4 +274,9 @@ struct RowStatus: View {
             Text(text).fixedSize(horizontal: false, vertical: true)
         }
     }
+}
+
+extension RemoteChat {
+    /// Approvals, questions and forms waiting for the user: what puts a chat under "Needs you".
+    var waitingRequests: Int { approvals.count + (interactions?.count ?? 0) }
 }

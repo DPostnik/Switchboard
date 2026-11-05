@@ -397,3 +397,26 @@ private func interaction(_ kind: AgentInteraction.Kind) -> AgentInteraction {
         #expect(model.state.chats.count == 1)
     }
 }
+
+@Test func phoneAddOnChoicesTurnOnOnlyWithinTheProjectDefault() {
+    let mail = RemoteAddOnOption(id: "mail", name: "Mail", symbol: "envelope"), chrome = RemoteAddOnOption(id: "userChrome", name: "Chrome", symbol: "globe")
+    // Chat settings list the granted add-ons plus the ones on now; the project's own list holds the granted ones.
+    let chat = RemoteChatSettings(options: RemoteChatOptions(model: "m", addOns: ["userChrome"]), projectAccess: .standard, canEdit: true,
+                                  addOns: [mail, chrome], projectAddOns: [])
+    let choices = chat.addOnChoices(selected: ["userChrome"], granted: ["mail"])
+    #expect(choices.map(\.id) == ["mail", "userChrome"])
+    #expect(choices[0] == RemoteAddOnChoice(option: mail, isOn: false, canTurnOn: true, outsideDefault: false))
+    #expect(choices[1] == RemoteAddOnChoice(option: chrome, isOn: true, canTurnOn: true, outsideDefault: true))
+    // Switching keeps the published order; an add-on the phone may not turn on is left off.
+    #expect(chat.addOns(["userChrome"], setting: "mail", on: true, granted: ["mail"]) == ["mail", "userChrome"])
+    #expect(chat.addOns(["userChrome"], setting: "userChrome", on: false, granted: ["mail"]) == [])
+    #expect(chat.addOns([], setting: "userChrome", on: true, granted: ["mail"]) == ["userChrome"], "On at the Mac now, so it may come back")
+    var turnedOff = chat; turnedOff.options.addOns = []
+    #expect(turnedOff.addOns([], setting: "userChrome", on: true, granted: ["mail"]) == [])
+    #expect(turnedOff.addOnChoices(selected: [], granted: ["mail"])[1].canTurnOn == false)
+    // Project settings (new chats) list only granted add-ons; an unknown selected id can only be turned off.
+    let project = RemoteChatSettings(options: RemoteChatOptions(model: "m"), projectAccess: .standard, canEdit: true, addOns: [mail], projectAddOns: ["mail"])
+    #expect(project.addOnChoices(selected: ["mail", "future"]).map(\.canTurnOn) == [true, false])
+    #expect(project.addOns(["mail", "future"], setting: "future", on: false) == ["mail"])
+    #expect(project.addOns([], setting: "future", on: true) == [])
+}

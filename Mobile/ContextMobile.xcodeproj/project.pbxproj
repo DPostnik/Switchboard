@@ -12,7 +12,9 @@ AAAAC0000000000000000003 = {isa = PBXBuildFile; fileRef = AAAAC00000000000000000
 
 AAAAB0000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITests/ScrollTests.swift; sourceTree = SOURCE_ROOT; };
 AAAAB0000000000000000002 = {isa = PBXBuildFile; fileRef = AAAAB0000000000000000001; };
-AAAAB0000000000000000003 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (AAAAB0000000000000000002,AAAAC0000000000000000003); runOnlyForDeploymentPostprocessing = 0; };
+AAAAB000000000000000000A = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITests/InteractionTests.swift; sourceTree = SOURCE_ROOT; };
+AAAAB000000000000000000B = {isa = PBXBuildFile; fileRef = AAAAB000000000000000000A; };
+AAAAB0000000000000000003 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (AAAAB0000000000000000002,AAAAB000000000000000000B,AAAAC0000000000000000003); runOnlyForDeploymentPostprocessing = 0; };
 AAAAB0000000000000000004 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = ContextMobileUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 AAAAB0000000000000000005 = {isa = PBXContainerItemProxy; containerPortal = 244210E48437B6556980A702; proxyType = 1; remoteGlobalIDString = 34A04005BCAF206EEC990BD9; remoteInfo = ContextMobile; };
 AAAAB0000000000000000006 = {isa = PBXTargetDependency; target = 34A04005BCAF206EEC990BD9; targetProxy = AAAAB0000000000000000005; };

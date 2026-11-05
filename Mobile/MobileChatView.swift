@@ -12,6 +12,8 @@ struct MobileChatView: View {
     @State private var jumpRequest = 0
     @State private var showingChatSettings = false
     @State private var openedFile: OpenedFile?
+    /// Height of the whole chat screen above the keyboard; bounds the cards pinned in the dock.
+    @State private var screenHeight: CGFloat = 700
     @StateObject private var scrollController = TranscriptScrollController()
     private var draftKey: String { deviceID + ":" + chatID }
 
@@ -29,8 +31,10 @@ struct MobileChatView: View {
             .background(Color(.systemBackground))
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 MobileChatDock(model: model, device: device, chat: chat, project: project, writing: $writing,
+                               cardLimit: max(150, screenHeight * 0.36),
                                openSettings: { showingChatSettings = true }, sent: { jumpRequest += 1 })
             }
+            .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { screenHeight = $0 }
             .navigationTitle(chat.title).navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
@@ -49,7 +53,8 @@ struct MobileChatView: View {
             }
             .sheet(isPresented: $showingChatSettings) {
                 if let settings = chat.settings {
-                    MobileChatSettingsView(model: model, deviceID: deviceID, chatID: chatID, expected: settings, options: settings.options)
+                    MobileChatSettingsView(model: model, deviceID: deviceID, chatID: chatID, expected: settings, options: settings.options,
+                                           granted: project?.settings?.addOns?.map(\.id))
                 }
             }
             .sheet(item: $openedFile) { file in
@@ -57,9 +62,11 @@ struct MobileChatView: View {
             }
             #if targetEnvironment(simulator)
             .onAppear {
-                // Visual checks: `-preview-file docs/plan.md` opens the viewer with synthetic content.
+                // Visual checks: `-preview-file docs/plan.md` opens the viewer with synthetic content;
+                // `-preview-chat-settings` opens Chat settings.
                 let arguments = ProcessInfo.processInfo.arguments
                 if let index = arguments.firstIndex(of: "-preview-file"), index + 1 < arguments.count { openedFile = OpenedFile(path: arguments[index + 1]) }
+                if arguments.contains("-preview-chat-settings") { showingChatSettings = true }
             }
             #endif
         } else if let command = model.commands.first(where: { $0.device == deviceID && $0.chat == chatID && $0.createsChat })
@@ -102,8 +109,10 @@ struct MobileChatView: View {
                             Text(status).font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .trailing)
                                 .accessibilityIdentifier("send-status")
                         }
-                        if let command = lastCommand, !["send", "create"].contains(command.kind), command.approval == nil {
-                            Text(command.kind == "configure" && command.status == "submitted" ? L10n.text("Настройки сохранены", "Settings saved") : MobileText.command(command.status))
+                        // Queued messages waiting for the Mac are listed above the composer; their outcome shows here.
+                        if let command = lastCommand, !["send", "create"].contains(command.kind), command.approval == nil,
+                           !(["queue", "interrupt"].contains(command.kind) && ["pending", "claimed"].contains(command.status)) {
+                            Text(command.kind == "configure" && command.status == "submitted" ? L10n.text("Настройки сохранены", "Settings saved") : MobileText.command(command.status, kind: command.kind))
                                 .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .trailing)
                                 .accessibilityIdentifier("command-status")
                         }

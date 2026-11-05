@@ -5,9 +5,9 @@ import ImageIO
 /// The message composer of one chat: photo strip, settings chips, input and the trailing action.
 ///
 /// Extension points for new controls:
-/// - `MobileComposerChips`: per-chat choices shown above the field (access, model; a role picker belongs here).
-/// - `MobileComposerAction`: the trailing button (Send, or Stop while the agent works; queue or
-///   interrupt-and-send for a busy chat belongs here).
+/// - `MobileComposerChips`: per-chat choices shown above the field (role or access, model).
+/// - `MobileComposerAction`: the trailing button (Send; while the agent works, Stop for an empty draft,
+///   otherwise Queue with Interrupt and send and Stop on a long press).
 /// Cards that need an answer before the next message (approvals, agent questions) go in `MobileChatDock`, above this view.
 struct MobileComposer: View {
     @ObservedObject var model: MobileModel
@@ -42,6 +42,11 @@ struct MobileComposer: View {
                     .padding(.vertical, 6).accessibilityIdentifier("read-only-notice")
             } else {
                 MobileComposerChips(model: model, deviceID: device.id, chat: chat, project: project, openSettings: openSettings)
+                if chat.running && hasContent && chat.canQueue == true && chat.canInterrupt == true && !model.isBlocked(key) {
+                    Text(L10n.text("Удерживай «В очередь», чтобы прервать и отправить.", "Hold Queue to interrupt and send."))
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        .accessibilityHidden(true)
+                }
                 HStack(alignment: .bottom, spacing: 8) {
                     PhotosPicker(selection: $photoSelection, maxSelectionCount: max(1, RemotePhoto.maximumCount - photos.count), matching: .images) {
                         Image(systemName: "plus").font(.body.weight(.semibold))
@@ -58,7 +63,7 @@ struct MobileComposer: View {
                         .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                         .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Color(.separator).opacity(0.5), lineWidth: 0.5))
                         .accessibilityIdentifier("message-input")
-                    MobileComposerAction(model: model, device: device, chat: chat, canSend: !loadingPhotos && hasContent, send: submit)
+                    MobileComposerAction(model: model, device: device, chat: chat, canSend: !loadingPhotos && hasContent, send: submit(kind:))
                 }
                 .disabled(model.isBlocked(key))
             }
@@ -91,11 +96,12 @@ struct MobileComposer: View {
         .disabled(model.isBlocked(key) || loadingPhotos)
     }
 
-    private func submit() {
+    /// `send`, or for a working chat `queue` / `interrupt`; the draft clears only after the command is stored.
+    private func submit(kind: String) {
         let text = draft.wrappedValue
         let submittedPhotos = photos
         Task {
-            if await model.send(device: device, chat: chat, kind: "send", text: text, photos: submittedPhotos) {
+            if await model.send(device: device, chat: chat, kind: kind, text: text, photos: submittedPhotos) {
                 if draft.wrappedValue == text { draft.wrappedValue = ""; writing.wrappedValue = false }
                 model.photoDrafts[draftKey]?.removeAll { photo in submittedPhotos.contains { $0.id == photo.id } }
                 sent()
@@ -152,9 +158,21 @@ struct MobileComposerChips: View {
             let modelName = project?.models?.first { $0.id == settings.options.model }?.name ?? settings.options.model
             ScrollView(.horizontal) {
                 HStack(spacing: 6) {
-                    Button(action: openSettings) {
-                        ComposerChip(icon: access == .fullAccess ? "lock.open" : "lock", text: access.title)
-                    }.accessibilityLabel(L10n.text("Доступ: ", "Access: ") + access.title).accessibilityIdentifier("chat-access-chip")
+                    if let roles = settings.roles, !roles.isEmpty {
+                        // As on the desktop: the role's name, then one symbol per add-on that is on.
+                        let roleID = settings.options.role ?? settings.projectRole
+                        let name = roles.first { $0.id == roleID }?.name ?? L10n.text("Роль", "Role")
+                        let addOns = (settings.addOns ?? []).filter { (settings.options.addOns ?? []).contains($0.id) }
+                        Button(action: openSettings) {
+                            ComposerChip(icon: access == .fullAccess ? "lock.open" : "lock", text: name, badges: addOns.map { $0.symbol ?? "puzzlepiece.extension" })
+                        }
+                        .accessibilityLabel(([L10n.text("Роль: ", "Role: ") + name] + addOns.map(\.name)).joined(separator: ", "))
+                        .accessibilityIdentifier("chat-role-chip")
+                    } else {
+                        Button(action: openSettings) {
+                            ComposerChip(icon: access == .fullAccess ? "lock.open" : "lock", text: access.title)
+                        }.accessibilityLabel(L10n.text("Доступ: ", "Access: ") + access.title).accessibilityIdentifier("chat-access-chip")
+                    }
                     Button(action: openSettings) {
                         ComposerChip(icon: "cpu", text: modelName.isEmpty ? L10n.text("Модель", "Model") : modelName)
                     }.accessibilityLabel(L10n.text("Настройки чата", "Chat settings") + ": " + modelName).accessibilityIdentifier("chat-settings")
@@ -173,10 +191,13 @@ struct MobileComposerChips: View {
 struct ComposerChip: View {
     let icon: String
     let text: String
+    /// Small symbols after the text, such as the role's add-ons.
+    var badges: [String] = []
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: icon).imageScale(.small).accessibilityHidden(true)
             Text(text)
+            ForEach(badges, id: \.self) { Image(systemName: $0).imageScale(.small).accessibilityHidden(true) }
         }
         .font(.caption.weight(.medium)).lineLimit(1)
             .padding(.horizontal, 10).padding(.vertical, 5)
@@ -186,27 +207,46 @@ struct ComposerChip: View {
     }
 }
 
-/// The trailing control: Send when idle, Stop while the agent works.
+/// The trailing control: Send when idle. While the agent works: Stop for an empty draft; with a draft, Queue
+/// (tap) and Interrupt and send and Stop (long press), each only when the Mac offers it for this chat.
 struct MobileComposerAction: View {
     @ObservedObject var model: MobileModel
     let device: RemoteDevice
     let chat: RemoteChat
     let canSend: Bool
-    let send: () -> Void
+    let send: (String) -> Void
     @ScaledMetric(relativeTo: .body) private var size: CGFloat = 34
     var body: some View {
         let key = MobileChatKey(device: device.id, chat: chat.id)
+        let enabled = canSend && !model.pendingSettings(device: device.id, chat: chat.id)
         Group {
             if model.isSending(key) {
                 ProgressView().frame(width: size, height: size)
+            } else if chat.running && enabled && chat.canQueue == true {
+                Menu { busyActions } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "text.line.last.and.arrowtriangle.forward").imageScale(.small)
+                        Text(L10n.text("В очередь", "Queue")).lineLimit(1)
+                    }
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                    .padding(.horizontal, 12).frame(minHeight: size)
+                    .background(Color.accentColor, in: Capsule())
+                } primaryAction: { send("queue") }
+                .accessibilityLabel(L10n.text("Добавить в очередь", "Add to queue"))
+                .accessibilityHint(chat.canInterrupt == true ? L10n.text("Удерживай, чтобы прервать и отправить или остановить агента", "Hold to interrupt and send or to stop the agent") : "")
+                .accessibilityIdentifier("queue-message")
+            } else if chat.running && enabled && chat.canInterrupt == true {
+                Menu { busyActions } label: {
+                    Image(systemName: "bolt.circle.fill").font(.system(size: size)).symbolRenderingMode(.hierarchical).foregroundStyle(.orange)
+                }
+                .accessibilityLabel(L10n.text("Действия с работающим чатом", "Working chat actions")).accessibilityIdentifier("busy-actions")
             } else if chat.running {
                 Button { Task { _ = await model.send(device: device, chat: chat, kind: "stop") } } label: {
                     Image(systemName: "stop.circle.fill").font(.system(size: size)).symbolRenderingMode(.hierarchical).foregroundStyle(.red)
                 }
                 .accessibilityLabel(L10n.text("Остановить", "Stop")).accessibilityIdentifier("stop-agent")
             } else {
-                let enabled = canSend && !model.pendingSettings(device: device.id, chat: chat.id)
-                Button(action: send) {
+                Button { send("send") } label: {
                     Image(systemName: "arrow.up.circle.fill").font(.system(size: size))
                         .foregroundStyle(enabled ? Color.accentColor : Color(.tertiaryLabel))
                 }
@@ -216,5 +256,21 @@ struct MobileComposerAction: View {
         }
         .buttonStyle(.plain)
         .frame(minWidth: 44, minHeight: 44)
+    }
+    @ViewBuilder private var busyActions: some View {
+        if chat.canInterrupt == true {
+            Button { send("interrupt") } label: {
+                Label(L10n.text("Прервать и отправить", "Interrupt and send"), systemImage: "bolt.fill")
+            }.accessibilityIdentifier("interrupt-and-send")
+        }
+        if chat.canQueue == true {
+            Button { send("queue") } label: {
+                Label(L10n.text("Добавить в очередь", "Add to queue"), systemImage: "text.line.last.and.arrowtriangle.forward")
+            }
+        }
+        Divider()
+        Button(role: .destructive) { Task { _ = await model.send(device: device, chat: chat, kind: "stop") } } label: {
+            Label(L10n.text("Остановить агента", "Stop the agent"), systemImage: "stop.circle")
+        }.accessibilityIdentifier("stop-agent-menu")
     }
 }

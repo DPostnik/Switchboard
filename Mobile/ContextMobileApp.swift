@@ -83,6 +83,10 @@ struct MobileRoot: View {
                 MobileChatView(model: model, deviceID: target.device, chatID: target.chat)
             }
             #if targetEnvironment(simulator)
+            // Visual checks: `-preview-new-chat` opens New chat once the fixtures are loaded.
+            .onChange(of: model.signedIn) { _, value in
+                if value && ProcessInfo.processInfo.arguments.contains("-preview-new-chat") { creatingChat = true }
+            }
             .navigationDestination(isPresented: .constant(ProcessInfo.processInfo.arguments.contains("-preview-chat") && model.signedIn)) {
                 if let device = model.devices.first, let chat = device.snapshot.chats.first {
                     MobileChatView(model: model, deviceID: device.id, chatID: chat.id)

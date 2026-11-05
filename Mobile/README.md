@@ -458,3 +458,31 @@ saving a delivery receipt; older Macs reject the new kinds as unknown commands.
   working; with `addOns` the expected settings must carry them too.
   `RemoteCommand.configure` sends add-ons only when they change and the host lists
   `settings.addOns`, so a model-only change needs no interactions schema.
+
+### Phone interface (2026-11-05)
+
+- **Question card** (`MobileQuestionCard` in `MobileChatDock.swift`): after a pending approval,
+  the first question or form without an accepted reply is pinned above the composer ("1 of N").
+  Options are rows with label and description (the chosen option's preview shows under them);
+  "Other answer" is a free-text row where the agent accepts one and replaces the option. Send
+  is enabled only while `RemoteInteraction.validate(answers:)` passes; Decline appears when
+  `canDecline`. Mac-only requests show their `macOnlyMessage` and the question text, no form.
+  The questions scroll inside a box capped at about a third of the screen above the keyboard,
+  so the composer stays visible. The reply's status shows on the card once every request has a
+  reply. Questions count under "Needs you" and in the row status like approvals.
+- **Working chat** (`MobileComposerAction`): with an empty draft the button is Stop; with a draft
+  it is Queue when `canQueue`, and a long press offers Interrupt and send (when `canInterrupt`)
+  and Stop. Without `canQueue` but with `canInterrupt` the button opens that menu. The draft
+  clears once the command is stored. `MobileQueueList` shows the chat's desktop queue (three
+  rows, "+N more" from `queueCount`, "Queue paused on the Mac"), plus this phone's queue and
+  interrupt commands the Mac has not listed yet with their status.
+- **Role and add-ons** (`MobileRoleSection` in `MobileSettings.swift`, chat settings and new chat):
+  hosts that publish roles get a role picker ("Project default: …") instead of the access
+  picker. Add-on toggles follow `RemoteChatSettings.addOnChoices` (ContextCore): on only within
+  the project default (the project's published `addOns`) or while the Mac already has it on, off
+  always; an add-on on beyond the default says that only the Mac can turn it on again. The
+  composer chip shows the role name and one symbol per add-on that is on (envelope, globe).
+- Simulator fixtures: `-preview-question`, `-preview-form-maconly`, `-preview-queue`
+  (`-preview-queue-paused`), `-preview-roles`; `-preview-chat-settings` and `-preview-new-chat`
+  open those sheets for screenshots. `MobilePreviewTransport` answers both schema RPCs with 1
+  and acknowledges command inserts. UI tests: `Mobile/UITests/InteractionTests.swift`.
