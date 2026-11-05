@@ -232,7 +232,7 @@ struct ChatRow: View, Equatable {
                     .foregroundStyle(.secondary).accessibilityIdentifier("read-only-badge")
             }
             if !meta.isEmpty {
-                Text(meta).foregroundStyle(.tertiary).lineLimit(1)
+                Text(meta).foregroundStyle(.tertiary).lineLimit(2).fixedSize(horizontal: false, vertical: true)
             }
         }
         .font(.caption.weight(.medium))
@@ -263,7 +263,8 @@ struct RowStatus: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 4) {
             Image(systemName: systemImage).imageScale(.small).accessibilityHidden(true)
-            Text(text)
+            // Wraps at large text sizes instead of cutting the status short.
+            Text(text).fixedSize(horizontal: false, vertical: true)
         }
     }
 }

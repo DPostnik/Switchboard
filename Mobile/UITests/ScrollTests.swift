@@ -53,7 +53,10 @@ final class ScrollTests: XCTestCase {
             app.navigationBars.buttons.firstMatch.tap()
             XCTAssertTrue(search.waitForExistence(timeout: 5))
             search.tap(); search.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 7))
-            if app.keyboards.firstMatch.exists { app.swipeDown() }
+            // The bottom search field keeps focus (and the keyboard keeps the list from scrolling) until it is closed.
+            let closeSearch = app.buttons["close"]
+            if closeSearch.exists && closeSearch.isHittable { closeSearch.tap() } else if app.keyboards.firstMatch.exists { app.swipeDown() }
+            XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
             reveal(expand)
             XCTAssertTrue(expand.label.contains(remaining), "Clearing search restores the collapsed limit")
             app.terminate()

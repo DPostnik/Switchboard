@@ -397,11 +397,14 @@ line, delivery notice, shared wording) and `MobilePreview.swift` (simulator fixt
 - Chat: the pending approval is pinned above the composer (one card, "1 of N" when more
   wait; the first without an accepted reply is shown), replacing the "Awaiting approval"
   shortcut. While the agent works, a one-line activity with elapsed time sits there instead.
+  Decline and Allow share a row while both labels fit on one line and stack otherwise
+  (`MobileApprovalButtonsLayout`), so neither label is shrunk or cut at large text sizes.
 - Delivery receipts are per chat (`RemoteReceipts`, Keychain account `pending-commands`; the
   single `pending-command` receipt of earlier builds is migrated on sign-in). An unconfirmed
   command blocks later sends, Stop, approval replies and settings in that chat only and is
   never resent automatically. Its notice offers Check delivery; once the cloud proves the
-  command absent, Send again (same command ID) or Discard. New chats are keyed by project:
+  command absent, Send again (same command ID) or Discard. After a relaunch the phone holds only
+  the receipt (identity and text, never photos), so it offers Discard and asks to write the message again. New chats are keyed by project:
   an unconfirmed creation blocks another creation in the same project and is listed under
   "Needs you" until the Mac publishes it. File reads still skip receipts.
 - The language switch applies at once (`L10n.use`); the Mac still keeps one language per launch.

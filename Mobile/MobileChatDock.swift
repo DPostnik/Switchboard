@@ -86,10 +86,9 @@ struct MobileApprovalCard: View {
             .frame(height: min(max(detailsHeight, 18), 120))
             .padding(10)
             .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 10) { buttons }
-                VStack(spacing: 8) { buttons }
-            }
+            // Side by side while both labels fit on one line, otherwise stacked (large text sizes).
+            // A custom layout: `ViewThatFits` with fixed-size labels here left the chat screen blank in the simulator.
+            MobileApprovalButtonsLayout { buttons }
             .controlSize(.large)
             .disabled(model.isBlocked(key) || response.map { $0.status != "rejected" } == true)
             if let response {
@@ -114,14 +113,50 @@ struct MobileApprovalCard: View {
         Button(role: .destructive) {
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             Task { _ = await model.send(device: device, chat: chat, kind: "deny", approval: approval.id) }
-        } label: { Text(L10n.text("Отклонить", "Decline")).frame(maxWidth: .infinity) }
+        } label: { Text(L10n.text("Отклонить", "Decline")).padding(.horizontal, 6).frame(maxWidth: .infinity) }
             .buttonStyle(.bordered).accessibilityIdentifier("deny-approval")
         if approval.canAllow {
             Button {
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 Task { _ = await model.send(device: device, chat: chat, kind: "allow", approval: approval.id) }
-            } label: { Text(L10n.text("Разрешить один раз", "Allow once")).lineLimit(1).frame(maxWidth: .infinity) }
+            } label: { Text(L10n.text("Разрешить один раз", "Allow once")).multilineTextAlignment(.center).frame(maxWidth: .infinity) }
                 .buttonStyle(.borderedProminent).tint(.orange).accessibilityIdentifier("allow-approval")
         }
+    }
+}
+
+/// Decline and Allow in one row when their one-line widths fit: Decline at its own width, Allow
+/// filling the rest. Otherwise each takes the full width, one under the other.
+struct MobileApprovalButtonsLayout: Layout {
+    var spacing: CGFloat = 10
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let ideals = subviews.map { $0.sizeThatFits(.unspecified) }
+        let width = proposal.width ?? ideals.map(\.width).reduce(0, +) + spacing * CGFloat(max(0, ideals.count - 1))
+        if fitsRow(ideals, width) { return CGSize(width: width, height: ideals.map(\.height).max() ?? 0) }
+        let heights = subviews.map { $0.sizeThatFits(ProposedViewSize(width: width, height: nil)).height }
+        return CGSize(width: width, height: heights.reduce(0, +) + spacing * CGFloat(max(0, heights.count - 1)))
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let ideals = subviews.map { $0.sizeThatFits(.unspecified) }
+        if fitsRow(ideals, bounds.width) {
+            var x = bounds.minX
+            for (index, subview) in subviews.enumerated() {
+                let last = index == subviews.count - 1
+                let width = last ? bounds.maxX - x : ideals[index].width
+                subview.place(at: CGPoint(x: x, y: bounds.midY), anchor: .leading,
+                              proposal: ProposedViewSize(width: width, height: ideals[index].height))
+                x += width + spacing
+            }
+        } else {
+            var y = bounds.minY
+            for subview in subviews {
+                let size = subview.sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
+                subview.place(at: CGPoint(x: bounds.minX, y: y), proposal: ProposedViewSize(width: bounds.width, height: size.height))
+                y += size.height + spacing
+            }
+        }
+    }
+    private func fitsRow(_ ideals: [CGSize], _ width: CGFloat) -> Bool {
+        ideals.map(\.width).reduce(0, +) + spacing * CGFloat(max(0, ideals.count - 1)) <= width
     }
 }

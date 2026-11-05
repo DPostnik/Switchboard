@@ -76,9 +76,12 @@ struct MobileDeliveryNotice: View {
                                           : L10n.text("Доставка не подтверждена", "Delivery unconfirmed"),
                               systemImage: undelivered ? "icloud.slash" : "questionmark.circle")
                             .font(.subheadline.weight(.semibold))
-                        Text(undelivered
+                        Text(!undelivered
+                             ? L10n.text("Новые команды в этом чате ждут проверки. Проверь доставку; повторной отправки без тебя не будет.", "New commands in this chat wait for this check. Check delivery; nothing is resent without you.")
+                             : model.canResend(receipt)
                              ? L10n.text("Mac её не получит. Отправь снова или сбрось её — другие чаты не затронуты.", "Your Mac will not receive it. Send it again or discard it; other chats are not affected.")
-                             : L10n.text("Новые команды в этом чате ждут проверки. Проверь доставку; повторной отправки без тебя не будет.", "New commands in this chat wait for this check. Check delivery; nothing is resent without you."))
+                             // After a relaunch the phone keeps only the text (photos are never stored), so it cannot resend.
+                             : L10n.text("Mac её не получит. Сбрось её и напиши сообщение заново — другие чаты не затронуты.", "Your Mac will not receive it. Discard it and write the message again; other chats are not affected."))
                             .foregroundStyle(.secondary)
                         if !receipt.text.isEmpty {
                             Text(receipt.text).lineLimit(2).foregroundStyle(.secondary).italic()

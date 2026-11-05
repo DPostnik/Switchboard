@@ -181,8 +181,10 @@ struct MobileNewChatPending: View {
                     Text(command.text).font(.callout).padding(12).frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }
-                Text(L10n.text("Чат откроется после обновления с Mac. Команда не отправляется повторно.", "The chat opens when your Mac publishes it. The command is not sent again."))
-                    .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                if receipt.map({ !model.isUndelivered($0) }) ?? true {
+                    Text(L10n.text("Чат откроется после обновления с Mac. Команда не отправляется повторно.", "The chat opens when your Mac publishes it. The command is not sent again."))
+                        .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }
                 MobileDeliveryNotice(model: model, key: MobileChatKey(command), receipt: receipt)
             }
             .padding(24).frame(maxWidth: .infinity)
