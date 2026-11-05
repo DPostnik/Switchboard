@@ -955,7 +955,7 @@ public actor ClaudeIntegration: AgentIntegration {
                     guard let label = option["label"].string else { return nil }
                     return .init(label: label, description: option["description"].string, preview: option["preview"].string)
                 }
-                return .init(id: text, text: text, options: options, secret: false, required: true)
+                return .init(id: text, text: text, options: options, secret: false, required: true, header: question["header"].string)
             }
             guard !fields.isEmpty, fields.count <= 16, fields.count == input["questions"].array.count, Set(fields.map(\.id)).count == fields.count else {
                 await deny(L10n.text("Неподдерживаемая схема вопроса", "Unsupported question schema")); return

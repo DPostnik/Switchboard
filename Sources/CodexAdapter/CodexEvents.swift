@@ -59,7 +59,7 @@ struct CodexPendingInteraction: Sendable {
                 let options = q["options"].array.compactMap { option -> AgentInteraction.Field.Option? in
                     option["label"].string.map { .init(label: $0, description: option["description"].string) }
                 }
-                fields.append(.init(id: id, text: text, options: options, secret: q["isSecret"].bool == true, required: true))
+                fields.append(.init(id: id, text: text, options: options, secret: q["isSecret"].bool == true, required: true, header: q["header"].string))
             }
             kind = .questions(fields)
         case "mcpServer/elicitation/request":

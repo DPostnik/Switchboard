@@ -18,7 +18,9 @@ with tempfile.TemporaryDirectory(prefix='context-remote-db-', dir='/tmp') as dir
     except subprocess.CalledProcessError as error: raise SystemExit(error.stderr)
     started = False
     try:
-        run('pg_ctl', '-D', folder/'data', '-l', folder/'postgres.log', '-o', f"-k {folder} -h '' -p 55439", '-w', 'start')
+        # Without a valid locale in the environment the macOS postmaster refuses to start ("became multithreaded").
+        run('pg_ctl', '-D', folder/'data', '-l', folder/'postgres.log', '-o', f"-k {folder} -h '' -p 55439", '-w', 'start',
+            env={**os.environ, 'LC_ALL': 'C', 'LANG': 'C'})
         started = True
         def sql(text):
             return run('psql','-h',folder,'-p','55439','-d','postgres','-v','ON_ERROR_STOP=1','-At',input=text).stdout.strip()
@@ -48,6 +50,19 @@ with tempfile.TemporaryDirectory(prefix='context-remote-db-', dir='/tmp') as dir
         sql((root/'supabase/migrations/202609280004_photo_retention.sql').read_text())
         sql((root/'supabase/migrations/202609280006_chat_settings.sql').read_text())
         sql((root/'supabase/migrations/202610180001_remote_files.sql').read_text())
+        # Before the interactions migration a role (published in chat settings since roles) cannot reach the queue.
+        assert sql("""select public.valid_remote_options('{"model":"m","role":"reader"}');""") == 'f'
+        sql((root/'supabase/migrations/202611050001_remote_interactions.sql').read_text())
+        assert sql("""select public.valid_remote_options('{"model":"m","role":"reader","addOns":["mail","userChrome"]}'),
+            public.valid_remote_options('{"model":"m","access":null,"role":null,"addOns":null}'),
+            public.valid_remote_options('{"model":"m","role":""}'), public.valid_remote_options('{"model":"m","role":5}'),
+            public.valid_remote_options('{"model":"m","addOns":[1]}'), public.valid_remote_options('{"model":"m","addOns":"mail"}'),
+            public.valid_remote_options('{"model":"m","addOns":["a","b","c","d","e","f","g","h","i"]}'),
+            public.valid_remote_options('{"model":"m","extra":true}');""") == 't|t|f|f|f|f|f|f'
+        assert sql("""select public.valid_remote_answers('{"q":"a"}'), public.valid_remote_answers('{}'),
+            public.valid_remote_answers('{"q":1}'), public.valid_remote_answers('[]'), public.valid_remote_answers('{"":"a"}'),
+            public.valid_remote_answers(jsonb_build_object('q', repeat('x', 8001))),
+            public.valid_remote_answers('{"1":"a","2":"a","3":"a","4":"a","5":"a","6":"a","7":"a","8":"a","9":"a"}');""") == 't|t|f|f|f|f|f'
         assert sql("select public.valid_remote_photos(null), public.valid_remote_photos('[]'), public.valid_remote_photos('{}'), public.valid_remote_photos('[{\"id\":\"bad\",\"data\":\"/9j/AA==\"}]');") == 't|t|f|f'
 
         owner = "set role authenticated; set request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';"
@@ -227,6 +242,58 @@ with tempfile.TemporaryDirectory(prefix='context-remote-db-', dir='/tmp') as dir
         sql(owner + answer.replace(request, last))
         sql(owner + 'delete from public.remote_devices;')
         assert sql('select count(*) from public.remote_files;') == '0'
-        print('PASS: file answers (owner-only, claimed file commands, immutable, swept after 10 minutes); chat settings validation, immutable choices and uncertain-work blocking; photo expiry, grace period, immutable history, retention permissions/idempotence; all data migrations, delete/recreate revision continuity, atomic event rollback, private channel RLS, compact signals, delta revisions/deletions, owner/project isolation, duplicate claims and no uncertain replay')
+        # Interactions: answers, queued and interrupt-and-send messages, role and add-on settings.
+        sql(owner + f"insert into public.remote_devices(id,name,projects,snapshot) values ('{device}','Mac',array['project'],'{{}}');")
+        handle = str(uuid.uuid4())
+        def command_row(kind, chat='work', text='', approval=None, turn=None, answers=None, photos=None, settings=None, project='project'):
+            value = str(uuid.uuid4())
+            columns, values = ['id','device','project','chat','kind','text'], [value, device, project, chat, kind, text]
+            for name, item in [('approval', approval), ('turn', turn), ('answers', answers), ('photos', photos), ('settings', settings)]:
+                if item is not None: columns.append(name); values.append(item)
+            literal = ','.join("'" + str(item).replace("'", "''") + "'" for item in values)
+            return value, f"insert into public.remote_commands({','.join(columns)}) values ({literal});"
+        answers = json.dumps({'Which?': 'Option A', 'Name': 'Свободный ответ / free text'}, ensure_ascii=False)
+        for _, bad in [command_row('answer', answers=answers), command_row('answer', approval=handle),
+                       command_row('answer', approval=handle, answers='{"q":1}'), command_row('answer', approval=handle, answers=answers, text='x'),
+                       command_row('answer', approval=handle, answers=answers, turn='t'), command_row('send', text='hi', answers=answers),
+                       command_row('queue'), command_row('queue', text='hi', approval=handle), command_row('interrupt', text='hi'),
+                       command_row('queue', text='hi', settings=json.dumps({'options': {'model': 'm'}})), command_row('stop', answers=answers),
+                       command_row('queue', text='hi', project='private'), command_row('interrupt', text='hi', turn='')]:
+            rejects(owner + bad)
+        rejects(other + command_row('queue', text='hi')[1])
+        # An uncertain message blocks every later message of the chat; answers are still claimed, and first.
+        sent, insert_sent = command_row('send', text='first')
+        sql(owner + insert_sent)
+        assert sql(owner + f"select kind from public.claim_remote_command('{device}');").endswith('send')
+        sql(owner + f"update public.remote_commands set status='uncertain' where id='{sent}';")
+        queued, insert_queued = command_row('queue', text='after the turn', photos=photo)
+        interrupt, insert_interrupt = command_row('interrupt', text='instead', turn='observed-turn')
+        answer, insert_answer = command_row('answer', approval=handle.upper(), answers=answers)
+        for statement in [insert_queued, insert_interrupt, insert_answer]: sql(owner + statement)
+        rejects(owner + insert_answer)
+        rejects(owner + f"update public.remote_commands set answers='{{}}' where id='{answer}';")
+        claimed = sql(owner + f"select kind || ':' || approval::text from public.claim_remote_command('{device}');").splitlines()[-1]
+        assert claimed == 'answer:' + handle.lower()
+        assert sql(owner + f"select answers->>'Name' from public.remote_commands where id='{answer}';").endswith('Свободный ответ / free text')
+        assert sql(owner + f"select count(*) from public.claim_remote_command('{device}');").endswith('0')
+        # Another chat is not blocked; queue and interrupt keep their creation order there.
+        other_queued, insert_other_queued = command_row('queue', chat='other-chat', text='later')
+        other_interrupt, insert_other_interrupt = command_row('interrupt', chat='other-chat', text='now', turn='t-2')
+        sql(owner + insert_other_queued); sql(owner + insert_other_interrupt)
+        assert sql(owner + f"select id::text from public.claim_remote_command('{device}');").endswith(other_queued)
+        sql(owner + f"update public.remote_commands set status='submitted' where id='{other_queued}';")
+        assert sql(owner + f"select turn from public.claim_remote_command('{device}');").endswith('t-2')
+        rejects(owner + f"update public.remote_commands set turn='newer' where id='{other_interrupt}';")
+        # Role and add-ons in configure; the expected settings carry the role the Mac published.
+        configured_role = json.dumps({'options': {'model': 'm', 'role': 'reader', 'addOns': ['mail']},
+                                      'expected': {'model': 'm', 'role': 'editor', 'addOns': []}, 'expectedProjectAccess': 'standard'})
+        sql(owner + command_row('configure', chat='settings-chat', settings=configured_role)[1])
+        rejects(owner + command_row('configure', chat='settings-chat', settings=configured_role.replace('"mail"', '7'))[1])
+        assert sql(owner + 'select public.remote_interactions_version();').endswith('1')
+        rejects('set role anon; select public.remote_interactions_version();')
+        assert sql(other + 'select count(*) from public.remote_commands;').endswith('0')
+        sql(owner + 'delete from public.remote_devices;')
+        assert sql('select count(*) from public.remote_commands;') == '0'
+        print('PASS: interactions (answers bound to a request handle, queue/interrupt validation, uncertain-message blocking with answers still claimed, role/add-on settings, version gate); file answers (owner-only, claimed file commands, immutable, swept after 10 minutes); chat settings validation, immutable choices and uncertain-work blocking; photo expiry, grace period, immutable history, retention permissions/idempotence; all data migrations, delete/recreate revision continuity, atomic event rollback, private channel RLS, compact signals, delta revisions/deletions, owner/project isolation, duplicate claims and no uncertain replay')
     finally:
         if started: run('pg_ctl','-D',folder/'data','-m','fast','-w','stop')

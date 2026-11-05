@@ -41,6 +41,8 @@ import IOKit.ps
     private var sleeping = false
     /// The cloud schema has the short-lived file table; checked on every subscription.
     private var filesReady = false
+    /// The cloud schema accepts answers, queued and interrupt-and-send messages; checked on every subscription.
+    private var interactionsReady = false
     private var api: RemoteAPI?
     private var apiURL = ""
     private var apiKey = ""
@@ -144,6 +146,7 @@ import IOKit.ps
                 guard let self, self.enabled, !self.sleeping else { throw CancellationError() }
                 self.lastPublished = nil // A new subscription always reconciles current local state.
                 self.filesReady = (try? await client.supportsFiles()) ?? false
+                self.interactionsReady = (try? await client.supportsInteractions()) ?? false
                 try await self.publishCurrent()
             }
             realtime = channel
@@ -192,6 +195,7 @@ import IOKit.ps
             }
         }
         for index in snapshot.projects.indices { snapshot.projects[index].canReadFiles = filesReady ? true : nil }
+        Self.applyInteractionSchema(interactionsReady, to: &snapshot)
         for index in snapshot.chats.indices where snapshot.chats[index].running {
             if let action = liveActivity[snapshot.chats[index].id] { snapshot.chats[index].activity = action }
         }
@@ -201,6 +205,18 @@ import IOKit.ps
         try await api.publishChanges(RemoteDevice(id: device, owner: api.owner(), snapshot: snapshot), previous: lastPublished)
         try Task.checkCancellation()
         lastPublished = snapshot
+    }
+    /// Without the interactions schema the cloud queue cannot carry answers, queued or interrupt-and-send messages:
+    /// those phone actions are withdrawn, while the requests and the queue stay visible.
+    static func applyInteractionSchema(_ ready: Bool, to snapshot: inout RemoteSnapshot) {
+        guard !ready else { return }
+        for index in snapshot.chats.indices {
+            snapshot.chats[index].canQueue = nil; snapshot.chats[index].canInterrupt = nil
+            if var interactions = snapshot.chats[index].interactions {
+                for item in interactions.indices { interactions[item].requireMac(.setup) }
+                snapshot.chats[index].interactions = interactions
+            }
+        }
     }
     /// Model changes arrive at delta rate while a chat streams; the phone receives at most one snapshot per second.
     static let publicationInterval: Duration = .seconds(1)
@@ -277,7 +293,8 @@ import IOKit.ps
                     var result = "rejected"
                     do {
                         guard projects.contains(command.project), command.device.lowercased() == device.lowercased(),
-                              command.owner == (try await api.owner()) else { throw RemoteFailure.invalidCommand }
+                              command.owner == (try await api.owner()),
+                              interactionsReady || !RemoteCommand.interactionKinds.contains(command.kind) else { throw RemoteFailure.invalidCommand }
                         try await journal.begin(command)
                         if command.kind == "file" { result = try await answerFile(command, model: model, api: api) }
                         else { result = try await model.executeRemote(command) }
