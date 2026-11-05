@@ -106,8 +106,12 @@ public struct AgentInteraction: Identifiable, Sendable {
         public let options: [Option]
         public let secret: Bool
         public let required: Bool
-        public init(id: String, text: String, options: [Option], secret: Bool, required: Bool) {
+        /// The agent's short label for the question (Claude and Codex "header"), as data; nil when none was sent.
+        public let header: String?
+        public init(id: String, text: String, options: [Option], secret: Bool, required: Bool, header: String? = nil) {
             self.id = id; self.text = text; self.options = options; self.secret = secret; self.required = required
+            let trimmed = header?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            self.header = trimmed.isEmpty ? nil : trimmed
         }
         /// One selectable answer. `label` is the value sent back; `description` and `preview` are agent text shown beside it, as data.
         public struct Option: Hashable, Sendable {

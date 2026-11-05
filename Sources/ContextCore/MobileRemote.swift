@@ -37,15 +37,37 @@ public struct RemoteModelOption: Codable, Identifiable, Sendable, Equatable {
     public var agentTitle: String { agent == Self.claudeAgent ? "Claude" : "Codex" }
 }
 public struct RemoteChatOptions: Codable, Sendable, Equatable {
+    public static let addOnLimit = 8
     public var model: String
     /// nil inherits the project's interactive default without changing it.
     public var access: RemoteAccessMode?
     /// Role id (v2 phones); wins over `access`. Never above the project's default: the Mac rejects anything higher.
+    /// Sending it needs the interactions schema (`RemoteAPI.checkInteractionSchema`).
     public var role: String?
-    public init(model: String, access: RemoteAccessMode? = nil, role: String? = nil) { self.model = model; self.access = access; self.role = role }
+    /// Role add-on ids (`RemoteAddOnOption.id`). In a chat's published settings: the add-ons the chat runs with now.
+    /// In a `configure` change, nil leaves the chat's add-ons unchanged (older phones never send it); in `create`, nil follows
+    /// the project's add-ons. Sending it needs the interactions schema.
+    public var addOns: [String]?
+    public init(model: String, access: RemoteAccessMode? = nil, role: String? = nil, addOns: [String]? = nil) {
+        self.model = model; self.access = access; self.role = role; self.addOns = addOns
+    }
     public func validate() throws {
         guard !model.isEmpty, model.utf8.count <= 200 else { throw RemoteFailure.invalidCommand }
+        if let role { guard !role.isEmpty, role.utf8.count <= 200 else { throw RemoteFailure.invalidCommand } }
+        if let addOns {
+            guard addOns.count <= Self.addOnLimit, Set(addOns).count == addOns.count,
+                  addOns.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 64 }) else { throw RemoteFailure.invalidCommand }
+        }
     }
+    /// The stale check of a settings change: `self` is what the phone saw. A phone that did not send add-ons
+    /// (older builds) is compared without them; add-ons compare as a set.
+    public func matches(current: RemoteChatOptions) -> Bool {
+        guard model == current.model, access == current.access, role == current.role else { return false }
+        guard let addOns else { return true }
+        return Set(addOns) == Set(current.addOns ?? [])
+    }
+    /// Uses fields that only the interactions schema accepts in the cloud queue.
+    var needsInteractionSchema: Bool { role != nil || addOns != nil }
 }
 public struct RemoteChatSettings: Codable, Sendable, Equatable {
     public var options: RemoteChatOptions
@@ -54,14 +76,32 @@ public struct RemoteChatSettings: Codable, Sendable, Equatable {
     /// Additive for v2 phones: the project's default role and the roles the phone may pick (never above it).
     public var projectRole: String?
     public var roles: [RemoteRoleOption]?
-    public init(options: RemoteChatOptions, projectAccess: RemoteAccessMode, canEdit: Bool, projectRole: String? = nil, roles: [RemoteRoleOption]? = nil) {
+    /// Add-ons the phone may turn on or off here: those within the project's default plus the ones already on.
+    /// Absent on older hosts (no add-on choice). `options.addOns` holds the current ones.
+    public var addOns: [RemoteAddOnOption]?
+    /// The project's default add-ons for new chats.
+    public var projectAddOns: [String]?
+    public init(options: RemoteChatOptions, projectAccess: RemoteAccessMode, canEdit: Bool, projectRole: String? = nil, roles: [RemoteRoleOption]? = nil,
+                addOns: [RemoteAddOnOption]? = nil, projectAddOns: [String]? = nil) {
         self.options = options; self.projectAccess = projectAccess; self.canEdit = canEdit; self.projectRole = projectRole; self.roles = roles
+        self.addOns = addOns; self.projectAddOns = projectAddOns
     }
 }
 public struct RemoteRoleOption: Codable, Sendable, Equatable, Identifiable {
     public var id: String
     public var name: String
     public init(id: String, name: String) { self.id = id; self.name = name }
+}
+/// A role add-on ("Mail and connectors", "My Chrome"): widens a chat's role without switching it.
+public struct RemoteAddOnOption: Codable, Sendable, Equatable, Identifiable {
+    public var id: String
+    public var name: String
+    public var summary: String?
+    /// SF Symbol the desktop role chip shows for it.
+    public var symbol: String?
+    public init(id: String, name: String, summary: String? = nil, symbol: String? = nil) {
+        self.id = id; self.name = name; self.summary = summary; self.symbol = symbol
+    }
 }
 public struct RemoteSettingsChange: Codable, Sendable, Equatable {
     public var options: RemoteChatOptions
@@ -103,6 +143,18 @@ public struct RemoteChat: Codable, Identifiable, Sendable, Equatable {
     public var activity: String?
     /// ISO 8601 start of the running turn; nil when idle or on older hosts.
     public var runningSince: String?
+    /// Pending questions and tool forms (not approvals); nil on older hosts. At most `RemoteInteraction.chatLimit`.
+    public var interactions: [RemoteInteraction]?
+    /// The chat's desktop queue in delivery order, at most `RemoteQueuedMessage.chatLimit`; nil on older hosts or when empty.
+    public var queue: [RemoteQueuedMessage]?
+    /// All queued messages, when more than `queue` lists.
+    public var queueCount: Int?
+    /// The queue waits for the user on the Mac (after a stop or a failed turn); new messages join it and wait too.
+    public var queuePaused: Bool?
+    /// The Mac accepts `RemoteCommand.queue` for this chat: the message joins the desktop queue and runs after the current turn.
+    public var canQueue: Bool?
+    /// The Mac accepts `RemoteCommand.interruptAndSend` for the running `turn` now.
+    public var canInterrupt: Bool?
     public static let activityLimit = 160
     public init(id: String, project: String, title: String, running: Bool, messages: [RemoteMessage], approvals: [RemoteApproval], turn: String? = nil) { self.id = id; self.project = project; self.title = title; self.running = running; self.messages = messages; self.approvals = approvals; self.turn = turn; supportsPhotos = true }
     public static var readOnlyNotice: String {
@@ -193,6 +245,138 @@ public struct RemoteApproval: Codable, Identifiable, Sendable, Equatable {
     public var details: String
     public var canAllow: Bool
     public init(id: String, details: String, canAllow: Bool) { self.id = id; self.details = details; self.canAllow = canAllow }
+}
+/// A pending structured question or tool form, as the desktop's request card shows it. Approvals stay in `RemoteApproval`.
+/// Agent text is data. When the phone cannot show the request faithfully, `canAnswer` is false and `macOnly` says why:
+/// the phone then shows "answer on the Mac" instead of a reduced form.
+public struct RemoteInteraction: Codable, Identifiable, Sendable, Equatable {
+    public enum Kind: String, Sendable { case questions, form, link, unsupported }
+    /// Why the request can be answered only on the Mac. Codes stay stable; `message` owns the wording.
+    public enum MacOnly: String, Sendable, CaseIterable {
+        /// A field asks for a secret; secrets never pass through the cloud queue.
+        case secret
+        /// Text or option lists exceed the phone limits; a shortened form could send a different answer.
+        case tooLarge
+        /// The tool's form uses restrictions the app does not support (the desktop can only decline it).
+        case unsupported
+        /// The tool asks to finish an action on its web page, next to the Mac's session.
+        case link
+        /// The cloud schema or the Mac app predates phone answers.
+        case setup
+        public func message(language: AppLanguage = L10n.language) -> String {
+            switch self {
+            case .secret: L10n.text("Запрос просит секрет. Ответь на Mac: секреты не передаются через облако.", "The request asks for a secret. Answer on the Mac: secrets are never sent through the cloud.", language: language)
+            case .tooLarge: L10n.text("Запрос слишком длинный для телефона. Ответь на Mac.", "The request is too long for the phone. Answer on the Mac.", language: language)
+            case .unsupported: L10n.text("Такую форму можно только отклонить или заполнить на Mac.", "This form can only be declined here or answered on the Mac.", language: language)
+            case .link: L10n.text("Инструмент просит завершить действие на его странице. Сделай это на Mac.", "The tool asks you to finish an action on its page. Do it on the Mac.", language: language)
+            case .setup: L10n.text("Чтобы отвечать с телефона, обнови приложение на Mac и схему мобильного доступа в Supabase.", "To answer from the phone, update the Mac app and the Supabase mobile access schema.", language: language)
+            }
+        }
+    }
+    public static let chatLimit = 4
+    public static let questionLimit = 8, optionLimit = 12
+    public static let textLimit = 2000, headerLimit = 200, labelLimit = 300, descriptionLimit = 600, previewLimit = 1500, messageLimit = 4000
+    /// All text of one request; above it descriptions and previews are dropped and the request is Mac-only.
+    public static let characterBudget = 16_000
+    /// One answer value, in UTF-8 bytes.
+    public static let answerBytes = 8000
+    /// Pending request handle; the answer command carries it in `RemoteCommand.approval`.
+    public var id: String
+    /// `Kind` raw value; kept a string so a future kind never breaks snapshot decoding.
+    public var kind: String
+    /// The form's or link's own message; nil for questions.
+    public var message: String?
+    public var questions: [RemoteQuestion]
+    /// The phone may submit `RemoteCommand.answer` for it.
+    public var canAnswer: Bool
+    /// The phone may submit `RemoteCommand.decline` (the desktop's Decline button). Questions have none, as on the desktop.
+    public var canDecline: Bool
+    /// `MacOnly` raw value when `canAnswer` is false.
+    public var macOnly: String?
+    public var kindValue: Kind? { Kind(rawValue: kind) }
+    public var macOnlyReason: MacOnly? { macOnly.flatMap(MacOnly.init(rawValue:)) }
+    /// What the phone shows instead of a form; a generic Mac hint for codes from newer hosts.
+    public var macOnlyMessage: String? {
+        guard !canAnswer else { return nil }
+        return macOnlyReason?.message() ?? L10n.text("Ответь на Mac.", "Answer on the Mac.")
+    }
+    public init(id: String, kind: Kind, message: String? = nil, questions: [RemoteQuestion], canAnswer: Bool, canDecline: Bool, macOnly: MacOnly? = nil) {
+        self.id = id; self.kind = kind.rawValue; self.message = message; self.questions = questions
+        self.canAnswer = canAnswer; self.canDecline = canDecline; self.macOnly = macOnly?.rawValue
+    }
+    /// Characters of all agent text, for `characterBudget`.
+    var characters: Int {
+        (message?.count ?? 0) + questions.reduce(0) { total, question in
+            total + question.id.count + question.text.count + (question.header?.count ?? 0)
+                + question.options.reduce(0) { $0 + $1.label.count + ($1.description?.count ?? 0) + ($1.preview?.count ?? 0) }
+        }
+    }
+    /// Marks the request Mac-only, e.g. while the cloud schema cannot carry answers.
+    public mutating func requireMac(_ reason: MacOnly) {
+        guard canAnswer else { return }
+        canAnswer = false; macOnly = reason.rawValue
+    }
+    /// The answers the Mac accepts: one value per answered question (an option's exact `label`, or free text where
+    /// `allowsOther`), every required question answered, and for `questions` every question. Throws `invalidAnswer`.
+    public func validate(answers: [String: String]) throws {
+        guard canAnswer, kindValue == .questions || kindValue == .form else { throw RemoteFailure.invalidCommand }
+        let ids = Set(questions.map(\.id))
+        guard Set(answers.keys).isSubset(of: ids), kindValue != .questions || Set(answers.keys) == ids else { throw RemoteFailure.invalidAnswer }
+        for question in questions {
+            let value = answers[question.id]
+            let blank = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            guard !question.required || !blank, (value?.utf8.count ?? 0) <= Self.answerBytes, value?.contains("\0") != true else { throw RemoteFailure.invalidAnswer }
+            if let value, !blank, !question.allowsOther, !question.options.isEmpty {
+                guard question.options.contains(where: { $0.label == value }) else { throw RemoteFailure.invalidAnswer }
+            }
+        }
+    }
+}
+public struct RemoteQuestion: Codable, Identifiable, Sendable, Equatable {
+    /// The answer key; send it back unchanged.
+    public var id: String
+    /// Short label shown above the question (Claude and Codex "header"); nil when the agent sent none.
+    public var header: String?
+    public var text: String
+    public var options: [RemoteQuestionOption]
+    /// Several options may be chosen. Never true today: the Mac declines multi-select questions before they reach any UI.
+    public var multiSelect: Bool?
+    /// A free-text answer is accepted besides the options ("Other"), as the desktop's answer field allows.
+    public var allowsOther: Bool
+    /// The desktop masks the field; such a request is Mac-only.
+    public var secret: Bool?
+    public var required: Bool
+    public init(id: String, header: String? = nil, text: String, options: [RemoteQuestionOption], multiSelect: Bool? = nil,
+                allowsOther: Bool = true, secret: Bool? = nil, required: Bool) {
+        self.id = id; self.header = header; self.text = text; self.options = options; self.multiSelect = multiSelect
+        self.allowsOther = allowsOther; self.secret = secret; self.required = required
+    }
+}
+public struct RemoteQuestionOption: Codable, Sendable, Equatable {
+    /// The value sent back when the option is chosen.
+    public var label: String
+    public var description: String?
+    /// Longer agent text (often code) the desktop shows for the selected option.
+    public var preview: String?
+    public init(label: String, description: String? = nil, preview: String? = nil) { self.label = label; self.description = description; self.preview = preview }
+}
+/// One message waiting in a chat's desktop queue.
+public struct RemoteQueuedMessage: Codable, Identifiable, Sendable, Equatable {
+    public static let chatLimit = 10
+    public static let textLimit = 500
+    /// Desktop queue identity (not a command ID).
+    public var id: String
+    public var text: String
+    public var truncated: Bool?
+    /// The phone command that queued it; nil for messages typed on the Mac or queued by the app.
+    public var command: String?
+    /// The Mac is sending it now or chose it for "Interrupt and send"; it can no longer change.
+    public var claimed: Bool?
+    public init(id: String, text: String, command: String? = nil, claimed: Bool? = nil) {
+        self.id = id; self.command = command; self.claimed = claimed
+        self.text = String(text.prefix(Self.textLimit))
+        if text.count > Self.textLimit { truncated = true }
+    }
 }
 public struct RemoteSnapshot: Codable, Sendable, Equatable {
     public var version = 1
@@ -290,6 +474,13 @@ public struct RemoteCommand: Codable, Identifiable, Sendable {
     public var status: String
     public var photos: [RemotePhoto]?
     public var settings: RemoteSettingsChange?
+    /// `answer` only: question id -> answer (an option's label or free text). Needs the interactions schema.
+    public var answers: [String: String]?
+    /// Kinds that bring a message to the agent; the cloud queue runs them one at a time per chat.
+    public static let messageKinds: Set<String> = ["send", "create", "queue", "interrupt"]
+    /// Kinds that only the interactions schema (`remote_interactions_version`) accepts.
+    public static let interactionKinds: Set<String> = ["answer", "queue", "interrupt"]
+    public static let kinds = Set(["send", "stop", "allow", "deny", "create", "configure", "file"]).union(interactionKinds)
     /// Uses the existing immutable send envelope and queue; no database migration required.
     /// The first send owns the new app ID. Later sends cannot recreate a missing conversation.
     public var createsChat: Bool { ["send", "create"].contains(kind) && chat == "mobile:" + id.lowercased() }
@@ -299,10 +490,42 @@ public struct RemoteCommand: Codable, Identifiable, Sendable {
         command.settings = options.map { RemoteSettingsChange(options: $0) }
         return command
     }
+    /// `options` is usually `expected.options` with the user's changes. Add-ons are sent only when they change and the
+    /// host offers them (`expected.addOns`); otherwise both sides drop them, so the Mac leaves them as they are and a
+    /// model-only change keeps working on a cloud schema without the interactions migration.
     public static func configure(owner: String, device: String, project: String, chat: String, options: RemoteChatOptions, expected: RemoteChatSettings) -> Self {
         var command = Self(owner: owner, device: device, project: project, chat: chat, kind: "configure")
-        command.settings = RemoteSettingsChange(options: options, expected: expected.options, expectedProjectAccess: expected.projectAccess)
+        var options = options, seen = expected.options
+        if expected.addOns == nil || options.addOns.map(Set.init) == seen.addOns.map(Set.init) || options.addOns == nil {
+            options.addOns = nil; seen.addOns = nil
+        } else if seen.addOns == nil { seen.addOns = [] }
+        command.settings = RemoteSettingsChange(options: options, expected: seen, expectedProjectAccess: expected.projectAccess)
         return command
+    }
+    /// Answers a pending question or form (`RemoteInteraction`) with the exact request handle it was published with.
+    /// The Mac rejects unknown, answered or changed requests and answers that `RemoteInteraction.validate(answers:)` refuses.
+    public static func answer(owner: String, device: String, project: String, chat: String, interaction: String, answers: [String: String]) -> Self {
+        var command = Self(owner: owner, device: device, project: project, chat: chat, kind: "answer", approval: interaction)
+        command.answers = answers
+        return command
+    }
+    /// The desktop's Decline for a form, link or unsupported request (`RemoteInteraction.canDecline`); an approval uses `deny` too.
+    public static func decline(owner: String, device: String, project: String, chat: String, interaction: String) -> Self {
+        Self(owner: owner, device: device, project: project, chat: chat, kind: "deny", approval: interaction)
+    }
+    /// Puts the message in the chat's desktop queue (`RemoteChat.canQueue`): it runs after the current turn, in queue order,
+    /// exactly like a message typed on the Mac while the chat works. A paused queue keeps it waiting for the Mac.
+    public static func queue(owner: String, device: String, project: String, chat: String, text: String, photos: [RemotePhoto] = []) -> Self {
+        Self(owner: owner, device: device, project: project, chat: chat, kind: "queue", text: text, photos: photos)
+    }
+    /// The desktop's "Interrupt and send" (`RemoteChat.canInterrupt`): stops the observed `turn` and sends the message next,
+    /// with the note that the previous turn was interrupted. Rejected when that turn is no longer the running one.
+    public static func interruptAndSend(owner: String, device: String, project: String, chat: String, turn: String, text: String, photos: [RemotePhoto] = []) -> Self {
+        Self(owner: owner, device: device, project: project, chat: chat, kind: "interrupt", text: text, turn: turn, photos: photos)
+    }
+    /// The cloud schema must have the interactions migration before this command can be queued.
+    public var needsInteractionSchema: Bool {
+        Self.interactionKinds.contains(kind) || settings.map { $0.options.needsInteractionSchema || $0.expected?.needsInteractionSchema == true } == true
     }
     /// Read-only request for one file of the chat's project; `text` carries the path as written in the answer.
     public static func file(owner: String, device: String, project: String, chat: String, path: String) -> Self {
@@ -317,10 +540,22 @@ public struct RemoteCommand: Codable, Identifiable, Sendable {
     public func validate() throws {
         guard UUID(uuidString: id) != nil, UUID(uuidString: project) != nil,
               !chat.isEmpty, text.utf8.count <= 32_000,
-              ["send", "stop", "allow", "deny", "create", "configure", "file"].contains(kind),
-              !["send", "create"].contains(kind) || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !(photos ?? []).isEmpty,
-              !["allow", "deny"].contains(kind) || approval.flatMap(UUID.init(uuidString:)) != nil
+              Self.kinds.contains(kind),
+              !Self.messageKinds.contains(kind) || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !(photos ?? []).isEmpty,
+              !["allow", "deny", "answer"].contains(kind) || approval.flatMap(UUID.init(uuidString:)) != nil,
+              (turn?.utf8.count ?? 0) <= 500
         else { throw RemoteFailure.invalidCommand }
+        if kind == "answer" {
+            guard let answers, answers.count <= RemoteInteraction.questionLimit, text.isEmpty, turn == nil, (photos ?? []).isEmpty, settings == nil,
+                  answers.allSatisfy({ !$0.key.isEmpty && $0.key.utf8.count <= RemoteInteraction.textLimit * 4 && $0.value.utf8.count <= RemoteInteraction.answerBytes }),
+                  answers.reduce(0, { $0 + $1.key.utf8.count + $1.value.utf8.count }) <= 24_000 else { throw RemoteFailure.invalidCommand }
+        } else if answers != nil { throw RemoteFailure.invalidCommand }
+        if kind == "interrupt" {
+            guard let turn, !turn.isEmpty else { throw RemoteFailure.invalidCommand }
+        }
+        if kind == "queue" || kind == "interrupt" {
+            guard approval == nil else { throw RemoteFailure.invalidCommand }
+        }
         if kind == "file" {
             let path = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !path.isEmpty, text.utf8.count <= RemoteFile.pathLimit, !text.contains("\n"), !text.contains("\0"),
@@ -328,7 +563,7 @@ public struct RemoteCommand: Codable, Identifiable, Sendable {
         }
         let photos = photos ?? []
         guard photos.count <= RemotePhoto.maximumCount,
-              photos.isEmpty || ["send", "create"].contains(kind), Set(photos.map(\.id)).count == photos.count else { throw RemoteFailure.invalidPhoto }
+              photos.isEmpty || Self.messageKinds.contains(kind), Set(photos.map(\.id)).count == photos.count else { throw RemoteFailure.invalidPhoto }
         try photos.forEach { try $0.validate() }
         if ["create", "configure"].contains(kind) {
             guard let settings, approval == nil, turn == nil else { throw RemoteFailure.invalidCommand }
@@ -336,7 +571,9 @@ public struct RemoteCommand: Codable, Identifiable, Sendable {
             if kind == "create" {
                 guard createsChat, settings.expected == nil, settings.expectedProjectAccess == nil else { throw RemoteFailure.invalidCommand }
             } else {
-                guard text.isEmpty, photos.isEmpty, let expected = settings.expected, settings.expectedProjectAccess != nil else { throw RemoteFailure.invalidCommand }
+                guard text.isEmpty, photos.isEmpty, let expected = settings.expected, settings.expectedProjectAccess != nil,
+                      // An add-on change is checked against the add-ons the phone saw.
+                      settings.options.addOns == nil || expected.addOns != nil else { throw RemoteFailure.invalidCommand }
                 try expected.validate()
             }
         } else if settings != nil { throw RemoteFailure.invalidCommand }
@@ -364,6 +601,7 @@ public struct RemoteCommand: Codable, Identifiable, Sendable {
 public enum RemoteFailure: Error, LocalizedError {
     case configuration, signedOut, request(Int), invalidCommand, uncertain, duplicate
     case invalidPhoto, photoSetup, settingsSetup
+    case interactionSetup, invalidAnswer
     case realtimeSetup, realtimeProtocol, realtimeTimeout
     case keychain(OSStatus)
     public var errorDescription: String? {
@@ -371,6 +609,8 @@ public enum RemoteFailure: Error, LocalizedError {
         case .invalidPhoto: L10n.text("Не удалось подготовить фото. Выбери до 4 изображений; каждое должно помещаться в 512 КБ после сжатия.", "Could not prepare photos. Choose up to 4 images; each must fit within 512 KB after compression.")
         case .photoSetup: L10n.text("Для отправки фото обнови схему мобильного доступа в Supabase (миграция photos).", "To send photos, update the Supabase mobile access schema (photos migration).")
         case .settingsSetup: L10n.text("Для выбора модели и доступа обнови схему мобильного доступа в Supabase и приложение на Mac.", "To choose a model and access mode, update the Supabase mobile access schema and Mac app.")
+        case .interactionSetup: L10n.text("Чтобы отвечать на вопросы, ставить сообщения в очередь и выбирать роль с телефона, обнови схему мобильного доступа в Supabase (миграция interactions) и приложение на Mac.", "To answer questions, queue messages and choose roles from the phone, update the Supabase mobile access schema (interactions migration) and the Mac app.")
+        case .invalidAnswer: L10n.text("Ответь на все обязательные вопросы. Ничего не отправлено.", "Answer every required question. Nothing was sent.")
         case .configuration: L10n.text("Проверь HTTPS URL Supabase и публичный ключ.", "Check the Supabase HTTPS URL and public key.")
         case .signedOut: L10n.text("Войди в Supabase заново.", "Sign in to Supabase again.")
         case .keychain(let code): Self.keychainDescription(code, language: L10n.language)
@@ -606,6 +846,23 @@ public actor RemoteAPI {
             let version = try JSONDecoder().decode(Int.self, from: await request("rest/v1/rpc/remote_settings_version", method: "POST", body: Data("{}".utf8)))
             guard version == 1 else { throw RemoteFailure.settingsSetup }
         } catch RemoteFailure.request(404) { throw RemoteFailure.settingsSetup }
+    }
+    /// Phone: questions, queue, interrupt-and-send, roles and add-ons need the interactions migration. Throws `interactionSetup`.
+    public func checkInteractionSchema() async throws {
+        guard try await supportsInteractions() else { throw RemoteFailure.interactionSetup }
+    }
+    /// Returns false when the cloud schema predates phone answers, queueing and role choices.
+    public func supportsInteractions() async throws -> Bool {
+        do {
+            return try JSONDecoder().decode(Int.self, from: await request("rest/v1/rpc/remote_interactions_version", method: "POST", body: Data("{}".utf8))) == 1
+        } catch RemoteFailure.request(404) { return false }
+    }
+    /// Every schema check the command needs, before a delivery receipt is saved: photos, chat settings, interactions.
+    public func preflight(_ command: RemoteCommand) async throws {
+        try command.validate()
+        if !(command.photos ?? []).isEmpty { try await checkPhotoSchema() }
+        if ["create", "configure"].contains(command.kind) { try await checkSettingsSchema() }
+        if command.needsInteractionSchema { try await checkInteractionSchema() }
     }
     /// Throws `RemoteNotStored` only when the failure proves the queue does not hold the command;
     /// any other failure leaves the outcome unknown.

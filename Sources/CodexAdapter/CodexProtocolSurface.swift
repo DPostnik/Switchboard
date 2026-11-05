@@ -94,7 +94,7 @@ enum CodexProtocolSurface {
         "serverRequest:item/fileChange/requestApproval": ["threadId", "turnId", "grantRoot", "reason"],
         "serverRequest:item/permissions/requestApproval": ["threadId", "turnId", "reason", "permissions.network.enabled",
                                                            "permissions.fileSystem.read", "permissions.fileSystem.write"],
-        "serverRequest:item/tool/requestUserInput": ["threadId", "turnId", "questions.*.id", "questions.*.question", "questions.*.isSecret",
+        "serverRequest:item/tool/requestUserInput": ["threadId", "turnId", "questions.*.id", "questions.*.header", "questions.*.question", "questions.*.isSecret",
                                                      "questions.*.options.*.label", "questions.*.options.*.description"],
         "serverRequest:mcpServer/elicitation/request": ["threadId", "turnId", "message", "mode", "url", "requestedSchema"],
         "item:userMessage": ["id", "content.*.type", "content.*.text"],
