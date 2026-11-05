@@ -6,6 +6,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Added
 
+- iPhone app: answer agent questions and forms from a card above the message field (options, your own answer, Decline; requests with secrets or links stay on the Mac), queue a message or interrupt and send while a chat works (its queue is shown), and choose the role and add-ons within the project default; the role chip shows the add-on icons. Needs the cloud migration `202611050001_remote_interactions.sql` and an updated Mac.
 - Background tasks in Claude chats: the panel above the message field (beside sub-agents) lists the commands, dev servers, watchers and workflows the agent or its sub-agents left running in the background, with the command line, run time, the end of the output (refreshed every 2 s while it runs, colors removed) and a Stop button for each one; the agent keeps working. A sub-agent that waits for its own background commands shows as "Waiting for background tasks" and no longer disappears from the list when you send a new message.
 - Your own skills in chats: Claude chats load `~/.claude/skills` and the app profile's skills, Codex chats `~/.codex/skills` (read-only, nothing is copied). The agent picks a skill by its description, a used skill shows as a "Skill: name" row in the chat, and typing `/` in the message field lists the engine's skills to insert (`/name` for Claude, `$name` for Codex). Claude Code's own bundled skills stay off.
 - Role add-ons "Mail and connectors" and "My Chrome" (shown as envelope and globe icons on the lock chip): the lock chip and the project settings add Gmail and other connectors (reads silent, sends asked) or the user's Chrome to a chat's role, so a Developer chat no longer has to switch to Operator for them; scheduled jobs never get them.
@@ -25,6 +26,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Changed
 
+- iPhone app redesign: chats that need you and running chats are grouped above the projects with one Mac connection line, the pending approval and the agent's activity stay pinned above the message field, an unconfirmed send blocks only its own chat with clear next steps and is never resent automatically, and the language switch applies without a restart.
 - Switching back to a recently viewed chat is instant: recent chats keep their rendered text (up to about 2 million characters in total).
 - Agents in every project get a heavy-work rule with the app's instructions: each step that builds, tests, installs or runs a probe counts as heavy, at most 2 heavy steps run at a time on the Mac (checked against the load average), edits are compiled once per hypothesis instead of after every change, and orchestrators keep at most 2 heavy sub-agents running.
 - The window stays responsive while chats stream: status lines, context usage and sub-agent updates no longer redraw the sidebar and the chat.
@@ -46,6 +48,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Fixed
 
+- iPhone app: changing a chat's role from the phone is no longer rejected by the cloud database.
 - Remote access: the connection to the server no longer stays down for good after a network drop during reconnect, so the iPhone sees the Mac again without turning remote access off and on.
 - Claude chats: screenshots and PDFs in temporary folders and the user's own attachments are read without a prompt in every role, and a background sub-agent still working after the turn ended gets the role's normal answer instead of a silent refusal of every tool.
 - Switchboard no longer quits with a crash when a chat's text changes while the pointer is over the transcript: the hover lookup no longer runs mid-edit, when the message list and its text ranges briefly disagree.
