@@ -497,8 +497,9 @@ private struct ChatRunState: Equatable {
     private var photoCleanupTask: Task<Void, Never>?
     private func cleanTemporaryPhotos() {
         guard photoCleanupTask != nil else { return }
+        // Queued messages (a phone's among them) may still point at their photos.
         let active = Set(runs.filter { $0.value.running || $0.value.sending }.map(\.key))
-            .union(pending.map(\.threadID))
+            .union(pending.map(\.threadID)).union(queuedMessages.map(\.threadID))
         do { try MobilePhotoRetention.sweep(root: Locations.root.appendingPathComponent("mobile-photos"), activeChats: active) }
         catch { self.error = L10n.text("Не удалось очистить временные фотографии: ", "Could not clean up temporary photos: ") + error.localizedDescription }
     }
@@ -2301,6 +2302,7 @@ private struct ChatRunState: Equatable {
             if let project = selected.first(where: { $0.id == chat.projectID }), traits(chat.nativeSession?.connection).contains(.remoteChatSettings) {
                 remote.settings = remoteSettings(chat, project: project)
             }
+            publishRemoteWork(chat, into: &remote)
             chats.append(remote)
         }
         // Existing chats' settings list the models of the agent whose chats the phone may configure.
@@ -2321,9 +2323,60 @@ private struct ChatRunState: Equatable {
             let projectRole = $0.chatRole(roleCatalog)
             project.settings = RemoteChatSettings(options: RemoteChatOptions(model: defaultModel),
                 projectAccess: RemoteAccessMode(rawValue: projectRole.legacyAccessMode.rawValue)!, canEdit: !newChatModels.isEmpty,
-                projectRole: projectRole.id, roles: remoteRoles(project: $0))
+                projectRole: projectRole.id, roles: remoteRoles(project: $0),
+                addOns: Self.remoteAddOnOptions(remoteAllowedAddOns(project: $0)), projectAddOns: Self.remoteAddOnIDs(Self.projectAddOns($0)))
             return project
         }, chats: chats)
+    }
+    /// Desktop queue identity of a message a phone queued; the suffix is its command ID.
+    static let phoneQueuePrefix = "local-user:phone:"
+    /// Pending questions and forms, the desktop queue and whether the phone may queue or interrupt-and-send now.
+    /// The host withdraws the phone actions while the cloud schema cannot carry them.
+    private func publishRemoteWork(_ chat: Chat, into remote: inout RemoteChat) {
+        let interactions = pending.filter { $0.threadID == chat.id }.compactMap { RemoteInteraction($0.interaction) }
+        remote.interactions = interactions.isEmpty ? nil : Array(interactions.prefix(RemoteInteraction.chatLimit))
+        let queued = queuedMessages.filter { $0.threadID == chat.id }
+        let run = runs[chat.id] ?? ChatRunState()
+        if !queued.isEmpty {
+            let claimed = claimedQueueIDs
+            remote.queue = queued.prefix(RemoteQueuedMessage.chatLimit).map { message in
+                RemoteQueuedMessage(id: message.id, text: message.text,
+                                    command: message.id.hasPrefix(Self.phoneQueuePrefix) ? String(message.id.dropFirst(Self.phoneQueuePrefix.count)) : nil,
+                                    claimed: claimed.contains(message.id) ? true : nil)
+            }
+            if queued.count > RemoteQueuedMessage.chatLimit { remote.queueCount = queued.count }
+            // A priority message pauses the queue only until its interruption completes.
+            if run.queuePaused && run.priorityMessageID == nil && !run.sending { remote.queuePaused = true }
+        }
+        let open = !chat.isScheduledRecord && !chat.isArchived && chatIsAvailable(chat.id) && !isChangingChat(chat.id)
+            && chatConnected(chat.id) && chatAuthenticated(chat.id)
+        remote.canQueue = open
+        remote.canInterrupt = open && run.running && run.turnID != nil && !run.sending && run.priorityMessageID == nil
+    }
+    static func projectAddOns(_ project: Project) -> Set<RoleAddOn> { Set((project.chatRoleAddOns ?? []).compactMap(RoleAddOn.init(rawValue:))) }
+    static func remoteAddOnIDs(_ addOns: Set<RoleAddOn>) -> [String] { RoleAddOn.allCases.filter(addOns.contains).map(\.rawValue) }
+    static func remoteAddOnOptions(_ addOns: Set<RoleAddOn>) -> [RemoteAddOnOption] {
+        RoleAddOn.allCases.filter(addOns.contains).map { RemoteAddOnOption(id: $0.rawValue, name: $0.title, summary: $0.summary, symbol: $0.symbol) }
+    }
+    /// Add-ons the phone may turn on: only those the project's chat default (role and project add-ons) already grants,
+    /// so a phone never widens a chat beyond the project default, as with roles (audit M3).
+    private func remoteAllowedAddOns(project: Project) -> Set<RoleAddOn> {
+        let base = project.chatRole(roleCatalog).profile(for: project, addOns: Self.projectAddOns(project))
+        return Set(RoleAddOn.allCases.filter { addOn in
+            var widened = base
+            addOn.apply(to: &widened)
+            return widened == base
+        })
+    }
+    /// The add-ons a phone command asks for, or nil when it names none. Unknown ids and add-ons outside `allowed` fail closed.
+    private func remoteAddOns(_ options: RemoteChatOptions?, allowed: Set<RoleAddOn>) throws -> Set<RoleAddOn>? {
+        guard let ids = options?.addOns else { return nil }
+        var result: Set<RoleAddOn> = []
+        for id in ids {
+            guard let addOn = RoleAddOn(rawValue: id), allowed.contains(addOn) else { throw RemoteFailure.invalidCommand }
+            result.insert(addOn)
+        }
+        return result
     }
     /// Roles the phone may select for a project: never above the project's chat default (audit M3).
     private func remoteRoles(project: Project) -> [RemoteRoleOption] {
@@ -2344,14 +2397,18 @@ private struct ChatRunState: Equatable {
     }
     private func remoteSettings(_ chat: Chat, project: Project) -> RemoteChatSettings {
         let projectRole = project.chatRole(roleCatalog), role = chat.resolvedRole(in: project, catalog: roleCatalog)
+        let addOns = chat.resolvedAddOns(in: project)
         return RemoteChatSettings(options: RemoteChatOptions(model: chat.model,
-            access: chat.inheritsProjectRole ? nil : RemoteAccessMode(rawValue: role.legacyAccessMode.rawValue), role: chat.inheritsProjectRole ? nil : role.id),
+            access: chat.inheritsProjectRole ? nil : RemoteAccessMode(rawValue: role.legacyAccessMode.rawValue), role: chat.inheritsProjectRole ? nil : role.id,
+            addOns: Self.remoteAddOnIDs(addOns)),
             projectAccess: RemoteAccessMode(rawValue: projectRole.legacyAccessMode.rawValue)!,
             canEdit: agentState(chat.nativeSession?.connection).connected && agentState(chat.nativeSession?.connection).authenticated
                 && !agentState(chat.nativeSession?.connection).models.isEmpty && !isChangingChat(chat.id) && !isBusy(threadID: chat.id)
                 && !pending.contains(where: { $0.threadID == chat.id }) && !queuedMessages.contains(where: { $0.threadID == chat.id })
                 && role.rank <= projectRole.rank,
-            projectRole: projectRole.id, roles: remoteRoles(project: project))
+            projectRole: projectRole.id, roles: remoteRoles(project: project),
+            // Turning off is always allowed; turning on only within the project default.
+            addOns: Self.remoteAddOnOptions(remoteAllowedAddOns(project: project).union(addOns)), projectAddOns: Self.remoteAddOnIDs(Self.projectAddOns(project)))
     }
     private func remoteModel(_ options: RemoteChatOptions, agent: AgentConnectionID?) throws -> AgentModelInfo {
         guard let model = agentState(agent).models.first(where: { $0.id == options.model }) else { throw RemoteFailure.invalidCommand }
@@ -2389,13 +2446,16 @@ private struct ChatRunState: Equatable {
         }
         let explicitRole = try remoteRole(options, project: project)
         let role = explicitRole ?? project.chatRole(roleCatalog)
+        let explicitAddOns = try remoteAddOns(options, allowed: remoteAllowedAddOns(project: project))
         // Persist the stable app ID before sending. Native identity never comes from the phone.
-        let session = try await client.createSession(projectPath: project.path, permissions: role.profile(for: project), model: model, route: route)
+        let session = try await client.createSession(projectPath: project.path, permissions: role.profile(for: project, addOns: explicitAddOns ?? Self.projectAddOns(project)),
+                                                     model: model, route: route)
         guard !state.chats.contains(where: { $0.id == command.chat }),
               ConversationIdentity.appID(for: session.nativeID, in: state, connection: session.connection) == nil else { throw RemoteFailure.invalidCommand }
         var chat = Chat(session: session, projectID: project.id, title: ChatTitle.placeholder(), model: model)
         chat.id = command.chat; chat.effort = effort; chat.route = route
         chat.roleID = explicitRole?.id; chat.accessMode = explicitRole?.legacyAccessMode; chat.inheritsProjectAccess = explicitRole == nil
+        chat.roleAddOns = explicitAddOns.map(Self.remoteAddOnIDs)
         state.chats.append(chat)
         try await store.save(state)
         loadedThreads.insert(chat.id)
@@ -2416,9 +2476,12 @@ private struct ChatRunState: Equatable {
         case "configure":
             guard traits(chat.nativeSession?.connection).contains(.remoteChatSettings), let change = command.settings else { throw RemoteFailure.invalidCommand }
             let current = remoteSettings(chat, project: project)
-            guard current.canEdit, change.expected == current.options, change.expectedProjectAccess == current.projectAccess else { throw RemoteFailure.invalidCommand }
+            guard current.canEdit, let expected = change.expected, expected.matches(current: current.options),
+                  change.expectedProjectAccess == current.projectAccess else { throw RemoteFailure.invalidCommand }
             let selectedModel = try remoteModel(change.options, agent: chat.nativeSession?.connection)
             let role = try remoteRole(change.options, project: project)
+            let currentAddOns = chat.resolvedAddOns(in: project)
+            let addOns = try remoteAddOns(change.options, allowed: remoteAllowedAddOns(project: project).union(currentAddOns))
             configuringRemoteChats.insert(chat.id)
             defer { configuringRemoteChats.remove(chat.id); objectWillChange.send() }
             guard let index = state.chats.firstIndex(where: { $0.id == chat.id }) else { throw RemoteFailure.invalidCommand }
@@ -2427,12 +2490,14 @@ private struct ChatRunState: Equatable {
             state.chats[index].roleID = role?.id
             state.chats[index].accessMode = role?.legacyAccessMode
             state.chats[index].inheritsProjectAccess = role == nil
+            // Unchanged add-ons keep following the project; a change stores them for this chat, as the desktop chip does.
+            if let addOns, addOns != currentAddOns { state.chats[index].roleAddOns = Self.remoteAddOnIDs(addOns) }
             do { try await store.save(state) }
             catch {
                 if let index = state.chats.firstIndex(where: { $0.id == chat.id }) {
                     state.chats[index].model = chat.model; state.chats[index].effort = chat.effort
                     state.chats[index].accessMode = chat.accessMode; state.chats[index].inheritsProjectAccess = chat.inheritsProjectAccess
-                    state.chats[index].roleID = chat.roleID
+                    state.chats[index].roleID = chat.roleID; state.chats[index].roleAddOns = chat.roleAddOns
                 }
                 throw error
             }
@@ -2445,12 +2510,80 @@ private struct ChatRunState: Equatable {
             await deliver(text: prompt, project: project, threadID: chat.id,
                           localID: "local-user:remote:" + command.id, selectedModel: chat.model, selectedEffort: chat.effort ?? "")
             return remoteDeliveryResults.removeValue(forKey: "local-user:remote:" + command.id) == true ? "submitted" : "uncertain"
+        case "queue":
+            // The desktop queue: like a message typed while the chat works, it runs after the current turn, in queue order.
+            guard !chat.isScheduledRecord else { throw RemoteFailure.invalidCommand }
+            let id = Self.phoneQueuePrefix + command.id.lowercased()
+            guard !queuedMessages.contains(where: { $0.id == id }) else { throw RemoteFailure.invalidCommand }
+            let prompt = try command.photoPrompt(directory: Locations.root.appendingPathComponent("mobile-photos", isDirectory: true))
+            // As on the desktop: a message joining a waiting (paused) queue waits too; an empty queue starts moving.
+            if !queuedMessages.contains(where: { $0.threadID == chat.id }) { runs[chat.id, default: ChatRunState()].queuePaused = false }
+            state.queuedMessages = queuedMessages + [QueuedMessage(id: id, threadID: chat.id, projectID: chat.projectID, text: prompt,
+                                                                   model: dispatchModel(chat), effort: dispatchEffort(chat))]
+            // Saved before the phone is told "submitted": an acknowledged message survives a quit or crash.
+            try await saveRemoteQueued(id)
+            AppLog.delivery.notice("Phone message queued in chat \(chat.id, privacy: .public)")
+            scheduleQueue(threadID: chat.id)
+            return "submitted"
+        case "interrupt":
+            // The desktop's "Interrupt and send": only for the turn the phone saw running. Nothing is sent here; the
+            // message goes first in the queue and the drain sends it, with the interruption note, once that turn ends.
+            let run = runs[chat.id] ?? ChatRunState()
+            guard !chat.isScheduledRecord, run.running, let turn = run.turnID, command.turn == turn,
+                  !run.sending, run.priorityMessageID == nil else { throw RemoteFailure.invalidCommand }
+            let id = Self.phoneQueuePrefix + command.id.lowercased()
+            guard !queuedMessages.contains(where: { $0.id == id }) else { throw RemoteFailure.invalidCommand }
+            let prompt = try command.photoPrompt(directory: Locations.root.appendingPathComponent("mobile-photos", isDirectory: true))
+            let wasPaused = run.queuePaused
+            state.queuedMessages = [QueuedMessage(id: id, threadID: chat.id, projectID: chat.projectID, text: prompt,
+                                                  model: dispatchModel(chat), effort: dispatchEffort(chat))] + queuedMessages
+            // Claimed before the save suspends, so a turn that ends meanwhile releases the message as "Interrupt and send" would.
+            runs[chat.id, default: ChatRunState()].priorityMessageID = id
+            runs[chat.id, default: ChatRunState()].queuePaused = true
+            do { try await saveRemoteQueued(id) } catch {
+                if runs[chat.id]?.priorityMessageID == id {
+                    runs[chat.id, default: ChatRunState()].priorityMessageID = nil
+                    runs[chat.id, default: ChatRunState()].queuePaused = wasPaused
+                }
+                if runs[chat.id]?.interruptedFor == id { runs[chat.id, default: ChatRunState()].interruptedFor = nil }
+                throw error
+            }
+            // The turn ended during the save: the message is already released to go next; there is nothing to stop.
+            guard runs[chat.id]?.priorityMessageID == id, runs[chat.id]?.turnID == turn else {
+                AppLog.delivery.notice("Phone interrupt-and-send in chat \(chat.id, privacy: .public): turn \(turn, privacy: .public) ended before the stop; the message stays first in the queue")
+                return "submitted"
+            }
+            do {
+                try await clientForChat(chat.id).interrupt(sessionForChat(chat.id), turn: turn)
+            } catch {
+                // The message stays in the paused queue for the user on the Mac; it is never sent on its own.
+                if runs[chat.id]?.priorityMessageID == id {
+                    runs[chat.id, default: ChatRunState()].priorityMessageID = nil
+                    runs[chat.id, default: ChatRunState()].queuePaused = true
+                }
+                throw error
+            }
+            AppLog.delivery.notice("Phone interrupt-and-send in chat \(chat.id, privacy: .public) for turn \(turn, privacy: .public)")
+            return "submitted"
+        case "answer":
+            // Only the exact pending request, as the phone saw it: still answerable in full, with answers the desktop accepts.
+            guard let handle = command.approval.flatMap(UUID.init(uuidString:)), let answers = command.answers,
+                  let action = pending.first(where: { $0.threadID == chat.id && $0.interaction.id == handle }),
+                  let published = RemoteInteraction(action.interaction), published.canAnswer,
+                  (try? published.validate(answers: answers)) != nil else { throw RemoteFailure.invalidCommand }
+            try await answerRemote(action, response: .answers(answers))
+            return "submitted"
         case "stop":
             guard let turn = runs[chat.id]?.turnID, command.turn == turn else { throw RemoteFailure.invalidCommand }
             runs[chat.id, default: ChatRunState()].queuePaused = true
             runs[chat.id, default: ChatRunState()].stopRequested = true
             try await clientForChat(chat.id).interrupt(sessionForChat(chat.id), turn: turn)
             return "stop_requested"
+        case "deny" where remoteRequest(command, chat: chat.id).map({ if case .approval = $0.interaction.kind { false } else { true } }) == true:
+            // The desktop's Decline of a form, link or unsupported request. Questions have no Decline there, so none here.
+            guard let action = remoteRequest(command, chat: chat.id), RemoteInteraction(action.interaction)?.canDecline == true else { throw RemoteFailure.invalidCommand }
+            try await answerRemote(action, response: .deny)
+            return "submitted"
         case "allow", "deny":
             guard let approvalID = command.approval.flatMap(UUID.init(uuidString:)),
                   let action = pending.first(where: { $0.threadID == chat.id && $0.interaction.id == approvalID }),
@@ -2463,6 +2596,33 @@ private struct ChatRunState: Equatable {
             return "submitted"
         default: throw RemoteFailure.invalidCommand
         }
+    }
+    /// Writes the state with a phone message just put in the desktop queue, before the command is acknowledged. When the
+    /// write fails and the message still waits, it is taken out again and the command is rejected: nothing was queued or
+    /// sent. A message the drain already took has gone out, so its command stands.
+    private func saveRemoteQueued(_ id: String) async throws {
+        do { try await store.save(state) } catch {
+            guard queuedMessages.contains(where: { $0.id == id }) else { return }
+            state.queuedMessages = queuedMessages.filter { $0.id != id }
+            persist()
+            AppLog.delivery.error("Phone message not queued, the app state could not be saved: \(error.localizedDescription, privacy: .public)")
+            throw RemoteFailure.invalidCommand
+        }
+    }
+    /// The pending request a phone command names by its handle, in that chat only.
+    private func remoteRequest(_ command: RemoteCommand, chat: String) -> PendingAction? {
+        guard let id = command.approval.flatMap(UUID.init(uuidString:)) else { return nil }
+        return pending.first { $0.threadID == chat && $0.interaction.id == id }
+    }
+    /// Answers a pending request for the phone. A definite rejection sent nothing; any other failure stays uncertain.
+    private func answerRemote(_ action: PendingAction, response: AgentInteractionResponse) async throws {
+        do {
+            try await clientForChat(action.threadID).answer(action.interaction.id, session: action.interaction.session, response: response)
+        } catch let failure as AgentOperationFailure where failure.rejection != nil && !failure.uncertain {
+            throw RemoteFailure.invalidCommand
+        }
+        pending.removeAll { $0.id == action.id }; removeActionNotices([action])
+        refreshDockBadge()
     }
     func shutdown() async {
         // Each awaited step is logged so a stalled quit names the step that never returned.

@@ -11,7 +11,17 @@ private final class RemoteAuthFixture: @unchecked Sendable {
     var writes: [Data?] = []
     var submitStatus = 201
     var submits = 0
+    /// Schema version functions the fixture project has (`remote_settings_version` and the like); the others answer 404.
+    var versions: [String: Int] = [:]
+    var versionRequests: [String] = []
     func respond(_ request: URLRequest) -> (Int, Data) {
+        if request.url!.path.contains("/rpc/"), request.url!.lastPathComponent.hasSuffix("_version") {
+            let name = request.url!.lastPathComponent
+            return lock.withLock {
+                versionRequests.append(name)
+                return versions[name].map { (200, Data(String($0).utf8)) } ?? (404, Data())
+            }
+        }
         if request.httpMethod == "POST" && request.url!.path.hasSuffix("/remote_commands") {
             return lock.withLock { submits += 1; return (submitStatus, Data()) }
         }
@@ -208,4 +218,32 @@ private func fixtureAPI(_ fixture: RemoteAuthFixture, host: String) throws -> Re
         guard case RemoteFailure.signedOut = failure.cause else { Issue.record("Wrong cause"); return }
     }
     #expect(fixture.lock.withLock { fixture.submits } == 0)
+}
+
+@Test func remotePreflightChecksEverySchemaTheCommandNeedsAndNothingElse() async throws {
+    let fixture = RemoteAuthFixture(); let host = UUID().uuidString.lowercased() + ".invalid"
+    let api = try fixtureAPI(fixture, host: host)
+    defer { AuthURLProtocol.registry.set(host, nil) }
+    try await api.signIn(email: "fixture", password: "fixture")
+    let owner = UUID().uuidString, device = UUID().uuidString, project = UUID().uuidString
+    let send = RemoteCommand(owner: owner, device: device, project: project, chat: "c", kind: "send", text: "hi")
+    let queue = RemoteCommand.queue(owner: owner, device: device, project: project, chat: "c", text: "next")
+    let answer = RemoteCommand.answer(owner: owner, device: device, project: project, chat: "c", interaction: UUID().uuidString, answers: ["q": "A"])
+    let seen = RemoteChatSettings(options: RemoteChatOptions(model: "m"), projectAccess: .standard, canEdit: true)
+    let role = RemoteCommand.configure(owner: owner, device: device, project: project, chat: "c", options: RemoteChatOptions(model: "m", role: "reader"), expected: seen)
+    // An older cloud schema: plain sends pass, the new kinds and role choices are refused before anything is stored.
+    try await api.preflight(send)
+    for command in [queue, answer, role] {
+        do { try await api.preflight(command); Issue.record("Expected interactionSetup for \(command.kind)") }
+        catch RemoteFailure.interactionSetup {}
+        catch RemoteFailure.settingsSetup { #expect(command.kind == "configure") }
+    }
+    #expect(fixture.lock.withLock { fixture.submits } == 0)
+    #expect(try await api.supportsInteractions() == false)
+    fixture.lock.withLock { fixture.versions = ["remote_settings_version": 1, "remote_interactions_version": 1]; fixture.versionRequests = [] }
+    for command in [queue, answer, role] { try await api.preflight(command) }
+    #expect(fixture.lock.withLock { fixture.versionRequests } == ["remote_interactions_version", "remote_interactions_version", "remote_settings_version", "remote_interactions_version"])
+    // An invalid command fails before any request.
+    var broken = queue; broken.text = " "
+    await #expect(throws: RemoteFailure.self) { try await api.preflight(broken) }
 }

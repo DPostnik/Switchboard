@@ -13,7 +13,9 @@ was provisioned on 2026-09-27; public signup is disabled.
    `supabase/migrations/202609280003_photos.sql`,
    `supabase/migrations/202609280004_photo_retention.sql` and
    `supabase/migrations/202609280005_photo_cleanup_cron.sql` and
-   `supabase/migrations/202609280006_chat_settings.sql` once, in order, with its SQL editor. The migration uses Supabase Auth and PostgREST v1;
+   `supabase/migrations/202609280006_chat_settings.sql`, then the file migrations
+   (`202610180001_remote_files.sql`, `202610180002_remote_files_cleanup_cron.sql`) and
+   `202611050001_remote_interactions.sql` once, in order, with its SQL editor. The migration uses Supabase Auth and PostgREST v1;
    it has no Supabase SDK dependency. Create a confirmed email/password Auth user.
    Disable public signup if the project is only for personal use.
 2. In the Mac app, Settings → Advanced → Mobile access, enter the project HTTPS URL,
@@ -140,13 +142,15 @@ A macOS Swift typecheck of shared views is useful but is **not** an iOS build.
   details cannot be approved from the phone.
 - Approval handles are compared as UUID values, including PostgreSQL's lowercase
   representation. Pending chats take priority within the 20-chat snapshot limit.
-  The phone has a visible approval shortcut and disables both reply buttons after
-  queue acknowledgement. A truncated request is rejected by the Mac even if a
+  The phone pins the pending approval above the composer and disables both reply
+  buttons after queue acknowledgement. A truncated request is rejected by the Mac even if a
   client bypasses the disabled Allow button. Structured questions and tool forms
-  still require the Mac.
+  are answered as described in "Questions, working chats and add-ons" below;
+  secret, oversized and link requests still require the Mac.
 - Project permissions, native provider identity and existing chat route are
-  preserved. Remote sends refuse busy chats, pending interactions and existing
-  desktop queues. They do not change the selected desktop chat or its draft.
+  preserved. A plain `send` refuses busy chats, pending interactions and existing
+  desktop queues; `queue` and `interrupt` (below) are the explicit ways into a
+  working chat. None of them change the selected desktop chat or its draft.
 - Both clients are authenticated as the same owner. RLS isolates owners and
   insert policy checks the selected device/project. This is a personal owner
   model, not separate worker/mobile roles or organization membership.
@@ -169,11 +173,13 @@ A macOS Swift typecheck of shared views is useful but is **not** an iOS build.
 ## Remaining work before declaring the original plan complete
 
 The preview handles **existing chats**, sends, Stop and allow/deny approvals.
-New-chat creation, structured question/form replies, full history pagination,
-per-device revocation, automated retention and recovery UI are not implemented.
+The protocol and Mac side of question/form replies, queued and interrupt-and-send
+messages and role add-ons exist (2026-11-05); the iPhone screens for them are
+separate work. Full history pagination, per-device revocation, automated
+retention and recovery UI are not implemented.
 A submission with unknown delivery is retained on the phone and blocks additional
-commands; this conservative behavior needs a verified reconciliation flow before
-regular use. There is no automatic fallback to PWA or VPS execution.
+commands in its own chat (see "Interface refresh" below); this conservative behavior
+needs a verified reconciliation flow before regular use. There is no automatic fallback to PWA or VPS execution.
 
 ## Acceptance checks on the actual Supabase project and iPhone
 
@@ -378,3 +384,105 @@ last whole Markdown block and never inside a code block or table. Agents in ever
 chat are asked to put the conclusion first and keep answers near 1,800 characters.
 The simulator-only `-preview-file <path>` argument opens the viewer with synthetic
 content for visual checks.
+
+## Interface refresh (2026-11-05)
+
+The UI is split into one file per screen: `ContextMobileApp.swift` (app and language
+root), `MobileModel.swift`, `MobileChatList.swift`, `MobileChatView.swift` (transcript),
+`MobileChatDock.swift` (everything pinned under the transcript), `MobileComposer.swift`,
+`MobileSettings.swift` (settings, chat settings, new chat), `MobileStatus.swift` (connection
+line, delivery notice, shared wording) and `MobilePreview.swift` (simulator fixtures).
+
+- Chat list: one connection line per Mac at the top; then "Needs you" (approvals and
+  unconfirmed sends, across every Mac and project) and "Working" (running chats); then the
+  projects, which still list every chat. Search shows matches in their projects only. Rows
+  show the agent when the snapshot reveals it (Codex chats carry settings with a model;
+  read-only records are Claude scheduled runs; other chats show none) and the running
+  turn's elapsed time. The snapshot has no per-chat or per-message time, so rows and
+  messages show no update time; adding one would be a protocol change.
+- Chat: the pending approval is pinned above the composer (one card, "1 of N" when more
+  wait; the first without an accepted reply is shown), replacing the "Awaiting approval"
+  shortcut. While the agent works, a one-line activity with elapsed time sits there instead.
+  Decline and Allow share a row while both labels fit on one line and stack otherwise
+  (`MobileApprovalButtonsLayout`), so neither label is shrunk or cut at large text sizes.
+- Delivery receipts are per chat (`RemoteReceipts`, Keychain account `pending-commands`; the
+  single `pending-command` receipt of earlier builds is migrated on sign-in). An unconfirmed
+  command blocks later sends, Stop, approval replies and settings in that chat only and is
+  never resent automatically. Its notice offers Check delivery; once the cloud proves the
+  command absent, Send again (same command ID) or Discard. After a relaunch the phone holds only
+  the receipt (identity and text, never photos), so it offers Discard and asks to write the message again. New chats are keyed by project:
+  an unconfirmed creation blocks another creation in the same project and is listed under
+  "Needs you" until the Mac publishes it. File reads still skip receipts.
+- The language switch applies at once (`L10n.use`); the Mac still keeps one language per launch.
+- Simulator fixtures: `-preview-groups` adds running, approval and read-only chats in a second
+  project; `-preview-unconfirmed` adds an unconfirmed send and an undelivered new chat.
+
+## Questions, working chats and add-ons (2026-11-05)
+
+Apply `202611050001_remote_interactions.sql` after the file migrations, then restart
+the Mac app. It adds the command kinds `answer`, `queue` and `interrupt`, an immutable
+`answers` column, role and add-on keys in chat settings, and `remote_interactions_version()`
+(returns 1). Before it, the database rejected every settings command that carried a
+`role`, which the Mac publishes for every chat with an explicit role. The phone calls
+`RemoteAPI.preflight(command)` (photos, settings and interactions schema checks) before
+saving a delivery receipt; older Macs reject the new kinds as unknown commands.
+
+- **Questions and forms.** `RemoteChat.interactions` lists up to 4 pending questions or
+  tool forms per chat (approvals stay in `approvals`), with header, question, options
+  (label, description, preview) and whether free text is accepted. The phone answers with
+  `RemoteCommand.answer` and the exact request handle; the Mac rejects unknown, answered
+  or changed requests and answers the desktop would not accept. Forms, links and
+  unsupported forms can be declined (`RemoteCommand.decline`, kind `deny`), as on the
+  desktop. Requests with a secret field, link requests and requests that exceed the phone
+  limits (8 questions, 12 options, text limits, 16,000 characters in total) are published
+  read-only with `canAnswer = false` and a `macOnly` reason; a shortened form is never
+  answerable. Answers are command data in the owner-scoped queue, like message text.
+  Claude multi-select questions are still declined by the Mac before any UI sees them.
+- **Working chats.** `queue` puts the message in the chat's desktop queue: it runs after
+  the current turn in queue order and waits in a paused queue exactly like a message typed
+  on the Mac. `interrupt` is the desktop "Interrupt and send": it carries the observed turn
+  ID, is rejected for any other turn, stops that turn and sends the message next with the
+  interruption note. The Mac saves the queued message before it reports `submitted`; if
+  that write fails, the message is taken out again and the command is `rejected`. Both
+  are claimed behind any claimed or uncertain message of the chat; an interrupt whose stop
+  request fails is reported uncertain and its message stays in the paused queue, never
+  sent on its own. `RemoteChat.queue` shows up to 10 queued messages
+  (500 characters each) with the phone command that queued them; `canQueue` and
+  `canInterrupt` advertise the actions per chat and are withdrawn while the cloud schema
+  lacks them. Queued photo folders stay protected until their chat's queue is empty.
+- **Roles and add-ons.** Chat and project settings publish the selectable add-ons
+  (`addOns`) and the project's default (`projectAddOns`); a chat's `options.addOns` holds
+  the add-ons it runs with. A phone may turn on only add-ons the project's default role and
+  add-ons already grant (an Operator project grants both), and may always turn off the ones
+  that are on. `configure` without `addOns` leaves them unchanged, so older phones keep
+  working; with `addOns` the expected settings must carry them too.
+  `RemoteCommand.configure` sends add-ons only when they change and the host lists
+  `settings.addOns`, so a model-only change needs no interactions schema.
+
+### Phone interface (2026-11-05)
+
+- **Question card** (`MobileQuestionCard` in `MobileChatDock.swift`): after a pending approval,
+  the first question or form without an accepted reply is pinned above the composer ("1 of N").
+  Options are rows with label and description (the chosen option's preview shows under them);
+  "Other answer" is a free-text row where the agent accepts one and replaces the option. Send
+  is enabled only while `RemoteInteraction.validate(answers:)` passes; Decline appears when
+  `canDecline`. Mac-only requests show their `macOnlyMessage` and the question text, no form.
+  The questions scroll inside a box capped at about a third of the screen above the keyboard,
+  so the composer stays visible. The reply's status shows on the card once every request has a
+  reply. Questions count under "Needs you" and in the row status like approvals.
+- **Working chat** (`MobileComposerAction`): with an empty draft the button is Stop; with a draft
+  it is Queue when `canQueue`, and a long press offers Interrupt and send (when `canInterrupt`)
+  and Stop. Without `canQueue` but with `canInterrupt` the button opens that menu. The draft
+  clears once the command is stored. `MobileQueueList` shows the chat's desktop queue (three
+  rows, "+N more" from `queueCount`, "Queue paused on the Mac"), plus this phone's queue and
+  interrupt commands the Mac has not listed yet with their status.
+- **Role and add-ons** (`MobileRoleSection` in `MobileSettings.swift`, chat settings and new chat):
+  hosts that publish roles get a role picker ("Project default: …") instead of the access
+  picker. Add-on toggles follow `RemoteChatSettings.addOnChoices` (ContextCore): on only within
+  the project default (the project's published `addOns`) or while the Mac already has it on, off
+  always; an add-on on beyond the default says that only the Mac can turn it on again. The
+  composer chip shows the role name and one symbol per add-on that is on (envelope, globe).
+- Simulator fixtures: `-preview-question`, `-preview-form-maconly`, `-preview-queue`
+  (`-preview-queue-paused`), `-preview-roles`; `-preview-chat-settings` and `-preview-new-chat`
+  open those sheets for screenshots. `MobilePreviewTransport` answers both schema RPCs with 1
+  and acknowledges command inserts. UI tests: `Mobile/UITests/InteractionTests.swift`.
