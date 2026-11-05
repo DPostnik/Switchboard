@@ -12,7 +12,8 @@ final class ScrollTests: XCTestCase {
             app.launchArguments = ["-mobile-preview", "-preview-project-list", "-interfaceLanguage", language]
             app.launch()
             let expand = app.buttons["more-chats-" + project]
-            XCTAssertTrue(expand.waitForExistence(timeout: 10))
+            // Projects follow the "Needs you" and "Working" groups; the lazy list creates rows as they scroll in.
+            XCTAssertTrue(app.descendants(matching: .any)["connection-status"].firstMatch.waitForExistence(timeout: 10))
             func reveal(_ element: XCUIElement, up: Bool = true) {
                 for _ in 0..<12 where !element.isHittable {
                     if up { app.swipeUp() } else { app.swipeDown() }
@@ -52,10 +53,85 @@ final class ScrollTests: XCTestCase {
             app.navigationBars.buttons.firstMatch.tap()
             XCTAssertTrue(search.waitForExistence(timeout: 5))
             search.tap(); search.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 7))
-            XCTAssertTrue(expand.waitForExistence(timeout: 5))
+            if app.keyboards.firstMatch.exists { app.swipeDown() }
+            reveal(expand)
             XCTAssertTrue(expand.label.contains(remaining), "Clearing search restores the collapsed limit")
             app.terminate()
         }
+    }
+
+    @MainActor func testAttentionGroupsAndPerChatDeliveryInBothLanguages() throws {
+        for (language, needs, working, unconfirmed) in [("ru", "Ждут тебя", "Работают", "Доставка не подтверждена"),
+                                                       ("en", "Needs you", "Working", "Delivery unconfirmed")] {
+            let app = XCUIApplication()
+            app.launchArguments = ["-mobile-preview", "-preview-groups", "-preview-unconfirmed", "-interfaceLanguage", language]
+            app.launch()
+            // Approvals and unconfirmed sends from every project come first, then running chats; projects still list them.
+            XCTAssertTrue(app.buttons["needs-row-preview-approval"].waitForExistence(timeout: 10))
+            XCTAssertTrue(app.buttons["needs-row-preview-chat"].label.contains(unconfirmed), app.buttons["needs-row-preview-chat"].label)
+            XCTAssertTrue(app.buttons["working-row-preview-running"].exists)
+            XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", needs)).firstMatch.exists)
+            XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", working)).firstMatch.exists)
+            XCTAssertTrue(app.buttons["working-row-preview-running"].label.contains("Codex"))
+            XCTAssertTrue(app.descendants(matching: .any)["connection-status"].firstMatch.exists)
+            let list = XCTAttachment(screenshot: app.screenshot())
+            list.name = "Attention groups " + language; list.lifetime = .keepAlways; add(list)
+
+            // The unconfirmed send blocks only its own chat.
+            app.buttons["working-row-preview-running"].tap()
+            let input = app.descendants(matching: .any)["message-input"].firstMatch
+            XCTAssertTrue(input.waitForExistence(timeout: 5))
+            XCTAssertTrue(input.isEnabled, "Another chat's receipt must not block this chat")
+            XCTAssertFalse(app.buttons["check-delivery"].exists)
+            XCTAssertTrue(app.buttons["stop-agent"].isEnabled)
+            app.navigationBars.buttons.firstMatch.tap()
+            let blocked = app.buttons["needs-row-preview-chat"]
+            XCTAssertTrue(blocked.waitForExistence(timeout: 5))
+            blocked.tap()
+            XCTAssertTrue(app.buttons["check-delivery"].waitForExistence(timeout: 5))
+            XCTAssertFalse(app.descendants(matching: .any)["message-input"].firstMatch.isEnabled)
+            let notice = XCTAttachment(screenshot: app.screenshot())
+            notice.name = "Unconfirmed send " + language; notice.lifetime = .keepAlways; add(notice)
+            app.navigationBars.buttons.firstMatch.tap()
+
+            // A new chat the cloud never stored can be discarded from its own screen.
+            let creation = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "creation-row-")).firstMatch
+            XCTAssertTrue(creation.waitForExistence(timeout: 5))
+            creation.tap()
+            let discard = app.buttons["discard-command"]
+            XCTAssertTrue(discard.waitForExistence(timeout: 5))
+            XCTAssertTrue(app.buttons["resend-command"].exists)
+            discard.tap()
+            XCTAssertFalse(app.buttons["discard-command"].waitForExistence(timeout: 2))
+            app.navigationBars.buttons.firstMatch.tap()
+            XCTAssertTrue(app.buttons["needs-row-preview-chat"].waitForExistence(timeout: 5))
+            XCTAssertFalse(creation.exists)
+            app.terminate()
+        }
+    }
+
+    @MainActor func testLanguageSwitchAppliesWithoutRestart() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-mobile-preview", "-interfaceLanguage", "en"]
+        app.launch()
+        XCTAssertTrue(app.navigationBars["Chats"].waitForExistence(timeout: 10))
+        app.buttons["open-settings"].tap()
+        let picker = app.buttons["language-picker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        picker.tap(); app.buttons["Русский"].tap()
+        XCTAssertTrue(app.navigationBars["Настройки"].waitForExistence(timeout: 5), "The open sheet switches at once")
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "Language switched"; shot.lifetime = .keepAlways; add(shot)
+        app.buttons["Готово"].tap()
+        XCTAssertTrue(app.navigationBars["Чаты"].waitForExistence(timeout: 5), "The chat list switches without a restart")
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label == %@", "Найти чат")).firstMatch.exists || app.searchFields["Найти чат"].exists)
+        app.buttons["open-settings"].tap()
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        picker.tap(); app.buttons["English"].tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.navigationBars["Chats"].waitForExistence(timeout: 5))
+        app.terminate()
     }
 
     @MainActor func testChatModelAndAccessChoicesInBothLanguages() throws {
@@ -115,11 +191,11 @@ final class ScrollTests: XCTestCase {
 
             app.launchArguments += ["-preview-chat", "-preview-long"]
             app.launch()
-            let banner = app.buttons["show-approvals"]
-            XCTAssertTrue(banner.waitForExistence(timeout: 10))
-            banner.tap()
+            // The request is pinned above the composer: answerable without scrolling a long transcript.
             let allow = app.buttons["allow-approval"], deny = app.buttons["deny-approval"]
+            XCTAssertTrue(allow.waitForExistence(timeout: 10))
             XCTAssertTrue(allow.isHittable && deny.isHittable)
+            XCTAssertLessThan(allow.frame.maxY, app.descendants(matching: .any)["message-input"].firstMatch.frame.minY)
             allow.tap()
             let acknowledged = NSPredicate { _, _ in !allow.isEnabled && !deny.isEnabled }
             expectation(for: acknowledged, evaluatedWith: nil)
@@ -137,7 +213,9 @@ final class ScrollTests: XCTestCase {
             let app = XCUIApplication()
             app.launchArguments = ["-mobile-preview", "-preview-chat", "-preview-offline", "-interfaceLanguage", language]
             app.launch()
-            XCTAssertTrue(app.staticTexts[status].firstMatch.waitForExistence(timeout: 10))
+            let line = app.descendants(matching: .any)["connection-status"].firstMatch
+            XCTAssertTrue(line.waitForExistence(timeout: 10))
+            XCTAssertTrue(line.label.contains(status), line.label)
             XCTAssertTrue(app.textViews["message-text-m2"].exists)
             XCTAssertTrue(app.descendants(matching: .any)["message-input"].firstMatch.exists)
             app.terminate()

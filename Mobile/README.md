@@ -140,8 +140,8 @@ A macOS Swift typecheck of shared views is useful but is **not** an iOS build.
   details cannot be approved from the phone.
 - Approval handles are compared as UUID values, including PostgreSQL's lowercase
   representation. Pending chats take priority within the 20-chat snapshot limit.
-  The phone has a visible approval shortcut and disables both reply buttons after
-  queue acknowledgement. A truncated request is rejected by the Mac even if a
+  The phone pins the pending approval above the composer and disables both reply
+  buttons after queue acknowledgement. A truncated request is rejected by the Mac even if a
   client bypasses the disabled Allow button. Structured questions and tool forms
   still require the Mac.
 - Project permissions, native provider identity and existing chat route are
@@ -172,8 +172,8 @@ The preview handles **existing chats**, sends, Stop and allow/deny approvals.
 New-chat creation, structured question/form replies, full history pagination,
 per-device revocation, automated retention and recovery UI are not implemented.
 A submission with unknown delivery is retained on the phone and blocks additional
-commands; this conservative behavior needs a verified reconciliation flow before
-regular use. There is no automatic fallback to PWA or VPS execution.
+commands in its own chat (see "Interface refresh" below); this conservative behavior
+needs a verified reconciliation flow before regular use. There is no automatic fallback to PWA or VPS execution.
 
 ## Acceptance checks on the actual Supabase project and iPhone
 
@@ -378,3 +378,32 @@ last whole Markdown block and never inside a code block or table. Agents in ever
 chat are asked to put the conclusion first and keep answers near 1,800 characters.
 The simulator-only `-preview-file <path>` argument opens the viewer with synthetic
 content for visual checks.
+
+## Interface refresh (2026-11-05)
+
+The UI is split into one file per screen: `ContextMobileApp.swift` (app and language
+root), `MobileModel.swift`, `MobileChatList.swift`, `MobileChatView.swift` (transcript),
+`MobileChatDock.swift` (everything pinned under the transcript), `MobileComposer.swift`,
+`MobileSettings.swift` (settings, chat settings, new chat), `MobileStatus.swift` (connection
+line, delivery notice, shared wording) and `MobilePreview.swift` (simulator fixtures).
+
+- Chat list: one connection line per Mac at the top; then "Needs you" (approvals and
+  unconfirmed sends, across every Mac and project) and "Working" (running chats); then the
+  projects, which still list every chat. Search shows matches in their projects only. Rows
+  show the agent when the snapshot reveals it (Codex chats carry settings with a model;
+  read-only records are Claude scheduled runs; other chats show none) and the running
+  turn's elapsed time. The snapshot has no per-chat or per-message time, so rows and
+  messages show no update time; adding one would be a protocol change.
+- Chat: the pending approval is pinned above the composer (one card, "1 of N" when more
+  wait; the first without an accepted reply is shown), replacing the "Awaiting approval"
+  shortcut. While the agent works, a one-line activity with elapsed time sits there instead.
+- Delivery receipts are per chat (`RemoteReceipts`, Keychain account `pending-commands`; the
+  single `pending-command` receipt of earlier builds is migrated on sign-in). An unconfirmed
+  command blocks later sends, Stop, approval replies and settings in that chat only and is
+  never resent automatically. Its notice offers Check delivery; once the cloud proves the
+  command absent, Send again (same command ID) or Discard. New chats are keyed by project:
+  an unconfirmed creation blocks another creation in the same project and is listed under
+  "Needs you" until the Mac publishes it. File reads still skip receipts.
+- The language switch applies at once (`L10n.use`); the Mac still keeps one language per launch.
+- Simulator fixtures: `-preview-groups` adds running, approval and read-only chats in a second
+  project; `-preview-unconfirmed` adds an unconfirmed send and an undelivered new chat.
