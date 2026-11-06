@@ -32,10 +32,14 @@ Both are baked into the static build, so they must be set in the Vercel project 
 
 ## Deploy (Vercel)
 
-- Project root directory: `Web` (framework preset Vite, build `npm run build`, output `dist`).
+- Vercel project `switchboard-web` (team "daniil's projects"), connected to `DPostnik/Switchboard`; every push to
+  `main` deploys. Project root directory: `Web` (framework preset Vite, build `npm run build`, output `dist`).
 - `vercel.json` rewrites every path to `index.html` (single-page app) and adds basic security headers.
 - Domain: `switchboard.daniilpostnik.com` (DNS on Vercel).
-- In Supabase Auth, add the domain to the allowed site URLs.
+- Password sign-in needs no redirect URLs in Supabase Auth.
+
+Sign out ends only this browser's session (`scope: 'local'`). The default global scope would also end the
+Mac's and the iPhone's sessions, because all clients share the owner account.
 
 ## Layout
 
