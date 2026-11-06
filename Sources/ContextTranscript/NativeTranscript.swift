@@ -1432,8 +1432,9 @@ public struct NativeTranscript: NSViewRepresentable {
                 let attributes: [NSAttributedString.Key: Any] = [
                     .font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph
                 ]
-                // Code and tool output stay literal, including link-like text.
+                // Code and tool output stay literal, including link-like text; image paths a user pasted show as thumbnails.
                 result.append(isCode ? NSAttributedString(string: block, attributes: attributes)
+                              : item.kind == "user" ? TranscriptImagePaths.render(block, attributes: attributes)
                               : TranscriptLinks.render(block, attributes: attributes))
             }
         }
@@ -1649,9 +1650,13 @@ public struct NativeTranscript: NSViewRepresentable {
 
     private static func measureOutgoingInset(_ item: TranscriptItem, width: CGFloat) -> CGFloat {
         let maxText = max(80, width * 0.78 - 32)
-        let body = NSAttributedString(string: item.text.isEmpty ? " " : item.text, attributes: [.font: NSFont.systemFont(ofSize: 14)])
+        // Image paths show as thumbnails: the bubble fits the rest of the text and the widest thumbnail.
+        let images = TranscriptImagePaths.measure(item.text)
+        let text = images?.text ?? item.text
+        let body = NSAttributedString(string: text.isEmpty ? " " : text, attributes: [.font: NSFont.systemFont(ofSize: 14)])
         var textWidth = body.boundingRect(with: NSSize(width: maxText, height: .greatestFiniteMagnitude),
                                           options: [.usesLineFragmentOrigin, .usesFontLeading]).width
+        if let images { textWidth = max(textWidth, images.width) }
         if let phase = item.phase {
             let header = NSAttributedString(string: phase, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold)])
             textWidth = max(textWidth, header.size().width)
@@ -1854,6 +1859,18 @@ public struct NativeTranscript: NSViewRepresentable {
             return menu
         }
         let pasteboard = self.pasteboard
+        let isImagePreview = storage.attribute(.imagePreview, at: charIndex, effectiveRange: nil) != nil
+        if isImagePreview {
+            // A pasted screenshot: its path is what the user most often needs again.
+            add(L10n.text("Скопировать путь", "Copy Path")) {
+                pasteboard.clearContents(); pasteboard.setString(url.path, forType: .string)
+            }
+            add(L10n.text("Скопировать изображение", "Copy Image")) {
+                guard let image = NSImage(contentsOf: url) else { return }
+                pasteboard.clearContents(); pasteboard.writeObjects([image])
+            }
+            items.append(.separator())
+        }
         if url.isFileURL {
             if let onOpenFile, Self.fileClickAction([], url: url, canPreview: true) == .preview {
                 let line = storage.attribute(.fileLine, at: charIndex, effectiveRange: nil) as? Int
@@ -1874,8 +1891,10 @@ public struct NativeTranscript: NSViewRepresentable {
                     pasteboard.clearContents(); pasteboard.setString(relative, forType: .string)
                 }
             }
-            add(L10n.text("Скопировать абсолютный путь", "Copy Absolute Path")) {
-                pasteboard.clearContents(); pasteboard.setString(url.path, forType: .string)
+            if !isImagePreview {
+                add(L10n.text("Скопировать абсолютный путь", "Copy Absolute Path")) {
+                    pasteboard.clearContents(); pasteboard.setString(url.path, forType: .string)
+                }
             }
         } else {
             add(L10n.text("Открыть ссылку", "Open Link")) { NSWorkspace.shared.open(url) }
@@ -1934,6 +1953,12 @@ private final class TranscriptTextView: NSTextView {
             _ = delegate?.textView?(self, clickedOnLink: hit.link, at: hit.index)
             return
         }
+        // A pasted image's thumbnail opens like its file link; AppKit tracks a click on an attachment as a cell click.
+        if event.clickCount == 1, !event.modifierFlags.contains(.shift),
+           let hit = imagePreview(at: convert(event.locationInWindow, from: nil)) {
+            _ = delegate?.textView?(self, clickedOnLink: hit.url, at: hit.index)
+            return
+        }
         guard let trackClick else { return super.mouseDown(with: event) }
         trackClick { super.mouseDown(with: event) }
     }
@@ -1949,6 +1974,17 @@ private final class TranscriptTextView: NSTextView {
         guard index < storage.length, storage.attribute(.changesCard, at: index, effectiveRange: nil) != nil,
               let link = storage.attribute(.link, at: index, effectiveRange: nil) as? String else { return nil }
         return (link, index)
+    }
+    /// The file of the image thumbnail under `point`.
+    func imagePreview(at point: NSPoint) -> (url: URL, index: Int)? {
+        guard let manager = layoutManager, let container = textContainer, let storage = textStorage, storage.length > 0 else { return nil }
+        let local = NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y)
+        let glyph = manager.glyphIndex(for: local, in: container)
+        guard glyph < manager.numberOfGlyphs else { return nil }
+        let index = manager.characterIndexForGlyph(at: glyph)
+        guard index < storage.length, let url = storage.attribute(.imagePreview, at: index, effectiveRange: nil) as? URL,
+              manager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container).contains(local) else { return nil }
+        return (url, index)
     }
     /// Select All (and the copy after it) covers the whole chat, also the older part still waiting to be rendered.
     var beforeSelectAll: (() -> Void)?
@@ -1976,7 +2012,7 @@ private final class TranscriptTextView: NSTextView {
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
         let point = convert(event.locationInWindow, from: nil)
-        if changesLink(at: point) != nil { NSCursor.pointingHand.set() }
+        if changesLink(at: point) != nil || imagePreview(at: point) != nil { NSCursor.pointingHand.set() }
         hoverChanged?(point)
     }
     override func mouseEntered(with event: NSEvent) {

@@ -53,3 +53,31 @@ import ContextTranscript
     let rendered = TranscriptLinks.render("Открой https://example.com", attributes: [:])
     #expect(rendered.attribute(.link, at: 7, effectiveRange: nil) as? URL == URL(string: "https://example.com"))
 }
+
+@Test @MainActor func pastedImagePathsBecomeThumbnailsWithFileLinks() throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("images-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let bitmap = try #require(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 600, pixelsHigh: 300, bitsPerSample: 8, samplesPerPixel: 4,
+                                               hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+    let png = try #require(bitmap.representation(using: .png, properties: [:]))
+    let shot = folder.appendingPathComponent("Screenshot 2026-10-10 at 14.35.30.png")
+    try png.write(to: shot)
+    try Data("text".utf8).write(to: folder.appendingPathComponent("notes.txt"))
+
+    // Spaces in the name, text after the path on the same line, `file://` and missing files.
+    let text = "почему не работает \(shot.path) выделение\n\(shot.absoluteString)\n\(folder.path)/missing.png \(folder.path)/notes.txt"
+    let found = TranscriptImagePaths.find(in: text)
+    #expect(found.map(\.url.path) == [shot.path, shot.path])
+    #expect((text as NSString).substring(with: found[0].range) == shot.path)
+    #expect(TranscriptImagePaths.find(in: "/tmp/a.png.swift and a/b.png").isEmpty)
+
+    let rendered = TranscriptImagePaths.render("почему не работает \(shot.path) выделение", attributes: [.font: NSFont.systemFont(ofSize: 14)])
+    #expect(rendered.string == "почему не работает\n\u{FFFC}\nвыделение")
+    let attachment = try #require(rendered.attribute(.attachment, at: 19, effectiveRange: nil) as? NSTextAttachment)
+    // 600 × 300 fits 260 × 180 at 260 × 130.
+    #expect(attachment.bounds.size == NSSize(width: 260, height: 130))
+    #expect((rendered.attribute(.link, at: 19, effectiveRange: nil) as? URL)?.path == shot.path)
+    // A message that is only the path keeps no empty lines around the thumbnail.
+    #expect(TranscriptImagePaths.render(shot.path, attributes: [:]).string == "\u{FFFC}")
+}
