@@ -3,9 +3,14 @@ import Foundation
 /// Files dropped anywhere on a chat are added to its draft as plain paths, the same text
 /// the editor inserts when a file lands on it directly.
 public enum DroppedFiles {
-    /// Appends the paths of local files, one per line, after any existing text.
+    /// Images the composer shows as chips; their paths go in brackets (`[/path/shot.png]`) so each stays one chip
+    /// whatever is typed next to it.
+    public static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "heic", "tiff", "tif", "bmp", "webp"]
+
+    /// Appends the paths of local files, one per line, after any existing text; image paths in brackets.
     public static func appending(_ urls: [URL], to draft: String) -> String {
-        let paths = urls.filter(\.isFileURL).map(\.path).filter { !$0.isEmpty }
+        let paths = urls.filter(\.isFileURL).filter { !$0.path.isEmpty }
+            .map { imageExtensions.contains($0.pathExtension.lowercased()) ? "[" + $0.path + "]" : $0.path }
         guard !paths.isEmpty else { return draft }
         let joined = paths.joined(separator: "\n")
         guard let last = draft.last else { return joined }

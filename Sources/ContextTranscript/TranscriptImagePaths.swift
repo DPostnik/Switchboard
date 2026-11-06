@@ -26,7 +26,8 @@ extension NSAttributedString.Key {
 
     /// Absolute, `~/` and `file://` paths of existing image files. A path may hold spaces (macOS screenshots are named
     /// "Screenshot 2026-10-10 at 14.35.30.png") and is followed by other text on the same line; the shortest
-    /// existing file wins.
+    /// existing file wins. A path in square brackets (`[/path/shot.png]`, as the composer writes it) is found with its
+    /// brackets and needs no space around it; a path with only one of the brackets is text the user opened, not an image.
     public static func find(in text: String, isFile: (String) -> Bool = { ChatFiles.cachedIsFile($0) }) -> [(range: NSRange, url: URL)] {
         guard text.contains("/"), let start, let end else { return [] }
         let string = text as NSString
@@ -42,12 +43,18 @@ extension NSAttributedString.Key {
                 let candidate = string.substring(with: range)
                 if candidate.contains("\n") || range.length > 1024 { break }
                 guard let url = fileURL(candidate), isFile(url.path) else { continue }
-                result.append((range, url))
+                let opens = from > 0 && string.character(at: from - 1) == 0x5B
+                let closes = to < string.length && string.character(at: to) == 0x5D
+                if opens != closes { break }
+                result.append((opens ? NSRange(location: from - 1, length: range.length + 2) : range, url))
                 break
             }
         }
         return result
     }
+
+    /// How the composer writes an image path: in brackets, so it stays one chip next to any text.
+    public static func chipText(_ path: String) -> String { "[" + path + "]" }
 
     static func fileURL(_ candidate: String) -> URL? {
         var path = candidate

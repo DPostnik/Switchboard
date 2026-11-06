@@ -153,6 +153,7 @@ public struct MessageComposer: NSViewRepresentable {
         public func textDidChange(_ notification: Notification) {
             guard let editor = notification.object as? NSTextView else { return }
             (editor as? ComposerTextView)?.refreshImages()
+            (editor as? ComposerTextView)?.editing = false
             parent.state.editorChanged(editor.string)
             parent.completion?.editorChanged(editor)
         }
@@ -162,13 +163,15 @@ public struct MessageComposer: NSViewRepresentable {
         }
         public func textView(_ textView: NSTextView, willChangeSelectionFromCharacterRange old: NSRange,
                              toCharacterRange proposed: NSRange) -> NSRange {
-            guard let editor = textView as? ComposerTextView, !editor.images.ranges.isEmpty else { return proposed }
+            // During an edit the chips' ranges are those before it; they are found again once the edit ends.
+            guard let editor = textView as? ComposerTextView, !editor.images.ranges.isEmpty, !editor.editing else { return proposed }
             return ComposerImages.snap(proposed, from: old, ranges: editor.images.ranges.map(\.range))
         }
         public func textView(_ textView: NSTextView, shouldChangeTextIn affected: NSRange, replacementString: String?) -> Bool {
-            guard let editor = textView as? ComposerTextView, !editor.images.ranges.isEmpty,
-                  let whole = ComposerImages.expanded(affected, ranges: editor.images.ranges.map(\.range)) else { return true }
-            // Deleting into a thumbnail removes its whole path.
+            guard let editor = textView as? ComposerTextView, !editor.images.ranges.isEmpty, let storage = editor.textStorage,
+                  let whole = ComposerImages.expanded(affected, ranges: editor.images.ranges.map(\.range), opened: editor.images.opened(in: storage))
+            else { (textView as? ComposerTextView)?.editing = true; return true }
+            // Deleting into a chip removes its whole path.
             editor.insertText(replacementString ?? "", replacementRange: whole)
             return false
         }
@@ -293,18 +296,21 @@ public final class ComposerTextView: NSTextView {
     }
     /// Paths one per line, separated from the text around them so each is found as a path.
     func insertPaths(_ urls: [URL], at range: NSRange) {
-        let paths = urls.filter(\.isFileURL).map(\.path)
+        // Images go in brackets: each stays one chip whatever is typed next to it.
+        let paths = urls.filter(\.isFileURL).map { TranscriptImagePaths.isImage($0) ? TranscriptImagePaths.chipText($0.path) : $0.path }
         guard !paths.isEmpty else { return }
         let text = string as NSString
         let before = range.location > 0 ? text.character(at: range.location - 1) : 0x0A
         let after = NSMaxRange(range) < text.length ? text.character(at: NSMaxRange(range)) : 0x0A
         let isSpace = { (c: unichar) in c == 0x20 || c == 0x0A || c == 0x09 }
-        insertText((isSpace(before) ? "" : " ") + paths.joined(separator: "\n") + (isSpace(after) ? "" : " "), replacementRange: range)
+        insertText((isSpace(before) ? "" : " ") + paths.joined(separator: " ") + (isSpace(after) ? "" : " "), replacementRange: range)
     }
 
     // MARK: Image thumbnails (`ComposerImages`)
 
     let images = ComposerImages()
+    /// Between an accepted edit and its text-change notification; the caret is not snapped to chips meanwhile.
+    var editing = false
     func refreshImages() {
         guard let storage = textStorage, images.refresh(storage, layoutManager: layoutManager) else { return }
         needsDisplay = true

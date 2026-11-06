@@ -108,3 +108,29 @@ private func writeImage(_ url: URL, width: Int = 600, height: Int = 300) throws 
     composer.editorChanged("только текст")
     #expect(composer.images.isEmpty)
 }
+
+@Test func deletingABracketOfAChipOpensItIntoText() {
+    let chip = [NSRange(location: 4, length: 12)]
+    // Backspace right after "]" deletes only the bracket; forward delete of "[" likewise.
+    #expect(ComposerImages.expanded(NSRange(location: 15, length: 1), ranges: chip, opened: chip) == nil)
+    #expect(ComposerImages.expanded(NSRange(location: 4, length: 1), ranges: chip, opened: chip) == nil)
+    // Without brackets the whole path goes.
+    #expect(ComposerImages.expanded(NSRange(location: 15, length: 1), ranges: chip) == chip[0])
+}
+
+@Test @MainActor func bracketedImagePathsNeedNoSpacesAndAnOpenedOneIsText() throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("brackets-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let shot = folder.appendingPathComponent("Screenshot 2026-11-06 at 23.36.45.png")
+    try writeImage(shot)
+    let glued = "фото[\(shot.path)]текст"
+    let found = TranscriptImagePaths.find(in: glued)
+    #expect(found.count == 1)
+    #expect((glued as NSString).substring(with: found[0].range) == "[\(shot.path)]")
+    // One bracket left: the path is text again.
+    #expect(TranscriptImagePaths.find(in: "фото [\(shot.path)").isEmpty)
+    #expect(TranscriptImagePaths.find(in: "фото \(shot.path)] x").isEmpty)
+    // The sent message shows the thumbnail without the brackets.
+    #expect(TranscriptImagePaths.render("до [\(shot.path)] после", attributes: [:]).string == "до\n\u{FFFC}\nпосле")
+}

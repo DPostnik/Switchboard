@@ -15,15 +15,17 @@ import Testing
         #expect(try Data(contentsOf: file) == Data([1, 2, 3]))
     }
     @Test func emptyDraftBecomesThePath() {
-        #expect(DroppedFiles.appending([shot], to: "") == shot.path)
+        #expect(DroppedFiles.appending([shot], to: "") == "[" + shot.path + "]")
     }
     @Test func appendsAfterTextWithSingleSeparator() {
-        #expect(DroppedFiles.appending([shot], to: "Посмотри") == "Посмотри " + shot.path)
-        #expect(DroppedFiles.appending([shot], to: "Посмотри\n") == "Посмотри\n" + shot.path)
+        #expect(DroppedFiles.appending([shot], to: "Посмотри") == "Посмотри [" + shot.path + "]")
+        #expect(DroppedFiles.appending([shot], to: "Посмотри\n") == "Посмотри\n[" + shot.path + "]")
     }
     @Test func severalFilesGoOnSeparateLines() {
         let other = URL(fileURLWithPath: "/tmp/b.png")
-        #expect(DroppedFiles.appending([shot, other], to: "") == shot.path + "\n/tmp/b.png")
+        #expect(DroppedFiles.appending([shot, other], to: "") == "[" + shot.path + "]\n[/tmp/b.png]")
+        // Other files keep a plain path.
+        #expect(DroppedFiles.appending([URL(fileURLWithPath: "/tmp/a.swift")], to: "") == "/tmp/a.swift")
     }
     @Test func ignoresNonFileURLs() {
         let web = URL(string: "https://example.com/a.png")!

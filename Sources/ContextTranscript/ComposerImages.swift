@@ -12,11 +12,12 @@ extension NSAttributedString.Key {
 /// chip, the others as nothing, and the text view draws the chip into the gap. The caret steps over a path as over one
 /// character, deleting into it removes the whole path, and a chip can be dragged to another place in the text.
 @MainActor final class ComposerImages: NSObject, @preconcurrency NSLayoutManagerDelegate {
-    static let chipHeight: CGFloat = 20
-    static let previewSide: CGFloat = 14
-    /// Space above and below a chip inside its line, and after it.
-    static let padding: CGFloat = 1
-    static let labelFont = NSFont.systemFont(ofSize: 12, weight: .medium)
+    /// About the height of a 14 pt text line, so a line with a chip keeps the height of the others.
+    static let chipHeight: CGFloat = 18
+    static let previewSide: CGFloat = 12
+    /// Space after a chip.
+    static let padding: CGFloat = 3
+    static let labelFont = NSFont.systemFont(ofSize: 11.5, weight: .medium)
 
     private(set) var ranges: [(range: NSRange, url: URL)] = []
     /// Each image's number: its place among the distinct images in text order, as in the bar above the composer.
@@ -41,8 +42,8 @@ extension NSAttributedString.Key {
         storage.removeAttribute(.toolTip, range: all)
         for (range, url) in found {
             storage.addAttributes([.composerImage: url, .toolTip: url.path + "\n" + L10n.text(
-                "Двойной клик - открыть, перетащите, чтобы переместить; агент получит путь к файлу на этом месте",
-                "Double-click to open, drag to move; the agent gets the file path at this place")], range: range)
+                "Двойной клик - открыть, перетащите, чтобы переместить, Backspace после чипа - раскрыть путь; агент получит путь к файлу на этом месте",
+                "Double-click to open, drag to move, Backspace after the chip shows the path; the agent gets the file path at this place")], range: range)
         }
         storage.endEditing()
         layoutManager?.invalidateGlyphs(forCharacterRange: all, changeInLength: 0, actualCharacterRange: nil)
@@ -50,12 +51,18 @@ extension NSAttributedString.Key {
         return true
     }
 
+    /// Chips written in brackets: deleting a bracket opens them into text.
+    func opened(in storage: NSTextStorage) -> [NSRange] {
+        let string = storage.string as NSString
+        return ranges.map(\.range).filter { $0.length > 1 && NSMaxRange($0) <= string.length && string.character(at: $0.location) == 0x5B }
+    }
+
     func number(for url: URL) -> Int { numbers[url.standardizedFileURL] ?? 1 }
 
     /// The chip's size: preview, gap, label and side insets.
     func size(for url: URL) -> NSSize? {
         let label = (Self.label(number(for: url)) as NSString).size(withAttributes: [.font: Self.labelFont])
-        return NSSize(width: (4 + Self.previewSide + 5 + label.width + 7).rounded(.up), height: Self.chipHeight)
+        return NSSize(width: (4 + Self.previewSide + 4 + label.width + 6).rounded(.up), height: Self.chipHeight)
     }
 
     // MARK: Editing
@@ -75,9 +82,13 @@ extension NSAttributedString.Key {
         return result
     }
 
-    /// An edit that cuts into a path takes the whole path; nil when it cuts into none.
-    nonisolated static func expanded(_ affected: NSRange, ranges: [NSRange]) -> NSRange? {
+    /// An edit that cuts into a path takes the whole path; nil when it cuts into none. Deleting only a bracket of a
+    /// bracketed path (`opened`) is left alone: it turns the chip back into its text.
+    nonisolated static func expanded(_ affected: NSRange, ranges: [NSRange], opened: [NSRange] = []) -> NSRange? {
         guard affected.length > 0 else { return nil }
+        if affected.length == 1, opened.contains(where: { affected.location == $0.location || affected.location == NSMaxRange($0) - 1 }) {
+            return nil
+        }
         var result = affected
         for range in ranges where NSIntersectionRange(range, result).length > 0 && NSUnionRange(range, result) != result {
             result = NSUnionRange(range, result)
@@ -121,7 +132,7 @@ extension NSAttributedString.Key {
         return NSRect(x: glyphPosition.x, y: 0, width: size.width + Self.padding, height: size.height)
     }
 
-    /// A line with a thumbnail grows to hold it; its text sits on the thumbnail's bottom edge.
+    /// A line lower than a chip grows to hold it, by the same amount above and below its text.
     func layoutManager(_ layoutManager: NSLayoutManager, shouldSetLineFragmentRect lineFragmentRect: UnsafeMutablePointer<NSRect>,
                        lineFragmentUsedRect: UnsafeMutablePointer<NSRect>, baselineOffset: UnsafeMutablePointer<CGFloat>,
                        in textContainer: NSTextContainer, forGlyphRange glyphRange: NSRange) -> Bool {
@@ -129,11 +140,11 @@ extension NSAttributedString.Key {
         let characters = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
         guard let height = ranges.filter({ NSLocationInRange($0.range.location, characters) }).compactMap({ size(for: $0.url)?.height }).max()
         else { return false }
-        let extra = height + 2 * Self.padding - lineFragmentRect.pointee.height
+        let extra = (height - lineFragmentRect.pointee.height).rounded(.up)
         guard extra > 0 else { return false }
         lineFragmentRect.pointee.size.height += extra
         lineFragmentUsedRect.pointee.size.height += extra
-        baselineOffset.pointee += extra
+        baselineOffset.pointee += extra / 2
         return true
     }
 
@@ -149,7 +160,9 @@ extension NSAttributedString.Key {
             guard manager.isValidGlyphIndex(glyph) else { return nil }
             let line = manager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
             let location = manager.location(forGlyphAt: glyph)
-            let frame = NSRect(x: origin.x + line.minX + location.x, y: origin.y + line.minY + ((line.height - size.height) / 2).rounded(),
+            // Centered on the text's middle (half the capital height above the baseline), not on the line box.
+            let middle = line.minY + location.y - (view.font?.capHeight ?? 10) / 2
+            let frame = NSRect(x: origin.x + line.minX + location.x, y: origin.y + (middle - size.height / 2).rounded(),
                                width: size.width, height: size.height)
             return (frame, range, url)
         }
@@ -166,7 +179,7 @@ extension NSAttributedString.Key {
     /// A rounded chip: the image's preview cropped to a square, then its label.
     func drawChip(_ url: URL, in frame: NSRect, selected: Bool) {
         NSGraphicsContext.saveGraphicsState()
-        let chip = NSBezierPath(roundedRect: frame.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
+        let chip = NSBezierPath(roundedRect: frame.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
         (selected ? DeskPalette.ns.accent.withAlphaComponent(0.22) : DeskPalette.ns.accent.withAlphaComponent(0.1)).setFill()
         chip.fill()
         (selected ? DeskPalette.ns.accent : DeskPalette.ns.accent.withAlphaComponent(0.35)).setStroke()
@@ -185,7 +198,7 @@ extension NSAttributedString.Key {
         let label = Self.label(number(for: url)) as NSString
         let attributes: [NSAttributedString.Key: Any] = [.font: Self.labelFont, .foregroundColor: DeskPalette.ns.accentDeep]
         let size = label.size(withAttributes: attributes)
-        label.draw(at: NSPoint(x: preview.maxX + 5, y: frame.midY - size.height / 2), withAttributes: attributes)
+        label.draw(at: NSPoint(x: preview.maxX + 4, y: frame.midY - size.height / 2), withAttributes: attributes)
         NSGraphicsContext.restoreGraphicsState()
     }
 
