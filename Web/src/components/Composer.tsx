@@ -1,10 +1,13 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type RefObject } from 'react'
 import { s } from '../i18n/strings'
 import { commands, limits, utf8Length } from '../protocol/commands'
 import { chatKey } from '../protocol/receipts'
+import { findProject } from '../protocol/snapshot'
 import type { RemoteChat, RemoteCommand, RemoteDevice } from '../protocol/types'
-import type { Engine, EngineState } from '../sync/engine'
+import type { EngineState } from '../sync/engine'
+import type { EngineLike } from './engineLike'
 import { commandStatusText, statusTone } from './format'
+import { Icon } from './Icon'
 import { latestOwnCommand } from './selectors'
 
 /** Drafts survive switching chats within the tab. */
@@ -12,7 +15,18 @@ const drafts = new Map<string, string>()
 
 type Action = 'send' | 'queue' | 'interrupt'
 
-export function Composer({ engine, state, device, chat }: { engine: Engine; state: EngineState; device: RemoteDevice; chat: RemoteChat }) {
+/** Grows a text field with its content up to the Mac composer's cap. */
+export function useAutosize(field: RefObject<HTMLTextAreaElement | null>, value: string, max = 220): void {
+  useLayoutEffect(() => {
+    const element = field.current
+    if (!element) return
+    element.style.height = 'auto'
+    element.style.height = Math.min(element.scrollHeight, max) + 'px'
+    element.style.overflowY = element.scrollHeight > max ? 'auto' : 'hidden'
+  }, [field, value, max])
+}
+
+export function Composer({ engine, state, device, chat }: { engine: EngineLike; state: EngineState; device: RemoteDevice; chat: RemoteChat }) {
   const key = chatKey(device.id, chat.id)
   const [draft, setDraftState] = useState(() => drafts.get(key) ?? '')
   const setDraft = (value: string) => {
@@ -23,8 +37,9 @@ export function Composer({ engine, state, device, chat }: { engine: Engine; stat
   useEffect(() => {
     input.current?.focus()
   }, [key])
+  useAutosize(input, draft)
 
-  if (chat.readOnly) return <div className="notice small">{s('readOnly')}</div>
+  if (chat.readOnly) return <div className="banner neutral"><Icon name="lock" /><span>{s('readOnly')}</span></div>
 
   const blocked = engine.isBlocked(key)
   const sending = state.inFlight.has(key)
@@ -33,6 +48,8 @@ export function Composer({ engine, state, device, chat }: { engine: Engine; stat
   const canQueue = chat.running && chat.canQueue === true
   const canInterrupt = chat.running && chat.canInterrupt === true && Boolean(chat.turn)
   const primary: Action | null = !chat.running ? 'send' : canQueue ? 'queue' : canInterrupt ? 'interrupt' : null
+  // One round control, as on the Mac: stop while a response runs and nothing can be sent, otherwise send or queue.
+  const stops = chat.running && (!hasText || !primary)
   const base = { owner: engine.owner, device: device.id, project: chat.project }
 
   const submit = async (action: Action) => {
@@ -56,26 +73,68 @@ export function Composer({ engine, state, device, chat }: { engine: Engine; stat
     if (primary) void submit(primary)
   }
 
+  const hint = primary === 'queue' ? s('queueHint') : primary === 'interrupt' ? s('interruptHint') : s('sendHint')
+  const sendLabel = primary === 'queue' ? s('queue') : primary === 'interrupt' ? s('interruptAndSend') : s('send')
   return (
-    <div className="composer">
+    <div className="composer-area">
       <CommandLine state={state} device={device} chat={chat} />
-      {chat.running && !primary && hasText && <div className="small muted">{s('busyNoQueue')}</div>}
-      {tooLong && <div className="small error">{s('textTooLong')}</div>}
-      <div className="composer-row">
-        <textarea ref={input} value={draft} rows={Math.min(10, Math.max(2, draft.split('\n').length))}
+      {chat.running && !primary && hasText && <div className="composer-note">{s('busyNoQueue')}</div>}
+      {tooLong && <div className="composer-note bad" role="alert">{s('textTooLong')}</div>}
+      <div className="composer">
+        <textarea ref={input} className="composer-input" value={draft} rows={1}
           placeholder={chat.running && primary ? s('queuePlaceholder') : s('messagePlaceholder')}
-          onChange={(event) => setDraft(event.target.value)} onKeyDown={onKeyDown} disabled={blocked} aria-label={s('messagePlaceholder')} />
-        <div className="composer-actions">
-          {chat.running && <button type="button" className="danger" onClick={stop} disabled={blocked}>{s('stop')}</button>}
-          {canInterrupt && canQueue && <button type="button" onClick={() => void submit('interrupt')} disabled={blocked || !hasText || tooLong}>{s('interruptAndSend')}</button>}
-          {primary && (
-            <button type="button" className="primary" onClick={() => void submit(primary)} disabled={blocked || !hasText || tooLong}>
-              {sending ? s('sending') : primary === 'send' ? s('send') : primary === 'queue' ? s('queue') : s('interruptAndSend')}
+          onChange={(event) => setDraft(event.target.value)} onKeyDown={onKeyDown} disabled={blocked} aria-label={s('message')} />
+        <div className="composer-bar">
+          <ChatChips device={device} chat={chat} />
+          <span className="composer-spacer" />
+          {canInterrupt && canQueue && hasText && (
+            <button type="button" className="chip-button" onClick={() => void submit('interrupt')} disabled={blocked || tooLong}>
+              <Icon name="interrupt" size={13} />
+              <span>{s('interruptAndSend')}</span>
+            </button>
+          )}
+          {stops ? (
+            <button type="button" className="round-button" onClick={stop} disabled={blocked} aria-label={s('stopResponse')} title={s('stopResponse')}>
+              <Icon name="stop" size={11} />
+            </button>
+          ) : (
+            <button type="button" className="round-button" onClick={() => primary && void submit(primary)} disabled={blocked || !hasText || tooLong || !primary}
+              aria-label={sendLabel} title={hint} aria-busy={sending || undefined}>
+              <Icon name="arrowUp" size={15} />
             </button>
           )}
         </div>
       </div>
     </div>
+  )
+}
+
+/** The chat's role and model, shown like the Mac composer's chips. They change only on the Mac. */
+function ChatChips({ device, chat }: { device: RemoteDevice; chat: RemoteChat }) {
+  const settings = chat.settings
+  if (!settings) return null
+  const project = findProject(device, chat.project)
+  const modelID = settings.options.model
+  const model = [...(project?.models ?? []), ...(project?.newChatModels ?? [])].find((value) => value.id === modelID)
+  const roleID = settings.options.role ?? settings.projectRole
+  const role = (settings.roles ?? []).find((value) => value.id === roleID)
+  const full = (settings.options.access ?? settings.projectAccess) === 'fullAccess'
+  const hint = s('chipReadOnly')
+  return (
+    <>
+      {role && (
+        <span className="chip" title={(full ? s('accessFull') : s('accessStandard')) + ' · ' + hint}>
+          <Icon name={full ? 'lockOpen' : 'lock'} size={13} label={full ? s('accessFull') : s('accessStandard')} />
+          <span className="ellipsis">{role.name}</span>
+        </span>
+      )}
+      {modelID && (
+        <span className="chip" title={hint}>
+          <Icon name="sparkle" size={12} />
+          <span className="ellipsis">{model?.name ?? modelID}</span>
+        </span>
+      )}
+    </>
   )
 }
 
@@ -90,5 +149,5 @@ function CommandLine({ state, device, chat }: { state: EngineState; device: Remo
     return () => clearTimeout(timer)
   }, [command, done])
   if (!command || hidden === command.id + command.status) return null
-  return <div className={'small status-line ' + statusTone(command.status)} role="status">{commandStatusText(command)}</div>
+  return <div className={'composer-note status-line ' + statusTone(command.status)} role="status">{commandStatusText(command)}</div>
 }

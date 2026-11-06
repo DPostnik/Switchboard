@@ -33,18 +33,18 @@ export function SignIn({ client, onToggleLanguage }: { client: SupabaseClient; o
           <h1>{s('signInTitle')}</h1>
           <LanguageToggle onToggle={onToggleLanguage} />
         </div>
-        <p className="muted">{s('signInLead')}</p>
+        <p className="card-lead">{s('signInLead')}</p>
         <label className="field">
           <span>{s('email')}</span>
-          <input id="email" name="email" type="email" autoComplete="username" required value={email} onChange={(event) => setEmail(event.target.value)} disabled={busy} />
+          <input className="field-input" id="email" name="email" type="email" autoComplete="username" required value={email} onChange={(event) => setEmail(event.target.value)} disabled={busy} />
         </label>
         <label className="field">
           <span>{s('password')}</span>
-          <input id="password" name="password" type="password" autoComplete="current-password" required value={password} onChange={(event) => setPassword(event.target.value)} disabled={busy} />
+          <input className="field-input" id="password" name="password" type="password" autoComplete="current-password" required value={password} onChange={(event) => setPassword(event.target.value)} disabled={busy} />
         </label>
         {error && <p className="error" role="alert">{error === 'credentials' ? s('signInFailed') : s('signInNetwork')}</p>}
-        <button type="submit" className="primary" disabled={busy || !email || !password}>{busy ? s('signingIn') : s('signIn')}</button>
-        <p className="muted small">{s('macExecutes')}</p>
+        <button type="submit" className="button primary wide" disabled={busy || !email || !password}>{busy ? s('signingIn') : s('signIn')}</button>
+        <p className="card-footnote">{s('macExecutes')}</p>
       </form>
     </div>
   )

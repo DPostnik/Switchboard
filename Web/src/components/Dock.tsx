@@ -3,17 +3,17 @@ import { t, tx } from '../i18n'
 import { s, type StringKey } from '../i18n/strings'
 import { commands, isValidAnswers, validateAnswers } from '../protocol/commands'
 import { chatKey } from '../protocol/receipts'
-import { elapsedSeconds } from '../protocol/snapshot'
 import type { RemoteApproval, RemoteChat, RemoteDevice, RemoteInteraction, RemoteQuestion } from '../protocol/types'
 import { describeError } from '../sync/errors'
-import type { Engine, EngineState } from '../sync/engine'
-import { commandStatusText, formatElapsed, statusTone } from './format'
+import type { EngineState } from '../sync/engine'
+import type { EngineLike } from './engineLike'
+import { commandStatusText, statusTone } from './format'
+import { Icon } from './Icon'
 import { approvalCommand, unlistedQueueCommands } from './selectors'
-import { useNow } from './useNow'
 
-/** Everything under a chat's transcript: delivery notice, the request waiting for an answer (approval, then question)
- *  or the agent's activity, the desktop queue, then the composer. */
-export function Dock({ engine, state, device, chat, children }: { engine: Engine; state: EngineState; device: RemoteDevice; chat: RemoteChat; children: ReactNode }) {
+/** Everything under a chat's transcript, in the composer's column: delivery notice, the request waiting for an answer
+ *  (approval, then question), the desktop queue, then the composer. The working row sits at the end of the transcript. */
+export function Dock({ engine, state, device, chat, children }: { engine: EngineLike; state: EngineState; device: RemoteDevice; chat: RemoteChat; children: ReactNode }) {
   const key = chatKey(device.id, chat.id)
   const pending = (id: string) => approvalCommand(state, device.id, chat.id, id)
   // The first request without an accepted reply; once all have one, the first, so its status stays visible.
@@ -29,7 +29,7 @@ export function Dock({ engine, state, device, chat, children }: { engine: Engine
       ) : interaction ? (
         <QuestionCard key={interaction.id} engine={engine} state={state} device={device} chat={chat} interaction={interaction}
           position={interactions.indexOf(interaction) + 1} total={interactions.length} />
-      ) : chat.running ? <ActivityLine chat={chat} /> : null}
+      ) : null}
       <QueueList state={state} device={device} chat={chat} />
       {children}
     </div>
@@ -37,25 +37,32 @@ export function Dock({ engine, state, device, chat, children }: { engine: Engine
 }
 
 /** The unresolved command of a chat (or of a new chat in a project): unknown outcome, or proven absent. */
-export function DeliveryNotice({ engine, state, keyValue }: { engine: Engine; state: EngineState; keyValue: string }) {
+export function DeliveryNotice({ engine, state, keyValue }: { engine: EngineLike; state: EngineState; keyValue: string }) {
   const receipt = state.receipts.blocking(keyValue)
   const busy = state.inFlight.has(keyValue)
   const error = state.chatErrors[keyValue]
   if (!receipt && !error) return null
   const missing = receipt ? state.undelivered.has(receipt.id) : false
   return (
-    <div className={'notice ' + (receipt ? 'warn' : 'bad')} role="status">
-      {receipt && <div>{busy ? s('sending') : missing ? s('deliveryMissing') : s('deliveryUnknown')}</div>}
-      {error && <div className="error">{tx(error)}</div>}
-      <div className="row">
-        {receipt && !busy && !missing && <button type="button" className="small" onClick={() => void engine.checkDelivery(receipt)}>{s('checkDelivery')}</button>}
+    <div className={'banner ' + (receipt ? 'attention' : 'problem')} role="status">
+      <Icon name="warning" />
+      <div className="banner-body">
+        {receipt && <div>{busy ? s('sending') : missing ? s('deliveryMissing') : s('deliveryUnknown')}</div>}
+        {error && <div>{tx(error)}</div>}
+      </div>
+      <div className="banner-actions">
+        {receipt && !busy && !missing && <button type="button" className="button" onClick={() => void engine.checkDelivery(receipt)}>{s('checkDelivery')}</button>}
         {receipt && !busy && missing && (
           <>
-            <button type="button" className="small primary" onClick={() => void engine.resend(receipt)}>{s('sendAgain')}</button>
-            <button type="button" className="small" onClick={() => engine.discard(receipt)}>{s('discard')}</button>
+            <button type="button" className="button" onClick={() => engine.discard(receipt)}>{s('discard')}</button>
+            <button type="button" className="button primary" onClick={() => void engine.resend(receipt)}>{s('sendAgain')}</button>
           </>
         )}
-        {!receipt && error && <button type="button" className="small ghost" onClick={() => engine.clearError(keyValue)}>{s('dismiss')}</button>}
+        {!receipt && error && (
+          <button type="button" className="icon-button" onClick={() => engine.clearError(keyValue)} aria-label={s('dismiss')} title={s('dismiss')}>
+            <Icon name="close" />
+          </button>
+        )}
       </div>
     </div>
   )
@@ -63,10 +70,10 @@ export function DeliveryNotice({ engine, state, keyValue }: { engine: Engine; st
 
 function Counter({ position, total }: { position: number; total: number }) {
   if (total <= 1) return null
-  return <span className="small muted">{t(`${position} из ${total}`, `${position} of ${total}`)}</span>
+  return <span className="card-counter">{t(`${position} из ${total}`, `${position} of ${total}`)}</span>
 }
 
-function ApprovalCard({ engine, state, device, chat, approval, position, total }: { engine: Engine; state: EngineState; device: RemoteDevice; chat: RemoteChat; approval: RemoteApproval; position: number; total: number }) {
+function ApprovalCard({ engine, state, device, chat, approval, position, total }: { engine: EngineLike; state: EngineState; device: RemoteDevice; chat: RemoteChat; approval: RemoteApproval; position: number; total: number }) {
   const response = approvalCommand(state, device.id, chat.id, approval.id)
   const locked = engine.isBlocked(chatKey(device.id, chat.id)) || (response !== undefined && response.status !== 'rejected')
   const base = { owner: engine.owner, device: device.id, project: chat.project }
@@ -74,15 +81,19 @@ function ApprovalCard({ engine, state, device, chat, approval, position, total }
     ? commands.allow(base, chat.id, approval.id, chat.turn)
     : commands.deny(base, chat.id, approval.id, chat.turn)))
   return (
-    <div className="card-request approval" role="group" aria-label={s('approvalRequired')}>
-      <div className="request-head"><strong>{s('approvalRequired')}</strong><Counter position={position} total={total} /></div>
-      <pre className="request-details">{approval.details}</pre>
-      <div className="row">
-        <button type="button" disabled={locked} onClick={() => reply('deny')}>{s('decline')}</button>
-        {approval.canAllow && <button type="button" className="primary warn" disabled={locked} onClick={() => reply('allow')}>{s('allowOnce')}</button>}
+    <div className="action-card" role="group" aria-label={s('approvalRequired')}>
+      <div className="action-head">
+        <Icon name="diamond" size={17} className="action-icon" />
+        <strong className="action-title">{s('approvalRequired')}</strong>
+        <Counter position={position} total={total} />
       </div>
-      {response && <div className={'small status-line ' + statusTone(response.status)}>{commandStatusText(response)}</div>}
-      {!approval.canAllow && <div className="small muted">{s('cannotAllowHere')}</div>}
+      <pre className="action-details">{approval.details}</pre>
+      {!approval.canAllow && <div className="action-note">{s('cannotAllowHere')}</div>}
+      <div className="action-buttons">
+        <button type="button" className="button" disabled={locked} onClick={() => reply('deny')}>{s('decline')}</button>
+        {approval.canAllow && <button type="button" className="button primary" disabled={locked} onClick={() => reply('allow')}>{s('allowOnce')}</button>}
+      </div>
+      {response && <div className={'status-line ' + statusTone(response.status)} role="status">{commandStatusText(response)}</div>}
     </div>
   )
 }
@@ -93,7 +104,7 @@ const macOnlyText: Record<string, StringKey> = {
 
 /** A question or tool form: options, free text where the agent accepts it ("Other"), Decline where the desktop has it.
  *  A request that cannot be shown faithfully says "answer on the Mac". */
-function QuestionCard({ engine, state, device, chat, interaction, position, total }: { engine: Engine; state: EngineState; device: RemoteDevice; chat: RemoteChat; interaction: RemoteInteraction; position: number; total: number }) {
+function QuestionCard({ engine, state, device, chat, interaction, position, total }: { engine: EngineLike; state: EngineState; device: RemoteDevice; chat: RemoteChat; interaction: RemoteInteraction; position: number; total: number }) {
   const [chosen, setChosen] = useState<Record<string, string>>({})
   const [other, setOther] = useState<Record<string, string>>({})
   const [typing, setTyping] = useState<Set<string>>(new Set())
@@ -137,9 +148,9 @@ function QuestionCard({ engine, state, device, chat, interaction, position, tota
                 setChosen((value) => ({ ...value, [question.id]: option.label }))
                 setTyping((value) => { const next = new Set(value); next.delete(question.id); return next })
               }} />
-            <span>
+            <span className="option-text">
               <span className="option-label">{option.label}</span>
-              {option.description && <span className="small muted option-description">{option.description}</span>}
+              {option.description && <span className="option-description">{option.description}</span>}
             </span>
           </label>
         ))}
@@ -149,56 +160,48 @@ function QuestionCard({ engine, state, device, chat, interaction, position, tota
               <input type="radio" name={interaction.id + ':' + question.id} checked={typing.has(question.id)}
                 onChange={() => setTyping((value) => new Set(value).add(question.id))} />
             )}
-            <textarea rows={1} placeholder={question.options.length ? s('otherAnswer') : s('answer')} value={other[question.id] ?? ''}
+            <textarea rows={1} className="field-input" placeholder={question.options.length ? s('otherAnswer') : s('answer')} value={other[question.id] ?? ''}
+              aria-label={question.options.length ? s('otherAnswer') : s('answer')}
               onFocus={() => question.options.length && setTyping((value) => new Set(value).add(question.id))}
               onChange={(event) => setOther((value) => ({ ...value, [question.id]: event.target.value }))} />
           </label>
         )}
-        {preview && <pre className="request-details">{preview}</pre>}
+        {preview && <pre className="action-details">{preview}</pre>}
       </fieldset>
     )
   }
 
   return (
-    <div className="card-request question" role="group" aria-label={isQuestions ? s('question') : s('toolRequest')}>
-      <div className="request-head"><strong>{isQuestions ? s('question') : s('toolRequest')}</strong><Counter position={position} total={total} /></div>
-      <div className="request-scroll">
-        {interaction.message && <p className="request-message">{interaction.message}</p>}
+    <div className="action-card" role="group" aria-label={isQuestions ? s('question') : s('toolRequest')}>
+      <div className="action-head">
+        <Icon name="diamond" size={17} className="action-icon" />
+        <strong className="action-title">{isQuestions ? s('question') : s('toolRequest')}</strong>
+        <Counter position={position} total={total} />
+      </div>
+      <div className="action-scroll">
+        {interaction.message && <p className="action-message">{interaction.message}</p>}
         {interaction.questions.map((question) => (
           <div key={question.id} className="question-block">
-            {question.header && <div className="small muted upper">{question.header}</div>}
+            {question.header && <div className="question-header">{question.header}</div>}
             <div className="question-text">
-              <strong>{question.text}</strong>
-              {!question.required && interaction.canAnswer && <span className="small muted"> · {s('optional')}</span>}
+              {question.text}
+              {!question.required && interaction.canAnswer && <span className="question-optional"> · {s('optional')}</span>}
             </div>
             {interaction.canAnswer ? optionRow(question) : question.options.length > 0 && (
-              <div className="small muted">{question.options.map((option) => option.label).join(' · ')}</div>
+              <div className="action-note">{question.options.map((option) => option.label).join(' · ')}</div>
             )}
           </div>
         ))}
       </div>
-      {macOnly && <div className="small muted mac-only">{macOnly}</div>}
+      {macOnly && <div className="action-note">{macOnly}</div>}
       {(interaction.canAnswer || interaction.canDecline) && (
-        <div className="row">
-          {interaction.canDecline && <button type="button" disabled={locked} onClick={decline}>{s('decline')}</button>}
-          {interaction.canAnswer && <button type="button" className="primary" disabled={locked || !valid} onClick={send}>{s('sendAnswer')}</button>}
+        <div className="action-buttons">
+          {interaction.canDecline && <button type="button" className="button" disabled={locked} onClick={decline}>{s('decline')}</button>}
+          {interaction.canAnswer && <button type="button" className="button primary" disabled={locked || !valid} onClick={send}>{s('sendAnswer')}</button>}
         </div>
       )}
-      {localError && <div className="small error">{localError}</div>}
-      {response && <div className={'small status-line ' + statusTone(response.status)}>{commandStatusText(response)}</div>}
-    </div>
-  )
-}
-
-/** What the agent is doing, with the turn's elapsed time. */
-function ActivityLine({ chat }: { chat: RemoteChat }) {
-  const now = useNow(1000, chat.running)
-  const elapsed = elapsedSeconds(chat, now)
-  return (
-    <div className="activity" aria-live="polite">
-      <span className="spinner" aria-hidden="true" />
-      <span className="ellipsis">{chat.activity || s('agentWorking')}</span>
-      {elapsed !== null && <span className="muted tabular">{formatElapsed(elapsed)}</span>}
+      {localError && <div className="status-line bad" role="alert">{localError}</div>}
+      {response && <div className={'status-line ' + statusTone(response.status)} role="status">{commandStatusText(response)}</div>}
     </div>
   )
 }
@@ -216,20 +219,22 @@ function QueueList({ state, device, chat }: { state: EngineState; device: Remote
     })),
     ...sending.map((command) => ({ id: 'command:' + command.id, text: command.text, note: commandStatusText(command), remote: true })),
   ]
+  const title = chat.queuePaused ? s('queuePaused') : t(`В очереди · ${total}`, `Queued · ${total}`)
   return (
-    <div className="queue">
-      <div className="queue-head small">
-        <strong>{t(`В очереди: ${total}`, `Queued: ${total}`)}</strong>
-        {chat.queuePaused && <span className="warn-text">{s('queuePaused')}</span>}
-      </div>
-      {rows.map((row) => (
-        <div key={row.id} className="queue-row small">
-          <span className="muted" title={row.remote ? s('fromBrowser') : s('fromMac')}>{row.remote ? '↗' : '⌘'}</span>
-          <span className="ellipsis">{row.text}</span>
-          {row.note && <span className="muted">{row.note}</span>}
-        </div>
-      ))}
-      {total > rows.length && <div className="small muted">{t(`Ещё ${total - rows.length}`, `+${total - rows.length} more`)}</div>}
-    </div>
+    <section className="queue" aria-label={title}>
+      <div className="queue-head">{title}</div>
+      <ul className="queue-list">
+        {rows.map((row) => (
+          <li key={row.id} className="queue-row">
+            <span className="queue-origin" title={row.remote ? s('fromBrowser') : s('fromMac')}>
+              <Icon name={row.remote ? 'phone' : 'desktop'} size={14} label={row.remote ? s('fromBrowser') : s('fromMac')} />
+            </span>
+            <span className="queue-text" title={row.text}>{row.text}</span>
+            {row.note && <span className="queue-note">{row.note}</span>}
+          </li>
+        ))}
+      </ul>
+      {total > rows.length && <div className="queue-more">{t(`Ещё ${total - rows.length}`, `+${total - rows.length} more`)}</div>}
+    </section>
   )
 }

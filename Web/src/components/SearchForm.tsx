@@ -1,14 +1,19 @@
-import { useState, type FormEvent } from 'react'
+import { useRef, useState, type FormEvent } from 'react'
 import { s } from '../i18n/strings'
 import { commands, limits } from '../protocol/commands'
 import { creationKey } from '../protocol/receipts'
 import type { RemoteDevice } from '../protocol/types'
-import type { Engine, EngineState } from '../sync/engine'
+import type { EngineState } from '../sync/engine'
+import { useAutosize } from './Composer'
 import { DeliveryNotice } from './Dock'
+import { EmptyState } from './EmptyState'
+import type { EngineLike } from './engineLike'
+import { Icon } from './Icon'
 import { submitOnEnter } from './keys'
+import { cancelOnEscape, ChipSelect, FormPage } from './NewChatForm'
 
 interface Props {
-  engine: Engine
+  engine: EngineLike
   state: EngineState
   device: RemoteDevice
   initialProject: string
@@ -22,6 +27,8 @@ export function SearchForm({ engine, state, device, initialProject, onOpen, onCa
   const [projectID, setProjectID] = useState(() => (projects.some((project) => project.id === initialProject) ? initialProject : projects[0]?.id ?? ''))
   const project = projects.find((value) => value.id === projectID)
   const [text, setText] = useState('')
+  const field = useRef<HTMLTextAreaElement>(null)
+  useAutosize(field, text)
   const key = project ? creationKey(device.id, project.id) : ''
   const blocked = key ? engine.isBlocked(key) : true
   const tooLong = [...text.trim()].length > limits.searchCharacters
@@ -37,30 +44,33 @@ export function SearchForm({ engine, state, device, initialProject, onOpen, onCa
   }
 
   if (projects.length === 0) {
-    return <section className="form-page"><h2>{s('searchTitle')}</h2><p className="muted">{s('noSearchProjects')}</p></section>
+    return (
+      <FormPage title={s('searchTitle')} onCancel={onCancel}>
+        <EmptyState icon="search" title={s('searchTitle')} text={s('noSearchProjects')} />
+      </FormPage>
+    )
   }
   return (
-    <section className="form-page">
-      <form className="card" onSubmit={submit}>
-        <h2>{s('searchTitle')}</h2>
-        <p className="muted small">{s('searchLead')}</p>
-        <label className="field">
-          <span>{s('project')}</span>
-          <select value={projectID} onChange={(event) => setProjectID(event.target.value)}>
-            {projects.map((value) => <option key={value.id} value={value.id}>{value.name}</option>)}
-          </select>
-        </label>
-        <label className="field">
-          <span>{s('searchRequest')}</span>
-          <textarea rows={4} value={text} placeholder={s('searchPlaceholder')} onChange={(event) => setText(event.target.value)} onKeyDown={submitOnEnter} autoFocus />
-        </label>
-        {tooLong && <p className="small error">{s('searchTooLong')}</p>}
+    <FormPage title={s('searchTitle')} subtitle={project?.name} onCancel={onCancel}>
+      <EmptyState icon="search" title={s('searchTitle')} text={s('searchLead')} />
+      <form className="dock" onSubmit={submit} onKeyDown={cancelOnEscape(onCancel)}>
+        {tooLong && <div className="composer-note bad" role="alert">{s('searchTooLong')}</div>}
         {key && <DeliveryNotice engine={engine} state={state} keyValue={key} />}
-        <div className="row end">
-          <button type="button" className="ghost" onClick={onCancel}>{s('cancel')}</button>
-          <button type="submit" className="primary" disabled={text.trim() === '' || blocked || tooLong}>{state.inFlight.has(key) ? s('sending') : s('startSearch')}</button>
+        <div className="composer">
+          <textarea ref={field} className="composer-input" rows={1} value={text} placeholder={s('searchPlaceholder')} aria-label={s('searchRequest')}
+            onChange={(event) => setText(event.target.value)} onKeyDown={submitOnEnter} autoFocus />
+          <div className="composer-bar">
+            <ChipSelect icon="folder" label={s('project')} value={projectID} onChange={setProjectID}>
+              {projects.map((value) => <option key={value.id} value={value.id}>{value.name}</option>)}
+            </ChipSelect>
+            <span className="composer-spacer" />
+            <button type="submit" className="round-button" disabled={text.trim() === '' || blocked || tooLong}
+              aria-label={s('startSearch')} title={s('startSearch')} aria-busy={state.inFlight.has(key) || undefined}>
+              <Icon name="search" size={15} />
+            </button>
+          </div>
         </div>
       </form>
-    </section>
+    </FormPage>
   )
 }

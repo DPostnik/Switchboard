@@ -49,7 +49,19 @@ export const strings = {
   starting: ['Запускается на Mac…', 'Starting on the Mac…'],
   noWebSupport: ['Mac или облачная схема ещё не поддерживают чаты в браузере. Обнови Switchboard и миграцию Supabase.', 'The Mac or the cloud schema does not support browser chats yet. Update Switchboard and the Supabase migration.'],
 
+  projects: ['Проекты', 'Projects'],
+  noChatsInProject: ['Чатов в браузере пока нет', 'No browser chats yet'],
+  actionRequired: ['Требуется действие', 'Action required'],
+  toggleSidebar: ['Показать или скрыть боковую панель', 'Show or hide the sidebar'],
+  macStatus: ['Состояние Mac', 'Mac status'],
+
   // Chat
+  emptyTitle: ['Чем займёмся?', 'What are we working on?'],
+  newChatHeadline: ['Чем помочь с проектом?', 'How can I help with your project?'],
+  copy: ['Копировать', 'Copy'],
+  copied: ['Скопировано', 'Copied'],
+  copyMessage: ['Копировать сообщение', 'Copy message'],
+  jumpToLatest: ['К последнему сообщению', 'Jump to the latest message'],
   selectChat: ['Выбери чат слева или начни новый.', 'Pick a chat on the left or start a new one.'],
   chatMissing: ['Чат не найден. Возможно, он истёк в облаке или закрыт на Mac.', 'Chat not found. It may have expired in the cloud or been closed on the Mac.'],
   chatStarting: ['Чат запускается на Mac. Он появится здесь через несколько секунд.', 'The chat is starting on the Mac. It will appear here in a few seconds.'],
@@ -89,8 +101,16 @@ export const strings = {
   queuedSending: ['отправляется', 'sending'],
 
   // Composer
-  messagePlaceholder: ['Сообщение… (Enter — отправить, Shift+Enter — новая строка)', 'Message… (Enter to send, Shift+Enter for a new line)'],
-  queuePlaceholder: ['Сообщение в очередь… (Enter — в очередь)', 'Message for the queue… (Enter to queue)'],
+  messagePlaceholder: ['Напиши сообщение…', 'Write a message…'],
+  queuePlaceholder: ['Сообщение в очередь…', 'Message for the queue…'],
+  message: ['Сообщение', 'Message'],
+  sendHint: ['Отправить · Enter. Shift+Enter — новая строка', 'Send · Enter. Shift+Enter for a new line'],
+  queueHint: ['Добавить в очередь · Enter. Shift+Enter — новая строка', 'Add to queue · Enter. Shift+Enter for a new line'],
+  interruptHint: ['Прервать и отправить · Enter. Shift+Enter — новая строка', 'Interrupt and send · Enter. Shift+Enter for a new line'],
+  stopResponse: ['Остановить ответ', 'Stop response'],
+  chipReadOnly: ['Меняется в приложении на Mac', 'Change it in the app on the Mac'],
+  accessFull: ['Полный доступ', 'Full access'],
+  accessStandard: ['Обычный доступ', 'Standard access'],
   send: ['Отправить', 'Send'],
   queue: ['В очередь', 'Queue'],
   interruptAndSend: ['Прервать и отправить', 'Interrupt and send'],

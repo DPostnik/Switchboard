@@ -48,7 +48,7 @@ export default function App() {
       </div>
     )
   }
-  if (!ready) return <div className="center-screen muted" key={lang}>{s('loading')}</div>
+  if (!ready) return <div className="center-screen" key={lang} role="status"><span className="pulse-dot large" aria-hidden="true" /><span className="sr-only">{s('loading')}</span></div>
   if (!session) return <SignIn key={lang} client={supabase} onToggleLanguage={switchLanguage} />
   return <Workspace key={session.user.id} lang={lang} client={supabase} owner={session.user.id} onToggleLanguage={switchLanguage} />
 }
