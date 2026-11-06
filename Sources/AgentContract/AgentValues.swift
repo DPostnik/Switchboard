@@ -71,6 +71,33 @@ public enum InterruptedTurnNote {
     }
 }
 
+/// Agent-facing note about the chat's job (`ChatJob`): its "done when" criterion, or that the user closed it. It rides on
+/// the next message after the job changes; transcripts show the message without it.
+public enum ChatJobNote {
+    static let prefixes = ["[Switchboard: задача чата", "[Switchboard: chat job"]
+    static let separator = "\n\n"
+    public static func russianCriterion(_ doneWhen: String) -> String {
+        "[Switchboard: задача чата. Пользователь задал условие завершения: «\(doneWhen)». Работай над задачей, пока условие не выполнено. Когда оно выполнено, прямо скажи об этом и перечисли, чем это подтверждено.]"
+    }
+    public static func englishCriterion(_ doneWhen: String) -> String {
+        "[Switchboard: chat job. The user set a done-when criterion: \"\(doneWhen)\". Keep working on the task until the criterion is met. When it is met, say so plainly and list what proves it.]"
+    }
+    public static func russianClosed(done: Bool) -> String {
+        "[Switchboard: задача чата закрыта пользователем (\(done ? "выполнена" : "отменена")). Прежнее условие завершения больше не действует.]"
+    }
+    public static func englishClosed(done: Bool) -> String {
+        "[Switchboard: chat job closed by the user (\(done ? "done" : "cancelled")). The earlier done-when criterion no longer applies.]"
+    }
+    public static func applying(_ note: String, to text: String) -> String { text + separator + note }
+    public static func stripped(_ text: String) -> String {
+        guard text.hasSuffix("]") else { return text }
+        for prefix in prefixes {
+            if let range = text.range(of: separator + prefix, options: .backwards) { return String(text[..<range.lowerBound]) }
+        }
+        return text
+    }
+}
+
 public struct TranscriptItem: Identifiable, Codable, Sendable, Equatable {
     public var id: String
     public var kind: String
@@ -102,7 +129,7 @@ public struct TranscriptItem: Identifiable, Codable, Sendable, Equatable {
     public var plan: AgentPlan?
     public init(id: String, kind: String, text: String, phase: String? = nil, timing: ResponseTiming? = nil) {
         self.id = id; self.kind = kind; self.phase = phase; self.timing = timing
-        self.text = kind == "user" ? InterruptedTurnNote.stripped(text) : text
+        self.text = kind == "user" ? InterruptedTurnNote.stripped(ChatJobNote.stripped(text)) : text
     }
     public static func merge(_ item: Self, into items: inout [Self]) {
         if let index = items.firstIndex(where: { $0.id == item.id }) {

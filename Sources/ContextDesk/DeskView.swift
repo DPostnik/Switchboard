@@ -1244,6 +1244,7 @@ struct ChatView: View {
                         Text(model.handoffProgress).font(.ui(.caption)).lineLimit(1)
                         Button(L10n.text("Отмена", "Cancel")) { Task { await model.cancelHandoffPreparation() } }
                     }
+                    if !chat.isScheduledRecord { ChatJobButton(model: model, chatID: chat.id) }
                     Button { Task { handoff = await model.prepareHandoff(chat) } } label: {
                         Label(L10n.text("Передать контекст…", "Hand off context…"), systemImage: "arrowshape.turn.up.right")
                     }.pointingHandCursor().help(L10n.text("Передать контекст в новый чат", "Hand off context to a new chat"))

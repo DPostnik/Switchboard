@@ -60,6 +60,8 @@ public struct Chat: Identifiable, Codable, Hashable, Sendable {
     /// The chat works in its own git worktree instead of the project folder (`workingDirectory(in:)`); nil for the
     /// project folder.
     public var worktree: ChatWorktree?
+    /// The user's current or last job for this chat ("done when" criterion and status); nil until one is started.
+    public var job: ChatJob?
     public var sidebarOrder: Int?
     public var pinned: Bool?
     public var isPinned: Bool { pinned == true }

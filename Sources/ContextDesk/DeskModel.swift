@@ -1969,6 +1969,8 @@ private struct ChatRunState: Equatable {
                     outgoing = ScheduledBrowserImport.applying(preflight, policy: scheduledBrowserImport, to: text, tool: tool)
                 }
             }
+            let jobNote = scheduledRun == nil ? state.chats.first(where: { $0.id == id })?.job?.pendingNote : nil
+            if let jobNote { outgoing = ChatJobNote.applying(ChatJob.noteText(jobNote), to: outgoing) }
             await prepareTurnCheckpoint(chatID: id, projectPath: workingDirectory)
             let submittedTurn = try await client.send(outgoing, to: sessionForChat(id), projectPath: workingDirectory,
                                                           permissions: access, model: selectedModel, effort: selectedEffort,
@@ -1996,7 +1998,11 @@ private struct ChatRunState: Equatable {
                     await interruptThread(id)
                 }
             }
-            if let i = state.chats.firstIndex(where: { $0.id == id }) { state.chats[i].updated = Date(); persist() }
+            if let i = state.chats.firstIndex(where: { $0.id == id }) {
+                state.chats[i].updated = Date()
+                if let jobNote { state.chats[i].job?.markAnnounced(jobNote) }
+                persist()
+            }
         } catch {
             turnCheckpoints.discardPending(chatID: runKey)
             let engineTurn = runs[runKey]?.turnID.flatMap { $0 == priorTurn ? nil : $0 }
@@ -2078,6 +2084,24 @@ private struct ChatRunState: Equatable {
     }
     func interrupt() async {
         await interruptThread(currentRunKey)
+    }
+    /// Starts a job with this "done when" criterion, or changes the criterion of the open one. The agent receives it
+    /// with the next message (`ChatJobNote`). Returns false for an empty criterion or an unknown chat.
+    @discardableResult
+    func setChatJob(_ chatID: String, doneWhen: String) -> Bool {
+        guard let criterion = ChatJob.criterion(doneWhen),
+              let i = state.chats.firstIndex(where: { $0.id == chatID }), !state.chats[i].isScheduledRecord else { return false }
+        if state.chats[i].job?.isActive == true { state.chats[i].job?.doneWhen = criterion }
+        else { state.chats[i].job = ChatJob(doneWhen: criterion, announced: state.chats[i].job?.announced) }
+        persist()
+        return true
+    }
+    /// Closes the open job as done or cancelled. Cancelling also stops the chat's running turn.
+    func closeChatJob(_ chatID: String, done: Bool) async {
+        guard let i = state.chats.firstIndex(where: { $0.id == chatID }), state.chats[i].job?.isActive == true else { return }
+        state.chats[i].job?.close(done: done)
+        persist()
+        if !done, isBusy(threadID: chatID) { await interruptThread(chatID) }
     }
     private func interruptThread(_ thread: String) async {
         // Stopping a scheduled-run record stops its job; no engine turn exists to interrupt.

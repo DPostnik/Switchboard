@@ -1180,6 +1180,13 @@ public struct NativeTranscript: NSViewRepresentable {
         return last
     }
 
+    /// The working row's line for the tool call the agent is running now; nil when it runs none.
+    public static func currentActivityLine(_ items: [TranscriptItem]) -> String? {
+        guard let activity = currentActivity(items) else { return nil }
+        if let title = activity.toolCall?.title, !title.isEmpty { return ActivityDetail.oneLine(title, limit: 120) }
+        return activityHeadline(activity.text)
+    }
+
     /// Text moves under a still pointer while scrolling, and AppKit rebuilds the tracking area with an exit event, so the
     /// copy control of the message under the pointer went out mid-scroll and stayed out until the mouse moved.
     private func refreshHover() {
