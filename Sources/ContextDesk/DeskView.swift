@@ -1396,14 +1396,19 @@ private struct ComposerEditor: View {
     let completion: SkillSuggestionController
     let onSubmit: () -> Void
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            if !composer.hasText {
-                Text(placeholder).font(.ui(size: 14)).foregroundStyle(.secondary).padding(.horizontal, 21).padding(.top, 16).allowsHitTesting(false)
+        VStack(alignment: .leading, spacing: 0) {
+            // Images named in the draft, numbered like their chips in the text.
+            ComposerAttachmentsBar(composer: composer)
+            ZStack(alignment: .topLeading) {
+                if !composer.hasText {
+                    Text(placeholder).font(.ui(size: 14)).foregroundStyle(.secondary).padding(.horizontal, 21).padding(.top, 16).allowsHitTesting(false)
+                }
+                MessageComposer(state: composer, focused: $focused, focusRequest: focusRequest, onContentHeight: onContentHeight,
+                                completion: completion, onSubmit: onSubmit)
+                    .frame(height: height).padding(.horizontal, 16).padding(.top, 14).accessibilityLabel(L10n.text("Сообщение", "Message"))
             }
-            MessageComposer(state: composer, focused: $focused, focusRequest: focusRequest, onContentHeight: onContentHeight,
-                            completion: completion, onSubmit: onSubmit)
-                .frame(height: height).padding(.horizontal, 16).padding(.top, 14).accessibilityLabel(L10n.text("Сообщение", "Message"))
         }
+        .animation(.easeOut(duration: 0.15), value: composer.images)
     }
 }
 

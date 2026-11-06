@@ -19,12 +19,39 @@ import SwiftUI
         if !list.contains(target) { list = [target] }
         images = list
         index = list.firstIndex(of: target) ?? 0
+        installKeys()
     }
     func step(_ delta: Int) {
         guard images.count > 1 else { return }
         index = (index + delta + images.count) % images.count
     }
-    func close() { images = []; index = 0 }
+    func close() {
+        images = []; index = 0
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
+    }
+
+    /// Esc and the arrows reach the viewer wherever keyboard focus is (the composer or the transcript keep it when an
+    /// image opens from them) and go no further while it is shown.
+    private var keyMonitor: Any?
+    private func installKeys() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty else { return event }
+            let key = event.keyCode
+            let used = MainActor.assumeIsolated { () -> Bool in
+                guard let self, self.current != nil else { return false }
+                switch key {
+                case 53: self.close()
+                case 123: self.step(-1)
+                case 124: self.step(1)
+                default: return false
+                }
+                return true
+            }
+            return used ? nil : event
+        }
+    }
 
     /// Image files pasted into the user's messages of a chat, in order, each once.
     static func gallery(_ items: [TranscriptItem]) -> [URL] {

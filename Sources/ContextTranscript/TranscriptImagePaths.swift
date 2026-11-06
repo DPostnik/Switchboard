@@ -105,7 +105,7 @@ extension NSAttributedString.Key {
         return (rest as String, images.map { size(of: $0.1).width }.max() ?? 0)
     }
 
-    static func thumbnail(_ url: URL) -> NSImage? { TranscriptMarkdown.image(at: url) }
+    public static func thumbnail(_ url: URL) -> NSImage? { TranscriptMarkdown.image(at: url) }
 
     private static func preview(_ url: URL, image: NSImage, attributes: [NSAttributedString.Key: Any]) -> NSAttributedString {
         let size = size(of: image)

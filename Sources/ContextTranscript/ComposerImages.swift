@@ -6,35 +6,43 @@ extension NSAttributedString.Key {
     static let composerImage = NSAttributedString.Key("ContextDeskComposerImage")
 }
 
-/// Image paths in the composer show as thumbnails at their place in the text. The text keeps the path, so the draft,
-/// copy, undo and the message the agent receives stay as they are: the path's first character lays out as a gap the
-/// size of the thumbnail, the others as nothing, and the text view draws the image into the gap. The caret steps over
-/// a path as over one character, and deleting into it removes the whole path.
+/// Image paths in the composer show as chips ("Image 1" with a small preview) at their place in the text; the bar
+/// above the composer shows the same images with the same numbers. The text keeps the path, so the draft, copy, undo
+/// and the message the agent receives stay as they are: the path's first character lays out as a gap the size of the
+/// chip, the others as nothing, and the text view draws the chip into the gap. The caret steps over a path as over one
+/// character, deleting into it removes the whole path, and a chip can be dragged to another place in the text.
 @MainActor final class ComposerImages: NSObject, @preconcurrency NSLayoutManagerDelegate {
-    static let maxSize = NSSize(width: 120, height: 72)
-    /// Space above and below a thumbnail inside its line, and after it.
-    static let padding: CGFloat = 3
+    static let chipHeight: CGFloat = 20
+    static let previewSide: CGFloat = 14
+    /// Space above and below a chip inside its line, and after it.
+    static let padding: CGFloat = 1
+    static let labelFont = NSFont.systemFont(ofSize: 12, weight: .medium)
 
     private(set) var ranges: [(range: NSRange, url: URL)] = []
-    private var sizes: [URL: NSSize] = [:]
+    /// Each image's number: its place among the distinct images in text order, as in the bar above the composer.
+    private(set) var numbers: [URL: Int] = [:]
     var isFile: (String) -> Bool = { ChatFiles.cachedIsFile($0) }
+
+    static func label(_ number: Int) -> String { L10n.text("Фото \(number)", "Image \(number)") }
 
     /// Marks the image paths of the text; true when the marks changed.
     @discardableResult func refresh(_ storage: NSTextStorage, layoutManager: NSLayoutManager?) -> Bool {
-        let found = TranscriptImagePaths.find(in: storage.string, isFile: isFile).filter { size(for: $0.url) != nil }
+        let found = TranscriptImagePaths.find(in: storage.string, isFile: isFile).filter { TranscriptImagePaths.thumbnail($0.url) != nil }
         // Replacing the whole text (a draft switch) drops the marks even when the paths stay where they were.
         guard found.map(\.range) != ranges.map(\.range) || found.map(\.url) != ranges.map(\.url)
                 || found.contains(where: { storage.attribute(.composerImage, at: $0.range.location, effectiveRange: nil) == nil })
         else { return false }
         ranges = found
+        numbers = [:]
+        for (_, url) in found where numbers[url.standardizedFileURL] == nil { numbers[url.standardizedFileURL] = numbers.count + 1 }
         let all = NSRange(location: 0, length: storage.length)
         storage.beginEditing()
         storage.removeAttribute(.composerImage, range: all)
         storage.removeAttribute(.toolTip, range: all)
         for (range, url) in found {
             storage.addAttributes([.composerImage: url, .toolTip: url.path + "\n" + L10n.text(
-                "Нажмите, чтобы открыть; агент получит путь к файлу на этом месте",
-                "Click to open; the agent gets the file path at this place")], range: range)
+                "Двойной клик - открыть, перетащите, чтобы переместить; агент получит путь к файлу на этом месте",
+                "Double-click to open, drag to move; the agent gets the file path at this place")], range: range)
         }
         storage.endEditing()
         layoutManager?.invalidateGlyphs(forCharacterRange: all, changeInLength: 0, actualCharacterRange: nil)
@@ -42,14 +50,12 @@ extension NSAttributedString.Key {
         return true
     }
 
+    func number(for url: URL) -> Int { numbers[url.standardizedFileURL] ?? 1 }
+
+    /// The chip's size: preview, gap, label and side insets.
     func size(for url: URL) -> NSSize? {
-        if let known = sizes[url] { return known }
-        guard let image = TranscriptImagePaths.thumbnail(url) else { return nil }
-        let scale = min(1, Self.maxSize.width / max(1, image.size.width), Self.maxSize.height / max(1, image.size.height))
-        let size = NSSize(width: max(1, (image.size.width * scale).rounded()), height: max(1, (image.size.height * scale).rounded()))
-        if sizes.count > 256 { sizes.removeAll() }
-        sizes[url] = size
-        return size
+        let label = (Self.label(number(for: url)) as NSString).size(withAttributes: [.font: Self.labelFont])
+        return NSSize(width: (4 + Self.previewSide + 5 + label.width + 7).rounded(.up), height: Self.chipHeight)
     }
 
     // MARK: Editing
@@ -143,22 +149,52 @@ extension NSAttributedString.Key {
             guard manager.isValidGlyphIndex(glyph) else { return nil }
             let line = manager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
             let location = manager.location(forGlyphAt: glyph)
-            let frame = NSRect(x: origin.x + line.minX + location.x, y: origin.y + line.minY + Self.padding, width: size.width, height: size.height)
+            let frame = NSRect(x: origin.x + line.minX + location.x, y: origin.y + line.minY + ((line.height - size.height) / 2).rounded(),
+                               width: size.width, height: size.height)
             return (frame, range, url)
         }
     }
 
     func draw(in view: NSTextView, dirtyRect: NSRect) {
-        for (frame, _, url) in frames(in: view) where frame.intersects(dirtyRect) {
-            guard let image = TranscriptImagePaths.thumbnail(url) else { continue }
+        let selection = view.selectedRange()
+        for (frame, range, url) in frames(in: view) where frame.intersects(dirtyRect) {
+            let selected = selection.length > 0 && NSIntersectionRange(selection, range).length == range.length
+            drawChip(url, in: frame, selected: selected)
+        }
+    }
+
+    /// A rounded chip: the image's preview cropped to a square, then its label.
+    func drawChip(_ url: URL, in frame: NSRect, selected: Bool) {
+        NSGraphicsContext.saveGraphicsState()
+        let chip = NSBezierPath(roundedRect: frame.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
+        (selected ? DeskPalette.ns.accent.withAlphaComponent(0.22) : DeskPalette.ns.accent.withAlphaComponent(0.1)).setFill()
+        chip.fill()
+        (selected ? DeskPalette.ns.accent : DeskPalette.ns.accent.withAlphaComponent(0.35)).setStroke()
+        chip.lineWidth = selected ? 1.5 : 1
+        chip.stroke()
+        let preview = NSRect(x: frame.minX + 4, y: frame.midY - Self.previewSide / 2, width: Self.previewSide, height: Self.previewSide)
+        if let image = TranscriptImagePaths.thumbnail(url) {
             NSGraphicsContext.saveGraphicsState()
-            let path = NSBezierPath(roundedRect: frame, xRadius: 6, yRadius: 6)
-            path.addClip()
-            image.draw(in: frame, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
-            NSColor.separatorColor.setStroke()
-            path.lineWidth = 1
-            path.stroke()
+            NSBezierPath(roundedRect: preview, xRadius: 3, yRadius: 3).addClip()
+            // Aspect fill: the middle square of the image.
+            let side = min(image.size.width, image.size.height)
+            let source = NSRect(x: (image.size.width - side) / 2, y: (image.size.height - side) / 2, width: side, height: side)
+            image.draw(in: preview, from: source, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
             NSGraphicsContext.restoreGraphicsState()
+        }
+        let label = Self.label(number(for: url)) as NSString
+        let attributes: [NSAttributedString.Key: Any] = [.font: Self.labelFont, .foregroundColor: DeskPalette.ns.accentDeep]
+        let size = label.size(withAttributes: attributes)
+        label.draw(at: NSPoint(x: preview.maxX + 5, y: frame.midY - size.height / 2), withAttributes: attributes)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    /// The chip alone, as the image dragged when it moves.
+    func chipImage(_ url: URL) -> NSImage? {
+        guard let size = size(for: url) else { return nil }
+        return NSImage(size: size, flipped: true) { [weak self] rect in
+            MainActor.assumeIsolated { self?.drawChip(url, in: rect, selected: true) }
+            return true
         }
     }
 

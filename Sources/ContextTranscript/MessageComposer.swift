@@ -18,9 +18,32 @@ import SwiftUI
     @Published public private(set) var hasMessage = false
     /// Counts writes that did not come from the editor.
     @Published public private(set) var revision = 0
+    /// Distinct image files named in the text, in order: the bar above the composer. Publishes only when they change.
+    @Published public private(set) var images: [URL] = []
     /// Runs after every change, typed or set, with the new text; the owner stores drafts through it.
     public var onChange: ((String) -> Void)?
     public init() {}
+
+    static func images(in text: String) -> [URL] {
+        var seen = Set<URL>()
+        return TranscriptImagePaths.find(in: text).map(\.url.standardizedFileURL)
+            .filter { TranscriptImagePaths.thumbnail($0) != nil && seen.insert($0).inserted }
+    }
+
+    /// Removes every mention of the image from the text, with one space beside each so no gap stays.
+    public func removeImage(_ url: URL) {
+        let target = url.standardizedFileURL
+        let found = TranscriptImagePaths.find(in: storage).filter { $0.url.standardizedFileURL == target }
+        guard !found.isEmpty else { return }
+        let result = NSMutableString(string: storage)
+        for (range, _) in found.reversed() {
+            var cut = range
+            let isSpace = { (index: Int) in index >= 0 && index < result.length && [0x20, 0x09].contains(result.character(at: index)) }
+            if isSpace(NSMaxRange(cut)) { cut.length += 1 } else if isSpace(cut.location - 1) { cut.location -= 1; cut.length += 1 }
+            result.replaceCharacters(in: cut, with: "")
+        }
+        text = result as String
+    }
     /// The editor reports what the user typed; nothing publishes unless `hasText` or `hasMessage` flips.
     public func editorChanged(_ text: String) { apply(text, fromEditor: true) }
     private func apply(_ text: String, fromEditor: Bool) {
@@ -31,6 +54,8 @@ import SwiftUI
             if hasText != nonEmpty { hasText = nonEmpty }
             let message = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             if hasMessage != message { hasMessage = message }
+            let found = Self.images(in: text)
+            if images != found { images = found }
         }
         onChange?(text)
     }
@@ -288,12 +313,37 @@ public final class ComposerTextView: NSTextView {
         super.draw(dirtyRect)
         images.draw(in: self, dirtyRect: dirtyRect)
     }
+    /// A click selects a chip (Delete removes it), a drag moves it to another place in the text, a double-click opens it.
     public override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 1, event.modifierFlags.intersection([.shift, .command, .option, .control]).isEmpty,
-           let hit = images.hit(convert(event.locationInWindow, from: nil), in: self) {
-            TranscriptImagePaths.open(hit.url); return
+        guard event.modifierFlags.intersection([.shift, .command, .option, .control]).isEmpty,
+              let hit = images.hit(convert(event.locationInWindow, from: nil), in: self) else { return super.mouseDown(with: event) }
+        if event.clickCount >= 2 { TranscriptImagePaths.open(hit.url); return }
+        window?.makeFirstResponder(self)
+        setSelectedRange(hit.range)
+        needsDisplay = true
+        let start = event.locationInWindow
+        while let next = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            if next.type == .leftMouseUp { return }
+            if hypot(next.locationInWindow.x - start.x, next.locationInWindow.y - start.y) > 3 {
+                // The text view moves the selected path itself and the chip follows it.
+                _ = dragSelection(with: next, offset: .zero, slideBack: true)
+                return
+            }
         }
-        super.mouseDown(with: event)
+    }
+    public override func dragImageForSelection(with event: NSEvent, origin: NSPointPointer?) -> NSImage? {
+        let selection = selectedRange()
+        guard let chip = images.frames(in: self).first(where: { $0.range == selection }), let image = images.chipImage(chip.url) else {
+            return super.dragImageForSelection(with: event, origin: origin)
+        }
+        // The origin is the image's lower-left corner; this view is flipped.
+        origin?.pointee = NSPoint(x: chip.frame.minX, y: chip.frame.maxY)
+        return image
+    }
+    public override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {
+        super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+        // A chip is drawn selected while the selection covers it.
+        if !images.ranges.isEmpty { needsDisplay = true }
     }
     public override func menu(for event: NSEvent) -> NSMenu? {
         guard let hit = images.hit(convert(event.locationInWindow, from: nil), in: self) else { return super.menu(for: event) }

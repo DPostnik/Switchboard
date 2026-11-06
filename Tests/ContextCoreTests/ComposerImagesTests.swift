@@ -52,10 +52,12 @@ private func writeImage(_ url: URL, width: Int = 600, height: Int = 300) throws 
 
     let manager = try #require(editor.layoutManager), container = try #require(editor.textContainer)
     manager.ensureLayout(for: container)
-    // 600 × 300 fits 120 × 72 at 120 × 60; the line grows to hold it.
+    // A chip with its number; the line holds it.
     let frame = try #require(editor.images.frames(in: editor).first?.frame)
-    #expect(frame.size == NSSize(width: 120, height: 60))
-    #expect(manager.usedRect(for: container).height >= 60 + 2 * ComposerImages.padding)
+    #expect(frame.height == ComposerImages.chipHeight)
+    #expect(frame.width > 40 && frame.width < 100)
+    #expect(editor.images.number(for: shot) == 1)
+    #expect(manager.usedRect(for: container).height >= ComposerImages.chipHeight)
     // The path's text takes no room: the line holds the words, the gap and the thumbnail only.
     #expect(manager.usedRect(for: container).width < 300)
 
@@ -88,4 +90,21 @@ private func writeImage(_ url: URL, width: Int = 600, height: Int = 300) throws 
     #expect(viewer.images.count == 1)
     viewer.close()
     #expect(viewer.current == nil)
+}
+
+@Test @MainActor func composerBarListsDistinctImagesAndRemovingOneTakesItsChipsOut() throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("bar-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let first = folder.appendingPathComponent("Screenshot 1.png"), second = folder.appendingPathComponent("b.png")
+    try writeImage(first); try writeImage(second)
+    let composer = ComposerState()
+    composer.text = "до \(first.path) середина \(second.path) и снова \(first.path) конец"
+    #expect(composer.images.map(\.lastPathComponent) == ["Screenshot 1.png", "b.png"])
+    composer.removeImage(first)
+    #expect(composer.text == "до середина \(second.path) и снова конец")
+    #expect(composer.images.map(\.lastPathComponent) == ["b.png"])
+    // Typing the chip away (the path leaves the text) empties the bar.
+    composer.editorChanged("только текст")
+    #expect(composer.images.isEmpty)
 }
