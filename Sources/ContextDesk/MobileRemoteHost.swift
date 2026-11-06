@@ -43,6 +43,14 @@ import IOKit.ps
     private var filesReady = false
     /// The cloud schema accepts answers, queued and interrupt-and-send messages; checked on every subscription.
     private var interactionsReady = false
+    /// The cloud schema carries web chats (`WebChats`); checked on every subscription.
+    private var webReady = false
+    /// Web chat ID -> full text of messages streamed while the chat is not open on the desktop.
+    private var webLive: [String: [(id: String, role: String, text: String)]] = [:]
+    /// Web chat ID -> what this subscription uploaded: message ID -> order number and content hash, and the last activity.
+    private var webPublished: [String: (messages: [String: (seq: Int, hash: Int)], active: Date)] = [:]
+    /// Web chats the cloud held when this subscription started; the ones no longer shown are removed once.
+    private var webCloud: Set<String> = []
     private var api: RemoteAPI?
     private var apiURL = ""
     private var apiKey = ""
@@ -147,6 +155,10 @@ import IOKit.ps
                 self.lastPublished = nil // A new subscription always reconciles current local state.
                 self.filesReady = (try? await client.supportsFiles()) ?? false
                 self.interactionsReady = (try? await client.supportsInteractions()) ?? false
+                self.webReady = (try? await client.supportsWeb()) ?? false
+                // A new subscription uploads web chats in full again and removes what the cloud should no longer hold.
+                self.webPublished = [:]
+                self.webCloud = self.webReady ? Set(try await client.webChats(device: self.device)) : []
                 try await self.publishCurrent()
             }
             realtime = channel
@@ -194,17 +206,65 @@ import IOKit.ps
                 snapshot.chats[index].messages = Array(messages.suffix(20))
             }
         }
-        for index in snapshot.projects.indices { snapshot.projects[index].canReadFiles = filesReady ? true : nil }
+        for index in snapshot.projects.indices {
+            snapshot.projects[index].canReadFiles = filesReady ? true : nil
+            snapshot.projects[index].canUseWeb = webReady ? true : nil
+            if !webReady { snapshot.projects[index].canSearchChats = nil }
+        }
         Self.applyInteractionSchema(interactionsReady, to: &snapshot)
         for index in snapshot.chats.indices where snapshot.chats[index].running {
             if let action = liveActivity[snapshot.chats[index].id] { snapshot.chats[index].activity = action }
         }
         liveMessages = liveMessages.filter { key, _ in snapshot.chats.contains { $0.id == key } }
         liveActivity = liveActivity.filter { key, _ in snapshot.chats.contains { $0.id == key && $0.running } }
+        // Before the snapshot check: a long message keeps growing after its clipped snapshot copy stopped changing.
+        try await publishWeb(&snapshot, model: model, api: api)
         guard snapshot != lastPublished else { return }
         try await api.publishChanges(RemoteDevice(id: device, owner: api.owner(), snapshot: snapshot), previous: lastPublished)
         try Task.checkCancellation()
         lastPublished = snapshot
+    }
+    /// Uploads the full text of the web chats the snapshot lists: only changed messages, in bounded chunks, with the
+    /// complete ID list when messages left the chat's window. Chats that stopped being web chats leave the cloud.
+    private func publishWeb(_ snapshot: inout RemoteSnapshot, model: DeskModel, api: RemoteAPI) async throws {
+        guard webReady else { return }
+        var shown: Set<String> = []
+        for index in snapshot.chats.indices where snapshot.chats[index].web == true {
+            let id = snapshot.chats[index].id
+            guard let chat = model.state.chats.first(where: { $0.id == id }),
+                  let active = WebChats.lastActive(updated: chat.updated, webSince: chat.webSince),
+                  let stored = await model.webMessages(id) else { continue }
+            try Task.checkCancellation()
+            shown.insert(id)
+            var list = stored.map { (id: $0.id, role: $0.kind, text: $0.text) }
+            if id != model.chatID, let live = webLive[id] {
+                for item in live {
+                    if let i = list.firstIndex(where: { $0.id == item.id }) { list[i] = item } else { list.append(item) }
+                }
+            }
+            list = Array(list.suffix(WebChats.messageLimit))
+            let previous = webPublished[id]
+            let seqs = WebChats.sequence(list.map(\.id), previous: previous?.messages.mapValues(\.seq) ?? [:])
+            let messages = zip(list, seqs).map { RemoteWebMessage(id: $0.id, seq: $1, role: $0.role, fullText: $0.text) }
+            snapshot.chats[index].webMessages = messages.count
+            let current = Dictionary(messages.map { ($0.id, (seq: $0.seq, hash: $0.hashValue)) }, uniquingKeysWith: { first, _ in first })
+            let changed = messages.filter { previous?.messages[$0.id]?.hash != $0.hashValue }
+            // The first upload of a subscription, or messages that left the window: the cloud keeps only `current`.
+            let replace = previous == nil || previous!.messages.keys.contains { current[$0] == nil }
+            guard !changed.isEmpty || replace || previous?.active != active else { continue }
+            let chunks = changed.isEmpty ? [[]] : WebChats.chunks(changed)
+            for (number, chunk) in chunks.enumerated() {
+                try await api.putWebChat(device: device, chat: id, active: active, messages: chunk,
+                                         keep: replace && number == chunks.count - 1 ? messages.map(\.id) : nil)
+                try Task.checkCancellation()
+            }
+            webPublished[id] = (current, active)
+        }
+        webLive = webLive.filter { shown.contains($0.key) }
+        for id in Set(webPublished.keys).union(webCloud).subtracting(shown) {
+            try await api.dropWebChat(device: device, chat: id)
+            webPublished[id] = nil; webCloud.remove(id)
+        }
     }
     /// Without the interactions schema the cloud queue cannot carry answers, queued or interrupt-and-send messages:
     /// those phone actions are withdrawn, while the requests and the queue stay visible.
@@ -252,6 +312,7 @@ import IOKit.ps
     func observe(_ event: AgentEvent, thread: String?) {
         guard enabled, let thread, let model,
               let chat = model.state.chats.first(where: { $0.id == thread }), projects.contains(chat.projectID.uuidString) else { return }
+        if webReady, chat.isWebVisible { observeWeb(event, thread: thread) }
         switch event.payload {
         case .item(let item) where item.kind == "activity":
             // Same one-line headline as the desktop working row.
@@ -279,6 +340,20 @@ import IOKit.ps
         }
         requestPublication()
     }
+    /// Full streamed text of a web chat's messages; the stored transcript replaces it once the chat saves.
+    private func observeWeb(_ event: AgentEvent, thread: String) {
+        var entries = webLive[thread] ?? []
+        switch event.payload {
+        case .item(let item) where ["user", "assistant"].contains(item.kind):
+            if let i = entries.firstIndex(where: { $0.id == item.id }) { entries[i].text = item.text }
+            else { entries.append((item.id, item.kind, item.text)) }
+        case .delta(_, let id, let text):
+            if let i = entries.firstIndex(where: { $0.id == id }) { entries[i].text += text }
+            else { entries.append((id, "assistant", text)) }
+        default: return
+        }
+        webLive[thread] = Array(entries.suffix(20))
+    }
     private func requestCommands() {
         guard enabled, !sleeping, connectionState == .connected else { return }
         commandWork.enqueue(operation: { [weak self] in
@@ -294,7 +369,8 @@ import IOKit.ps
                     do {
                         guard projects.contains(command.project), command.device.lowercased() == device.lowercased(),
                               command.owner == (try await api.owner()),
-                              interactionsReady || !RemoteCommand.interactionKinds.contains(command.kind) else { throw RemoteFailure.invalidCommand }
+                              interactionsReady || !RemoteCommand.interactionKinds.contains(command.kind),
+                              webReady || !(RemoteCommand.webKinds.contains(command.kind) || command.createsWebChat) else { throw RemoteFailure.invalidCommand }
                         try await journal.begin(command)
                         if command.kind == "file" { result = try await answerFile(command, model: model, api: api) }
                         else { result = try await model.executeRemote(command) }
@@ -337,6 +413,7 @@ import IOKit.ps
         workspaceObservers = []
         if let powerSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), powerSource, .commonModes) }
         powerSource = nil; liveMessages = [:]; liveActivity = [:]; lastPublished = nil
+        webLive = [:]; webPublished = [:]; webCloud = []
         phonePresent = false; phoneActiveUntil = nil
         releaseSleepAssertion()
         status = L10n.text("Удалённый доступ выключен. Очередь в облаке сохранена.", "Remote access disabled. Cloud queue retained.")
@@ -402,6 +479,9 @@ struct MobileRemoteSettings: View {
             Text(L10n.text("Если Связка ключей на Mac запрашивает доступ для Switchboard, выберите «Разрешать всегда», чтобы сохранить разрешение. После обновления приложения macOS может запросить его снова.", "If Keychain on your Mac asks to allow Switchboard access, choose Always Allow to save permission. macOS may ask again after an app update."))
                 .font(.ui(.caption)).foregroundStyle(.secondary)
             Text(L10n.text("Выбранные проекты: названия, последние сообщения и запросы подтверждения передаются в Supabase. Фото с телефона удаляются из облака примерно через час после обработки команды, а с Mac — через час после окончания работы чата. Очистка на Mac выполняется, пока приложение открыто. Вложения из истории Mac и учётные данные агентов не передаются. Облачная копия хранится до удаления ниже.", "Selected projects: names, recent messages and approval requests are sent to Supabase. Phone photos are removed from the cloud about an hour after the command is processed, and from your Mac an hour after the chat becomes idle. Mac cleanup runs while the app is open. Attachments from Mac history and agent credentials are excluded. The cloud copy remains until deleted below."))
+                .font(.ui(.caption)).foregroundStyle(.secondary)
+            Text(L10n.text("Чаты, начатые из веб-клиента или возвращённые в него, передаются целиком: до 100 000 символов на сообщение, последние 500 сообщений. Из облака они удаляются через 15 дней без активности, на Mac остаются.",
+                           "Chats started from the web client or brought back to it are sent in full: up to 100,000 characters per message, the latest 500 messages. They leave the cloud after 15 days without activity and stay on your Mac."))
                 .font(.ui(.caption)).foregroundStyle(.secondary)
             // Projects are chosen in each project's settings; the stored selection is unchanged.
             LabeledContent(L10n.text("Проектов на телефоне", "Projects on the phone"),

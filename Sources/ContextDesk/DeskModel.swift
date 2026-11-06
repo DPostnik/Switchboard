@@ -107,10 +107,12 @@ private struct ChatRunState: Equatable {
     let limitResumeClock = LimitResumeClock()
     /// Checks for sub-agents that stopped reporting (`SubagentWatching`).
     let subagentWatch = SubagentWatchClock()
-    private var remoteDeliveryResults: [String: Bool] = [:]
+    var remoteDeliveryResults: [String: Bool] = [:]
     private var configuringRemoteChats: Set<String> = []
     /// Chat ID -> last stored messages sent to the phone, keyed by store revision and native session.
     private var remoteHistoryCache: [String: (revision: Int, session: AgentSessionReference?, messages: [TranscriptItem])] = [:]
+    /// Chat ID -> the latest stored messages of a web chat in full (`WebChats.messageLimit`), keyed the same way.
+    private var webHistoryCache: [String: (revision: Int, session: AgentSessionReference?, messages: [TranscriptItem])] = [:]
     @Published var configuringBrowserChats: Set<String> = []
     @Published var newChatBrowserProfiles: [UUID: UUID] = [:]
     /// Project ID -> role picked in the composer for the project's next new chat; absent follows the project default.
@@ -2269,10 +2271,15 @@ private struct ChatRunState: Equatable {
         let selected = state.projects.filter { projects.contains($0.id.uuidString) }
         var chats: [RemoteChat] = []
         let awaitingApproval = Set(pending.map(\.threadID))
-        for chat in state.chats.filter({ projects.contains($0.projectID.uuidString) && !$0.isArchived }).sorted(by: {
+        let enabled = state.chats.filter { projects.contains($0.projectID.uuidString) && !$0.isArchived }
+        let phoneChats = enabled.sorted(by: {
             if awaitingApproval.contains($0.id) != awaitingApproval.contains($1.id) { return awaitingApproval.contains($0.id) }
             return $0.updated > $1.updated
-        }).prefix(20) {
+        }).prefix(20)
+        // Web chats are always listed for the web client; beyond the phone's 20 they carry only their latest messages.
+        let phoneIDs = Set(phoneChats.map(\.id))
+        let webChats = enabled.filter { $0.isWebVisible && !phoneIDs.contains($0.id) }.sorted { $0.updated > $1.updated }.prefix(WebChats.snapshotLimit)
+        for chat in Array(phoneChats) + webChats {
             let messages: [TranscriptItem]
             if chat.id == chatID { messages = items }
             else {
@@ -2289,10 +2296,13 @@ private struct ChatRunState: Equatable {
                 guard case .approval(let canAllow) = action.interaction.kind else { return nil }
                 return RemoteApproval(id: action.id, details: String(action.interaction.details.prefix(8000)), canAllow: canAllow && action.interaction.details.count <= 8000)
             }
+            let shown = phoneIDs.contains(chat.id) ? 20 : WebChats.snapshotMessages
             var remote = RemoteChat(id: chat.id, project: chat.projectID.uuidString, title: chat.title,
-                running: isBusy(threadID: chat.id), messages: messages.filter { ["user", "assistant"].contains($0.kind) }.suffix(20).map {
+                running: isBusy(threadID: chat.id), messages: messages.filter { ["user", "assistant"].contains($0.kind) }.suffix(shown).map {
                     RemoteMessage(id: $0.id, role: $0.kind, fullText: $0.text)
                 }, approvals: approvals, turn: runs[chat.id]?.turnID)
+            if chat.isWebVisible { remote.web = true }
+            if chat.chatSearch == true { remote.chatSearch = true }
             if remote.running, let run = runs[chat.id] {
                 // The host replaces this with the current tool call when it saw one.
                 remote.activity = activity.statuses[chat.id].map { String($0.prefix(RemoteChat.activityLimit)) }
@@ -2318,6 +2328,7 @@ private struct ChatRunState: Equatable {
         } else { defaultModel = state.model }
         return RemoteSnapshot(projects: selected.map {
             var project = RemoteProject(id: $0.id.uuidString, name: $0.name, canCreateChat: canCreateRemoteChat)
+            project.canSearchChats = canStartChatSearch ? true : nil
             project.models = settingsOptions
             project.newChatModels = newChatModels
             let projectRole = $0.chatRole(roleCatalog)
@@ -2327,6 +2338,19 @@ private struct ChatRunState: Equatable {
                 addOns: Self.remoteAddOnOptions(remoteAllowedAddOns(project: $0)), projectAddOns: Self.remoteAddOnIDs(Self.projectAddOns($0)))
             return project
         }, chats: chats)
+    }
+    /// Full user and assistant messages of a web chat, the latest `WebChats.messageLimit`: the open chat from memory,
+    /// others from the store, decoded again only when the stored transcript changed. Nil for an unknown chat.
+    func webMessages(_ id: String) async -> [TranscriptItem]? {
+        guard let chat = state.chats.first(where: { $0.id == id }) else { return nil }
+        webHistoryCache = webHistoryCache.filter { key, _ in state.chats.contains { $0.id == key && $0.isWebVisible } }
+        if id == chatID { return Array(items.filter { ["user", "assistant"].contains($0.kind) }.suffix(WebChats.messageLimit)) }
+        let revision = await store.transcriptRevision(conversationID: id)
+        if let cached = webHistoryCache[id], cached.revision == revision, cached.session == chat.nativeSession { return cached.messages }
+        // A failed read publishes nothing rather than an empty chat.
+        guard let messages = try? await store.recentMessages(conversationID: id, limit: WebChats.messageLimit) else { return nil }
+        webHistoryCache[id] = (revision, chat.nativeSession, messages)
+        return messages
     }
     /// Desktop queue identity of a message a phone queued; the suffix is its command ID.
     static let phoneQueuePrefix = "local-user:phone:"
@@ -2456,6 +2480,7 @@ private struct ChatRunState: Equatable {
         chat.id = command.chat; chat.effort = effort; chat.route = route
         chat.roleID = explicitRole?.id; chat.accessMode = explicitRole?.legacyAccessMode; chat.inheritsProjectAccess = explicitRole == nil
         chat.roleAddOns = explicitAddOns.map(Self.remoteAddOnIDs)
+        if command.createsWebChat { chat.webSince = Date() }
         state.chats.append(chat)
         try await store.save(state)
         loadedThreads.insert(chat.id)
@@ -2468,6 +2493,8 @@ private struct ChatRunState: Equatable {
     }
     func executeRemote(_ command: RemoteCommand) async throws -> String {
         try command.validate()
+        if command.kind == "search" { return try await startRemoteChatSearch(command) }
+        if command.kind == "restore" { return try await restoreWebChat(command) }
         if command.createsChat { return try await createRemoteChat(command) }
         guard let chat = state.chats.first(where: { $0.id == command.chat && $0.projectID.uuidString == command.project && !$0.isArchived }),
               let project = state.projects.first(where: { $0.id == chat.projectID }),

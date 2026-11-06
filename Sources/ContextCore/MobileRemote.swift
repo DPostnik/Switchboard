@@ -159,6 +159,10 @@ public struct RemoteProject: Codable, Identifiable, Sendable, Equatable {
     public var settings: RemoteChatSettings?
     /// Absent on older hosts and when the cloud schema has no file table: path chips only copy.
     public var canReadFiles: Bool?
+    /// The Mac can start an archive search (`RemoteCommand.search`). Web client only; absent on older hosts.
+    public var canSearchChats: Bool?
+    /// The cloud schema and the Mac carry web chats (`remote_web_version`). Absent on older hosts.
+    public var canUseWeb: Bool?
     public init(id: String, name: String, canCreateChat: Bool? = nil) {
         self.id = id; self.name = name; self.canCreateChat = canCreateChat
     }
@@ -191,6 +195,12 @@ public struct RemoteChat: Codable, Identifiable, Sendable, Equatable {
     public var canQueue: Bool?
     /// The Mac accepts `RemoteCommand.interruptAndSend` for the running `turn` now.
     public var canInterrupt: Bool?
+    /// A web chat (`WebChats`): the web client lists only these and reads their full text from `remote_web_messages`.
+    public var web: Bool?
+    /// Messages of a web chat in `remote_web_messages`.
+    public var webMessages: Int?
+    /// An archive-search chat; its answers carry `switchboard-chat:<id>` links the web can restore.
+    public var chatSearch: Bool?
     public static let activityLimit = 160
     public init(id: String, project: String, title: String, running: Bool, messages: [RemoteMessage], approvals: [RemoteApproval], turn: String? = nil) { self.id = id; self.project = project; self.title = title; self.running = running; self.messages = messages; self.approvals = approvals; self.turn = turn; supportsPhotos = true }
     public static var readOnlyNotice: String {
@@ -414,6 +424,62 @@ public struct RemoteQueuedMessage: Codable, Identifiable, Sendable, Equatable {
         if text.count > Self.textLimit { truncated = true }
     }
 }
+/// Web client chats (`docs/web-client-plan.md`). Their full text lives in `remote_web_messages`; the cloud keeps a chat
+/// for `retention` after its last activity, the Mac keeps it for good.
+public enum WebChats {
+    public static let prefix = "web:"
+    public static let retention: TimeInterval = 15 * 24 * 60 * 60
+    /// The cloud keeps this many latest messages of a chat.
+    public static let messageLimit = 500
+    public static let searchLimit = 2000
+    /// Web chats listed in the snapshot beside the phone's chats.
+    public static let snapshotLimit = 40
+    /// Clipped messages that a web chat outside the phone's list carries in the snapshot.
+    public static let snapshotMessages = 4
+    /// Encoded message bytes per upload call.
+    public static let chunkBytes = 1_000_000
+    /// Last activity of a web chat; nil for other chats.
+    public static func lastActive(updated: Date, webSince: Date?) -> Date? { webSince.map { max($0, updated) } }
+    public static func isVisible(updated: Date, webSince: Date?, archived: Bool, now: Date = Date()) -> Bool {
+        guard !archived, let active = lastActive(updated: updated, webSince: webSince) else { return false }
+        return now.timeIntervalSince(active) < retention
+    }
+    /// Order numbers for a chat's messages that keep the ones already published (`previous`, message ID -> seq), so an
+    /// appended message or older messages leaving the window do not renumber the rest. Always strictly increasing.
+    public static func sequence(_ ids: [String], previous: [String: Int]) -> [Int] {
+        var result: [Int] = [], last = -1
+        for id in ids {
+            if let seq = previous[id], seq > last { last = seq } else { last += 1 }
+            result.append(last)
+        }
+        return result
+    }
+    /// Upload batches: each stays under `chunkBytes` of text (a single larger message goes alone).
+    public static func chunks(_ messages: [RemoteWebMessage]) -> [[RemoteWebMessage]] {
+        var result: [[RemoteWebMessage]] = [], current: [RemoteWebMessage] = [], bytes = 0
+        for message in messages {
+            let size = message.text.utf8.count + message.id.utf8.count + 64
+            if !current.isEmpty, bytes + size > chunkBytes { result.append(current); current = []; bytes = 0 }
+            current.append(message); bytes += size
+        }
+        if !current.isEmpty { result.append(current) }
+        return result
+    }
+}
+/// One message of a web chat, full text up to `textLimit` characters.
+public struct RemoteWebMessage: Codable, Sendable, Hashable {
+    public static let textLimit = 100_000
+    public var id: String
+    public var seq: Int
+    public var role: String
+    public var text: String
+    public var truncated: Bool?
+    public init(id: String, seq: Int, role: String, fullText: String) {
+        self.id = id; self.seq = seq; self.role = role
+        if fullText.count > Self.textLimit { text = RemoteMessage.clip(fullText, limit: Self.textLimit); truncated = true }
+        else { text = fullText }
+    }
+}
 public struct RemoteSnapshot: Codable, Sendable, Equatable {
     public var version = 1
     public var projects: [RemoteProject]
@@ -516,10 +582,33 @@ public struct RemoteCommand: Codable, Identifiable, Sendable {
     public static let messageKinds: Set<String> = ["send", "create", "queue", "interrupt"]
     /// Kinds that only the interactions schema (`remote_interactions_version`) accepts.
     public static let interactionKinds: Set<String> = ["answer", "queue", "interrupt"]
-    public static let kinds = Set(["send", "stop", "allow", "deny", "create", "configure", "file"]).union(interactionKinds)
+    /// Kinds that only the web schema (`remote_web_version`) accepts: bring a chat back to the web, start an archive search.
+    public static let webKinds: Set<String> = ["restore", "search"]
+    public static let kinds = Set(["send", "stop", "allow", "deny", "create", "configure", "file"]).union(interactionKinds).union(webKinds)
     /// Uses the existing immutable send envelope and queue; no database migration required.
     /// The first send owns the new app ID. Later sends cannot recreate a missing conversation.
-    public var createsChat: Bool { ["send", "create"].contains(kind) && chat == "mobile:" + id.lowercased() }
+    public var createsChat: Bool {
+        (["send", "create"].contains(kind) && chat == "mobile:" + id.lowercased()) || createsWebChat
+    }
+    /// A web client's new chat or archive search: the chat is a web chat from the start.
+    public var createsWebChat: Bool { ["create", "search"].contains(kind) && chat == WebChats.prefix + id.lowercased() }
+    /// A new web chat; `options` as in `newChat`.
+    public static func newWebChat(owner: String, device: String, project: String, text: String, options: RemoteChatOptions) -> Self {
+        var command = Self(owner: owner, device: device, project: project, chat: "", kind: "create", text: text)
+        command.chat = WebChats.prefix + command.id
+        command.settings = RemoteSettingsChange(options: options)
+        return command
+    }
+    /// Starts an archive-search chat (the archive's "Find with agent") as a web chat.
+    public static func search(owner: String, device: String, project: String, query: String) -> Self {
+        var command = Self(owner: owner, device: device, project: project, chat: "", kind: "search", text: query)
+        command.chat = WebChats.prefix + command.id
+        return command
+    }
+    /// Brings an existing chat back to the web (un-archiving it on the Mac).
+    public static func restore(owner: String, device: String, project: String, chat: String) -> Self {
+        Self(owner: owner, device: device, project: project, chat: chat, kind: "restore")
+    }
     public static func newChat(owner: String, device: String, project: String, text: String, options: RemoteChatOptions? = nil) -> Self {
         var command = Self(owner: owner, device: device, project: project, chat: "", kind: options == nil ? "send" : "create", text: text)
         command.chat = "mobile:" + command.id
@@ -591,6 +680,11 @@ public struct RemoteCommand: Codable, Identifiable, Sendable {
         }
         if kind == "queue" || kind == "interrupt" {
             guard approval == nil else { throw RemoteFailure.invalidCommand }
+        }
+        if Self.webKinds.contains(kind) {
+            guard approval == nil, turn == nil, (photos ?? []).isEmpty, settings == nil,
+                  kind == "restore" ? text.isEmpty : (createsWebChat && text.count <= WebChats.searchLimit
+                      && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) else { throw RemoteFailure.invalidCommand }
         }
         if kind == "file" {
             let path = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -892,6 +986,31 @@ public actor RemoteAPI {
         do {
             return try JSONDecoder().decode(Int.self, from: await request("rest/v1/rpc/remote_interactions_version", method: "POST", body: Data("{}".utf8))) == 1
         } catch RemoteFailure.request(404) { return false }
+    }
+    /// Returns false when the cloud schema predates web chats.
+    public func supportsWeb() async throws -> Bool {
+        do {
+            return try JSONDecoder().decode(Int.self, from: await request("rest/v1/rpc/remote_web_version", method: "POST", body: Data("{}".utf8))) == 1
+        } catch RemoteFailure.request(404) { return false }
+    }
+    /// Mac side: upserts a web chat and `messages`; with `keep`, the cloud drops the chat's other messages.
+    public func putWebChat(device: String, chat: String, active: Date, messages: [RemoteWebMessage], keep: [String]?) async throws {
+        struct Body: Encodable { let device_id: String; let chat_id: String; let active: String; let messages: [RemoteWebMessage]; let keep: [String]? }
+        guard UUID(uuidString: device) != nil, !chat.isEmpty, messages.count <= WebChats.messageLimit,
+              (keep?.count ?? 0) <= WebChats.messageLimit else { throw RemoteFailure.invalidCommand }
+        _ = try await request("rest/v1/rpc/put_remote_web_chat", method: "POST", body: JSONEncoder().encode(Body(
+            device_id: device, chat_id: chat, active: ISO8601DateFormatter().string(from: active), messages: messages, keep: keep)))
+    }
+    /// Mac side: removes a web chat and its messages from the cloud.
+    public func dropWebChat(device: String, chat: String) async throws {
+        guard UUID(uuidString: device) != nil else { throw RemoteFailure.invalidCommand }
+        _ = try await request("rest/v1/rpc/drop_remote_web_chat", method: "POST", body: JSONEncoder().encode(["device_id": device, "chat_id": chat]))
+    }
+    /// Web chats the cloud holds for this Mac.
+    public func webChats(device: String) async throws -> [String] {
+        struct Row: Decodable { let chat: String }
+        guard UUID(uuidString: device) != nil else { throw RemoteFailure.invalidCommand }
+        return try JSONDecoder().decode([Row].self, from: await request("rest/v1/remote_web_chats?select=chat&device=eq.\(device.lowercased())&limit=1000")).map(\.chat)
     }
     /// Every schema check the command needs, before a delivery receipt is saved: photos, chat settings, interactions.
     public func preflight(_ command: RemoteCommand) async throws {

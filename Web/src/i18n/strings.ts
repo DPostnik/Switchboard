@@ -1,0 +1,149 @@
+import { t } from './index'
+
+/** Static UI strings: [Russian, English]. Parameterized strings use `t(ru, en)` at the call site. */
+export const strings = {
+  appName: ['Switchboard', 'Switchboard'],
+  languageToggle: ['English', 'Русский'],
+  languageToggleHint: ['Switch to English', 'Переключить на русский'],
+
+  // Configuration and sign-in
+  configMissing: ['Сайт не настроен: задай VITE_SUPABASE_URL и VITE_SUPABASE_KEY при сборке.', 'The site is not configured: set VITE_SUPABASE_URL and VITE_SUPABASE_KEY at build time.'],
+  configURL: ['VITE_SUPABASE_URL должен быть HTTPS-адресом проекта Supabase без пути.', 'VITE_SUPABASE_URL must be the HTTPS address of the Supabase project, without a path.'],
+  configSecretKey: ['VITE_SUPABASE_KEY должен быть публичным ключом (publishable или anon), а не секретным.', 'VITE_SUPABASE_KEY must be the publishable (or anon) key, never a secret key.'],
+  signInTitle: ['Вход в Switchboard', 'Sign in to Switchboard'],
+  signInLead: ['Чаты агентов твоего Mac в браузере. Войди аккаунтом мобильного доступа.', 'Your Mac’s agent chats in the browser. Sign in with your mobile access account.'],
+  email: ['Эл. почта', 'Email'],
+  password: ['Пароль', 'Password'],
+  signIn: ['Войти', 'Sign in'],
+  signingIn: ['Входим…', 'Signing in…'],
+  signInFailed: ['Не удалось войти. Проверь почту и пароль.', 'Could not sign in. Check the email and password.'],
+  signInNetwork: ['Нет связи с сервером. Попробуй ещё раз.', 'Cannot reach the server. Try again.'],
+  signOut: ['Выйти', 'Sign out'],
+  loading: ['Загрузка…', 'Loading…'],
+  macExecutes: ['Команды выполняет только твой Mac. Сайт лишь показывает чаты и ставит команды в очередь.', 'Only your Mac runs commands. The site only shows chats and queues commands.'],
+
+  // Connection
+  connConnecting: ['Подключаемся…', 'Connecting…'],
+  connSyncing: ['Обновляем данные…', 'Synchronizing…'],
+  connConnected: ['Сервер на связи', 'Server connected'],
+  connRetrying: ['Восстанавливаем соединение…', 'Reconnecting…'],
+  connOffline: ['Нет сети', 'Offline'],
+  connSignedOut: ['Войди заново', 'Sign in again'],
+  connFailed: ['Соединение недоступно. Проверь настройки Supabase.', 'Connection unavailable. Check the Supabase settings.'],
+  connStopped: ['Соединение приостановлено', 'Connection paused'],
+  macOnline: ['Mac на связи', 'Mac online'],
+  macOffline: ['Mac не в сети', 'Mac offline'],
+  mac: ['Mac', 'Mac'],
+  noMacs: ['Нет Mac с включённым мобильным доступом. Включи его в настройках Switchboard на Mac.', 'No Mac with mobile access. Turn it on in Switchboard settings on the Mac.'],
+  waitingForData: ['Получаем данные с Mac…', 'Loading data from the Mac…'],
+
+  // Sidebar
+  project: ['Проект', 'Project'],
+  allProjects: ['Все проекты', 'All projects'],
+  newChat: ['Новый чат', 'New chat'],
+  findInArchive: ['Найти в архиве', 'Find in archive'],
+  webChats: ['Чаты в браузере', 'Browser chats'],
+  noWebChats: ['Здесь пока нет чатов. Начни новый чат или найди прежний в архиве.', 'No chats here yet. Start a new chat or find an earlier one in the archive.'],
+  running: ['работает', 'working'],
+  searchBadge: ['поиск', 'search'],
+  starting: ['Запускается на Mac…', 'Starting on the Mac…'],
+  noWebSupport: ['Mac или облачная схема ещё не поддерживают чаты в браузере. Обнови Switchboard и миграцию Supabase.', 'The Mac or the cloud schema does not support browser chats yet. Update Switchboard and the Supabase migration.'],
+
+  // Chat
+  selectChat: ['Выбери чат слева или начни новый.', 'Pick a chat on the left or start a new one.'],
+  chatMissing: ['Чат не найден. Возможно, он истёк в облаке или закрыт на Mac.', 'Chat not found. It may have expired in the cloud or been closed on the Mac.'],
+  chatStarting: ['Чат запускается на Mac. Он появится здесь через несколько секунд.', 'The chat is starting on the Mac. It will appear here in a few seconds.'],
+  you: ['Ты', 'You'],
+  agent: ['Агент', 'Agent'],
+  agentWorking: ['Агент работает…', 'Agent is working…'],
+  messageTruncated: ['Сообщение сокращено. Полный текст — на Mac.', 'Message shortened. The full text is on the Mac.'],
+  loadingMessages: ['Загружаем сообщения…', 'Loading messages…'],
+  olderOnMac: ['Ранние сообщения хранятся на Mac.', 'Earlier messages are kept on the Mac.'],
+  readOnly: ['Запись запуска задания Claude — только для чтения. Чтобы продолжить, начни новый чат.', 'A Claude scheduled run record is read-only. Start a new chat to follow up.'],
+  emptyChat: ['Сообщений пока нет.', 'No messages yet.'],
+  openInBrowser: ['Открыть в браузере', 'Open in browser'],
+  opening: ['Открываем…', 'Opening…'],
+  open: ['Открыть', 'Open'],
+  restoreFailed: ['Не удалось открыть', 'Could not open'],
+
+  // Dock
+  approvalRequired: ['Требуется подтверждение', 'Approval required'],
+  allowOnce: ['Разрешить один раз', 'Allow once'],
+  decline: ['Отклонить', 'Decline'],
+  cannotAllowHere: ['Подтвердить этот запрос из браузера нельзя. Проверь детали на Mac или отклони запрос.', 'This request cannot be approved from the browser. Review the details on the Mac or decline it.'],
+  question: ['Вопрос агента', 'Question from the agent'],
+  toolRequest: ['Запрос инструмента', 'Tool request'],
+  optional: ['необязательно', 'optional'],
+  otherAnswer: ['Свой ответ', 'Other answer'],
+  answer: ['Ответ', 'Answer'],
+  sendAnswer: ['Ответить', 'Send answer'],
+  answerOnMac: ['Ответь на Mac.', 'Answer on the Mac.'],
+  macOnlySecret: ['Запрос просит секрет. Ответь на Mac: секреты не передаются через облако.', 'The request asks for a secret. Answer on the Mac: secrets are never sent through the cloud.'],
+  macOnlyTooLarge: ['Запрос слишком длинный для удалённого ответа. Ответь на Mac.', 'The request is too long to answer remotely. Answer on the Mac.'],
+  macOnlyUnsupported: ['Такую форму можно только отклонить или заполнить на Mac.', 'This form can only be declined here or answered on the Mac.'],
+  macOnlyLink: ['Инструмент просит завершить действие на его странице. Сделай это на Mac.', 'The tool asks you to finish an action on its page. Do it on the Mac.'],
+  macOnlySetup: ['Чтобы отвечать удалённо, обнови приложение на Mac и схему мобильного доступа в Supabase.', 'To answer remotely, update the Mac app and the Supabase mobile access schema.'],
+  queuePaused: ['Очередь на паузе на Mac', 'Queue paused on the Mac'],
+  fromBrowser: ['Из браузера или телефона', 'From the browser or phone'],
+  fromMac: ['С Mac', 'From the Mac'],
+  queuedSending: ['отправляется', 'sending'],
+
+  // Composer
+  messagePlaceholder: ['Сообщение… (Enter — отправить, Shift+Enter — новая строка)', 'Message… (Enter to send, Shift+Enter for a new line)'],
+  queuePlaceholder: ['Сообщение в очередь… (Enter — в очередь)', 'Message for the queue… (Enter to queue)'],
+  send: ['Отправить', 'Send'],
+  queue: ['В очередь', 'Queue'],
+  interruptAndSend: ['Прервать и отправить', 'Interrupt and send'],
+  stop: ['Остановить', 'Stop'],
+  sending: ['Отправляем…', 'Sending…'],
+  busyNoQueue: ['Агент работает. Дождись конца хода или останови его.', 'The agent is working. Wait for the turn to end or stop it.'],
+  textTooLong: ['Сообщение длиннее 32 000 байт. Сократи его.', 'The message is longer than 32,000 bytes. Shorten it.'],
+
+  // Delivery
+  deliveryUnknown: ['Результат отправки неизвестен. Повторной отправки не будет, пока ты не проверишь.', 'The send outcome is unknown. Nothing is resent until you check.'],
+  deliveryMissing: ['Команда не дошла до очереди.', 'The command did not reach the queue.'],
+  checkDelivery: ['Проверить', 'Check'],
+  sendAgain: ['Отправить снова', 'Send again'],
+  discard: ['Отменить', 'Discard'],
+  dismiss: ['Скрыть', 'Dismiss'],
+
+  // Command status
+  statusSending: ['Отправляем…', 'Sending…'],
+  statusPending: ['Ожидает Mac', 'Waiting for the Mac'],
+  statusClaimed: ['Получено Mac', 'Received by the Mac'],
+  statusSubmitted: ['Доставлено агенту', 'Delivered to the agent'],
+  statusStopRequested: ['Остановка запрошена', 'Stop requested'],
+  statusRejected: ['Команда отклонена: чат недоступен, занят или запрос устарел', 'Command rejected: chat unavailable, busy or request stale'],
+  statusUncertain: ['Результат неизвестен · проверь Mac', 'Outcome unknown · check the Mac'],
+  statusQueued: ['Добавлено в очередь на Mac', 'Added to the queue on the Mac'],
+  statusInterrupted: ['Ход прерван, сообщение отправлено следом', 'Turn interrupted, message sent next'],
+  statusAnswered: ['Ответ передан агенту', 'Answer sent to the agent'],
+  statusRestored: ['Чат открыт в браузере', 'Chat opened in the browser'],
+  statusCreated: ['Чат запущен', 'Chat started'],
+
+  // New chat and archive search
+  newChatTitle: ['Новый чат', 'New chat'],
+  model: ['Модель', 'Model'],
+  role: ['Роль', 'Role'],
+  firstMessage: ['Первое сообщение', 'First message'],
+  firstMessagePlaceholder: ['Что нужно сделать?', 'What should the agent do?'],
+  startChat: ['Начать чат', 'Start chat'],
+  noProjects: ['Нет проектов, где можно начать чат из браузера.', 'No project where a chat can be started from the browser.'],
+  noModels: ['Mac не опубликовал моделей для этого проекта.', 'The Mac published no models for this project.'],
+  creationPending: ['Предыдущий новый чат в этом проекте ещё не подтверждён.', 'The previous new chat in this project is not confirmed yet.'],
+  searchTitle: ['Найти в архиве', 'Find in archive'],
+  searchLead: ['Агент на Mac поищет прежние чаты (только чтение) и пришлёт ссылки. Любой найденный чат можно открыть в браузере.', 'An agent on the Mac searches earlier chats (read-only) and replies with links. Any chat it finds can be opened in the browser.'],
+  searchRequest: ['Что найти', 'What to find'],
+  searchPlaceholder: ['Например: чат, где мы настраивали деплой на Vercel в октябре', 'For example: the chat where we set up the Vercel deploy in October'],
+  startSearch: ['Искать', 'Search'],
+  searchTooLong: ['Запрос длиннее 2000 символов. Сократи его.', 'The request is longer than 2,000 characters. Shorten it.'],
+  noSearchProjects: ['Ни один проект не поддерживает поиск по архиву. Обнови Switchboard на Mac.', 'No project supports archive search. Update Switchboard on the Mac.'],
+  cancel: ['Отмена', 'Cancel'],
+} as const satisfies Record<string, readonly [string, string]>
+
+export type StringKey = keyof typeof strings
+
+export function s(key: StringKey): string {
+  const [ru, en] = strings[key]
+  return t(ru, en)
+}

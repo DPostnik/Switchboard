@@ -53,6 +53,7 @@ with tempfile.TemporaryDirectory(prefix='context-remote-db-', dir='/tmp') as dir
         # Before the interactions migration a role (published in chat settings since roles) cannot reach the queue.
         assert sql("""select public.valid_remote_options('{"model":"m","role":"reader"}');""") == 'f'
         sql((root/'supabase/migrations/202611050001_remote_interactions.sql').read_text())
+        sql((root/'supabase/migrations/202611060001_remote_web.sql').read_text())
         assert sql("""select public.valid_remote_options('{"model":"m","role":"reader","addOns":["mail","userChrome"]}'),
             public.valid_remote_options('{"model":"m","access":null,"role":null,"addOns":null}'),
             public.valid_remote_options('{"model":"m","role":""}'), public.valid_remote_options('{"model":"m","role":5}'),
@@ -294,6 +295,46 @@ with tempfile.TemporaryDirectory(prefix='context-remote-db-', dir='/tmp') as dir
         assert sql(other + 'select count(*) from public.remote_commands;').endswith('0')
         sql(owner + 'delete from public.remote_devices;')
         assert sql('select count(*) from public.remote_commands;') == '0'
+        # Web chats: full text written only through the Mac's functions, bigger snapshots, restore/search commands, cleanup.
+        sql(owner + f"insert into public.remote_devices(id,name,projects,snapshot) values ('{device}','Mac',array['project'],'{{}}');")
+        def put(chat, messages, keep='null'):
+            text = json.dumps(messages, ensure_ascii=False).replace("'", "''")
+            return f"select public.put_remote_web_chat('{device}','{chat}',now(),'{text}'::jsonb,{keep});"
+        sql(owner + put('web:a', [{'id': 'm1', 'seq': 0, 'role': 'user', 'text': 'Привет / Hello'},
+                                  {'id': 'm2', 'seq': 1, 'role': 'assistant', 'text': 'я' * 100000, 'truncated': True}]))
+        assert sql(owner + "select count(*), bool_or(truncated) from public.remote_web_messages where chat='web:a';").endswith('2|t')
+        rejects(owner + put('web:a', [{'id': 'm3', 'seq': 2, 'role': 'assistant', 'text': 'x' * 100001}]))
+        rejects(owner + put('web:a', [{'id': 'm3', 'seq': 2, 'role': 'tool', 'text': 'x'}]))
+        signals = int(sql("select count(*) from realtime.messages where payload->>'entity' = 'web';"))
+        sql(owner + put('web:a', [{'id': 'm3', 'seq': 2, 'role': 'assistant', 'text': 'next'}], "array['m2','m3']"))
+        assert sql(owner + "select string_agg(id, ',' order by seq) from public.remote_web_messages;").endswith('m2,m3')
+        assert int(sql("select count(*) from realtime.messages where payload->>'entity' = 'web';")) == signals + 1
+        rejects(other + put('web:b', []))
+        assert sql(other + 'select count(*) from public.remote_web_messages;').endswith('0')
+        rejects(owner + f"insert into public.remote_web_chats(device,chat) values ('{device}','web:direct');")
+        rejects(owner + "update public.remote_web_messages set text='edited';")
+        ids = [f'chat-{n}' for n in range(30)]
+        order = 'array[' + ','.join(f"'{n}'" for n in ids) + ']'
+        changed = json.dumps([{'id': n, 'title': n} for n in ids])
+        projects = json.dumps([{'id': 'project', 'name': 'Project'}])
+        sql(owner + f"select public.patch_remote_snapshot('{device}','Mac','{projects}'::jsonb,{order},'{changed}'::jsonb);")
+        assert sql(owner + f"select jsonb_array_length(snapshot->'chats') from public.remote_devices where id='{device}';").endswith('30')
+        web_search = str(uuid.uuid4())
+        sql(owner + f"insert into public.remote_commands(id,device,project,chat,kind,text) values ('{web_search}','{device}','project','web:{web_search}','search','анкета');")
+        web_create = str(uuid.uuid4())
+        sql(owner + f"""insert into public.remote_commands(id,device,project,chat,kind,text,settings) values ('{web_create}','{device}','project','web:{web_create}','create','hi','{{"options":{{"model":"m"}}}}');""")
+        for _, bad in [command_row('search', chat='web:other', text='x'), command_row('restore', chat='old', text='x'),
+                       command_row('restore', chat='old', turn='t'), command_row('restore', chat='old', settings=json.dumps({'options': {'model': 'm'}}))]:
+            rejects(owner + bad)
+        sql(owner + command_row('restore', chat='old')[1])
+        assert sql(owner + f"select kind from public.claim_remote_command('{device}');").endswith('restore')
+        sql("update public.remote_web_chats set last_active = now() - interval '16 days';")
+        rejects(owner + 'select public.cleanup_remote_web();')
+        assert sql('select public.cleanup_remote_web();') == '1'
+        assert sql('select count(*) from public.remote_web_messages;') == '0'
+        assert sql(owner + 'select public.remote_web_version();').endswith('1')
+        sql(owner + 'delete from public.remote_devices;')
+        print('PASS: web chats (writes only through the Mac functions, owner isolation, 100,000-character limit, keep list, one signal per call, 60-chat snapshots, restore/search validation, 15-day cleanup)')
         print('PASS: interactions (answers bound to a request handle, queue/interrupt validation, uncertain-message blocking with answers still claimed, role/add-on settings, version gate); file answers (owner-only, claimed file commands, immutable, swept after 10 minutes); chat settings validation, immutable choices and uncertain-work blocking; photo expiry, grace period, immutable history, retention permissions/idempotence; all data migrations, delete/recreate revision continuity, atomic event rollback, private channel RLS, compact signals, delta revisions/deletions, owner/project isolation, duplicate claims and no uncertain replay')
     finally:
         if started: run('pg_ctl','-D',folder/'data','-m','fast','-w','stop')

@@ -51,6 +51,9 @@ public struct Chat: Identifiable, Codable, Hashable, Sendable {
     public var chatDirectoryAccess: Bool?
     /// A chat the archive opened to find other chats: its chat tools carry the search recipe.
     public var chatSearch: Bool?
+    /// Started from the web client or brought back to it (`WebChats`); the web lists the chat while it stays active.
+    public var webSince: Date?
+    public var isWebVisible: Bool { WebChats.isVisible(updated: updated, webSince: webSince, archived: isArchived) }
     /// The git branch checked out in the project when the chat's latest turn started; nil outside a repository
     /// or on a detached HEAD.
     public var turnBranch: String?
