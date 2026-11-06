@@ -30,6 +30,19 @@ public enum DroppedFiles {
         return roots.contains { path.hasPrefix($0) && path != $0 }
     }
 
+    /// Saves image data pasted from the clipboard (a screenshot taken with Control) as a PNG in its own folder under
+    /// `directory`, named like a macOS screenshot, and returns the file.
+    public static func savePasted(png: Data, in directory: URL, date: Date = Date(), fileManager: FileManager = .default) throws -> URL {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+        let folder = directory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let file = folder.appendingPathComponent("Pasted image \(formatter.string(from: date)).png")
+        try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
+        try png.write(to: file)
+        return file
+    }
+
     /// Copies temporary files into `directory` (each into its own folder, keeping the file name) and returns
     /// the paths to use. Other files, and any file that cannot be copied, keep their original path.
     public static func preserving(_ urls: [URL], in directory: URL, temporaryDirectory: URL = FileManager.default.temporaryDirectory,

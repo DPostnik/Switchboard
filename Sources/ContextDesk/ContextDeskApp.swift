@@ -203,6 +203,9 @@ private struct MainWindowContent: View {
                     if let model { TurnChangesWindow.show(changes, chatID: chatID, model: model, file: file) }
                 }
                 TurnChangesWindow.showMainWindow = { [weak delegate] in delegate?.showMainWindow() }
+                TranscriptImagePaths.openImage = { [weak model] url in
+                    ImageViewerState.shared.show(url, gallery: model.map { ImageViewerState.gallery($0.transcript.items) } ?? [])
+                }
                 EditorLauncher.projectFolders = { [weak model] in
                     guard let model else { return [] }
                     return model.state.projects.map(\.path) + model.state.chats.compactMap { $0.worktree?.workingDirectory }

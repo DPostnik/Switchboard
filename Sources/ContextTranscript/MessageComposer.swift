@@ -90,6 +90,7 @@ public struct MessageComposer: NSViewRepresentable {
         editor.textContainer?.widthTracksTextView = true
         editor.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         editor.delegate = context.coordinator
+        editor.layoutManager?.delegate = editor.images
         editor.onSubmit = onSubmit; editor.onCancel = onCancel; editor.completion = completion
         editor.setAccessibilityLabel(L10n.text("Сообщение", "Message"))
         scroll.drawsBackground = false; scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = false
@@ -105,7 +106,7 @@ public struct MessageComposer: NSViewRepresentable {
         if editor.font?.pointSize != fontSize { editor.font = .systemFont(ofSize: fontSize); editor.reportContentHeight() }
         if editor.string != state.text {
             context.coordinator.applyingOwnerText = true
-            editor.string = state.text; editor.reportContentHeight()
+            editor.string = state.text; editor.refreshImages(); editor.reportContentHeight()
             context.coordinator.applyingOwnerText = false
             // A write from the owner (send, chat switch) can end a `/` token; the list publishes, so not during this update.
             if completion != nil {
@@ -126,12 +127,30 @@ public struct MessageComposer: NSViewRepresentable {
         init(_ parent: MessageComposer) { self.parent = parent }
         public func textDidChange(_ notification: Notification) {
             guard let editor = notification.object as? NSTextView else { return }
+            (editor as? ComposerTextView)?.refreshImages()
             parent.state.editorChanged(editor.string)
             parent.completion?.editorChanged(editor)
         }
         public func textViewDidChangeSelection(_ notification: Notification) {
             guard !applyingOwnerText, let editor = notification.object as? NSTextView else { return }
             parent.completion?.editorChanged(editor)
+        }
+        public func textView(_ textView: NSTextView, willChangeSelectionFromCharacterRange old: NSRange,
+                             toCharacterRange proposed: NSRange) -> NSRange {
+            guard let editor = textView as? ComposerTextView, !editor.images.ranges.isEmpty else { return proposed }
+            return ComposerImages.snap(proposed, from: old, ranges: editor.images.ranges.map(\.range))
+        }
+        public func textView(_ textView: NSTextView, shouldChangeTextIn affected: NSRange, replacementString: String?) -> Bool {
+            guard let editor = textView as? ComposerTextView, !editor.images.ranges.isEmpty,
+                  let whole = ComposerImages.expanded(affected, ranges: editor.images.ranges.map(\.range)) else { return true }
+            // Deleting into a thumbnail removes its whole path.
+            editor.insertText(replacementString ?? "", replacementRange: whole)
+            return false
+        }
+        public func textView(_ textView: NSTextView, shouldChangeTypingAttributes old: [String: Any] = [:],
+                             toAttributes new: [NSAttributedString.Key: Any] = [:]) -> [NSAttributedString.Key: Any] {
+            // Text typed after a thumbnail is not part of its path.
+            new.filter { $0.key != .composerImage && $0.key != .toolTip }
         }
         public func textDidBeginEditing(_ notification: Notification) { parent.focused = true }
         public func textDidEndEditing(_ notification: Notification) { parent.focused = false }
@@ -230,10 +249,66 @@ public final class ComposerTextView: NSTextView {
         guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
               !urls.isEmpty else { return super.performDragOperation(sender) }
         let index = characterIndexForInsertion(at: convert(sender.draggingLocation, from: nil))
-        let paths = DroppedFiles.preserving(urls, in: DroppedFiles.directory).map(\.path).joined(separator: "\n")
-        insertText(paths, replacementRange: NSRange(location: index, length: 0))
+        insertPaths(DroppedFiles.preserving(urls, in: DroppedFiles.directory), at: NSRange(location: index, length: 0))
         window?.makeFirstResponder(self)
         return true
+    }
+    /// Copied files paste as their paths, image data (a screenshot taken with Control) as the path of a saved PNG.
+    public override func paste(_ sender: Any?) {
+        let pasteboard = NSPasteboard.general
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
+            insertPaths(DroppedFiles.preserving(urls, in: DroppedFiles.directory), at: selectedRange()); return
+        }
+        if pasteboard.string(forType: .string) == nil, NSImage.canInit(with: pasteboard), let image = NSImage(pasteboard: pasteboard),
+           let tiff = image.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]),
+           let file = try? DroppedFiles.savePasted(png: png, in: DroppedFiles.directory) {
+            insertPaths([file], at: selectedRange()); return
+        }
+        super.paste(sender)
+    }
+    /// Paths one per line, separated from the text around them so each is found as a path.
+    func insertPaths(_ urls: [URL], at range: NSRange) {
+        let paths = urls.filter(\.isFileURL).map(\.path)
+        guard !paths.isEmpty else { return }
+        let text = string as NSString
+        let before = range.location > 0 ? text.character(at: range.location - 1) : 0x0A
+        let after = NSMaxRange(range) < text.length ? text.character(at: NSMaxRange(range)) : 0x0A
+        let isSpace = { (c: unichar) in c == 0x20 || c == 0x0A || c == 0x09 }
+        insertText((isSpace(before) ? "" : " ") + paths.joined(separator: "\n") + (isSpace(after) ? "" : " "), replacementRange: range)
+    }
+
+    // MARK: Image thumbnails (`ComposerImages`)
+
+    let images = ComposerImages()
+    func refreshImages() {
+        guard let storage = textStorage, images.refresh(storage, layoutManager: layoutManager) else { return }
+        needsDisplay = true
+    }
+    public override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        images.draw(in: self, dirtyRect: dirtyRect)
+    }
+    public override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 1, event.modifierFlags.intersection([.shift, .command, .option, .control]).isEmpty,
+           let hit = images.hit(convert(event.locationInWindow, from: nil), in: self) {
+            TranscriptImagePaths.open(hit.url); return
+        }
+        super.mouseDown(with: event)
+    }
+    public override func menu(for event: NSEvent) -> NSMenu? {
+        guard let hit = images.hit(convert(event.locationInWindow, from: nil), in: self) else { return super.menu(for: event) }
+        let menu = NSMenu()
+        func add(_ title: String, _ action: @escaping () -> Void) { menu.addItem(ComposerMenuItem(title: title, perform: action)) }
+        add(L10n.text("Открыть", "Open")) { TranscriptImagePaths.open(hit.url) }
+        add(L10n.text("Скопировать путь", "Copy Path")) {
+            NSPasteboard.general.clearContents(); NSPasteboard.general.setString(hit.url.path, forType: .string)
+        }
+        add(L10n.text("Показать в Finder", "Show in Finder")) { NSWorkspace.shared.activateFileViewerSelecting([hit.url]) }
+        menu.addItem(.separator())
+        add(L10n.text("Убрать из сообщения", "Remove from Message")) { [weak self] in
+            self?.insertText("", replacementRange: hit.range)
+        }
+        return menu
     }
     public override func keyDown(with event: NSEvent) {
         if let completion, completion.isActive, !hasMarkedText(), let key = Self.completionKey(event),
@@ -259,4 +334,14 @@ public final class ComposerTextView: NSTextView {
     public override func cancelOperation(_ sender: Any?) {
         if let onCancel, !hasMarkedText() { onCancel() } else { super.cancelOperation(sender) }
     }
+}
+
+@MainActor private final class ComposerMenuItem: NSMenuItem {
+    private var perform: (() -> Void)?
+    convenience init(title: String, perform: @escaping () -> Void) {
+        self.init(title: title, action: #selector(run), keyEquivalent: "")
+        self.perform = perform
+        target = self
+    }
+    @objc private func run() { perform?() }
 }

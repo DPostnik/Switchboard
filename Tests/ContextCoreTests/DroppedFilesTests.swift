@@ -5,6 +5,15 @@ import Testing
 @Suite struct DroppedFilesTests {
     let shot = URL(fileURLWithPath: "/Users/me/Desktop/Снимок экрана 2026-10-11 в 12.00.00.png")
 
+    @Test func pastedImageIsSavedAsScreenshotNamedPNG() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pasted-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let date = try #require(ISO8601DateFormatter().date(from: "2026-11-06T22:15:30Z"))
+        let file = try DroppedFiles.savePasted(png: Data([1, 2, 3]), in: directory, date: date)
+        #expect(file.deletingLastPathComponent().deletingLastPathComponent().path == directory.path)
+        #expect(file.lastPathComponent.hasPrefix("Pasted image 2026-11-0") && file.pathExtension == "png")
+        #expect(try Data(contentsOf: file) == Data([1, 2, 3]))
+    }
     @Test func emptyDraftBecomesThePath() {
         #expect(DroppedFiles.appending([shot], to: "") == shot.path)
     }

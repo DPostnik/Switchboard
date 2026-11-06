@@ -11,6 +11,13 @@ extension NSAttributedString.Key {
 /// (the thumbnail carries the file link), the context menu copies its path.
 @MainActor public enum TranscriptImagePaths {
     static let extensions: Set<String> = ["png", "jpg", "jpeg", "gif", "heic", "tiff", "tif", "bmp", "webp"]
+    /// Set by the app: shows an image in its viewer. Without it images open in the default app.
+    public static var openImage: ((URL) -> Void)?
+    public static func open(_ url: URL) {
+        if let openImage { openImage(url) } else { NSWorkspace.shared.open(url) }
+    }
+    /// The file is an image the viewer shows.
+    public static func isImage(_ url: URL) -> Bool { url.isFileURL && extensions.contains(url.pathExtension.lowercased()) }
     /// Thumbnails fit this box; the bubble grows to the widest one.
     static let maxSize = NSSize(width: 260, height: 180)
 

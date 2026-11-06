@@ -52,6 +52,8 @@ struct DeskView: View {
             detail
                 .background(DeskPalette.canvas)
         }
+        // Images open over the whole window, not in the side preview.
+        .overlay { ImageViewerOverlay(state: .shared) }
         .toolbar(removing: .sidebarToggle)
         .modifier(GitStatusTracking(model: model))
         .modifier(PullRequestTracking(model: model))
@@ -1201,7 +1203,7 @@ struct ChatView: View {
         }
         .animation(DeskMotion.standard(reduceMotion), value: model.currentAction?.id)
         .overlay(alignment: .topTrailing) {
-            ChatFilesOverlay(files: chatFiles, model: model, open: { preview.open($0, line: $1) },
+            ChatFilesOverlay(files: chatFiles, model: model, open: openPreview,
                              addToMessage: { model.addDroppedFiles([$0]) })
         }
         .background(DeskPalette.canvas)
@@ -1272,7 +1274,7 @@ struct ChatView: View {
                     .id(current.id)
                     .inspectorColumnWidth(min: 320, ideal: 520, max: 1100)
             } else if showingFiles {
-                ProjectFilesView(files: files, open: { preview.open($0) },
+                ProjectFilesView(files: files, open: { openPreview($0, line: nil) },
                                  addToMessage: { model.addDroppedFiles([$0]) }, close: { showingFiles = false })
                     .inspectorColumnWidth(min: 320, ideal: 520, max: 1100)
             }
@@ -1304,8 +1306,13 @@ struct ChatView: View {
         .onDisappear { model.documentExpanded = false }
     }
 
+    /// Images go to the viewer over the window (with the chat's other images), other files to the side preview.
     private func openPreview(_ url: URL, line: Int?) {
-        preview.open(url, line: line)
+        if TranscriptImagePaths.isImage(url) {
+            ImageViewerState.shared.show(url, gallery: ImageViewerState.gallery(model.transcript.items))
+        } else {
+            preview.open(url, line: line)
+        }
     }
 
     /// Shows the file tree (closing a file opened beside it) or hides the panel when the tree is already up.
