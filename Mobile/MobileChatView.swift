@@ -93,8 +93,10 @@ struct MobileChatView: View {
                                 .padding(.top, 40)
                         }
                         let lastUser = chat.messages.last { $0.role == "user" }?.id
+                        let answerEnds = chat.answerEnds
                         ForEach(chat.messages) { message in
-                            MessageBubble(message: message, openFile: project?.canReadFiles == true ? { openedFile = OpenedFile(path: $0) } : nil)
+                            MessageBubble(message: message, showsActions: answerEnds.contains(message.id),
+                                          openFile: project?.canReadFiles == true ? { openedFile = OpenedFile(path: $0) } : nil)
                                 .environment(\.quoteSelection, QuoteSelectionAction { selection in
                                     draft.wrappedValue = QuoteSelectionAction.appending(selection, to: draft.wrappedValue)
                                     writing = true
@@ -239,6 +241,8 @@ struct OpenedFile: Identifiable {
 
 struct MessageBubble: View {
     let message: RemoteMessage
+    /// Copy, Share and Links under the message: only the end of the agent's reply, not its progress notes.
+    var showsActions = true
     /// Set when the Mac can send project files; otherwise path chips copy the path.
     var openFile: ((String) -> Void)?
     @State private var copiedPath = false
@@ -260,7 +264,7 @@ struct MessageBubble: View {
                     Label(L10n.text("Сокращено · полный текст на Mac", "Shortened · full text on Mac"), systemImage: "scissors")
                         .font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("message-truncated-" + message.id)
                 }
-                HStack(spacing: 20) {
+                if showsActions { HStack(spacing: 20) {
                     CopyControl(title: L10n.text("Копировать ответ", "Copy answer"), text: message.text, identifier: "copy-message-" + message.id)
                     ShareLink(item: message.text) { Label(L10n.text("Поделиться", "Share"), systemImage: "square.and.arrow.up").font(.caption.weight(.medium)) }
                     let links = Self.links(in: message.text)
@@ -269,7 +273,8 @@ struct MessageBubble: View {
                             .accessibilityIdentifier("message-links-" + message.id)
                     }
                     if copiedPath { Text(L10n.text("Путь скопирован", "Path copied")).font(.caption) }
-                }.labelStyle(.iconOnly).foregroundStyle(.secondary).buttonStyle(.borderless)
+                }.labelStyle(.iconOnly).foregroundStyle(.secondary).buttonStyle(.borderless) }
+                else if copiedPath { Text(L10n.text("Путь скопирован", "Path copied")).font(.caption).foregroundStyle(.secondary) }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .environment(\.openURL, OpenURLAction { url in

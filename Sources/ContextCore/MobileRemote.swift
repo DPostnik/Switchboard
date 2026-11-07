@@ -209,6 +209,17 @@ public struct RemoteChat: Codable, Identifiable, Sendable, Equatable {
     }
 }
 extension RemoteChat {
+    /// Agent messages that end a reply: the last one before the user's next message, or the chat's last one once the
+    /// turn is over. Only these get Copy and Share; the agent's progress notes in between do not.
+    public var answerEnds: Set<String> {
+        var ends = Set<String>()
+        for (index, message) in messages.enumerated() where message.role != "user" {
+            let next = messages.index(after: index)
+            if next < messages.endIndex ? messages[next].role == "user" : !running { ends.insert(message.id) }
+        }
+        return ends
+    }
+
     /// Compact elapsed time of the running turn, matching the desktop working row.
     public func elapsed(now: Date = Date()) -> String? {
         guard running, let runningSince, let start = ISO8601DateFormatter().date(from: runningSince) else { return nil }

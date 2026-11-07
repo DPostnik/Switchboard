@@ -273,3 +273,18 @@ import ContextCore
     let start = try #require(published.runningSince.flatMap { ISO8601DateFormatter().date(from: $0) })
     #expect(abs(start.timeIntervalSinceNow) < 60)
 }
+
+@Test func onlyTheEndOfAnAgentReplyGetsCopyAndShare() {
+    let messages = [
+        RemoteMessage(id: "u1", role: "user", fullText: "сделай"),
+        RemoteMessage(id: "a1", role: "assistant", fullText: "Смотрю код."),
+        RemoteMessage(id: "a2", role: "assistant", fullText: "Готово."),
+        RemoteMessage(id: "u2", role: "user", fullText: "ещё"),
+        RemoteMessage(id: "a3", role: "assistant", fullText: "Пишу тесты."),
+    ]
+    var chat = RemoteChat(id: "c", project: "p", title: "t", running: true, messages: messages, approvals: [])
+    // While the turn runs, its latest note is not an answer yet.
+    #expect(chat.answerEnds == ["a2"])
+    chat.running = false
+    #expect(chat.answerEnds == ["a2", "a3"])
+}

@@ -1,6 +1,7 @@
 import SwiftUI
 import PhotosUI
 import ImageIO
+import UniformTypeIdentifiers
 
 /// The message composer of one chat: photo strip, settings chips, input and the trailing action.
 ///
@@ -22,6 +23,10 @@ struct MobileComposer: View {
     @State private var loadingPhotos = false
     @State private var photoError: String?
     @ScaledMetric(relativeTo: .body) private var plusSize: CGFloat = 36
+    /// The clipboard holds an image the user has not pasted here yet (a screenshot after "Copy and Delete").
+    @State private var clipboardHasImage = false
+    @State private var pastedChangeCount = -1
+    @State private var dropTargeted = false
 
     private var key: MobileChatKey { MobileChatKey(device: device.id, chat: chat.id) }
     private var draftKey: String { device.id + ":" + chat.id }
@@ -30,6 +35,9 @@ struct MobileComposer: View {
     }
     private var photos: [RemotePhoto] { model.photoDrafts[draftKey] ?? [] }
     private var hasContent: Bool { !draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !photos.isEmpty }
+    private var canAddPhotos: Bool {
+        !loadingPhotos && photos.count < RemotePhoto.maximumCount && chat.supportsPhotos == true && chat.readOnly != true && !model.isBlocked(key)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -42,6 +50,21 @@ struct MobileComposer: View {
                     .padding(.vertical, 6).accessibilityIdentifier("read-only-notice")
             } else {
                 MobileComposerChips(model: model, deviceID: device.id, chat: chat, project: project, openSettings: openSettings)
+                if clipboardHasImage && canAddPhotos {
+                    // The system Paste button reads the clipboard without the "Allow Paste" prompt.
+                    HStack(spacing: 8) {
+                        Label(L10n.text("Фото в буфере обмена", "Photo on the clipboard"), systemImage: "photo.on.rectangle")
+                            .font(.caption).foregroundStyle(.secondary)
+                        PasteButton(supportedContentTypes: [.image]) { providers in
+                            Task { @MainActor in
+                                pastedChangeCount = UIPasteboard.general.changeCount; clipboardHasImage = false
+                                await addPhotos(from: providers)
+                            }
+                        }
+                        .labelStyle(.titleAndIcon).buttonBorderShape(.capsule).controlSize(.small)
+                        .accessibilityIdentifier("paste-photo")
+                    }
+                }
                 if chat.running && hasContent && chat.canQueue == true && chat.canInterrupt == true && !model.isBlocked(key) {
                     Text(L10n.text("Удерживай «В очередь», чтобы прервать и отправить.", "Hold Queue to interrupt and send."))
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -69,6 +92,48 @@ struct MobileComposer: View {
             }
         }
         .task(id: photoSelection) { await preparePhotos() }
+        // A screenshot thumbnail (or any image) dragged onto the composer is added like a picked photo.
+        .onDrop(of: [.image], isTargeted: $dropTargeted) { providers in
+            guard canAddPhotos else { return false }
+            Task { await addPhotos(from: providers) }
+            return true
+        }
+        .overlay {
+            if dropTargeted && canAddPhotos {
+                RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                    .padding(-4).allowsHitTesting(false)
+            }
+        }
+        .onAppear(perform: refreshClipboard)
+        .onReceive(NotificationCenter.default.publisher(for: UIPasteboard.changedNotification)) { _ in refreshClipboard() }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in refreshClipboard() }
+    }
+
+    /// `hasImages` only detects the type; it reads nothing and shows no prompt.
+    private func refreshClipboard() {
+        let pasteboard = UIPasteboard.general
+        clipboardHasImage = pasteboard.hasImages && pasteboard.changeCount != pastedChangeCount
+    }
+
+    /// Images from a drop or the Paste button, prepared like picked photos, up to the photo limit.
+    private func addPhotos(from providers: [NSItemProvider]) async {
+        let images = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) }
+        guard !images.isEmpty else { return }
+        loadingPhotos = true; photoError = nil
+        defer { loadingPhotos = false }
+        do {
+            var prepared: [RemotePhoto] = []
+            for provider in images.prefix(max(0, RemotePhoto.maximumCount - photos.count)) {
+                let data: Data = try await withCheckedThrowingContinuation { continuation in
+                    _ = provider.loadDataRepresentation(for: .image) { data, error in
+                        if let data { continuation.resume(returning: data) } else { continuation.resume(throwing: error ?? RemoteFailure.invalidPhoto) }
+                    }
+                }
+                prepared.append(try Self.preparePhoto(data))
+            }
+            guard !prepared.isEmpty, photos.count + prepared.count <= RemotePhoto.maximumCount else { throw RemoteFailure.invalidPhoto }
+            model.photoDrafts[draftKey, default: []].append(contentsOf: prepared)
+        } catch { photoError = error.localizedDescription }
     }
 
     private var photoStrip: some View {
