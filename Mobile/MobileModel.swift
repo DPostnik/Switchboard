@@ -21,6 +21,8 @@ struct MobileChatKey: Hashable, Sendable {
     @Published var connecting = false
     @Published var drafts: [String: String] = [:]
     @Published var photoDrafts: [String: [RemotePhoto]] = [:]
+    /// Images dropped anywhere on a chat screen, keyed like `photoDrafts`; the chat's composer prepares them.
+    @Published var photoDrops: [String: [NSItemProvider]] = [:]
     @Published var signedIn = false
     /// Commands whose queue insert is unconfirmed. Each blocks later commands in its own chat only.
     @Published private(set) var receipts = RemoteReceipts()

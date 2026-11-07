@@ -14,6 +14,7 @@ struct MobileChatView: View {
     @State private var openedFile: OpenedFile?
     /// Height of the whole chat screen above the keyboard; bounds the cards pinned in the dock.
     @State private var screenHeight: CGFloat = 700
+    @State private var dropTargeted = false
     @StateObject private var scrollController = TranscriptScrollController()
     private var draftKey: String { deviceID + ":" + chatID }
 
@@ -33,6 +34,23 @@ struct MobileChatView: View {
                 MobileChatDock(model: model, device: device, chat: chat, project: project, writing: $writing,
                                cardLimit: max(150, screenHeight * 0.36),
                                openSettings: { showingChatSettings = true }, sent: { jumpRequest += 1 })
+            }
+            // An image dragged anywhere onto the chat (the screenshot thumbnail from the screen corner) joins the draft's
+            // photos. The message field's own text view takes only text, so the whole screen is the target.
+            .onDrop(of: [.image], isTargeted: $dropTargeted) { providers in
+                guard chat.supportsPhotos == true, chat.readOnly != true else { return false }
+                model.photoDrops[draftKey, default: []].append(contentsOf: providers)
+                return true
+            }
+            .overlay {
+                if dropTargeted && chat.supportsPhotos == true && chat.readOnly != true {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.accentColor.opacity(0.08))
+                        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [8, 6])))
+                        .overlay(Label(L10n.text("Отпусти, чтобы добавить фото", "Drop to add the photo"), systemImage: "photo.badge.plus")
+                            .font(.headline).foregroundStyle(Color.accentColor))
+                        .padding(8).allowsHitTesting(false)
+                }
             }
             .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { screenHeight = $0 }
             .navigationTitle(chat.title).navigationBarTitleDisplayMode(.inline)

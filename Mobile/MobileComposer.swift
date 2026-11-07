@@ -26,7 +26,6 @@ struct MobileComposer: View {
     /// The clipboard holds an image the user has not pasted here yet (a screenshot after "Copy and Delete").
     @State private var clipboardHasImage = false
     @State private var pastedChangeCount = -1
-    @State private var dropTargeted = false
 
     private var key: MobileChatKey { MobileChatKey(device: device.id, chat: chat.id) }
     private var draftKey: String { device.id + ":" + chat.id }
@@ -92,17 +91,10 @@ struct MobileComposer: View {
             }
         }
         .task(id: photoSelection) { await preparePhotos() }
-        // A screenshot thumbnail (or any image) dragged onto the composer is added like a picked photo.
-        .onDrop(of: [.image], isTargeted: $dropTargeted) { providers in
-            guard canAddPhotos else { return false }
+        // Images dropped on the chat screen (`MobileChatView`) are prepared here like picked photos.
+        .onChange(of: model.photoDrops[draftKey]?.count ?? 0, initial: true) { _, count in
+            guard count > 0, let providers = model.photoDrops.removeValue(forKey: draftKey) else { return }
             Task { await addPhotos(from: providers) }
-            return true
-        }
-        .overlay {
-            if dropTargeted && canAddPhotos {
-                RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
-                    .padding(-4).allowsHitTesting(false)
-            }
         }
         .onAppear(perform: refreshClipboard)
         .onReceive(NotificationCenter.default.publisher(for: UIPasteboard.changedNotification)) { _ in refreshClipboard() }
