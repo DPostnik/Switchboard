@@ -22,3 +22,10 @@ import ClaudeAdapter
     #expect(ru.contains("Тяжёлая работа в Switchboard") && ru.contains("не больше 2 тяжёлых шагов") && ru.contains("vm.loadavg"))
     #expect(en.contains("Heavy work in Switchboard") && en.contains("At most 2 heavy steps") && en.contains("vm.loadavg"))
 }
+
+@Test func chatReferenceRuleNamesTheInspectTool() {
+    let ru = AgentAutonomy.instructions(language: .russian)
+    let en = AgentAutonomy.instructions(language: .english)
+    #expect(ru.contains("switchboard-chat:<UUID>") && ru.contains("inspect_chat"))
+    #expect(en.contains("switchboard-chat:<UUID>") && en.contains("inspect_chat"))
+}

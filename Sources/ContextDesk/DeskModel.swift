@@ -1361,6 +1361,9 @@ private struct ChatRunState: Equatable {
         }
         forgetTurnCheckpoints(chatID: id)
         let removed = state.chats.first { $0.id == id }
+        // The process sweeper labels events with the agent session ID.
+        ChatReferences.remove(chat: id); ChatEventLog.remove(chat: id)
+        if let native = removed?.nativeSession?.nativeID { ChatEventLog.remove(chat: native) }
         state.chats.removeAll { $0.id == id }
         if let removed { offerWorktreeRemoval(removed) }
         state.queuedMessages = queuedMessages.filter { $0.threadID != id }
@@ -1667,17 +1670,42 @@ private struct ChatRunState: Equatable {
         scheduleQueue(threadID: id)
         return true
     }
-    /// The chat directory server's command line for a chat the user opted in (Claude chats only, plan Phase 5).
-    func chatDirectoryArguments(for id: String) -> [String]? {
-        guard let chat = state.chats.first(where: { $0.id == id }), chat.chatDirectoryAccess == true,
-              traits(chat.nativeSession?.connection).contains(.chatDirectory),
-              let script = Bundle.main.resourceURL?.appendingPathComponent("ChatDirectoryRuntime/server.py"),
-              FileManager.default.fileExists(atPath: script.path) else { return nil }
+    /// The chat directory server's command line (Claude chats only, plan Phase 5): all tools for a chat the user opted
+    /// in; only `inspect_chat` over the chats the user named in this chat's messages otherwise; nothing without either.
+    func chatDirectoryArguments(for id: String, script: URL? = Bundle.main.resourceURL?.appendingPathComponent("ChatDirectoryRuntime/server.py")) -> [String]? {
+        guard let chat = state.chats.first(where: { $0.id == id }), traits(chat.nativeSession?.connection).contains(.chatDirectory),
+              let script, FileManager.default.fileExists(atPath: script.path) else { return nil }
+        let root = Locations.root.path
+        guard chat.chatDirectoryAccess == true else {
+            guard !ChatReferences.load(chat: id).isEmpty, let references = ChatReferences.file(chat: id) else { return nil }
+            return ChatDirectory.serverArguments(script: script.path, snapshot: nil, chat: id, root: root, references: references.path)
+        }
         // Every chat with access can search the index; only a chat-search chat gets the search recipe as instructions.
         return ChatDirectory.serverArguments(script: script.path, snapshot: chatDirectoryFile.path, chat: id, index: chatSearchIndexFile.path,
-                                             recipe: chat.chatSearch == true ? chatSearchRecipe.path : nil)
+                                             recipe: chat.chatSearch == true ? chatSearchRecipe.path : nil, root: root)
+    }
+    /// Remembers the chats the user names in a message to this chat (`switchboard-chat:<ID>`, a chat ID or its agent
+    /// session ID), so this chat may inspect them. IDs of unknown chats are ignored.
+    func noteChatReferences(chatID: String, text: String) {
+        let found = ChatReferences.identifiers(in: text)
+        var named = found.compactMap { id in
+            state.chats.first { $0.id.lowercased() == id || $0.nativeSession?.nativeID.lowercased() == id }?.id
+        }.filter { $0 != chatID }
+        // The first reference adds the server to the launch, which restarts a live CLI and would end its background
+        // tasks and sub-agents; it waits for a message sent while none run.
+        let backgroundWork = backgroundWaits[chatID] != nil || subagents[chatID]?.contains { $0.status == .running } == true
+        if backgroundWork, ChatReferences.load(chat: chatID).isEmpty {
+            if !named.isEmpty { deferredChatReferences[chatID, default: []] += named }
+            return
+        }
+        named += deferredChatReferences.removeValue(forKey: chatID) ?? []
+        guard !named.isEmpty else { return }
+        do { try ChatReferences.record(named, chat: chatID) }
+        catch { AppLog.delivery.error("Chat references not saved: \(error.localizedDescription, privacy: .public)") }
     }
     var chatDirectoryFile: URL { Locations.root.appendingPathComponent(ChatDirectory.fileName) }
+    /// Chats named while the chat's CLI ran background work; recorded with its next message.
+    private var deferredChatReferences: [String: [String]] = [:]
     /// Gives or takes a chat's access to the other chats; it applies from the chat's next message.
     func toggleChatDirectory(_ id: String) {
         guard let index = state.chats.firstIndex(where: { $0.id == id }) else { return }
@@ -1964,6 +1992,8 @@ private struct ChatRunState: Equatable {
                 guard !schedulerStopping else { throw CancellationError() }
             }
             var outgoing = afterInterrupt ? InterruptedTurnNote.applying(L10n.text(InterruptedTurnNote.russian, InterruptedTurnNote.english), to: text) : text
+            // Before the launch arguments are built: a newly named chat attaches `inspect_chat` to this turn.
+            if scheduledRun == nil { noteChatReferences(chatID: id, text: text) }
             if let scheduledBrowserImport, scheduledRun != nil, state.browserEnabled == true {
                 let session = try sessionForChat(id)
                 try ScheduledBrowserImport.install(scheduledBrowserImport, session: session, browserEnabled: state.browserEnabled == true)
@@ -2856,7 +2886,9 @@ private struct ChatRunState: Equatable {
                 agentStates[id]?.connected = false; agentStates[id]?.authenticated = false; clearLimits(id)
                 await interruptSummaries(id, issue: L10n.text("\(name) отключился. Итог не повторён автоматически.", "\(name) disconnected. The summary was not retried automatically."))
             }
-        case .diagnostic(let message): error = message
+        case .diagnostic(let message):
+            error = message
+            if let thread { ChatEventLog.append(chat: thread, kind: "diagnostic", text: message) }
         case .resolved(let requestID):
             let resolved = pending.filter { $0.interaction.id == requestID && $0.threadID == thread }
             pending.removeAll { action in resolved.contains { $0.id == action.id } }
@@ -2896,7 +2928,10 @@ private struct ChatRunState: Equatable {
         case .started(let turn):
             if let thread,
                completedTurns[thread + ":" + turn] == nil {
-                if turnStarts[thread + ":" + turn] == nil { recordTurnBranch(threadID: thread) }
+                if turnStarts[thread + ":" + turn] == nil {
+                    recordTurnBranch(threadID: thread)
+                    ChatEventLog.append(chat: thread, kind: "turn", text: "Turn \(turn) started")
+                }
                 turnStarts[thread + ":" + turn] = turnStarts[thread + ":" + turn] ?? Date()
                 if turnTokens[thread + ":" + turn] == nil {
                     turnTokens[thread + ":" + turn] = ResponseTokenTracker(baseline: tokenTotals[thread])
@@ -2921,6 +2956,8 @@ private struct ChatRunState: Equatable {
                 try? await store.saveTiming(threadID: threadID, turnID: turnID, timing: timing)
                 recordTurnChanges(chatID: threadID, turnID: turnID)
                 let status = completion.status
+                ChatEventLog.append(chat: threadID, kind: "turn", text: "Turn \(turnID) finished: \(status.rawValue)"
+                                    + (completion.hasError ? ", error: " + (completion.error ?? "-") : ""))
                 let title = completion.hasError || (status != .completed && status != .cancelled) ? L10n.text("Ошибка в разговоре", "Conversation error") : status == .cancelled ? L10n.text("Ответ остановлен", "Response stopped") : L10n.text("Ответ готов", "Response ready")
                 let completionID = "turn:" + threadID + ":" + turnID
                 recordRecap(threadID: threadID, failed: completion.hasError || (status != .completed && status != .cancelled), error: completion.error)
@@ -2958,7 +2995,10 @@ private struct ChatRunState: Equatable {
         case .background(let tasks):
             guard let thread else { return }
             let count = tasks > 0 ? tasks : nil
-            if backgroundWaits[thread] != count { backgroundWaits[thread] = count }
+            if backgroundWaits[thread] != count {
+                backgroundWaits[thread] = count
+                ChatEventLog.append(chat: thread, kind: "background", text: count.map { "Waiting for \($0) background task(s) after the turn" } ?? "Background wait ended")
+            }
         case .subagents(let list):
             guard let thread else { return }
             let agents = list.isEmpty ? nil : list

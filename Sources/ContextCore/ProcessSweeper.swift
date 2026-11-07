@@ -216,6 +216,8 @@ public final class ProcessSweeper: @unchecked Sendable {
     private var counts: [String: Int] = [:]
     private var enabled = false
     private var log: @Sendable (String) -> Void = { _ in }
+    /// Receives each stopped process of a labelled chat with that chat's ID.
+    private var chatEvent: @Sendable (String, String) -> Void = { _, _ in }
     private var table: @Sendable () -> [ProcessRecord]
     /// A sweep in flight; `shutdown` waits for it so a quit never leaves a half-finished pass.
     private var pending: [UUID: Task<[Outcome], Never>] = [:]
@@ -224,8 +226,8 @@ public final class ProcessSweeper: @unchecked Sendable {
         self.instance = instance; self.table = table
     }
     /// Turns sweeping on (the app does this at boot).
-    public func start(log: @escaping @Sendable (String) -> Void) {
-        lock.withLock { enabled = true; self.log = log }
+    public func start(log: @escaping @Sendable (String) -> Void, chatEvent: @escaping @Sendable (String, String) -> Void = { _, _ in }) {
+        lock.withLock { enabled = true; self.log = log; self.chatEvent = chatEvent }
     }
     public var isEnabled: Bool { lock.withLock { enabled } }
     /// Chats whose CLI is running now.
@@ -278,7 +280,7 @@ public final class ProcessSweeper: @unchecked Sendable {
     /// SIGTERM to the snapshot, then SIGKILL to the same processes (PID and start time) still alive after `grace`.
     public func terminate(_ targets: [ProcessRecord], reason: String) async -> [Outcome] {
         guard !targets.isEmpty else { return [] }
-        let log = lock.withLock { self.log }
+        let (log, chatEvent) = lock.withLock { (self.log, self.chatEvent) }
         for record in targets where ProcessTable.isAlive(record) { kill(record.pid, SIGTERM) }
         try? await Task.sleep(for: grace)
         var outcomes: [Outcome] = []
@@ -292,6 +294,9 @@ public final class ProcessSweeper: @unchecked Sendable {
             outcomes.append(Outcome(record: record, result: result))
             log("Orphan process \(result) (\(reason)): pid \(record.pid), chat \(record.chat ?? "-"), instance \(record.instance ?? "-"), "
                 + "cpu \(String(format: "%.1f", record.cpuSeconds)) s, command \(record.command.isEmpty ? record.path : record.command)")
+            if let chat = record.chat {
+                chatEvent(chat, "Process \(result) (\(reason)): pid \(record.pid), command \((record.command.isEmpty ? record.path : record.command).prefix(160))")
+            }
         }
         return outcomes
     }

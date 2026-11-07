@@ -22,6 +22,9 @@ public enum AgentAutonomy {
             - Готовые тексты для отдельного копирования — сообщения, письма и инструкции для другого чата — оформляй Markdown-цитатой: каждая строка, включая пустые, начинается с `>`. Switchboard отображает такой блок карточкой с кнопкой копирования. Каждый самостоятельный текст помещай в отдельную цитату, пояснения оставляй снаружи.
             - Блоки кода используй для кода, команд и буквальных данных, а не как контейнер для обычного готового текста. Если пользователь явно просит другой формат, соблюдай его запрос.
 
+            Ссылки на чаты Switchboard:
+            - `switchboard-chat:<UUID>` — это ID другого чата Switchboard. Чтобы узнать, что в нём произошло, сначала вызови инструмент `inspect_chat`; не ищи этот ID в файлах приложения.
+
             Формат ответа в Switchboard (ответы читают и на Mac, и на телефоне):
             - Первая строка — вывод или статус. Дальше короткие пункты по сути. Обычный ответ укладывай примерно в 1800 символов; длиннее — только если пользователь прямо просит подробно.
             - Пиши примерно на 80% по ASD-STE100: предложения до 20 слов, активный залог, одна мысль в предложении, один термин для одного понятия. Без бытовых аналогий и метафор: объясняй прямо, на примерах из самой задачи.
@@ -44,6 +47,9 @@ public enum AgentAutonomy {
             Copyable text formatting in Switchboard:
             - Format ready-to-copy messages, letters and instructions for another chat as Markdown blockquotes: start every line, including blank lines, with `>`. Switchboard renders each block as a card with a copy button. Put each independent text in a separate blockquote and keep explanations outside it.
             - Use code blocks for code, commands and literal data, not as containers for ordinary ready-to-copy prose. Follow an explicitly requested different format.
+
+            Switchboard chat references:
+            - `switchboard-chat:<UUID>` is the ID of another Switchboard chat. To learn what happened in it, call the `inspect_chat` tool first; do not search the app's files for the ID.
 
             Answer format in Switchboard (answers are read on the Mac and on the phone):
             - Start with the conclusion or status. Follow with short points. Keep a normal answer to about 1,800 characters; go longer only when the user explicitly asks for detail.

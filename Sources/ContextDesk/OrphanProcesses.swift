@@ -17,7 +17,8 @@ import SwiftUI
     }
     func start() {
         guard loop == nil else { return }
-        sweeper.start { message in AppLog.processes.notice("\(message, privacy: .public)") }
+        sweeper.start(log: { message in AppLog.processes.notice("\(message, privacy: .public)") },
+                      chatEvent: { chat, text in ChatEventLog.append(chat: chat, kind: "process", text: text) })
         loop = Task { [weak self, sweeper, interval] in
             if let task = sweeper.sweepForeignInstances() { _ = await task.value }
             await self?.refresh()

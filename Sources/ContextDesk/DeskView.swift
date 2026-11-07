@@ -546,7 +546,8 @@ struct DeskView: View {
             ]
         }
         var agents = [
-            SidebarMenuAction(title: L10n.text("Скопировать ID чата", "Copy chat ID")) { copyToPasteboard(chat.id) },
+            // Typed as `switchboard-chat:<ID>`, so an agent tells a chat ID from session, turn and job IDs.
+            SidebarMenuAction(title: L10n.text("Скопировать ID чата", "Copy chat ID")) { copyToPasteboard(ChatReference.link(chat)) },
             SidebarMenuAction(title: L10n.text("Скопировать ссылку на чат для агента", "Copy chat reference for an agent")) {
                 copyToPasteboard(ChatReference.text(chat, projectPath: model.state.projects.first { $0.id == chat.projectID }?.path))
             },
