@@ -1432,7 +1432,7 @@ public struct NativeTranscript: NSViewRepresentable {
                 let attributes: [NSAttributedString.Key: Any] = [
                     .font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph
                 ]
-                // Code and tool output stay literal, including link-like text; image paths a user pasted show as thumbnails.
+                // Code and tool output stay literal, including link-like text; image paths a user pasted show as chips.
                 result.append(isCode ? NSAttributedString(string: block, attributes: attributes)
                               : item.kind == "user" ? TranscriptImagePaths.render(block, attributes: attributes)
                               : TranscriptLinks.render(block, attributes: attributes))
@@ -1650,13 +1650,12 @@ public struct NativeTranscript: NSViewRepresentable {
 
     private static func measureOutgoingInset(_ item: TranscriptItem, width: CGFloat) -> CGFloat {
         let maxText = max(80, width * 0.78 - 32)
-        // Image paths show as thumbnails: the bubble fits the rest of the text and the widest thumbnail.
-        let images = TranscriptImagePaths.measure(item.text)
-        let text = images?.text ?? item.text
-        let body = NSAttributedString(string: text.isEmpty ? " " : text, attributes: [.font: NSFont.systemFont(ofSize: 14)])
+        let font: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 14)]
+        // Image paths show as chips: the bubble fits the chips, not the long paths.
+        let body = TranscriptImagePaths.measuringText(item.text, attributes: font)
+            ?? NSAttributedString(string: item.text.isEmpty ? " " : item.text, attributes: font)
         var textWidth = body.boundingRect(with: NSSize(width: maxText, height: .greatestFiniteMagnitude),
                                           options: [.usesLineFragmentOrigin, .usesFontLeading]).width
-        if let images { textWidth = max(textWidth, images.width) }
         if let phase = item.phase {
             let header = NSAttributedString(string: phase, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold)])
             textWidth = max(textWidth, header.size().width)
@@ -1865,10 +1864,7 @@ public struct NativeTranscript: NSViewRepresentable {
             add(L10n.text("Скопировать путь", "Copy Path")) {
                 pasteboard.clearContents(); pasteboard.setString(url.path, forType: .string)
             }
-            add(L10n.text("Скопировать изображение", "Copy Image")) {
-                guard let image = NSImage(contentsOf: url) else { return }
-                pasteboard.clearContents(); pasteboard.writeObjects([image])
-            }
+            add(L10n.text("Скопировать изображение", "Copy Image")) { _ = TranscriptImagePaths.copyImage(url, to: pasteboard) }
             items.append(.separator())
         }
         if url.isFileURL {

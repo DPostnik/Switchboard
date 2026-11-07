@@ -18,8 +18,6 @@ extension NSAttributedString.Key {
     }
     /// The file is an image the viewer shows.
     public static func isImage(_ url: URL) -> Bool { url.isFileURL && extensions.contains(url.pathExtension.lowercased()) }
-    /// Thumbnails fit this box; the bubble grows to the widest one.
-    static let maxSize = NSSize(width: 260, height: 180)
 
     private static let start = try? NSRegularExpression(pattern: #"(?:^|(?<=[\s"'(<\[]))(?:file://|~/|/)"#, options: [.anchorsMatchLines])
     private static let end = try? NSRegularExpression(pattern: #"\.(?:png|jpe?g|gif|heic|tiff?|bmp|webp)(?![\w.])"#, options: [.caseInsensitive])
@@ -53,6 +51,19 @@ extension NSAttributedString.Key {
         return result
     }
 
+    /// One clipboard item with the image's bytes and its file: other apps (messengers, editors) paste the picture, the
+    /// composer pastes the original file as a chip instead of saving a copy.
+    @discardableResult public static func copyImage(_ url: URL, to pasteboard: NSPasteboard) -> Bool {
+        let item = NSPasteboardItem()
+        item.setString(url.absoluteString, forType: .fileURL)
+        let ext = url.pathExtension.lowercased()
+        if ext == "png", let data = try? Data(contentsOf: url) { item.setData(data, forType: .png) }
+        if let tiff = NSImage(contentsOf: url)?.tiffRepresentation { item.setData(tiff, forType: .tiff) }
+        guard item.types.count > 1 else { return false }
+        pasteboard.clearContents()
+        return pasteboard.writeObjects([item])
+    }
+
     /// How the composer writes an image path: in brackets, so it stays one chip next to any text.
     public static func chipText(_ path: String) -> String { "[" + path + "]" }
 
@@ -69,73 +80,56 @@ extension NSAttributedString.Key {
         return URL(fileURLWithPath: path)
     }
 
-    /// The message text with each image path replaced by its thumbnail on a line of its own; the rest renders as
-    /// `TranscriptLinks.render` does. Paths of files that cannot be decoded stay text.
+    /// The message text with each image path replaced by a chip in the line ("Image 1" with a small preview, numbered
+    /// by distinct image in order), as in the composer; the rest renders as `TranscriptLinks.render` does. Paths of files
+    /// that cannot be decoded stay text.
     public static func render(_ text: String, attributes: [NSAttributedString.Key: Any],
                               isFile: (String) -> Bool = { ChatFiles.cachedIsFile($0) }) -> NSAttributedString {
-        let images = find(in: text, isFile: isFile).compactMap { found in thumbnail(found.url).map { (found.range, found.url, $0) } }
+        let images = find(in: text, isFile: isFile).filter { thumbnail($0.url) != nil }
         guard !images.isEmpty else { return TranscriptLinks.render(text, attributes: attributes) }
         let string = text as NSString
         let result = NSMutableAttributedString()
+        var numbers: [URL: Int] = [:]
         var position = 0
-        for (range, url, image) in images {
-            // Spaces around the path go with it; the thumbnail takes its own line.
-            let before = string.substring(with: NSRange(location: position, length: range.location - position))
-                .replacingOccurrences(of: #"[ \t]+$"#, with: "", options: .regularExpression)
-            result.append(TranscriptLinks.render(before, attributes: attributes))
-            if result.length > 0, !result.string.hasSuffix("\n") { result.append(NSAttributedString(string: "\n", attributes: attributes)) }
-            result.append(preview(url, image: image, attributes: attributes))
+        for (range, url) in images {
+            result.append(TranscriptLinks.render(string.substring(with: NSRange(location: position, length: range.location - position)),
+                                                 attributes: attributes))
+            let key = url.standardizedFileURL
+            if numbers[key] == nil { numbers[key] = numbers.count + 1 }
+            result.append(chip(url, number: numbers[key] ?? 1, attributes: attributes))
             position = NSMaxRange(range)
-            let rest = string.substring(from: position)
-            let skipped = rest.prefix { $0 == " " || $0 == "\t" }
-            position += (String(skipped) as NSString).length
-            if position < string.length, string.character(at: position) != 0x0A {
-                result.append(NSAttributedString(string: "\n", attributes: attributes))
-            }
         }
         result.append(TranscriptLinks.render(string.substring(from: position), attributes: attributes))
         return result
     }
 
-    /// Point size of a thumbnail inside `maxSize`.
-    static func size(of image: NSImage) -> NSSize {
-        let scale = min(1, maxSize.width / max(1, image.size.width), maxSize.height / max(1, image.size.height))
-        return NSSize(width: max(1, (image.size.width * scale).rounded()), height: max(1, (image.size.height * scale).rounded()))
-    }
-
-    /// The widest thumbnail of a message and its text without the image paths, for sizing a hugging bubble.
-    static func measure(_ text: String) -> (text: String, width: CGFloat)? {
-        let images = find(in: text).compactMap { found in thumbnail(found.url).map { (found.range, $0) } }
-        guard !images.isEmpty else { return nil }
-        let rest = NSMutableString(string: text)
-        for (range, _) in images.reversed() { rest.replaceCharacters(in: range, with: "") }
-        return (rest as String, images.map { size(of: $0.1).width }.max() ?? 0)
+    /// The message as `render` lays it out, for sizing a hugging bubble; nil when it names no image.
+    static func measuringText(_ text: String, attributes: [NSAttributedString.Key: Any]) -> NSAttributedString? {
+        guard text.contains("/"), !find(in: text).filter({ thumbnail($0.url) != nil }).isEmpty else { return nil }
+        return render(text, attributes: attributes)
     }
 
     public static func thumbnail(_ url: URL) -> NSImage? { TranscriptMarkdown.image(at: url) }
 
-    private static func preview(_ url: URL, image: NSImage, attributes: [NSAttributedString.Key: Any]) -> NSAttributedString {
-        let size = size(of: image)
-        // Rounded corners and a hairline edge; NSImage keeps the drawn bitmap, so scrolling does not rescale the source.
-        let rounded = NSImage(size: size, flipped: false) { rect in
-            let path = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
-            path.addClip()
-            image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
-            NSColor.separatorColor.setStroke()
-            path.lineWidth = 1
-            path.stroke()
+    private static func chip(_ url: URL, number: Int, attributes: [NSAttributedString.Key: Any]) -> NSAttributedString {
+        let label = ComposerImages.label(number)
+        let size = ComposerImages.chipSize(label)
+        let image = NSImage(size: size, flipped: true) { rect in
+            MainActor.assumeIsolated { ComposerImages.drawChip(url, label: label, in: rect, selected: false) }
             return true
         }
         let attachment = NSTextAttachment()
-        attachment.image = rounded
-        attachment.bounds = NSRect(origin: .zero, size: size)
-        let line = NSMutableAttributedString(attachment: attachment)
+        attachment.image = image
+        // Centered on the text's middle: half the capital height above the baseline.
+        let font = attributes[.font] as? NSFont ?? NSFont.systemFont(ofSize: 14)
+        attachment.bounds = NSRect(x: 0, y: (font.capHeight / 2 - size.height / 2).rounded(), width: size.width, height: size.height)
+        let result = NSMutableAttributedString(attachment: attachment)
         var style = attributes
         style[.link] = url
         style[.imagePreview] = url
-        style[.toolTip] = url.path + "\n" + L10n.text("Нажмите, чтобы открыть в приложении; правая кнопка - скопировать путь",
-                                                      "Click to open in the app; right-click to copy the path")
-        line.addAttributes(style, range: NSRange(location: 0, length: line.length))
-        return line
+        style[.toolTip] = url.path + "\n" + L10n.text("Нажмите, чтобы открыть; правая кнопка - скопировать путь",
+                                                      "Click to open; right-click to copy the path")
+        result.addAttributes(style, range: NSRange(location: 0, length: result.length))
+        return result
     }
 }

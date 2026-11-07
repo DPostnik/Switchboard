@@ -282,6 +282,10 @@ public final class ComposerTextView: NSTextView {
         return true
     }
     /// Copied files paste as their paths, image data (a screenshot taken with Control) as the path of a saved PNG.
+    /// A plain-text view enables Paste only for text; files and image data are pasted by `paste` below.
+    public override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
+        super.readablePasteboardTypes + [.fileURL, .png, .tiff]
+    }
     public override func paste(_ sender: Any?) {
         let pasteboard = NSPasteboard.general
         if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {

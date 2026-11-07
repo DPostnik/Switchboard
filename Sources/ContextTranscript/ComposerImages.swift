@@ -59,10 +59,12 @@ extension NSAttributedString.Key {
 
     func number(for url: URL) -> Int { numbers[url.standardizedFileURL] ?? 1 }
 
-    /// The chip's size: preview, gap, label and side insets.
-    func size(for url: URL) -> NSSize? {
-        let label = (Self.label(number(for: url)) as NSString).size(withAttributes: [.font: Self.labelFont])
-        return NSSize(width: (4 + Self.previewSide + 4 + label.width + 6).rounded(.up), height: Self.chipHeight)
+    func size(for url: URL) -> NSSize? { Self.chipSize(Self.label(number(for: url))) }
+
+    /// A chip's size: preview, gap, label and side insets.
+    static func chipSize(_ label: String) -> NSSize {
+        let width = (label as NSString).size(withAttributes: [.font: labelFont]).width
+        return NSSize(width: (4 + previewSide + 4 + width + 6).rounded(.up), height: chipHeight)
     }
 
     // MARK: Editing
@@ -176,8 +178,12 @@ extension NSAttributedString.Key {
         }
     }
 
-    /// A rounded chip: the image's preview cropped to a square, then its label.
     func drawChip(_ url: URL, in frame: NSRect, selected: Bool) {
+        Self.drawChip(url, label: Self.label(number(for: url)), in: frame, selected: selected)
+    }
+
+    /// A rounded chip: the image's preview cropped to a square, then its label. Shared with sent messages.
+    static func drawChip(_ url: URL, label text: String, in frame: NSRect, selected: Bool) {
         NSGraphicsContext.saveGraphicsState()
         let chip = NSBezierPath(roundedRect: frame.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
         (selected ? DeskPalette.ns.accent.withAlphaComponent(0.22) : DeskPalette.ns.accent.withAlphaComponent(0.1)).setFill()
@@ -185,7 +191,7 @@ extension NSAttributedString.Key {
         (selected ? DeskPalette.ns.accent : DeskPalette.ns.accent.withAlphaComponent(0.35)).setStroke()
         chip.lineWidth = selected ? 1.5 : 1
         chip.stroke()
-        let preview = NSRect(x: frame.minX + 4, y: frame.midY - Self.previewSide / 2, width: Self.previewSide, height: Self.previewSide)
+        let preview = NSRect(x: frame.minX + 4, y: frame.midY - previewSide / 2, width: previewSide, height: previewSide)
         if let image = TranscriptImagePaths.thumbnail(url) {
             NSGraphicsContext.saveGraphicsState()
             NSBezierPath(roundedRect: preview, xRadius: 3, yRadius: 3).addClip()
@@ -195,8 +201,8 @@ extension NSAttributedString.Key {
             image.draw(in: preview, from: source, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
             NSGraphicsContext.restoreGraphicsState()
         }
-        let label = Self.label(number(for: url)) as NSString
-        let attributes: [NSAttributedString.Key: Any] = [.font: Self.labelFont, .foregroundColor: DeskPalette.ns.accentDeep]
+        let label = text as NSString
+        let attributes: [NSAttributedString.Key: Any] = [.font: labelFont, .foregroundColor: DeskPalette.ns.accentDeep]
         let size = label.size(withAttributes: attributes)
         label.draw(at: NSPoint(x: preview.maxX + 4, y: frame.midY - size.height / 2), withAttributes: attributes)
         NSGraphicsContext.restoreGraphicsState()

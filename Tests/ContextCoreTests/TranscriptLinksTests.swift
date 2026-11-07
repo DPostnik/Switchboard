@@ -73,11 +73,11 @@ import ContextTranscript
     #expect(TranscriptImagePaths.find(in: "/tmp/a.png.swift and a/b.png").isEmpty)
 
     let rendered = TranscriptImagePaths.render("почему не работает \(shot.path) выделение", attributes: [.font: NSFont.systemFont(ofSize: 14)])
-    #expect(rendered.string == "почему не работает\n\u{FFFC}\nвыделение")
+    // A chip in the line, as in the composer, in place of the path.
+    #expect(rendered.string == "почему не работает \u{FFFC} выделение")
     let attachment = try #require(rendered.attribute(.attachment, at: 19, effectiveRange: nil) as? NSTextAttachment)
-    // 600 × 300 fits 260 × 180 at 260 × 130.
-    #expect(attachment.bounds.size == NSSize(width: 260, height: 130))
+    #expect(attachment.bounds.height == 18)
+    #expect(attachment.bounds.width > 40 && attachment.bounds.width < 100)
     #expect((rendered.attribute(.link, at: 19, effectiveRange: nil) as? URL)?.path == shot.path)
-    // A message that is only the path keeps no empty lines around the thumbnail.
     #expect(TranscriptImagePaths.render(shot.path, attributes: [:]).string == "\u{FFFC}")
 }

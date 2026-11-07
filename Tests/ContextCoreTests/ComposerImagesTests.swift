@@ -131,6 +131,25 @@ private func writeImage(_ url: URL, width: Int = 600, height: Int = 300) throws 
     // One bracket left: the path is text again.
     #expect(TranscriptImagePaths.find(in: "фото [\(shot.path)").isEmpty)
     #expect(TranscriptImagePaths.find(in: "фото \(shot.path)] x").isEmpty)
-    // The sent message shows the thumbnail without the brackets.
-    #expect(TranscriptImagePaths.render("до [\(shot.path)] после", attributes: [:]).string == "до\n\u{FFFC}\nпосле")
+    // The sent message shows the chip without the brackets.
+    #expect(TranscriptImagePaths.render("до [\(shot.path)] после", attributes: [:]).string == "до \u{FFFC} после")
+}
+
+@Test @MainActor func copiedImageCarriesItsBytesAndFileAndTheComposerAcceptsIt() throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("copy-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let shot = folder.appendingPathComponent("Screenshot 2026-11-07 at 10.00.00.png")
+    try writeImage(shot)
+    let pasteboard = NSPasteboard(name: NSPasteboard.Name("switchboard-test-\(UUID().uuidString)"))
+    defer { pasteboard.releaseGlobally() }
+    #expect(TranscriptImagePaths.copyImage(shot, to: pasteboard))
+    // One item: other apps take the picture, the composer takes the original file.
+    #expect(pasteboard.pasteboardItems?.count == 1)
+    #expect(NSImage(pasteboard: pasteboard) != nil)
+    let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]
+    #expect(urls?.map(\.path) == [shot.path])
+    // Paste is enabled for image data and files, not only for text.
+    let editor = ComposerTextView(frame: .zero)
+    #expect(Set([.png, .tiff, .fileURL]).isSubset(of: Set(editor.readablePasteboardTypes)))
 }
