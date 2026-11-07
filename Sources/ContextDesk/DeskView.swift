@@ -1047,6 +1047,11 @@ struct ChatView: View {
     /// The chat folder's file tree in the same side panel; a file picked there opens in the preview above it.
     @StateObject private var files = ProjectFilesModel()
     @State private var showingFiles = false
+    /// The side panel's shown state, applied one change per slide: AppKit leaves an empty column behind when the panel
+    /// is hidden while it is still sliding in (a quick double click on the files button).
+    @State private var inspectorShown = false
+    @State private var inspectorChangedAt = Date.distantPast
+    @State private var inspectorSettle: Task<Void, Never>?
     /// Files the open chat changed or cited, in a column on the chat's right; it appears once the chat has any.
     /// Held without observing it: only `ChatFilesOverlay` redraws when the lists change, not the whole chat.
     @State private var chatFiles = ChatFilesModel()
@@ -1266,8 +1271,15 @@ struct ChatView: View {
                 route: model.state.chats.first(where: { $0.id == value.origin.conversation.value })?.route ?? model.defaultRoute)
         }
         // Expanding moves the preview out of the inspector, so hiding the inspector then must not close it.
-        .inspector(isPresented: Binding(get: { (preview.current != nil || showingFiles) && !preview.expanded },
-                                        set: { if !$0 && !preview.expanded { preview.close(); showingFiles = false } })) {
+        .inspector(isPresented: Binding(get: { inspectorShown },
+                                        set: { shown in
+                                            AppLog.ui.info("inspector set by SwiftUI: \(shown), wanted \(wantsInspector)")
+                                            inspectorSettle?.cancel()
+                                            inspectorShown = shown; inspectorChangedAt = .now
+                                            if !shown && !preview.expanded { preview.close(); showingFiles = false }
+                                            // A late write-back of an earlier slide must not override a newer wish.
+                                            syncInspector()
+                                        })) {
             if let current = preview.current, !preview.expanded {
                 DocumentPreviewView(session: preview, model: current, onQuote: quoteIntoDraft,
                                     onShowFiles: showingFiles ? { preview.close() } : nil)
@@ -1279,6 +1291,7 @@ struct ChatView: View {
                     .inspectorColumnWidth(min: 320, ideal: 520, max: 1100)
             }
         }
+        .onChange(of: wantsInspector, initial: true) { _, _ in syncInspector() }
         .task(id: showingFiles ? model.selectedWorkingDirectory : nil) {
             // Runs when the tree is shown or the chat's folder changes: the listing is always fresh then.
             if showingFiles { await files.load(model.selectedWorkingDirectory, force: true) }
@@ -1320,6 +1333,24 @@ struct ChatView: View {
         if showingFiles && preview.current == nil { showingFiles = false; return }
         preview.close()
         showingFiles = true
+    }
+
+    private var wantsInspector: Bool { (preview.current != nil || showingFiles) && !preview.expanded }
+
+    /// Shows or hides the side panel to match `wantsInspector`. A change that comes while the panel still slides
+    /// waits for the slide to end, and only the latest wish is applied then.
+    private func syncInspector() {
+        inspectorSettle?.cancel(); inspectorSettle = nil
+        let wanted = wantsInspector
+        guard wanted != inspectorShown else { return }
+        let wait = inspectorChangedAt.addingTimeInterval(0.45).timeIntervalSinceNow
+        AppLog.ui.info("inspector wanted \(wanted), wait \(max(wait, 0), format: .fixed(precision: 2)) s")
+        guard wait > 0 else { inspectorShown = wanted; inspectorChangedAt = .now; return }
+        inspectorSettle = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(wait))
+            guard !Task.isCancelled else { return }
+            syncInspector()
+        }
     }
 
     private func refreshChatFiles(immediately: Bool = false) {

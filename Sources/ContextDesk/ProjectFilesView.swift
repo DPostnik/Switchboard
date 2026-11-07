@@ -99,13 +99,17 @@ struct ProjectFilesView: View {
     let addToMessage: (URL) -> Void
     let close: () -> Void
     @FocusState private var searchFocused: Bool
+    @FocusState private var listFocused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var searching: Bool { !files.query.trimmingCharacters(in: .whitespaces).isEmpty }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "folder").foregroundStyle(DeskPalette.muted)
                 Text(files.root.map { URL(fileURLWithPath: $0).lastPathComponent } ?? L10n.text("Файлы", "Files"))
-                    .font(.ui(size: 13, weight: .semibold)).lineLimit(1).truncationMode(.middle)
+                    .font(.ui(size: 13, weight: .semibold)).foregroundStyle(DeskPalette.ink).lineLimit(1).truncationMode(.middle)
                     .help(files.root ?? "")
                 Spacer(minLength: 8)
                 if files.loading { ProgressView().controlSize(.small) }
@@ -121,130 +125,184 @@ struct ProjectFilesView: View {
                     .help(L10n.text("Скрыть файлы", "Hide files"))
                     .keyboardShortcut(.cancelAction)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.borderless).foregroundStyle(DeskPalette.muted).pointingHandCursor()
             .padding(.horizontal, 14).padding(.vertical, 10)
-            TextField(L10n.text("Найти файл", "Find a file"), text: $files.query)
-                .textFieldStyle(.roundedBorder).focused($searchFocused)
-                .onSubmit { if let first = files.firstMatch() { activate(first) } }
-                .padding(.horizontal, 12).padding(.bottom, 8)
-            Divider()
+            searchField.padding(.horizontal, 12).padding(.bottom, 8)
+            Divider().overlay(DeskPalette.border)
             content.frame(maxWidth: .infinity, maxHeight: .infinity)
             if files.listing?.truncated == true {
                 Text(L10n.text("Показаны первые \(ProjectFiles.limit) файлов.", "Showing the first \(ProjectFiles.limit) files."))
                     .font(.ui(.caption)).foregroundStyle(DeskPalette.attentionInk).padding(8)
             }
         }
+        .background(DeskPalette.canvas)
         .accessibilityLabel(L10n.text("Файлы проекта", "Project files"))
+    }
+
+    /// The same field as the chat files panel; Down Arrow moves into the list.
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(DeskPalette.muted)
+            TextField(L10n.text("Найти файл", "Find a file"), text: $files.query)
+                .textFieldStyle(.plain).font(.ui(size: 12)).focused($searchFocused)
+                .onSubmit { if let first = files.firstMatch() { activate(first) } }
+                .onKeyPress(.downArrow) {
+                    guard let first = entries.first else { return .ignored }
+                    files.selection = first.id; listFocused = true
+                    return .handled
+                }
+            if !files.query.isEmpty {
+                Button { files.query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(DeskPalette.muted) }
+                    .buttonStyle(.plain).pointingHandCursor()
+                    .help(L10n.text("Очистить поиск", "Clear the search"))
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 8).fill(DeskPalette.subtle))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(searchFocused ? DeskPalette.focusBorder : .clear, lineWidth: 1))
     }
 
     @ViewBuilder private var content: some View {
         if let issue = files.issue {
-            Text(issue).font(.ui(.callout)).foregroundStyle(.secondary).padding(20)
+            Text(issue).font(.ui(.callout)).foregroundStyle(DeskPalette.muted).padding(20)
         } else if files.listing == nil {
             ProgressView()
-        } else if !files.query.trimmingCharacters(in: .whitespaces).isEmpty {
-            let matches = files.matches
-            if matches.isEmpty {
-                if files.matchesCurrent {
-                    Text(L10n.text("Ничего не найдено", "No matches")).font(.ui(.callout)).foregroundStyle(.secondary)
-                } else {
-                    // The first results are a moment away; a spinner would only flash.
-                    Color.clear
-                }
+        } else if searching && files.matches.isEmpty {
+            if files.matchesCurrent {
+                Text(L10n.text("Ничего не найдено", "No matches")).font(.ui(.callout)).foregroundStyle(DeskPalette.muted)
             } else {
-                List(matches, id: \.self, selection: selectionBinding) { path in
-                    FileRow(name: URL(fileURLWithPath: path).lastPathComponent, detail: (path as NSString).deletingLastPathComponent,
-                            folder: false, expanded: false, depth: 0)
-                        .tag(path)
-                        .modifier(FileDrag(files: files, path: path))
-                }
-                .listStyle(.sidebar)
-                .contextMenu(forSelectionType: String.self) { paths in menu(paths, folder: { _ in false }) }
-                .onKeyPress(.return) { keyActivate() }
+                // The first results are a moment away; a spinner would only flash.
+                Color.clear
             }
-        } else if files.tree.isEmpty {
-            Text(L10n.text("В папке нет файлов", "The folder has no files")).font(.ui(.callout)).foregroundStyle(.secondary)
+        } else if !searching && files.tree.isEmpty {
+            Text(L10n.text("В папке нет файлов", "The folder has no files")).font(.ui(.callout)).foregroundStyle(DeskPalette.muted)
         } else {
-            ScrollViewReader { proxy in
-                List(files.rows, selection: selectionBinding) { row in
-                    FileRow(name: row.node.name, detail: nil, folder: row.node.isFolder,
-                            expanded: files.expanded.contains(row.node.path), depth: row.depth) { files.toggle(row.node.path) }
-                        .tag(row.node.path)
-                        .modifier(FileDrag(files: files, path: row.node.path))
+            list(entries)
+        }
+    }
+
+    /// The tree's visible rows, or the filter results with their folders.
+    private var entries: [FileEntry] {
+        if searching {
+            return files.matches.map { FileEntry(id: $0, name: URL(fileURLWithPath: $0).lastPathComponent,
+                                                 detail: ($0 as NSString).deletingLastPathComponent, folder: false, depth: 0) }
+        }
+        return files.rows.map { FileEntry(id: $0.node.path, name: $0.node.name, detail: nil, folder: $0.node.isFolder, depth: $0.depth) }
+    }
+
+    /// Rows drawn in the app's colors; opening a folder slides its contents in under it, as Finder does.
+    private func list(_ entries: [FileEntry]) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 1) {
+                    ForEach(entries) { entry in
+                        FileRow(entry: entry, expanded: files.expanded.contains(entry.id), selected: files.selection == entry.id,
+                                toggle: { toggle(entry.id) }, click: { files.selection = entry.id; listFocused = true; activate(entry.id) })
+                            .id(entry.id)
+                            .modifier(FileDrag(files: files, path: entry.id))
+                            .contextMenu { FileMenu(files: files, path: entry.id, folder: entry.folder, open: open, addToMessage: addToMessage) }
+                            .transition(reduceMotion ? .opacity : .asymmetric(insertion: .opacity.combined(with: .offset(y: -8)), removal: .opacity))
+                    }
                 }
-                .listStyle(.sidebar)
-                .contextMenu(forSelectionType: String.self) { paths in
-                    menu(paths) { path in files.rows.first { $0.node.path == path }?.node.isFolder == true }
-                }
-                .onKeyPress(.return) { keyActivate() }
-                .onKeyPress(.space) { keyActivate() }
-                .onAppear { if let selected = files.selection { proxy.scrollTo(selected, anchor: .center) } }
+                .padding(.horizontal, 8).padding(.vertical, 6)
             }
+            .focusable().focused($listFocused).focusEffectDisabled()
+            .onKeyPress(keys: [.upArrow, .downArrow, .leftArrow, .rightArrow, .return, .space]) { press in
+                key(press.key, entries, proxy)
+            }
+            .onAppear { if let selected = files.selection { proxy.scrollTo(selected, anchor: .center) } }
         }
     }
 
-    /// One menu for the whole list, built when it opens for the clicked row, instead of a menu per row that every
-    /// filter keystroke and every expansion rebuilt.
-    @ViewBuilder private func menu(_ paths: Set<String>, folder: (String) -> Bool) -> some View {
-        if paths.count == 1, let path = paths.first {
-            FileMenu(files: files, path: path, folder: folder(path), open: open, addToMessage: addToMessage)
-        }
+    private func toggle(_ path: String) {
+        withAnimation(DeskMotion.standard(reduceMotion, response: 0.26)) { files.toggle(path) }
     }
 
-    /// A click on a file previews it and a click on a folder opens or closes it; arrow keys only move the selection,
-    /// Return or Space acts on it.
-    private var selectionBinding: Binding<String?> {
-        Binding(get: { files.selection }, set: { path in
-            files.selection = path
-            let type = NSApp.currentEvent?.type
-            guard let path, type == .leftMouseDown || type == .leftMouseUp else { return }
-            activate(path)
-        })
+    /// Up and Down move the selection, Right opens a folder or steps into it, Left closes it or steps out to its
+    /// parent, Return or Space acts on the selected row.
+    private func key(_ key: KeyEquivalent, _ entries: [FileEntry], _ proxy: ScrollViewProxy) -> KeyPress.Result {
+        guard !entries.isEmpty else { return .ignored }
+        let index = files.selection.flatMap { selected in entries.firstIndex { $0.id == selected } }
+        let current = index.map { entries[$0] }
+        var target: String?
+        switch key {
+        case .downArrow: target = entries[min((index ?? -1) + 1, entries.count - 1)].id
+        case .upArrow: target = entries[max((index ?? entries.count) - 1, 0)].id
+        case .rightArrow:
+            guard let current, current.folder, let index else { return .ignored }
+            if !files.expanded.contains(current.id) { toggle(current.id); return .handled }
+            if index + 1 < entries.count, entries[index + 1].depth > current.depth { target = entries[index + 1].id }
+        case .leftArrow:
+            guard let current, !searching else { return .ignored }
+            if current.folder, files.expanded.contains(current.id) { toggle(current.id); return .handled }
+            let parent = (current.id as NSString).deletingLastPathComponent
+            if !parent.isEmpty { target = parent }
+        default:
+            guard let current else { return .ignored }
+            activate(current.id)
+            return .handled
+        }
+        if let target {
+            files.selection = target
+            proxy.scrollTo(target)
+        }
+        return .handled
     }
 
     private func activate(_ path: String) {
         guard let url = files.url(path) else { return }
-        if files.query.trimmingCharacters(in: .whitespaces).isEmpty,
-           files.rows.first(where: { $0.node.path == path })?.node.isFolder == true {
-            files.toggle(path); return
+        if !searching, files.rows.first(where: { $0.node.path == path })?.node.isFolder == true {
+            toggle(path); return
         }
         var directory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &directory), !directory.boolValue else { return }
-        if !files.query.trimmingCharacters(in: .whitespaces).isEmpty { files.reveal(path) }
+        if searching { files.reveal(path) }
         open(url)
-    }
-
-    private func keyActivate() -> KeyPress.Result {
-        guard let selected = files.selection else { return .ignored }
-        activate(selected)
-        return .handled
     }
 }
 
-private struct FileRow: View {
+/// One row of the tree or of the filter results; the id is the path relative to the folder.
+private struct FileEntry: Identifiable, Equatable {
+    let id: String
     let name: String
     let detail: String?
     let folder: Bool
-    let expanded: Bool
     let depth: Int
-    var toggle: () -> Void = {}
+}
+
+/// The selection is a palette tint, as in the chat changes window, so the name stays readable on it.
+private struct FileRow: View {
+    let entry: FileEntry
+    let expanded: Bool
+    let selected: Bool
+    let toggle: () -> Void
+    let click: () -> Void
+    @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 5) {
-            if folder {
-                Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 9, weight: .semibold)).foregroundStyle(DeskPalette.muted).frame(width: 10)
+            if entry.folder {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold)).foregroundStyle(DeskPalette.muted)
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+                    .frame(width: 12, height: 18)
                     .contentShape(Rectangle()).onTapGesture(perform: toggle)
             } else {
-                Color.clear.frame(width: 10)
+                Color.clear.frame(width: 12, height: 18)
             }
-            Image(nsImage: folder ? FileIcons.folder : FileIcons.icon(for: name)).resizable().frame(width: 15, height: 15)
-            Text(name).font(.ui(size: 12.5)).lineLimit(1).truncationMode(.middle)
-            if let detail, !detail.isEmpty {
+            Image(nsImage: entry.folder ? FileIcons.folder : FileIcons.icon(for: entry.name)).resizable().frame(width: 15, height: 15)
+            Text(entry.name).font(.ui(size: 12.5)).foregroundStyle(DeskPalette.ink).lineLimit(1).truncationMode(.middle)
+            if let detail = entry.detail, !detail.isEmpty {
                 Text(detail).font(.ui(size: 11)).foregroundStyle(DeskPalette.muted).lineLimit(1).truncationMode(.head)
             }
+            Spacer(minLength: 0)
         }
-        .padding(.leading, CGFloat(depth) * 14)
+        .padding(.leading, 4 + CGFloat(entry.depth) * 14).padding(.trailing, 8).padding(.vertical, 3)
+        .background(RoundedRectangle(cornerRadius: 6).fill(selected ? DeskPalette.selection : hovering ? DeskPalette.rowHover : .clear))
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onTapGesture(perform: click)
+        .pointingHandCursor()
     }
 }
 

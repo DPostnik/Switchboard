@@ -6,6 +6,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Added
 
+- Project files panel: drawn in the app's colors (row selection and hover, search field like the chat files panel); folders open and close with a sliding animation and a turning arrow, and the arrow keys work as in Finder (Right opens a folder, Left closes it or goes to its parent).
 - iPhone app: drop an image (such as the screenshot thumbnail) anywhere on the chat, or paste one from the clipboard with the Paste button that appears above it; Copy and Share show only under the end of the agent's reply, not under each progress note.
 - Chat: image paths you paste into a message (screenshots, files from other apps) show as numbered chips with a small preview, in the sent message and in the message field; in the message field they are written as `[path]`, so they work right next to text, and you can drag them to another place in the text and open back into the path by deleting a bracket, with the images shown above the field (click to view, × to remove; removing a chip removes the image). Images open in a viewer over the window (zoom, arrows through the images, Esc to close). Pasting a screenshot from the clipboard saves it and inserts its path; Copy Image on a chip pastes back into the message field as the same file and into other apps as the picture.
 - Chat job (Job button in the chat toolbar): set a "done when" criterion for the chat; the panel shows how long the job has been open, what the agent is doing now and the criterion, with Done and Cancel job (cancel also stops the running turn). The agent receives the criterion, and later that the job was closed, with your next message; the transcript does not show these notes.
@@ -53,6 +54,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Fixed
 
+- Chat: a quick double click on the Project files button no longer leaves an empty column where the side panel was.
 - iPhone app: changing a chat's role from the phone is no longer rejected by the cloud database.
 - Remote access: the connection to the server no longer stays down for good after a network drop during reconnect, so the iPhone sees the Mac again without turning remote access off and on.
 - Claude chats: screenshots and PDFs in temporary folders and the user's own attachments are read without a prompt in every role, and a background sub-agent still working after the turn ended gets the role's normal answer instead of a silent refusal of every tool.
