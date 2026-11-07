@@ -115,9 +115,11 @@ private func interactiveFixture(_ root: URL) throws -> URL {
     assert not any(k in os.environ for k in ['ANTHROPIC_API_KEY','CLAUDE_CODE_OAUTH_TOKEN','ANTHROPIC_BASE_URL','BASH_ENV','NODE_OPTIONS'])
     sid=sys.argv[sys.argv.index('--resume' if '--resume' in sys.argv else '--session-id')+1]
     def out(value): print(json.dumps(value),flush=True)
-    def result(): out({'type':'result','session_id':sid,'is_error':False,
+    def result(**extra): out({'type':'result','session_id':sid,'is_error':False,
         'usage':{'input_tokens':10,'cache_creation_input_tokens':20,'cache_read_input_tokens':70,'output_tokens':5},
-        'modelUsage':{'claude-helper':{'contextWindow':5000,'inputTokens':1},'claude-test':{'contextWindow':1000,'inputTokens':10}}})
+        'modelUsage':{'claude-helper':{'contextWindow':5000,'inputTokens':1},'claude-test':{'contextWindow':1000,'inputTokens':10}},**extra})
+    # Claude Code 2.1.292: a turn the CLI starts on a task notification names that origin in its result.
+    notified={'origin':{'kind':'task-notification'}}
     out({'type':'system','subtype':'init','session_id':sid,'model':'claude-test'})
     with (home/'launches').open('a') as f: f.write(sid+'\n')
     def tasks(*ids): out({'type':'system','subtype':'background_tasks_changed','session_id':sid,'tasks':[{'task_id':i,'task_type':'local_agent'} for i in ids]})
@@ -127,7 +129,18 @@ private func interactiveFixture(_ root: URL) throws -> URL {
         tasks()
         out({'type':'system','subtype':'init','session_id':sid,'model':'claude-test'})
         out({'type':'assistant','session_id':sid,'message':{'id':'woke-'+sid,'content':[{'type':'text','text':'woke'}]}})
-        result()
+        result(**notified)
+    def woke_idle():
+        # The task ended before the turn did; the idle CLI then answers its notifications one turn at a time.
+        for n in ['1','2']:
+            time.sleep(0.3)
+            out({'type':'system','subtype':'init','session_id':sid,'model':'claude-test'})
+            out({'type':'assistant','session_id':sid,'message':{'id':'woke-'+n+'-'+sid,'content':[{'type':'text','text':'woke '+n}]}})
+            if n=='1':
+                # A request in that turn goes to the user; an unseen turn would refuse it as unattended.
+                out({'type':'control_request','request_id':'woke-write','request':{'subtype':'can_use_tool','tool_name':'Write','input':{'file_path':'/outside-project/file','content':'x'}}})
+                while not (home/'answer').exists(): time.sleep(0.05)
+            result(**notified)
     for line in sys.stdin:
         value=json.loads(line)
         if value['type']=='control_request':
@@ -185,6 +198,16 @@ private func interactiveFixture(_ root: URL) throws -> URL {
                 out({'type':'assistant','session_id':sid,'message':{'id':'handled-'+sid,'content':[{'type':'text','text':'handled'}]}})
                 result()
                 life('completed')
+                continue
+            if prompt=='background-early':
+                # A background command fails at once: it starts and ends inside the turn, so the result sees no tasks.
+                tasks('s1')
+                out({'type':'system','subtype':'task_started','session_id':sid,'task_id':'s1','tool_use_id':'bash-bg','description':'Build','task_type':'local_bash','is_backgrounded':True})
+                out({'type':'system','subtype':'task_notification','session_id':sid,'task_id':'s1','tool_use_id':'bash-bg','status':'failed','summary':'Build failed'})
+                tasks()
+                out({'type':'assistant','session_id':sid,'message':{'id':'early-'+sid,'content':[{'type':'text','text':'building'}]}})
+                result()
+                threading.Thread(target=woke_idle).start()
                 continue
             if prompt=='unknown': out({'type':'control_request','request_id':'unknown','request':{'subtype':'unexpected_action'}}); continue
             if prompt=='wait': continue
@@ -1587,6 +1610,37 @@ private func completedClaudeSession(_ adapter: ClaudeIntegration, binary: URL, h
     try await waitFor { await events.completionCount() == 3 }
     // A new user message starts a fresh round: finished sub-agents leave the preview.
     #expect(await events.subagents().last == [])
+    #expect(try String(contentsOf: home.appendingPathComponent("launches"), encoding: .utf8).split(separator: "\n").count == 1)
+    #expect(await events.diagnostics().isEmpty)
+    await adapter.disconnect()
+}
+
+@Test func claudeWarmCliTurnAfterATaskEndedEarlyReachesTheChat() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let developer = AgentRoleCatalog.preset(AgentRoleID.developer).profile
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root, role: developer)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "background-early", role: developer)).value()
+    // The task ended before the result, so no wait began; the warm CLI's own turn still shows and asks the user.
+    try await waitFor { await events.interaction() != nil }
+    let interaction = try #require(await events.interaction())
+    guard case .success = await adapter.answer(interaction.id, session: session, context: descriptor.context, response: .deny) else {
+        Issue.record("answer failed"); return
+    }
+    // Its end keeps the CLI warm, so the next queued notification gets its own turn too.
+    try await waitFor { await events.completionCount() == 3 }
+    #expect(await events.startedCount() == 3)
+    #expect(await events.background().allSatisfy { $0 == 0 })
+    let history = try await adapter.history(session, context: descriptor.context).value()
+    #expect(history.map { $0.items.map(\.text) }.dropFirst().map { $0.first } == ["woke 1", "woke 2"])
+    _ = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root, session: session, role: developer)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, role: developer)).value()
+    try await waitFor { await events.completionCount() == 4 }
     #expect(try String(contentsOf: home.appendingPathComponent("launches"), encoding: .utf8).split(separator: "\n").count == 1)
     #expect(await events.diagnostics().isEmpty)
     await adapter.disconnect()

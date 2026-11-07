@@ -760,8 +760,9 @@ public actor ClaudeIntegration: AgentIntegration {
             let outcome: AgentExecutionOutcome = interrupted.contains(id) ? .cancelled : value["is_error"].bool == true ? .failed : .completed
             // Background tasks live in this CLI, which resumes the agent itself when they finish; a stopped turn ends them.
             let keep = !interrupted.contains(id) && !(backgroundTasks[id] ?? []).isEmpty
-            // A clean turn keeps its process warm; errors and interrupts restart from native history.
-            let park = !keep && outcome == .completed && sessions[id]?.active != nil
+            // A clean turn keeps its process warm; errors and interrupts restart from native history. So does a clean turn
+            // the CLI ran unseen: closing it would drop the notifications still queued in it.
+            let park = !keep && outcome == .completed
             if !keep && !park { wires.removeValue(forKey: id) }
             if let turn = sessions[id]?.active, var meter = meters[id] {
                 meter.complete(result: value); meters[id] = meter
@@ -778,8 +779,10 @@ public actor ClaudeIntegration: AgentIntegration {
         case "system":
             switch value["subtype"].string {
             case "init":
-                // A new main turn the CLI started itself after its background tasks finished.
-                if waiting[id] != nil, sessions[id]?.active == nil, value["parent_tool_use_id"].string == nil { wake(id) }
+                // A new main turn the CLI started itself after its background tasks finished. A task that ended before the
+                // previous result leaves no wait: the warm CLI starts that turn while it idles.
+                if waiting[id] != nil || warm[id]?.wire === wire, sessions[id]?.active == nil, !submitting.contains(id),
+                   value["parent_tool_use_id"].string == nil { wake(id) }
                 if let model = value["model"].string { meters[id]?.model = model }
                 guard value["parent_tool_use_id"].string == nil else { return }
                 if let commands = ClaudeToolCalls.commands(initFrame: value, known: commandDetails[id] ?? [:]) {
@@ -1244,7 +1247,7 @@ public actor ClaudeIntegration: AgentIntegration {
     private func abandonWait(_ id: String) {
         stopSubagents(id)
         guard waiting[id] != nil else { return }
-        stopWaiting(id)
+        stopWaiting(id); warm[id] = nil
         sink.yield(.init(session: reference(id), payload: .diagnostic(L10n.text(
             "Процесс Claude с фоновыми задачами остановлен до их завершения; их результат не получен. Ничего не повторялось.",
             "The Claude process running background tasks stopped before they finished; their result was not received. Nothing was retried."))))

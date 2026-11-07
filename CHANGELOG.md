@@ -58,6 +58,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 ### Fixed
 
 - Chat: a quick double click on the Project files button no longer leaves an empty column where the side panel was.
+- Claude chats: when a background command ended before the agent's turn did, the agent's next turn on its result no longer runs unseen: its reply reaches the chat, its requests ask you instead of being refused as unattended, and the Claude process stays open for the following notifications.
 - iPhone app: changing a chat's role from the phone is no longer rejected by the cloud database.
 - Remote access: the connection to the server no longer stays down for good after a network drop during reconnect, so the iPhone sees the Mac again without turning remote access off and on.
 - Claude chats: screenshots and PDFs in temporary folders and the user's own attachments are read without a prompt in every role, and a background sub-agent still working after the turn ended gets the role's normal answer instead of a silent refusal of every tool.
