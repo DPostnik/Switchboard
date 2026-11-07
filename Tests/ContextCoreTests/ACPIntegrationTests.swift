@@ -660,9 +660,9 @@ func geminiLiveHandshakeWithoutSignIn() async throws {
     model.state.projects = [project]; model.projectID = project.id; model.state.model = "codex-default"
     model.selectAgent(gemini)
     #expect(model.currentAgent == gemini)
-    // A new Gemini chat keeps its own default model; Codex's setting is untouched.
+    // A new Gemini chat's pick is that chat's only: no default changes, Codex's setting is untouched.
     model.selectModel("deep")
-    #expect(model.state.agentModels?[gemini.agent.rawValue] == "deep" && model.state.model == "codex-default" && model.currentModel == "deep")
+    #expect(model.state.agentModels?[gemini.agent.rawValue] == nil && model.state.model == "codex-default" && model.currentModel == "deep")
     #expect(model.currentEffort == "")
     model.draft = "stream"
     #expect(model.canSend)

@@ -47,9 +47,10 @@ struct ModelChip: View {
     private var help: String {
         var lines: [String] = []
         if let catalog {
-            let fallback = catalog.title(catalog.defaultModel)
-            lines.append(L10n.text("Модель Claude для новых сообщений. По умолчанию — \(fallback).",
-                                   "Claude model for new messages. Default is \(fallback)."))
+            let fallback = catalog.title(model.resolvedDefaultModel(model.currentAgent, project: model.projectID))
+            let fallbackEffort = catalog.effortTitle(model.resolvedDefaultEffort(model.currentAgent, project: model.projectID)) ?? catalog.defaultEffort.title
+            lines.append(L10n.text("Модель Claude для новых сообщений. Новый чат этого проекта начинается с \(fallback) · \(fallbackEffort.lowercased()).",
+                                   "Claude model for new messages. A new chat in this project starts with \(fallback) · \(fallbackEffort.lowercased())."))
             let configured = model.currentModel.trimmingCharacters(in: .whitespacesAndNewlines)
             if !configured.isEmpty {
                 lines.append(L10n.text("Выбрано: ", "Selected: ") + configured)
@@ -58,8 +59,10 @@ struct ModelChip: View {
                     lines.append(L10n.text("Недоступно: ", "Unavailable: ") + note)
                 }
             }
-            lines.append(L10n.text("Усилие рассуждения Claude для новых сообщений. По умолчанию — \(catalog.defaultEffort.title.lowercased()). Низкое усилие экономит токены на простых задачах и подагентах.",
-                                   "Claude reasoning effort for new messages. Default is \(catalog.defaultEffort.title.lowercased()). Low effort saves tokens on simple tasks and sub-agents."))
+            lines.append(L10n.text("Усилие рассуждения Claude для новых сообщений. Низкое усилие экономит токены на простых задачах и подагентах.",
+                                   "Claude reasoning effort for new messages. Low effort saves tokens on simple tasks and sub-agents."))
+            lines.append(L10n.text("Выбор в новом чате действует только на этот чат. Умолчание меняется пунктами «Сделать по умолчанию» или в настройках проекта.",
+                                   "A choice in a new chat applies to that chat only. Change the default with Make default or in the project settings."))
         } else {
             let name = model.currentAgentName
             lines.append(L10n.text("Модель и усилие рассуждения \(name) для новых сообщений.",
@@ -141,6 +144,16 @@ struct ModelChip: View {
                     }.pickerStyle(.inline).labelsHidden()
                 } header: { Text(L10n.text("Рассуждение", "Reasoning")) }
             }
+        }
+        if showsModels, let project = model.selectedProject {
+            Section {
+                Button(L10n.text("Сделать по умолчанию в проекте «\(project.name)»", "Make default in project “\(project.name)”")) {
+                    model.saveCurrentModelAsDefault(projectOnly: true)
+                }
+                Button(L10n.text("Сделать по умолчанию во всех проектах", "Make default in all projects")) {
+                    model.saveCurrentModelAsDefault(projectOnly: false)
+                }
+            } header: { Text(L10n.text("Для новых чатов", "For new chats")) }
         }
         // The agent is fixed once the chat exists.
         if newChat {

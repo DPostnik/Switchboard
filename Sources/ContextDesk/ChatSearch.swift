@@ -120,8 +120,8 @@ extension DeskModel {
     /// Creates the search chat and sends the request. `web` is the web chat ID: the chat is then not opened on the desktop.
     private func launchChatSearch(query: String, project: Project, scoped: Bool, web: String?, localID: String) async throws {
         guard let agent = chatSearchAgent, let client = client(agent) else { throw RemoteFailure.invalidCommand }
-        let model = modelCatalog(agent)?.runnable.first { $0.id == Self.chatSearchModel }?.id ?? resolvedDefaultModel(agent)
-        let effort = resolvedDefaultEffort(agent)
+        let model = modelCatalog(agent)?.runnable.first { $0.id == Self.chatSearchModel }?.id ?? resolvedDefaultModel(agent, project: project.id)
+        let effort = resolvedDefaultEffort(agent, project: project.id)
         let role = roleCatalog.role(AgentRoleID.reader) ?? project.chatRole(roleCatalog)
         try prepareChatSearchRecipe()
         refreshChatSearchIndex()

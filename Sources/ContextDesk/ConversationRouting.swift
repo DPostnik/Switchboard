@@ -54,19 +54,61 @@ extension DeskModel {
         models[agent.agent.rawValue] = model.isEmpty ? nil : model
         state.agentModels = models.isEmpty ? nil : models
     }
-    /// The default model a new message uses; a catalog agent resolves an unset setting to the app default.
-    func resolvedDefaultModel(_ agent: AgentConnectionID) -> String {
-        if traits(agent).contains(.sessionModels) { return defaultModelSetting(agent) }
-        return modelCatalog(agent)?.resolveModel(state.claudeModel) ?? state.model
+    /// The app default effort setting of `agent` as stored: the catalog agent's own, else the composer's session value.
+    func defaultEffortSetting(_ agent: AgentConnectionID) -> String? {
+        modelCatalog(agent) != nil ? state.claudeEffort : draftEffort
+    }
+    /// The project's own default for new chats of `agent`; empty when it follows the app default.
+    func projectModelChoice(_ agent: AgentConnectionID, project: UUID?) -> ModelChoice {
+        project.flatMap { self.project($0)?.chatModels?[agent.agent.rawValue] } ?? ModelChoice()
+    }
+    /// What a new chat of `agent` in `project` starts with before the app default: the composer's pick for the
+    /// project's next chat, then the project default. A pick never changes any default.
+    func newChatChoice(_ agent: AgentConnectionID, project: UUID?) -> ModelChoice {
+        let picked = project.flatMap { newChatModelChoices[$0]?[agent.agent.rawValue] }
+        return ModelChoice.resolve([picked, projectModelChoice(agent, project: project)])
+    }
+    /// Records the composer's pick for the selected project's next new chat only.
+    func pickNewChatModel(_ change: (inout ModelChoice) -> Void) {
+        guard let project = projectID else { return }
+        var picks = newChatModelChoices[project] ?? [:]
+        var choice = picks[currentAgent.agent.rawValue] ?? ModelChoice()
+        change(&choice)
+        picks[currentAgent.agent.rawValue] = choice.isEmpty ? nil : choice
+        newChatModelChoices[project] = picks.isEmpty ? nil : picks
+    }
+    /// Saves the composer's current model and effort as the default of new chats: the project's, or the app's (which
+    /// also clears the project's own, so the project follows it).
+    func saveCurrentModelAsDefault(projectOnly: Bool) {
+        let agent = currentAgent, choice = ModelChoice(model: currentModel, effort: currentEffort)
+        guard let project = selectedChat?.projectID ?? projectID,
+              let index = state.projects.firstIndex(where: { $0.id == project }) else { return }
+        if projectOnly {
+            state.projects[index].setChatModel(choice, agent: agent.agent.rawValue)
+        } else {
+            if modelCatalog(agent) != nil { state.claudeModel = choice.model; state.claudeEffort = choice.effort }
+            else if traits(agent).contains(.sessionModels) { setDefaultModelSetting(choice.model ?? "", agent: agent) }
+            else { state.model = choice.model ?? ""; draftEffort = choice.effort ?? "medium" }
+            state.projects[index].setChatModel(ModelChoice(), agent: agent.agent.rawValue)
+        }
+        newChatModelChoices[project]?[agent.agent.rawValue] = nil
+        persist()
+    }
+    /// The default model a new message uses (project default, else the app's); a catalog agent resolves an unset
+    /// setting to the app default.
+    func resolvedDefaultModel(_ agent: AgentConnectionID, project: UUID? = nil) -> String {
+        let setting = projectModelChoice(agent, project: project).model ?? defaultModelSetting(agent)
+        return modelCatalog(agent)?.resolveModel(setting) ?? setting
     }
     /// The effort sent to a session-models agent: only one the model lists, else none (the agent's own default).
     func sessionEffort(_ effort: String?, model: String, agent: AgentConnectionID?) -> String {
         guard let effort, let listed = agentState(agent).models.first(where: { $0.id == model })?.efforts, listed.contains(effort) else { return "" }
         return effort
     }
-    /// The default effort of a new chat on a catalog agent.
-    func resolvedDefaultEffort(_ agent: AgentConnectionID) -> String {
-        modelCatalog(agent)?.resolveEffort(state.claudeEffort) ?? draftEffort
+    /// The default effort of a new chat (project default, else the app's).
+    func resolvedDefaultEffort(_ agent: AgentConnectionID, project: UUID? = nil) -> String {
+        let setting = projectModelChoice(agent, project: project).effort ?? defaultEffortSetting(agent)
+        return modelCatalog(agent)?.resolveEffort(setting) ?? setting ?? draftEffort
     }
     /// Model and effort a queued app message (continuation, Telegram reply) is sent with on the chat's own agent.
     func dispatchModel(_ chat: Chat) -> String {
@@ -78,10 +120,9 @@ extension DeskModel {
         return modelCatalog(agent)?.resolveEffort(chat.effort ?? state.claudeEffort) ?? chat.effort ?? "medium"
     }
     var currentModel: String {
+        let setting = selectedChat?.model ?? newChatChoice(currentAgent, project: projectID).model ?? defaultModelSetting(currentAgent)
         // A catalog agent has an app default, so a blank value never reaches the CLI as "its own choice".
-        if let catalog = modelCatalog(currentAgent) { return catalog.resolveModel(selectedChat?.model ?? state.claudeModel) }
-        if traits(currentAgent).contains(.sessionModels) { return selectedChat?.model ?? defaultModelSetting(currentAgent) }
-        return selectedChat?.model ?? state.model
+        return modelCatalog(currentAgent)?.resolveModel(setting) ?? setting
     }
     /// The effort the composer sends with: the catalog level, the selected model's free-form effort, or for a
     /// session-models agent only an effort its model lists.
@@ -90,23 +131,24 @@ extension DeskModel {
         if traits(currentAgent).contains(.sessionModels) { return sessionEffort(effort, model: currentModel, agent: currentAgent) }
         return effort
     }
+    /// In a new chat the pick holds for the project's next chat only; the defaults change through
+    /// `saveCurrentModelAsDefault` and the project settings.
     func selectCurrentModel(_ value: String) {
         if modelCatalog(currentAgent) != nil {
-            if let index = state.chats.firstIndex(where: { $0.id == chatID }) { state.chats[index].model = value }
-            else { state.claudeModel = value }
-            saveAgentChoice()
+            if let index = state.chats.firstIndex(where: { $0.id == chatID }) { state.chats[index].model = value; saveAgentChoice() }
+            else { pickNewChatModel { $0.model = value } }
         } else { selectModel(value) }
     }
     /// A catalog agent keeps its own effort so another agent's default never leaks into its session.
     /// An unset or blank value resolves to the app default level.
     var claudeEffort: String {
-        let configured = selectedChat?.effort ?? state.claudeEffort
+        let configured = selectedChat.map { $0.effort ?? state.claudeEffort }
+            ?? newChatChoice(currentAgent, project: projectID).effort ?? state.claudeEffort
         return (modelCatalog(currentAgent) ?? modelCatalog(firstAgent(with: .catalogModels)))?.resolveEffort(configured) ?? configured ?? ""
     }
     func selectClaudeEffort(_ value: String) {
         guard let catalog = modelCatalog(currentAgent), catalog.isDispatchableEffort(value) else { return }
-        if let index = state.chats.firstIndex(where: { $0.id == chatID }) { state.chats[index].effort = value }
-        else { state.claudeEffort = value }
-        saveAgentChoice()
+        if let index = state.chats.firstIndex(where: { $0.id == chatID }) { state.chats[index].effort = value; saveAgentChoice() }
+        else { pickNewChatModel { $0.effort = value } }
     }
 }

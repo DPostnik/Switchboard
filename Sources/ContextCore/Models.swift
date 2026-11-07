@@ -28,9 +28,31 @@ public struct Project: Identifiable, Codable, Hashable, Sendable {
     /// Sidebar visibility only; chats, permissions and scheduled work are retained.
     public var hidden: Bool?
     public var isHidden: Bool { hidden == true }
+    /// Agent ID -> model and effort new chats of the project start with; a missing field follows the app default.
+    public var chatModels: [String: ModelChoice]?
     public init(path: String) {
         self.id = UUID(); self.path = URL(fileURLWithPath: path).standardizedFileURL.path
         self.name = URL(fileURLWithPath: path).lastPathComponent
+    }
+}
+/// Model and reasoning effort for new chats at one level (composer pick, project default). A nil field follows the
+/// next level, ending at the app default.
+public struct ModelChoice: Codable, Hashable, Sendable {
+    public var model: String?
+    public var effort: String?
+    public init(model: String? = nil, effort: String? = nil) { self.model = model; self.effort = effort }
+    public var isEmpty: Bool { model == nil && effort == nil }
+    /// Each field from the first level that sets it, most specific level first.
+    public static func resolve(_ levels: [ModelChoice?]) -> ModelChoice {
+        ModelChoice(model: levels.lazy.compactMap { $0?.model }.first, effort: levels.lazy.compactMap { $0?.effort }.first)
+    }
+}
+public extension Project {
+    /// Sets or clears the project's default for `agent`; an empty choice removes it.
+    mutating func setChatModel(_ choice: ModelChoice, agent: String) {
+        var models = chatModels ?? [:]
+        models[agent] = choice.isEmpty ? nil : choice
+        chatModels = models.isEmpty ? nil : models
     }
 }
 public enum AccessMode: String, Codable, CaseIterable, Sendable {

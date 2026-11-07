@@ -56,7 +56,8 @@ import Testing
     #expect(model.currentModel == "claude-opus-5-5")
 
     model.selectCurrentModel("claude-sonnet-5-5")
-    #expect(model.state.claudeModel == "claude-sonnet-5-5")
+    // A new chat's pick is that chat's only; the app default stays.
+    #expect(model.state.claudeModel == nil)
     #expect(ClaudeModel.title(for: model.currentModel) == "Sonnet 5.5")
     #expect(model.state.model.isEmpty || model.state.model != "claude-sonnet-5-5")
 
@@ -66,7 +67,7 @@ import Testing
 
     // A blank value (the legacy empty field) means the app default, not the CLI's own choice.
     model.selectCurrentModel("")
-    #expect(model.state.claudeModel == "")
+    #expect(model.state.claudeModel == nil)
     #expect(model.currentModel == "claude-opus-5-5")
 }
 
@@ -86,7 +87,7 @@ import Testing
 
     model.selectClaudeEffort("low")
     #expect(model.claudeEffort == "low")
-    #expect(model.state.claudeEffort == "low")
+    #expect(model.state.claudeEffort == nil)
     #expect(model.effort == "medium")
 
     model.selectClaudeEffort("ultra")
@@ -118,4 +119,59 @@ import Testing
     model.selectClaudeEffort("low")
     #expect(model.currentModel == "claude-haiku-4-5")
     #expect(model.claudeEffort == "low")
+}
+
+/// A new chat's pick never follows the user into another project: each project starts at its own default, else the
+/// app default, and only "Make default" or the project settings change a default.
+@Test @MainActor func newChatModelPickStaysInItsProjectAndDefaultsComeFromSettings() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let model = DeskModel(store: AppStore(file: root.appendingPathComponent("state.sqlite")),
+                          pluginDirectory: root, summaryResources: nil,
+                          jobStore: JobStore(file: root.appendingPathComponent("jobs.json")))
+    let first = model.state.addProject(path: "/tmp/FirstProject")
+    let second = model.state.addProject(path: "/tmp/SecondProject")
+    model.state.defaultConnection = .appClaude
+    model.state.claudeModel = "claude-opus-5-5"; model.state.claudeEffort = "medium"
+
+    model.selectProject(first)
+    model.selectCurrentModel("claude-sonnet-5-5"); model.selectClaudeEffort("high")
+    #expect(model.currentModel == "claude-sonnet-5-5" && model.claudeEffort == "high")
+    model.selectProject(second)
+    #expect(model.currentModel == "claude-opus-5-5" && model.claudeEffort == "medium")
+    model.selectProject(first)
+    #expect(model.currentModel == "claude-sonnet-5-5" && model.claudeEffort == "high")
+
+    // The project default applies to that project only and wins over the app default.
+    model.selectProject(second)
+    model.updateProjectChatModels(second, [AgentConnectionID.appClaude.agent.rawValue: ModelChoice(model: "claude-haiku-4-5", effort: "low")])
+    #expect(model.currentModel == "claude-haiku-4-5" && model.claudeEffort == "low")
+    #expect(model.resolvedDefaultModel(.appClaude, project: second) == "claude-haiku-4-5")
+    #expect(model.resolvedDefaultModel(.appClaude, project: first) == "claude-opus-5-5")
+
+    // Make default in all projects: the app default changes and the project follows it again.
+    model.selectCurrentModel("claude-fable-5-1"); model.selectClaudeEffort("xhigh")
+    model.saveCurrentModelAsDefault(projectOnly: false)
+    #expect(model.state.claudeModel == "claude-fable-5-1" && model.state.claudeEffort == "xhigh")
+    #expect(model.state.projects.first { $0.id == second }?.chatModels == nil)
+    #expect(model.currentModel == "claude-fable-5-1" && model.claudeEffort == "xhigh")
+
+    // Make default in this project only.
+    model.selectProject(first)
+    model.saveCurrentModelAsDefault(projectOnly: true)
+    #expect(model.state.projects.first { $0.id == first }?.chatModels?[AgentConnectionID.appClaude.agent.rawValue] == ModelChoice(model: "claude-sonnet-5-5", effort: "high"))
+    #expect(model.state.claudeModel == "claude-fable-5-1")
+}
+
+@Test func modelChoiceTakesEachFieldFromTheFirstLevelThatSetsIt() throws {
+    let resolved = ModelChoice.resolve([ModelChoice(effort: "high"), nil, ModelChoice(model: "m", effort: "low")])
+    #expect(resolved == ModelChoice(model: "m", effort: "high"))
+    var project = Project(path: "/tmp/Example")
+    project.setChatModel(ModelChoice(model: "m"), agent: "claude")
+    #expect(project.chatModels == ["claude": ModelChoice(model: "m")])
+    project.setChatModel(ModelChoice(), agent: "claude")
+    #expect(project.chatModels == nil)
+    // Older saved projects without the field still decode.
+    let legacy = try JSONEncoder().encode(Project(path: "/tmp/Legacy"))
+    #expect(try JSONDecoder().decode(Project.self, from: legacy).chatModels == nil)
 }

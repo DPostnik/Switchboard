@@ -9,11 +9,12 @@ import ContextTranscript
 /// request can never change them. Every edit applies on Save.
 struct ProjectSettingsView: View {
     enum Pane: CaseIterable, Identifiable {
-        case roles, sandbox, browser, phone, advanced
+        case roles, model, sandbox, browser, phone, advanced
         var id: Self { self }
         var title: String {
             switch self {
             case .roles: L10n.text("Что можно агентам", "What agents may do")
+            case .model: L10n.text("Модель", "Model")
             case .sandbox: L10n.text("Песочница команд", "Command sandbox")
             case .browser: L10n.text("Браузер и вход", "Browser & sign-in")
             case .phone: L10n.text("Телефон", "Phone")
@@ -47,6 +48,8 @@ struct ProjectSettingsView: View {
     /// Approvals as saved; a server whose `.mcp.json` entry changed since shows as off and must be approved again.
     @State private var mcpServers: [String: String]
     private let projectServers: [ProjectMCPServers.Server]
+    /// Agent ID -> the project's default model and effort for new chats.
+    @State private var chatModels: [String: ModelChoice]
 
     init(model: DeskModel, project: Project) {
         self.model = model; self.project = project
@@ -62,6 +65,7 @@ struct ProjectSettingsView: View {
         suggestedPresets = Set(AccessPresetCatalog.detect(projectPath: project.path))
         _cookieSites = State(initialValue: (project.cookieSites ?? []).joined(separator: "\n"))
         _mcpServers = State(initialValue: project.mcpServers ?? [:])
+        _chatModels = State(initialValue: project.chatModels ?? [:])
         let shown = model.mobileRemote.projects.contains(project.id.uuidString)
         _shownOnPhone = State(initialValue: shown)
         initiallyShownOnPhone = shown
@@ -78,6 +82,7 @@ struct ProjectSettingsView: View {
                             .accessibilityAddTraits(.isHeader)
                         switch section {
                         case .roles: rolesPane
+                        case .model: modelPane
                         case .sandbox: sandboxPane
                         case .browser: browserPane
                         case .phone: phonePane
@@ -201,6 +206,89 @@ struct ProjectSettingsView: View {
             Button(L10n.text("Добавить папку…", "Add folder…")) { chooseFolder() }
                 .buttonStyle(DeskButtonStyle(kind: .text))
         }
+    }
+
+    struct ModelOption: Identifiable { let id: String; let title: String }
+
+    /// Agents with models to choose from: the app's catalog or the engine's list.
+    private var modelAgents: [AgentConnectionID] {
+        model.agentIDs.filter { model.modelCatalog($0) != nil || !model.agentState($0).models.isEmpty }
+    }
+
+    private var modelPane: some View {
+        VStack(alignment: .leading, spacing: .ui(14)) {
+            hint(L10n.text("С чего начинается новый чат этого проекта. Выбор в чипе модели нового чата действует только на этот чат.",
+                           "What a new chat in this project starts with. A choice in a new chat's model chip applies to that chat only."))
+            if modelAgents.isEmpty {
+                hint(L10n.text("Список моделей появится, когда агент подключится.", "The model list appears once an agent connects."))
+            }
+            ForEach(modelAgents, id: \.self) { agent in
+                VStack(alignment: .leading, spacing: .ui(8)) {
+                    Text(model.agentName(agent)).font(.ui(.callout).weight(.semibold))
+                    row(L10n.text("Модель", "Model"), L10n.text("Для новых чатов проекта", "For the project's new chats")) {
+                        Picker(L10n.text("Модель", "Model"), selection: choice(agent, \.model)) {
+                            Text(L10n.text("Как во всех проектах: ", "As in all projects: ") + modelTitle(agent, model.resolvedDefaultModel(agent))).tag("")
+                            ForEach(modelOptions(agent)) { Text($0.title).tag($0.id) }
+                        }
+                        .labelsHidden().pickerStyle(.menu).fixedSize().pointingHandCursor()
+                    }
+                    let efforts = effortOptions(agent)
+                    if !efforts.isEmpty {
+                        row(L10n.text("Рассуждение", "Reasoning"), L10n.text("Для новых чатов проекта", "For the project's new chats")) {
+                            Picker(L10n.text("Рассуждение", "Reasoning"), selection: choice(agent, \.effort)) {
+                                Text(L10n.text("Как во всех проектах: ", "As in all projects: ") + effortTitle(agent, model.resolvedDefaultEffort(agent))).tag("")
+                                ForEach(efforts) { Text($0.title).tag($0.id) }
+                            }
+                            .labelsHidden().pickerStyle(.menu).fixedSize().pointingHandCursor()
+                        }
+                    }
+                }
+                Divider()
+            }
+            hint(L10n.text("Умолчание для всех проектов задаётся в чипе модели: «Сделать по умолчанию во всех проектах».",
+                           "The default for all projects is set in the model chip: Make default in all projects."))
+        }
+    }
+
+    private func choice(_ agent: AgentConnectionID, _ field: WritableKeyPath<ModelChoice, String?>) -> Binding<String> {
+        let key = agent.agent.rawValue
+        return Binding(get: { chatModels[key]?[keyPath: field] ?? "" },
+                       set: { value in
+                           var choice = chatModels[key] ?? ModelChoice()
+                           choice[keyPath: field] = value.isEmpty ? nil : value
+                           chatModels[key] = choice.isEmpty ? nil : choice
+                       })
+    }
+
+    private func modelOptions(_ agent: AgentConnectionID) -> [ModelOption] {
+        var options: [ModelOption]
+        if let catalog = model.modelCatalog(agent) { options = catalog.runnable.map { ModelOption(id: $0.id, title: $0.menuTitle) } }
+        else { options = model.agentState(agent).models.map { ModelOption(id: $0.id, title: $0.displayName) } }
+        // A saved model the list no longer offers stays visible verbatim.
+        if let saved = chatModels[agent.agent.rawValue]?.model, !options.contains(where: { $0.id == saved }) { options.append(ModelOption(id: saved, title: saved)) }
+        return options
+    }
+
+    private func effortOptions(_ agent: AgentConnectionID) -> [ModelOption] {
+        var options: [ModelOption]
+        if let catalog = model.modelCatalog(agent) { options = catalog.efforts.map { ModelOption(id: $0.id, title: $0.title) } }
+        else {
+            let selected = chatModels[agent.agent.rawValue]?.model ?? model.resolvedDefaultModel(agent)
+            options = (model.agentState(agent).models.first { $0.id == selected }?.efforts ?? []).map { ModelOption(id: $0, title: $0) }
+        }
+        if let saved = chatModels[agent.agent.rawValue]?.effort, !options.contains(where: { $0.id == saved }) { options.append(ModelOption(id: saved, title: saved)) }
+        return options
+    }
+
+    private func modelTitle(_ agent: AgentConnectionID, _ id: String) -> String {
+        if let catalog = model.modelCatalog(agent) { return catalog.title(id) }
+        if id.isEmpty { return L10n.text("Авто", "Auto") }
+        return model.agentState(agent).models.first { $0.id == id }?.displayName ?? id
+    }
+
+    private func effortTitle(_ agent: AgentConnectionID, _ id: String) -> String {
+        if id.isEmpty { return L10n.text("Авто", "Auto") }
+        return model.modelCatalog(agent)?.effortTitle(id) ?? id
     }
 
     private var sandboxPane: some View {
@@ -387,6 +475,7 @@ struct ProjectSettingsView: View {
                                  cookieSites: cookieSites.split(whereSeparator: \.isNewline).map(String.init), mcpServers: mcpServers,
                                  chatAddOns: chatAddOns,
                                  sandbox: (sandboxEnabled, Array(accessPresets), sandboxCommands.split(whereSeparator: \.isNewline).map(String.init)))
+        model.updateProjectChatModels(project.id, chatModels)
         if shownOnPhone != initiallyShownOnPhone { phone.setProject(project.id, shown: shownOnPhone) }
         dismiss()
     }

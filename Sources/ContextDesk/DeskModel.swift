@@ -118,6 +118,9 @@ private struct ChatRunState: Equatable {
     /// Project ID -> role picked in the composer for the project's next new chat; absent follows the project default.
     /// It applies to that chat only; the project default changes in the project settings.
     @Published var newChatRoles: [UUID: String] = [:]
+    /// Project ID -> agent ID -> model and effort picked in the composer for the project's next new chat; absent
+    /// follows the project default, then the app default. It never changes either default.
+    @Published var newChatModelChoices: [UUID: [String: ModelChoice]] = [:]
     /// Project ID -> role add-ons picked for the project's next new chat; absent follows the project's add-ons.
     @Published var newChatAddOns: [UUID: Set<RoleAddOn>] = [:]
     /// Project ID -> where the project's next new chat works; absent is the project folder (`ChatWorktrees.swift`).
@@ -286,14 +289,17 @@ private struct ChatRunState: Equatable {
     @Published var draftEffort = "medium"
     var effort: String {
         get {
-            guard let chat = selectedChat else { return draftEffort }
+            // A catalog agent's pick is `claudeEffort`; it never leaks into this free-form effort.
+            guard let chat = selectedChat else {
+                return (modelCatalog(currentAgent) == nil ? newChatChoice(currentAgent, project: projectID).effort : nil) ?? draftEffort
+            }
             return chat.effort ?? "medium"
         }
         set {
             if let index = state.chats.firstIndex(where: { $0.id == chatID }) {
                 state.chats[index].effort = newValue
                 persist()
-            } else { draftEffort = newValue }
+            } else { pickNewChatModel { $0.effort = newValue } }
         }
     }
     private var newChatDrafts: [UUID: String] = [:]
@@ -883,14 +889,11 @@ private struct ChatRunState: Equatable {
         if let index = state.chats.firstIndex(where: { $0.id == chatID }) {
             state.chats[index].model = model
             state.chats[index].effort = "medium"
-        } else if traits(currentAgent).contains(.sessionModels) {
-            setDefaultModelSetting(model, agent: currentAgent)
-            draftEffort = "medium"
+            persist()
         } else {
-            state.model = model
-            draftEffort = "medium"
+            // A new chat's pick holds for the project's next chat only; its effort follows the defaults again.
+            pickNewChatModel { $0.model = model; $0.effort = nil }
         }
-        persist()
     }
     /// `quiet`: the engine reported new limits (Codex does after each model response, mid-turn). It shows no "Checking limits"
     /// state and writes the result in one change, so each report publishes the model once instead of three or four times;
@@ -1488,6 +1491,14 @@ private struct ChatRunState: Equatable {
         if let mcpServers { state.projects[index].mcpServers = mcpServers.isEmpty ? nil : mcpServers }
         persist()
     }
+    /// The project's own model and effort for new chats, by agent ID; empty choices follow the app default.
+    func updateProjectChatModels(_ id: UUID, _ choices: [String: ModelChoice]) {
+        guard let index = state.projects.firstIndex(where: { $0.id == id }) else { return }
+        let kept = choices.filter { !$0.value.isEmpty }
+        guard state.projects[index].chatModels ?? [:] != kept else { return }
+        state.projects[index].chatModels = kept.isEmpty ? nil : kept
+        persist()
+    }
     var queuedMessages: [QueuedMessage] { state.queuedMessages ?? [] }
     var visibleQueue: [QueuedMessage] { queuedMessages.filter { $0.threadID == chatID } }
     func removeQueuedMessage(_ id: String) {
@@ -1958,6 +1969,7 @@ private struct ChatRunState: Equatable {
                 if let explicitNewChatRole, newChatRoles[project.id] == explicitNewChatRole.id {
                     newChatRoles.removeValue(forKey: project.id)
                 }
+                if scheduledRun == nil { newChatModelChoices.removeValue(forKey: project.id) }
                 if let explicitNewChatAddOns {
                     chat.roleAddOns = RoleAddOn.allCases.filter(explicitNewChatAddOns.contains).map(\.rawValue)
                     if newChatAddOns[project.id] == explicitNewChatAddOns { newChatAddOns.removeValue(forKey: project.id) }
@@ -2385,12 +2397,16 @@ private struct ChatRunState: Equatable {
         let lists = agentIDs.map { id in (id, remoteReady(id) ? remoteNewChatModels(id) : []) }.filter { !$0.1.isEmpty }
         let ordered = lists.filter { $0.0 == state.defaultConnection } + lists.filter { $0.0 != state.defaultConnection }
         let newChatModels = ordered.flatMap(\.1)
-        let defaultModel: String
-        if let (lead, options) = ordered.first, traits(lead).contains(.catalogModels) {
-            let configured = resolvedDefaultModel(lead)
-            defaultModel = options.contains(where: { $0.id == configured }) ? configured : options.first?.id ?? state.model
-        } else { defaultModel = state.model }
+        // The phone's preselected model for a project's new chat: the project default, else the app's.
+        func defaultModel(_ project: UUID) -> String {
+            guard let (lead, options) = ordered.first, traits(lead).contains(.catalogModels) else {
+                return ordered.first.flatMap { projectModelChoice($0.0, project: project).model } ?? state.model
+            }
+            let configured = resolvedDefaultModel(lead, project: project)
+            return options.contains(where: { $0.id == configured }) ? configured : options.first?.id ?? state.model
+        }
         return RemoteSnapshot(projects: selected.map {
+            let defaultModel = defaultModel($0.id)
             var project = RemoteProject(id: $0.id.uuidString, name: $0.name, canCreateChat: canCreateRemoteChat)
             project.canSearchChats = canStartChatSearch ? true : nil
             project.models = settingsOptions
@@ -2527,10 +2543,11 @@ private struct ChatRunState: Equatable {
         guard let agent, remoteReady(agent), let client = client(agent) else { throw RemoteFailure.invalidCommand }
         let model: String, effort: String, route = newChatRoute(agent)
         if traits(agent).contains(.catalogModels), let options {
-            model = options.model; effort = resolvedDefaultEffort(agent)
+            model = options.model; effort = resolvedDefaultEffort(agent, project: project.id)
         } else {
             let chosen = try options.map { try remoteModel($0, agent: agent) }
-            model = chosen?.id ?? state.model; effort = chosen?.defaultEffort ?? draftEffort
+            model = chosen?.id ?? resolvedDefaultModel(agent, project: project.id)
+            effort = chosen?.defaultEffort ?? resolvedDefaultEffort(agent, project: project.id)
         }
         let explicitRole = try remoteRole(options, project: project)
         let role = explicitRole ?? project.chatRole(roleCatalog)
@@ -3042,7 +3059,7 @@ private struct ChatRunState: Equatable {
             watch($summaryActiveThread, "summaryActiveThread"), watch($localHistoryNotice, "localHistoryNotice"), watch($routines, "routines"),
             watch($creatingHandoff, "creatingHandoff"), watch($preparingHandoff, "preparingHandoff"), watch($handoffProgress, "handoffProgress"),
             watch($pending, "pending"), watch($restartWaitingChatIDs, "restartWaitingChatIDs"),
-            watch($draftEffort, "draftEffort"), watch($agentStates, "agentStates"), watch($isBootstrapping, "isBootstrapping"),
+            watch($draftEffort, "draftEffort"), watch($newChatModelChoices, "newChatModelChoices"), watch($agentStates, "agentStates"), watch($isBootstrapping, "isBootstrapping"),
             watch($runs, "runs"), watch($stoppingTasks, "stoppingTasks"), watch($deletingChatIDs, "deletingChatIDs"),
             watch($archivingChatIDs, "archivingChatIDs"), watch($loadingChat, "loadingChat"), watch($error, "error"),
             watch($queueEdit, "queueEdit"), watch($notificationStatus, "notificationStatus"),
