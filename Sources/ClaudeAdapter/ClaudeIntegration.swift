@@ -285,7 +285,7 @@ public actor ClaudeIntegration: AgentIntegration {
             let launch = try Self.arguments(id: id, resumed: true, permissions: profile, model: request.model.model, effort: request.model.effort,
                                             advisor: request.model.advisor, chatDirectory: request.chatDirectory, scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                             projectAgents: ProjectAgents.argument(projectPath: record.cwd), projectServers: projectServers,
-                                            home: home, userChrome: userChrome, skills: skills)
+                                            home: home, userChrome: userChrome, skills: skills, cwd: record.cwd)
             // A scheduled turn's CLI still running background tasks (sub-agents) takes the user's message instead of
             // restarting, which would end them: the attended approval rules are applied to the live process first.
             // `--chrome` cannot be added live, so that CLI stays without the user's Chrome until it is replaced.
@@ -296,7 +296,7 @@ public actor ClaudeIntegration: AgentIntegration {
                     try Self.arguments(id: id, resumed: true, permissions: profile, model: model ?? request.model.model, effort: effort ?? request.model.effort,
                                        advisor: advisor ?? request.model.advisor, chatDirectory: request.chatDirectory, scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                        projectAgents: ProjectAgents.argument(projectPath: record.cwd), projectServers: projectServers,
-                                       home: home, userChrome: userChrome, skills: skills)
+                                       home: home, userChrome: userChrome, skills: skills, cwd: record.cwd)
                 }
                 let live = try variant(scheduled: false, userChrome: false)
                 if scheduledWires.contains(id), wireArguments[id] == (try variant(scheduled: true, userChrome: userChrome)) {
@@ -353,7 +353,7 @@ public actor ClaudeIntegration: AgentIntegration {
                                                    chatDirectory: request.chatDirectory, scheduled: scheduled,
                                                    projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                                    projectAgents: ProjectAgents.argument(projectPath: record.cwd), browserServer: server,
-                                                   projectServers: projectServers, home: home, userChrome: userChrome, skills: skills)
+                                                   projectServers: projectServers, home: home, userChrome: userChrome, skills: skills, cwd: record.cwd)
                 var environment = ClaudeProfile.environment(home: home).merging(Self.sessionEnvironment) { _, new in new }
                 // Every descendant of this CLI (also after `setsid`) carries the chat label for the orphan sweeper.
                 environment.merge(ProcessLabels.environment(chat: id)) { _, new in new }
@@ -413,6 +413,8 @@ public actor ClaudeIntegration: AgentIntegration {
         if nonEmpty(new.advisor) != nonEmpty(old.advisor) { settings["advisorModel"] = value(nonEmpty(new.advisor)) }
         return .object(settings)
     }
+    /// Grant key of a command outside the sandbox (`permission()`); not a tool name, so no turn grant covers it.
+    static let unsandboxedGrant = "Bash:unsandboxed"
     /// Asks the CLI for `tool_use_summary` progress lines (a small extra model call per tool batch).
     static let sessionEnvironment = ["CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES": "1"]
     /// `--safe-mode` would also drop `--mcp-config` servers, so browser chats and chats with project servers spell out its isolation instead.
@@ -445,7 +447,8 @@ public actor ClaudeIntegration: AgentIntegration {
     /// Flags for one launch. A scheduled turn runs unattended, so connector actions are never held for approval.
     static func arguments(id: String, resumed: Bool, permissions requested: AgentPermissionProfile, model: String, effort: String?, advisor: String? = nil, chatDirectory: [String]? = nil, scheduled: Bool = false,
                           projectInstructions: String? = nil, projectAgents: String? = nil, browserServer: [String]? = nil,
-                          projectServers: [String: JSONValue] = [:], home: URL? = nil, userChrome: Bool = false, skills: String? = nil) throws -> [String] {
+                          projectServers: [String: JSONValue] = [:], home: URL? = nil, userChrome: Bool = false, skills: String? = nil,
+                          cwd: String? = nil) throws -> [String] {
         let policy = ClaudeLaunchPolicy(requested, scheduled: scheduled, userChromeEnabled: userChrome)
         // Only roles with connectors load the account's claude.ai connectors such as Gmail.
         let connectors = policy.connectors
@@ -474,6 +477,10 @@ public actor ClaudeIntegration: AgentIntegration {
         settings["crossSessionInbound"] = .string("refuse")
         // A setting, not `--advisor`: the flag exits at launch on an unsupported pairing, the setting is skipped.
         if let advisor, !advisor.isEmpty { settings["advisorModel"] = .string(advisor) }
+        if let sandbox = policy.sandboxSettings(cwd: cwd, extraReads: Self.sandboxReads(home: home, skills: skills),
+                                                extraWrites: Self.userTemporaryFolders) {
+            settings["sandbox"] = sandbox
+        }
         if !settings.isEmpty {
             let encoder = JSONEncoder(); encoder.outputFormatting = [.withoutEscapingSlashes, .sortedKeys]
             args += ["--settings", String(decoding: try encoder.encode(JSONValue.object(settings)), as: UTF8.self)]
@@ -921,6 +928,8 @@ public actor ClaudeIntegration: AgentIntegration {
         // answer; only what would need the user is refused, since no turn is there to show the prompt.
         let attended = turn != nil && profile.approvals == .ask && !policy.scheduled
         let outside = L10n.text("Действие выходит за разрешённые границы роли", "Outside the role's permitted scope")
+        /// A command that leaves the sandbox: asked on its own, never covered by "allow for this turn".
+        var unsandboxed = false
         switch name {
         case "Read", "Glob", "Grep", "Write", "Edit":
             let writing = ["Write", "Edit"].contains(name)
@@ -938,6 +947,19 @@ public actor ClaudeIntegration: AgentIntegration {
             } else if !attended, profile.filesystem != .unrestricted { await deny(outside); return }
         case "Bash":
             guard profile.shell == .on || profile.filesystem == .unrestricted else { await deny(outside); return }
+            if policy.sandbox != nil {
+                // Inside the sandbox the OS holds the role's folders, so the CLI's other questions need no prompt.
+                // Outside it, only trusted commands run unasked; the rest is the user's call, one command at a time.
+                let command = input["command"].string ?? ""
+                if policy.runsSandboxed(command, disableSandbox: input["dangerouslyDisableSandbox"].bool == true) || policy.trusts(command) {
+                    await allow(); return
+                }
+                guard attended else {
+                    await deny(L10n.text("Команда вне песочницы; запуск без присмотра её не выполняет.", "A command outside the sandbox; an unattended run does not run it.")); return
+                }
+                unsandboxed = true
+                break
+            }
             guard attended else { await deny(outside); return }
         case "WebFetch", "WebSearch":
             if profile.network || (name == "WebSearch" && profile.webSearch) { await allow(); return }
@@ -984,16 +1006,18 @@ public actor ClaudeIntegration: AgentIntegration {
             questions = Set(fields.map(\.id)); kind = .questions(fields)
         } else {
             // "Allow for this turn" answered earlier in the same turn covers later requests of the same tool.
-            if let grant = turnGrants[id], grant.turn == turn, grant.tools.contains(name) { await allow(); return }
+            if !unsandboxed, let grant = turnGrants[id], grant.turn == turn, grant.tools.contains(name) { await allow(); return }
             kind = .approval(canAllow: true)
             record(.init(tool: name, capability: capability, target: target, decision: .asked, turn: turn), session: id)
         }
         let token = UUID()
-        interactions[token] = .init(session: id, requestID: requestID, tool: name, turn: turn, input: input, questions: questions,
-                                    epoch: context.accountRevision, toolUseID: toolUseID)
+        // The grant key of a command outside the sandbox never matches a tool name, so it cannot widen later requests.
+        interactions[token] = .init(session: id, requestID: requestID, tool: unsandboxed ? Self.unsandboxedGrant : name, turn: turn, input: input,
+                                    questions: questions, epoch: context.accountRevision, toolUseID: toolUseID)
         updateCall(toolUseID, session: id, status: .awaitingApproval)
+        let reason = unsandboxed ? L10n.text("Bash вне песочницы: команда получит доступ ко всему Mac", "Bash outside the sandbox: the command gets access to the whole Mac") : name
         sink.yield(.init(session: reference(id), payload: .interaction(.init(id: token, session: reference(id), turn: turn,
-            kind: kind, reason: name, details: input.display, canAllowTurn: questions == nil))))
+            kind: kind, reason: reason, details: input.display, canAllowTurn: questions == nil && !unsandboxed))))
     }
     /// Resolve existing ancestors through POSIX, including /var versus /private/var.
     /// Missing leaf components are allowed; inaccessible paths and dangling symlinks fail closed.

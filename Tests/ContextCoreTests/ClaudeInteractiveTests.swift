@@ -99,6 +99,7 @@ private func interactiveFixture(_ root: URL) throws -> URL {
     browser='--mcp-config' in sys.argv and 'switchboard_browser' in sys.argv[sys.argv.index('--mcp-config')+1]
     full=sys.argv[sys.argv.index('--permission-mode')+1]=='bypassPermissions'
     twice=False
+    sandboxed=False
     late=False
     editor='--restricted' in sys.argv and sys.argv[sys.argv.index('--tools')+1]=='Read,Glob,Grep,Write,Edit,Skill,AskUserQuestion'
     connectors='--strict-mcp-config' not in sys.argv
@@ -290,6 +291,12 @@ private func interactiveFixture(_ root: URL) throws -> URL {
                 out({'type':'control_request','request_id':'late-read','request':{'subtype':'can_use_tool','tool_name':'Read','input':{'file_path':shot}}})
                 out({'type':'control_request','request_id':'late-write','request':{'subtype':'can_use_tool','tool_name':'Write','input':{'file_path':'/outside-project/file','content':'x'}}})
                 continue
+            if prompt=='sandbox':
+                # Bash requests under the command sandbox: inside it (asked for an env prefix), a trusted command
+                # outside it, then a command that asks to leave it.
+                sandboxed=True
+                out({'type':'control_request','request_id':'sb-1','request':{'subtype':'can_use_tool','tool_name':'Bash','input':{'command':'FOO=1 ls'}}})
+                continue
             if prompt in ['approval','question','outside','connector','approval-twice']:
                 name='AskUserQuestion' if prompt=='question' else 'mcp__claude_ai_Gmail__send_message' if prompt=='connector' else 'Write'
                 args={'questions':[{'question':'Choose','options':[{'label':'Yes','description':'Go ahead','preview':'print(1)'},{'label':'No','description':' '}]}]} if prompt=='question' else {'file_path':'/outside-project/file' if prompt=='outside' else str(pathlib.Path.cwd()/'fixture.txt'),'content':'content'}
@@ -318,6 +325,12 @@ private func interactiveFixture(_ root: URL) throws -> URL {
                 continue
             if twice and value['response']['request_id']=='permission-2':
                 out({'type':'control_request','request_id':'permission-3','request':{'subtype':'can_use_tool','tool_name':'Bash','input':{'command':'echo hi'}}})
+                continue
+            if sandboxed and value['response']['request_id']=='sb-1':
+                out({'type':'control_request','request_id':'sb-2','request':{'subtype':'can_use_tool','tool_name':'Bash','input':{'command':'cd sub && gh pr list'}}})
+                continue
+            if sandboxed and value['response']['request_id']=='sb-2':
+                out({'type':'control_request','request_id':'sb-3','request':{'subtype':'can_use_tool','tool_name':'Bash','input':{'command':'cat ~/secret','dangerouslyDisableSandbox':True}}})
                 continue
             if late: continue
             result()
@@ -878,6 +891,33 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     #expect(decisions == ["Write:asked", "Write:allowed", "Bash:asked"])
     _ = try await adapter.answer(second.id, session: session, context: descriptor.context, response: .deny).value()
     try await waitFor { await events.completion() != nil }
+    await adapter.disconnect()
+}
+
+@Test func claudeSandboxedCommandsRunUnaskedAndCommandsOutsideItAskOneByOne() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    var developer = AgentPermissionProfile.workspace(); developer.shell = .on; developer.network = true
+    developer.commandSandbox = .init(read: [root.path], write: [root.path], unsandboxed: ["gh"])
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root, role: developer)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "sandbox", role: developer)).value()
+    try await waitFor { await events.interaction() != nil }
+    // Only the command that leaves the sandbox asks, and "allow for this turn" is not offered for it.
+    let asked = try #require(await events.interaction())
+    #expect(await events.interactions().count == 1 && !asked.canAllowTurn)
+    #expect(asked.reason == L10n.text("Bash вне песочницы: команда получит доступ ко всему Mac", "Bash outside the sandbox: the command gets access to the whole Mac"))
+    _ = try await adapter.answer(asked.id, session: session, context: descriptor.context, response: .allowOnce).value()
+    try await waitFor { await events.completion() != nil }
+    let answers = try String(contentsOf: home.appendingPathComponent("answers"), encoding: .utf8).split(separator: "\n")
+        .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8))["response"] }
+    #expect(answers.map { $0["request_id"].string } == ["sb-1", "sb-2", "sb-3"])
+    #expect(answers.allSatisfy { $0["response"]["behavior"].string == "allow" })
+    #expect(await events.capabilities().map { "\($0.tool):\($0.decision)" } == ["Bash:allowed", "Bash:allowed", "Bash:asked"])
     await adapter.disconnect()
 }
 

@@ -45,11 +45,14 @@ struct ClaudeLaunchPolicy: Equatable {
     let inspectsCommands: Bool
     /// Audit mode: the engine runs unrestricted and the hook only records what the role would have denied.
     let audit: Bool
+    /// The OS sandbox for Bash (Seatbelt); nil runs commands unconfined.
+    let sandbox: AgentPermissionProfile.CommandSandbox?
 
     init(_ requested: AgentPermissionProfile, scheduled: Bool, userChromeEnabled: Bool) {
         let profile = requested.effective
         self.profile = profile; self.scheduled = scheduled; self.audit = requested.audit
         let unrestricted = profile.filesystem == .unrestricted
+        sandbox = !unrestricted && profile.shell == .on ? profile.commandSandbox : nil
         self.tools = Self.toolList(profile)
         if unrestricted && profile.approvals == .never { permissionMode = "bypassPermissions" }
         else if profile.projectWrites == .silent, profile.filesystem != .readOnly { permissionMode = "acceptEdits" }
@@ -62,7 +65,9 @@ struct ClaudeLaunchPolicy: Equatable {
         if let scratch = profile.scratch, profile.filesystem == .readOnly {
             allow += Self.editTools.map { "\($0)(\(scratch)/**)" }
         }
-        if profile.shell == .on, !unrestricted { allow.append("Bash") }
+        // A sandboxed shell has no blanket rule: sandboxed commands are allowed by the CLI itself, and a command outside
+        // the sandbox reaches the app's answer instead of running unasked (a rule would auto-approve it).
+        if profile.shell == .on, !unrestricted, sandbox == nil { allow.append("Bash") }
         if profile.network, !unrestricted { allow += Self.fetchTools }
         if !unrestricted, profile.network || profile.shell == .on { deny += Self.secretDenyRules }
         switch profile.connectors {
@@ -119,6 +124,47 @@ struct ClaudeLaunchPolicy: Equatable {
             matchers.append(.object(["matcher": .string("SendMessage"), "hookCallbackIds": .array([.string(Self.sendCallback)]), "timeout": .number(60)]))
         }
         return matchers.isEmpty ? .null : .object(["PreToolUse": .array(matchers)])
+    }
+
+    /// The `sandbox` flag setting: the home folder is closed to commands except the chat's folder, the project's
+    /// roots and presets and `extraReads` (the app's own files a command needs, such as skill scripts). Temporary
+    /// folders stay writable. Commands outside the sandbox stay possible but reach `permission()` (see `trusts`).
+    func sandboxSettings(cwd: String?, extraReads: [String] = [], extraWrites: [String] = []) -> JSONValue? {
+        guard let sandbox else { return nil }
+        func unique(_ values: [String]) -> [String] { var seen = Set<String>(); return values.filter { !$0.isEmpty && seen.insert($0).inserted } }
+        let write = unique([cwd].compactMap { $0 } + sandbox.write + ["/private/tmp"] + extraWrites)
+        let read = unique(write + sandbox.read + extraReads)
+        var filesystem: [String: JSONValue] = ["denyRead": .array([.string("~/")]),
+                                               "allowRead": .array(read.map(JSONValue.string)),
+                                               "allowWrite": .array(write.map(JSONValue.string))]
+        if !sandbox.readOnly.isEmpty { filesystem["denyWrite"] = .array(sandbox.readOnly.map(JSONValue.string)) }
+        let excluded = sandbox.unsandboxed.flatMap { [$0, $0 + " *"] }
+        // `*` keeps the network open for roles that have it; the CLI's proxy then passes every host.
+        let network: [String: JSONValue] = ["allowedDomains": .array(profile.network ? [.string("*")] : []),
+                                            "allowLocalBinding": .bool(profile.network)]
+        return .object(["enabled": .bool(true), "failIfUnavailable": .bool(true), "autoAllowBashIfSandboxed": .bool(true),
+                        "allowUnsandboxedCommands": .bool(true), "excludedCommands": .array(excluded.map(JSONValue.string)),
+                        "filesystem": .object(filesystem), "network": .object(network)])
+    }
+    /// Whether a command runs inside the sandbox: not asked to leave it and no segment is an excluded command.
+    func runsSandboxed(_ command: String, disableSandbox: Bool) -> Bool {
+        guard let sandbox, !disableSandbox else { return false }
+        return !Self.heads(command + " ").contains { head in sandbox.unsandboxed.contains { Self.prefix(head, $0) } }
+    }
+    /// Whether a command outside the sandbox runs without a prompt: every segment, as written, is a trusted command
+    /// or a `cd`. Environment prefixes and wrappers (`GIT_SSH_COMMAND=…`, `env`, `nohup`) and redirections could run
+    /// or read anything outside the sandbox, so they are asked.
+    func trusts(_ command: String) -> Bool {
+        guard let sandbox else { return false }
+        let segments = ShellSegments.commands(command + " ").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        return !segments.isEmpty && segments.allSatisfy { segment in
+            guard !segment.contains(">"), !segment.contains("<") else { return false }
+            return segment == "cd" || segment.hasPrefix("cd ") || sandbox.unsandboxed.contains { Self.prefix(segment, $0) }
+        }
+    }
+    private static func prefix(_ head: String, _ pattern: String) -> Bool {
+        let trimmed = pattern.trimmingCharacters(in: .whitespaces)
+        return !trimmed.isEmpty && (head == trimmed || head.hasPrefix(trimmed + " "))
     }
 
     enum CommandDecision: Equatable { case allow, ask, deny(String) }
@@ -212,6 +258,34 @@ struct ClaudeLaunchPolicy: Equatable {
     }
     static var attachmentRoots: [String] {
         [DroppedFiles.directory.path, Locations.root.appendingPathComponent("mobile-photos", isDirectory: true).path]
+    }
+}
+
+extension ClaudeIntegration {
+    /// The app's own files a sandboxed command still reads: the CLI's shell snapshots, skill scripts (the plugin folder
+    /// and the folders its links point to; the sandbox checks resolved paths) and the user's attachments.
+    static func sandboxReads(home: URL?, skills: String?, manager: FileManager = .default) -> [String] {
+        var result = ClaudeLaunchPolicy.attachmentRoots
+        if let home { result += ["shell-snapshots", "session-env"].map { home.appendingPathComponent($0, isDirectory: true).path } }
+        if let skills {
+            result.append(skills)
+            for entry in (try? manager.contentsOfDirectory(atPath: skills)) ?? [] {
+                let link = URL(fileURLWithPath: skills).appendingPathComponent(entry).appendingPathComponent("skills")
+                let target = link.resolvingSymlinksInPath().path
+                if target != link.path { result.append(target) }
+            }
+        }
+        return result
+    }
+    /// The user's per-boot temporary and cache folders under /var/folders (compilers keep module caches there).
+    static var userTemporaryFolders: [String] {
+        [_CS_DARWIN_USER_TEMP_DIR, _CS_DARWIN_USER_CACHE_DIR].compactMap { name in
+            var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+            guard confstr(name, &buffer, buffer.count) > 0, let resolved = realpath(buffer, nil) else { return nil }
+            defer { free(resolved) }
+            let path = String(cString: resolved)
+            return path.hasPrefix("/private/var/folders/") ? path : nil
+        }
     }
 }
 

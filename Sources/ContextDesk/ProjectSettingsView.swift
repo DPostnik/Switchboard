@@ -9,11 +9,12 @@ import ContextTranscript
 /// request can never change them. Every edit applies on Save.
 struct ProjectSettingsView: View {
     enum Pane: CaseIterable, Identifiable {
-        case roles, browser, phone, advanced
+        case roles, sandbox, browser, phone, advanced
         var id: Self { self }
         var title: String {
             switch self {
             case .roles: L10n.text("Что можно агентам", "What agents may do")
+            case .sandbox: L10n.text("Песочница команд", "Command sandbox")
             case .browser: L10n.text("Браузер и вход", "Browser & sign-in")
             case .phone: L10n.text("Телефон", "Phone")
             case .advanced: L10n.text("Дополнительно", "Advanced")
@@ -31,6 +32,12 @@ struct ProjectSettingsView: View {
     @State private var chatAddOns: Set<RoleAddOn>
     @State private var extraRoots: [AgentPermissionProfile.Root]
     @State private var foldersExpanded = false
+    @State private var sandboxEnabled: Bool
+    @State private var accessPresets: Set<String>
+    @State private var sandboxCommands: String
+    @FocusState private var sandboxCommandsFocused: Bool
+    /// Presets the project's files suggest, marked in the list.
+    private let suggestedPresets: Set<String>
     @State private var cookieSites: String
     @FocusState private var cookieSitesFocused: Bool
     @State private var shownOnPhone: Bool
@@ -49,6 +56,10 @@ struct ProjectSettingsView: View {
         _jobRole = State(initialValue: project.jobRole(catalog).id)
         _chatAddOns = State(initialValue: Set((project.chatRoleAddOns ?? []).compactMap(RoleAddOn.init(rawValue:))))
         _extraRoots = State(initialValue: project.extraRoots ?? [])
+        _sandboxEnabled = State(initialValue: project.usesCommandSandbox)
+        _accessPresets = State(initialValue: Set(project.accessPresets ?? []))
+        _sandboxCommands = State(initialValue: (project.sandboxCommands ?? []).joined(separator: "\n"))
+        suggestedPresets = Set(AccessPresetCatalog.detect(projectPath: project.path))
         _cookieSites = State(initialValue: (project.cookieSites ?? []).joined(separator: "\n"))
         _mcpServers = State(initialValue: project.mcpServers ?? [:])
         let shown = model.mobileRemote.projects.contains(project.id.uuidString)
@@ -67,6 +78,7 @@ struct ProjectSettingsView: View {
                             .accessibilityAddTraits(.isHeader)
                         switch section {
                         case .roles: rolesPane
+                        case .sandbox: sandboxPane
                         case .browser: browserPane
                         case .phone: phonePane
                         case .advanced: advancedPane
@@ -188,6 +200,55 @@ struct ProjectSettingsView: View {
             }
             Button(L10n.text("Добавить папку…", "Add folder…")) { chooseFolder() }
                 .buttonStyle(DeskButtonStyle(kind: .text))
+        }
+    }
+
+    private var sandboxPane: some View {
+        VStack(alignment: .leading, spacing: .ui(14)) {
+            Toggle(isOn: $sandboxEnabled) {
+                VStack(alignment: .leading, spacing: .ui(1)) {
+                    Text(L10n.text("Команды агента в песочнице", "Run agent commands in a sandbox")).font(.ui(.body)).foregroundStyle(DeskPalette.ink)
+                    Text(L10n.text("Для ролей с командами («Разработчик»). Команды видят папку проекта, папки вне проекта из раздела «Что можно агентам» и отмеченные наборы; остальная домашняя папка для них закрыта. Сейчас работает в чатах Claude.",
+                                   "For roles with commands (Developer). Commands see the project folder, the folders outside the project from What agents may do and the ticked sets; the rest of the home folder is closed to them. Works in Claude chats for now."))
+                        .font(.ui(.caption)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+            Divider()
+            Text(L10n.text("Общие наборы доступа", "Shared access sets")).font(.ui(.callout).weight(.semibold))
+            VStack(alignment: .leading, spacing: .ui(8)) {
+                ForEach(AccessPresetCatalog.all) { preset in
+                    Toggle(isOn: Binding(get: { accessPresets.contains(preset.id) },
+                                         set: { if $0 { accessPresets.insert(preset.id) } else { accessPresets.remove(preset.id) } })) {
+                        VStack(alignment: .leading, spacing: .ui(1)) {
+                            HStack(spacing: .ui(6)) {
+                                Text(preset.title).font(.ui(.body)).foregroundStyle(DeskPalette.ink)
+                                if suggestedPresets.contains(preset.id) {
+                                    Text(L10n.text("подходит проекту", "fits this project")).font(.ui(.caption)).foregroundStyle(DeskPalette.accentDeep)
+                                }
+                            }
+                            Text(preset.summary).font(.ui(.caption)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .toggleStyle(.checkbox).pointingHandCursor()
+                    .help((preset.read + preset.write).joined(separator: "\n"))
+                }
+            }
+            .disabled(!sandboxEnabled)
+            hint(L10n.text("Наборы общие для всех проектов. Новый проект сразу получает те, что подходят его файлам.",
+                           "Sets are shared by every project. A new project starts with the ones its files suggest."))
+            Divider()
+            VStack(alignment: .leading, spacing: .ui(6)) {
+                Text(L10n.text("Команды вне песочницы", "Commands outside the sandbox")).font(.ui(.callout).weight(.semibold))
+                TextEditor(text: $sandboxCommands)
+                    .font(.ui(.body).monospaced()).scrollContentBackground(.hidden).focused($sandboxCommandsFocused)
+                    .padding(.ui(6)).frame(minHeight: 70, maxHeight: 100)
+                    .modifier(DeskFieldChrome(focused: sandboxCommandsFocused))
+                    .accessibilityLabel(L10n.text("Команды вне песочницы", "Commands outside the sandbox"))
+                    .disabled(!sandboxEnabled)
+                hint(L10n.text("По одной в строке, начало команды: например zsh scripts/build-app.sh. Такие команды получают доступ ко всему Mac без вопроса; другие команды вне песочницы агент запускает только после твоего подтверждения.",
+                               "One per line, the start of a command: for example zsh scripts/build-app.sh. These commands get access to the whole Mac without a prompt; other commands outside the sandbox run only after you confirm them."))
+            }
         }
     }
 
@@ -324,7 +385,8 @@ struct ProjectSettingsView: View {
     private func save() {
         model.updateProjectRoles(project.id, chatRole: chatRole, jobRole: jobRole, extraRoots: extraRoots,
                                  cookieSites: cookieSites.split(whereSeparator: \.isNewline).map(String.init), mcpServers: mcpServers,
-                                 chatAddOns: chatAddOns)
+                                 chatAddOns: chatAddOns,
+                                 sandbox: (sandboxEnabled, Array(accessPresets), sandboxCommands.split(whereSeparator: \.isNewline).map(String.init)))
         if shownOnPhone != initiallyShownOnPhone { phone.setProject(project.id, shown: shownOnPhone) }
         dismiss()
     }

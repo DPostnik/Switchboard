@@ -179,7 +179,9 @@ private func settings(_ args: [String]) throws -> JSONValue {
     #expect(value(after: "--permission-mode", in: developer) == "acceptEdits" && !developer.contains("--restricted"))
     #expect(value(after: "--add-dir", in: developer) == "/Users/me/fringe" && developer.contains("--strict-mcp-config"))
     let developerSettings = try settings(developer)["permissions"]
-    #expect(developerSettings["additionalDirectories"].array == [.string("/Users/me/fringe")] && developerSettings["allow"].array.contains(.string("Bash")))
+    // Commands run in the project's sandbox, so no blanket Bash rule would auto-approve one that leaves it.
+    #expect(developerSettings["additionalDirectories"].array == [.string("/Users/me/fringe")] && !developerSettings["allow"].array.contains(.string("Bash")))
+    #expect(try settings(developer)["sandbox"]["enabled"] == .bool(true))
     #expect(developerSettings["ask"] == .null)
     #expect(value(after: "--agents", in: developer) == #"{"w":{"description":"d","disallowedTools":[],"prompt":"p","tools":["Read","Bash","Write"]}}"#)
     var routine = preset(AgentRoleID.routineOperator).profile; routine.audit = false

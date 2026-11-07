@@ -15,6 +15,12 @@ public struct Project: Identifiable, Codable, Hashable, Sendable {
     public var chatRoleAddOns: [String]?
     /// Folders outside the project a `developer` or `routine-operator` role may use; declared here, never by the agent.
     public var extraRoots: [AgentPermissionProfile.Root]?
+    /// Ticked `AccessPreset` ids; nil until the suggested ones are filled in (`migrateAccessPresets`).
+    public var accessPresets: [String]?
+    /// Shell commands of roles with a shell run in the command sandbox; nil means on.
+    public var commandSandbox: Bool?
+    /// The project's own command prefixes that run outside the sandbox without a prompt.
+    public var sandboxCommands: [String]?
     /// Sites a `routine-operator` job may import Chrome cookies for.
     public var cookieSites: [String]?
     /// Approved servers from the project's `.mcp.json`: name -> fingerprint of the approved entry (`ProjectMCPServers`).

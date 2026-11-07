@@ -516,6 +516,7 @@ private struct ChatRunState: Equatable {
         defer { isBootstrapping = false; step("rest") }
         do { state = try await store.load(); usage = try await store.loadUsage(); projectID = state.visibleProjects.first?.id } catch { self.error = error.localizedDescription; return }
         if state.migrateRoles() { persist() }
+        if state.migrateAccessPresets() { persist() }
         // Sign the cookie-import consent files once, when the signing key is first created (audit H2).
         do {
             let signed = try ChromeSessionImportPolicy.adoptExistingPolicies()
@@ -964,6 +965,8 @@ private struct ChatRunState: Equatable {
             let id = state.addProject(path: url.path)
             if firstID == nil { firstID = id }
         }
+        // A new project starts with the presets its files suggest; project settings change them.
+        _ = state.migrateAccessPresets()
         persist()
         if let firstID { selectProject(firstID) }
     }
@@ -1461,8 +1464,15 @@ private struct ChatRunState: Equatable {
     func selectAccessMode(_ mode: AccessMode?) { selectRole(mode?.legacyRoleID) }
     /// Project defaults for chats and jobs plus the declared extra roots; the agent never changes these.
     func updateProjectRoles(_ id: UUID, chatRole: String?, jobRole: String?, extraRoots: [AgentPermissionProfile.Root]?, cookieSites: [String]?,
-                            mcpServers: [String: String]? = nil, chatAddOns: Set<RoleAddOn>? = nil) {
+                            mcpServers: [String: String]? = nil, chatAddOns: Set<RoleAddOn>? = nil,
+                            sandbox: (enabled: Bool, presets: [String], commands: [String])? = nil) {
         guard let index = state.projects.firstIndex(where: { $0.id == id }) else { return }
+        if let sandbox {
+            state.projects[index].commandSandbox = sandbox.enabled ? nil : false
+            state.projects[index].accessPresets = AccessPresetCatalog.all.map(\.id).filter(sandbox.presets.contains)
+            let commands = sandbox.commands.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            state.projects[index].sandboxCommands = commands.isEmpty ? nil : commands
+        }
         if let chatAddOns { state.projects[index].chatRoleAddOns = chatAddOns.isEmpty ? nil : RoleAddOn.allCases.filter(chatAddOns.contains).map(\.rawValue) }
         if let chatRole, let role = roleCatalog.role(chatRole) {
             state.projects[index].chatRoleID = chatRole; state.projects[index].defaultChatAccessMode = role.legacyAccessMode

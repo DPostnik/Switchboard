@@ -32,6 +32,8 @@ public struct AgentRole: Codable, Hashable, Identifiable, Sendable {
         if case .project = result.filesystem {
             let roots = acceptsExtraRoots ? (project.extraRoots ?? []).filter { $0.path.hasPrefix("/") } : []
             result.filesystem = .project(extraRoots: roots)
+            // Commands of a role with a shell are confined to the project, its folders and its presets.
+            if result.shell == .on { result.commandSandbox = project.commandSandbox(extraRoots: roots) }
         }
         if case .sites = result.cookieImport {
             result.cookieImport = .sites((project.cookieSites ?? []).map { $0.lowercased() })
