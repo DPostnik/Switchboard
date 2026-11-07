@@ -6,6 +6,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Added
 
+- Chat servers: a "Servers" line above the composer lists the servers the chat's agent started (any process listening on a port, such as `npm run dev`), with the address that opens in the browser on click and a button that stops the server and its child processes; the right-click menu opens other ports, opens in Chrome or Safari and copies the address or the command. Codex servers are shown in the chats of their folder.
+- File menus: HTML files get "Open in Google Chrome" and "Open in Safari" (for the browsers installed) in the chat files panel, project files, turn changes, the file preview and file links in the chat.
 - Settings proposals: an agent in a sandboxed Claude chat can propose project settings changes (access sets, folders outside the project, commands outside the sandbox, the sandbox switch); the app opens a review with every change and applies it only when you press Apply.
 - Command sandbox: `git worktree` is trusted in the GitHub set, so removing and pruning worktrees no longer asks.
 - Command sandbox: trusted commands followed by `2>&1`, `| tail`, `| grep` with one pattern, output to /dev/null or a temporary folder, `cd` and `echo` no longer ask; in sandboxed chats the file tools read and write temporary folders without a prompt; read-only folders outside the project no longer block writes to writable folders inside them.

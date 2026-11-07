@@ -32,6 +32,14 @@ public struct ExternalEditor: Identifiable, Hashable, Sendable {
     }
 }
 
+/// A browser that previews HTML files; opened through Launch Services with the file's URL.
+public struct ExternalBrowser: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let title: String
+    public let bundleID: String
+    public init(id: String, title: String, bundleID: String) { self.id = id; self.title = title; self.bundleID = bundleID }
+}
+
 public enum ExternalEditors {
     /// Preference key holding the chosen editor's ID; `system` opens files in their default app.
     public static let preferenceKey = "preferredEditor"
@@ -126,6 +134,24 @@ public enum ExternalEditors {
                 return parts.count > 1 && target.count > parts.count && Array(target.prefix(parts.count)) == parts
             }
             .max { $0.pathComponents.count < $1.pathComponents.count }?.path
+    }
+
+    /// Browsers offered for web pages, in menu order.
+    public static let browsers: [ExternalBrowser] = [
+        ExternalBrowser(id: "chrome", title: "Google Chrome", bundleID: "com.google.Chrome"),
+        ExternalBrowser(id: "safari", title: "Safari", bundleID: "com.apple.Safari"),
+    ]
+
+    public static let webPageExtensions: Set<String> = ["html", "htm", "xhtml"]
+
+    /// HTML files get "Open in <browser>" entries next to the editor.
+    public static func isWebPage(_ path: String) -> Bool {
+        webPageExtensions.contains((path as NSString).pathExtension.lowercased())
+    }
+
+    /// Known browsers whose application is found, with its location.
+    public static func installedBrowsers(locate: (String) -> URL?) -> [(browser: ExternalBrowser, app: URL)] {
+        browsers.compactMap { browser in locate(browser.bundleID).map { (browser, $0) } }
     }
 
     /// The editor inherits this environment when it is not running yet. The app's agent homes and chat labels

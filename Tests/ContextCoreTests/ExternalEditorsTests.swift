@@ -41,6 +41,18 @@ private func editor(_ id: String) -> ExternalEditor { ExternalEditors.known.firs
     #expect(ExternalEditors.preferred(nil, among: []) == nil)
 }
 
+@Test func htmlFilesOfferTheInstalledBrowsers() {
+    #expect(ExternalEditors.isWebPage("/p/index.html"))
+    #expect(ExternalEditors.isWebPage("/p/Report.HTM"))
+    #expect(!ExternalEditors.isWebPage("/p/a.swift"))
+    #expect(!ExternalEditors.isWebPage("/p/html"))
+    let apps = ["com.apple.Safari": "/Applications/Safari.app"]
+    let found = ExternalEditors.installedBrowsers { apps[$0].map { URL(fileURLWithPath: $0) } }
+    #expect(found.map(\.browser.id) == ["safari"])
+    #expect(found[0].app.path == "/Applications/Safari.app")
+    #expect(ExternalEditors.browsers.map(\.id) == ["chrome", "safari"])
+}
+
 @Test func editorFolderIsTheDeepestProjectHoldingTheFile() {
     let folders = ["/work/app", "/work/app/.worktrees/feature", "/work/other", "/"]
     #expect(ExternalEditors.folder(containing: "/work/app/Sources/a.swift", in: folders) == "/work/app")

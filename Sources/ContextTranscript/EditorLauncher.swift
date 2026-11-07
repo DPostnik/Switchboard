@@ -21,7 +21,46 @@ import os
         return found
     }
 
-    public static func refresh() { cache = nil }
+    public static func refresh() { cache = nil; browserCache = nil }
+
+    private static var browserCache: [(browser: ExternalBrowser, app: URL)]?
+
+    /// Browsers offered for an HTML file at `path`; empty for other files.
+    public static func browsers(for path: String) -> [(browser: ExternalBrowser, app: URL)] {
+        ExternalEditors.isWebPage(path) ? installedBrowsers : []
+    }
+
+    public static var installedBrowsers: [(browser: ExternalBrowser, app: URL)] {
+        if let browserCache { return browserCache }
+        let found = ExternalEditors.installedBrowsers { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) }
+        browserCache = found
+        return found
+    }
+
+    /// Opens the file as a page in `browser`; a failure is logged, not retried.
+    public static func openInBrowser(_ path: String, browser: ExternalBrowser, app: URL) {
+        openInBrowser(URL(fileURLWithPath: path), browser: browser, app: app)
+    }
+
+    /// Opens a file or web address in `browser`.
+    public static func openInBrowser(_ url: URL, browser: ExternalBrowser, app: URL) {
+        let id = browser.id
+        NSWorkspace.shared.open([url], withApplicationAt: app,
+                                configuration: NSWorkspace.OpenConfiguration()) { _, error in
+            let log = Logger(subsystem: "local.daniil.switchboard", category: "editor")
+            if let error { log.error("Browser \(id, privacy: .public) did not open a file: \(error.localizedDescription, privacy: .public)") }
+            else { log.info("Opened a file in \(id, privacy: .public)") }
+        }
+    }
+
+    /// "Open in Google Chrome", "Open in Safari" for AppKit menus.
+    public static func browserItems(_ path: String) -> [NSMenuItem] {
+        browsers(for: path).map { found in
+            EditorMenuItem(title: openTitle(found.browser.title)) { openInBrowser(path, browser: found.browser, app: found.app) }
+        }
+    }
+
+    public static func openTitle(_ app: String) -> String { L10n.text("Открыть в \(app)", "Open in \(app)") }
 
     public static var preferred: ExternalEditors.Installed? {
         ExternalEditors.preferred(UserDefaults.standard.string(forKey: ExternalEditors.preferenceKey), among: installed)
@@ -32,7 +71,7 @@ import os
 
     public static func openTitle(_ editor: ExternalEditors.Installed?) -> String {
         guard let editor else { return L10n.text("Открыть в программе по умолчанию", "Open in Default App") }
-        return L10n.text("Открыть в \(editor.title)", "Open in \(editor.title)")
+        return openTitle(editor.title)
     }
 
     /// Opens a file at `line` (and `column`), or a folder as a workspace.
@@ -113,6 +152,11 @@ public struct OpenInEditorMenu: View {
 
     public var body: some View {
         Button(EditorLauncher.openTitle) { EditorLauncher.open(path, line: line) }
+        ForEach(EditorLauncher.browsers(for: path), id: \.browser.id) { found in
+            Button(EditorLauncher.openTitle(found.browser.title)) {
+                EditorLauncher.openInBrowser(path, browser: found.browser, app: found.app)
+            }
+        }
         Menu(L10n.text("Открыть в", "Open In")) {
             ForEach(EditorLauncher.installed) { editor in
                 Button(editor.title) { EditorLauncher.open(path, line: line, target: .editor(editor)) }

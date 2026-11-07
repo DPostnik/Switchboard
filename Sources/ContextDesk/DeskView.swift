@@ -1116,6 +1116,9 @@ struct ChatView: View {
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, .ui(24)).padding(.vertical, .ui(8))
             }
             if let chat = model.selectedChat { SubagentsBar(model: model, chatID: chat.id) }
+            if let chat = model.selectedChat {
+                ChatServersBar(label: chat.nativeSession?.nativeID, folder: model.selectedWorkingDirectory)
+            }
             if let chat = model.selectedChat, let notice = model.backgroundWaitNotice(chat.id) {
                 HStack(alignment: .firstTextBaseline, spacing: .ui(12)) {
                     Label(notice, systemImage: "hourglass").foregroundStyle(.secondary)

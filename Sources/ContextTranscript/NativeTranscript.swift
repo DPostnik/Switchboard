@@ -1877,6 +1877,7 @@ public struct NativeTranscript: NSViewRepresentable {
             if FileManager.default.fileExists(atPath: file.path, isDirectory: &directory), !directory.boolValue {
                 let line = storage.attribute(.fileLine, at: charIndex, effectiveRange: nil) as? Int
                 add(EditorLauncher.openTitle) { EditorLauncher.open(file.path, line: line) }
+                items.append(contentsOf: EditorLauncher.browserItems(file.path))
                 items.append(EditorLauncher.submenu(file.path, line: line))
             } else {
                 add(L10n.text("Открыть в программе по умолчанию", "Open in Default App")) { NSWorkspace.shared.open(file) }
