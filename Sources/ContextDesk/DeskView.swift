@@ -111,6 +111,10 @@ struct DeskView: View {
             }
         }
         .sheet(item: $permissionsProject) { project in ProjectSettingsView(model: model, project: project) }
+        // A proposal opens by itself, oldest first; it closes only through Apply or Reject, which remove its file.
+        .sheet(item: Binding(get: { permissionsProject == nil ? model.settingsProposals.first : nil }, set: { _ in })) { review in
+            SettingsProposalView(model: model, review: review)
+        }
         .alert(L10n.text("Название чата", "Chat title"), isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField(L10n.text("Название", "Title"), text: $newTitle)
             Button(L10n.text("Сохранить", "Save")) { if let chat = renaming { Task { await model.renameChat(chat.id, title: newTitle) } }; renaming = nil }

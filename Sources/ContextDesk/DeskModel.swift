@@ -452,6 +452,8 @@ private struct ChatRunState: Equatable {
     }
     @Published var loadingChat = false
     @Published var error: String?
+    /// Project settings changes agents proposed (`SettingsProposalInbox`), waiting for the user's decision.
+    @Published private(set) var settingsProposals: [SettingsProposalReview] = []
     /// The queued message being edited in place, at most one at a time.
     @Published private(set) var queueEdit: QueueEditSession?
     @Published var notificationStatus = L10n.text("Уведомления не включены", "Notifications are off")
@@ -529,6 +531,7 @@ private struct ChatRunState: Equatable {
             if !signed.isEmpty { AppLog.browser.notice("Signed \(signed.count, privacy: .public) existing cookie-import permission files") }
         } catch { AppLog.browser.error("Could not sign cookie-import permission files: \(error.localizedDescription, privacy: .public)") }
         Task { [capabilityLedger] in try? await capabilityLedger.sweep() }
+        watchSettingsProposals()
         photoCleanupTask = Task { [weak self] in
             while !Task.isCancelled {
                 self?.cleanTemporaryPhotos()
@@ -1468,6 +1471,39 @@ private struct ChatRunState: Equatable {
         }
     }
     func selectAccessMode(_ mode: AccessMode?) { selectRole(mode?.legacyRoleID) }
+    /// Polls the proposal folder; a listing every two seconds costs next to nothing.
+    private func watchSettingsProposals() {
+        Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                self.refreshSettingsProposals()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+    }
+    func refreshSettingsProposals() {
+        let current = SettingsProposalInbox.load(state: state)
+        if current != settingsProposals { settingsProposals = current }
+    }
+    /// Applies a proposal as it reads against the current settings, then removes its file.
+    func applySettingsProposal(_ id: String) {
+        refreshSettingsProposals()
+        if let review = settingsProposals.first(where: { $0.id == id }), state.apply(review) {
+            persist()
+            AppLog.lifecycle.notice("Applied settings proposal \(id, privacy: .public) for \(review.projects.count, privacy: .public) projects")
+        }
+        SettingsProposalInbox.remove(id)
+        refreshSettingsProposals()
+    }
+    func rejectSettingsProposal(_ id: String) {
+        SettingsProposalInbox.remove(id)
+        refreshSettingsProposals()
+    }
+    /// The chat a proposal names, when it is one of this app's chats.
+    func proposalChatTitle(_ label: String?) -> String? {
+        guard let label, !label.isEmpty else { return nil }
+        return state.chats.first { $0.nativeSession?.nativeID == label || $0.id == label }?.title
+    }
     /// Project defaults for chats and jobs plus the declared extra roots; the agent never changes these.
     func updateProjectRoles(_ id: UUID, chatRole: String?, jobRole: String?, extraRoots: [AgentPermissionProfile.Root]?, cookieSites: [String]?,
                             mcpServers: [String: String]? = nil, chatAddOns: Set<RoleAddOn>? = nil,

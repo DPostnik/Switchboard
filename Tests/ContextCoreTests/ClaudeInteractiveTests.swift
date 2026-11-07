@@ -355,6 +355,10 @@ private func interactiveFixture(_ root: URL) throws -> URL {
             if sandboxed and value['response']['request_id']=='sb-2':
                 out({'type':'control_request','request_id':'sb-3','request':{'subtype':'can_use_tool','tool_name':'Bash','input':{'command':'cat ~/secret','dangerouslyDisableSandbox':True}}})
                 continue
+            if sandboxed and value['response']['request_id']=='sb-3':
+                # The file tools reach temporary folders as sandboxed commands do.
+                out({'type':'control_request','request_id':'sb-4','request':{'subtype':'can_use_tool','tool_name':'Write','input':{'file_path':'/tmp/sb-notes.txt','content':'x'}}})
+                continue
             if late: continue
             result()
     """#
@@ -938,9 +942,9 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     try await waitFor { await events.completion() != nil }
     let answers = try String(contentsOf: home.appendingPathComponent("answers"), encoding: .utf8).split(separator: "\n")
         .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8))["response"] }
-    #expect(answers.map { $0["request_id"].string } == ["sb-1", "sb-2", "sb-3"])
+    #expect(answers.map { $0["request_id"].string } == ["sb-1", "sb-2", "sb-3", "sb-4"])
     #expect(answers.allSatisfy { $0["response"]["behavior"].string == "allow" })
-    #expect(await events.capabilities().map { "\($0.tool):\($0.decision)" } == ["Bash:allowed", "Bash:allowed", "Bash:asked"])
+    #expect(await events.capabilities().map { "\($0.tool):\($0.decision)" } == ["Bash:allowed", "Bash:allowed", "Bash:asked", "Write:allowed"])
     await adapter.disconnect()
 }
 

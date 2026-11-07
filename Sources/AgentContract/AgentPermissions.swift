@@ -42,12 +42,10 @@ public struct AgentPermissionProfile: Codable, Hashable, Sendable {
     public struct CommandSandbox: Codable, Hashable, Sendable {
         public var read: [String]
         public var write: [String]
-        /// Declared read-only folders the engine would otherwise make writable for commands.
-        public var readOnly: [String]
         /// Trusted command prefixes that run outside the sandbox without a prompt.
         public var unsandboxed: [String]
-        public init(read: [String], write: [String], readOnly: [String] = [], unsandboxed: [String] = []) {
-            self.read = read; self.write = write; self.readOnly = readOnly; self.unsandboxed = unsandboxed
+        public init(read: [String], write: [String], unsandboxed: [String] = []) {
+            self.read = read; self.write = write; self.unsandboxed = unsandboxed
         }
     }
 

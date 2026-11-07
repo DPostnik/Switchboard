@@ -357,6 +357,8 @@ public actor ClaudeIntegration: AgentIntegration {
                 var environment = ClaudeProfile.environment(home: home).merging(Self.sessionEnvironment) { _, new in new }
                 // Every descendant of this CLI (also after `setsid`) carries the chat label for the orphan sweeper.
                 environment.merge(ProcessLabels.environment(chat: id)) { _, new in new }
+                // Where the agent may leave a settings proposal for the user (`settingsProposalInstructions`).
+                environment[SettingsProposalInbox.environmentKey] = SettingsProposalInbox.directory.path
                 // Same startup/tool limits as the Codex MCP entry (30 s / 90 s).
                 if server != nil || policy.connectors || policy.userChrome || !projectServers.isEmpty { environment.merge(Self.browserEnvironment) { _, new in new } }
                 if policy.connectors { environment.merge(Self.connectorEnvironment) { _, new in new } }
@@ -478,7 +480,7 @@ public actor ClaudeIntegration: AgentIntegration {
         // A setting, not `--advisor`: the flag exits at launch on an unsupported pairing, the setting is skipped.
         if let advisor, !advisor.isEmpty { settings["advisorModel"] = .string(advisor) }
         if let sandbox = policy.sandboxSettings(cwd: cwd, extraReads: Self.sandboxReads(home: home, skills: skills),
-                                                extraWrites: Self.userTemporaryFolders) {
+                                                extraWrites: Self.userTemporaryFolders + [SettingsProposalInbox.directory.path]) {
             settings["sandbox"] = sandbox
         }
         if !settings.isEmpty {
@@ -505,10 +507,29 @@ public actor ClaudeIntegration: AgentIntegration {
         // `--setting-sources ""` also skips the user's and the project's CLAUDE.md, so both come in here; project rules last.
         // Only roles with subagents get the delegation guidance; it would be noise elsewhere.
         let delegation = policy.delegation ? delegationInstructions() : nil
-        args += ["--append-system-prompt", ([AgentAutonomy.instructions(), delegation, chrome ? userChromeInstructions() : nil,
+        let proposals = policy.sandbox != nil ? settingsProposalInstructions() : nil
+        args += ["--append-system-prompt", ([AgentAutonomy.instructions(), delegation, chrome ? userChromeInstructions() : nil, proposals,
                                              home.flatMap { ClaudeProfile.instructions(home: $0) },
                                              projectInstructions].compactMap { $0 }).joined(separator: "\n\n")]
         return args
+    }
+    /// How a sandboxed chat proposes project settings; only the user applies them in the app.
+    static func settingsProposalInstructions(language: AppLanguage = L10n.language) -> String {
+        let presets = AccessPresetCatalog.all.map(\.id).joined(separator: ", ")
+        let format = #"{"chat": "<$SWITCHBOARD_CHAT_ID>", "reason": "...", "changes": [{"project": "<project path or name>", "addPresets": ["vercel"], "removePresets": [], "addFolders": [{"path": "~/path", "writable": false}], "removeFolders": [], "addCommands": ["zsh scripts/build.sh"], "removeCommands": [], "sandbox": true}]}"#
+        return L10n.text(
+            """
+            Настройки проектов в Switchboard (песочница команд, наборы доступа, папки вне проекта, команды вне песочницы) меняет только пользователь. Если задаче нужен доступ, которого нет, или пользователь просит изменить эти настройки, предложи изменение:
+            - Запиши один JSON-файл в папку "$\(SettingsProposalInbox.environmentKey)" (она доступна на запись в песочнице), например "$\(SettingsProposalInbox.environmentKey)/<короткое-имя>.json". Формат: \(format). Пропускай ненужные поля; в одном файле может быть несколько проектов.
+            - Наборы: \(presets).
+            - Приложение покажет пользователю список изменений; применит их только он. Скажи пользователю, что предложение ждёт его решения. Предлагай только то, что нужно задаче; команды вне песочницы получают доступ ко всему Mac.
+            """,
+            """
+            Project settings in Switchboard (the command sandbox, access sets, folders outside the project, commands outside the sandbox) are changed only by the user. When the task needs access that is missing, or the user asks to change these settings, propose the change:
+            - Write one JSON file into the folder "$\(SettingsProposalInbox.environmentKey)" (writable inside the sandbox), for example "$\(SettingsProposalInbox.environmentKey)/<short-name>.json". Format: \(format). Omit fields you do not need; one file may cover several projects.
+            - Sets: \(presets).
+            - The app shows the user the list of changes; only the user applies them. Tell the user the proposal waits for their decision. Propose only what the task needs; commands outside the sandbox get access to the whole Mac.
+            """, language: language)
     }
     /// When to reach for the user's own Chrome rather than the app's isolated browser.
     static func userChromeInstructions(language: AppLanguage = L10n.language) -> String {
@@ -939,7 +960,10 @@ public actor ClaudeIntegration: AgentIntegration {
             if profile.filesystem != .unrestricted, let path = input["file_path"].string ?? input["path"].string {
                 let roots = writing ? policy.writableRoots : policy.readableRoots
                 let inProject = Self.isWithinProject(path, cwd: cwd)
-                var inside = inProject || roots.contains { Self.isWithinProject(path, cwd: $0) } || (!writing && ClaudeLaunchPolicy.isAttachment(path))
+                // With a command sandbox, temporary folders are open to the file tools as they are to commands.
+                let temporary = policy.sandbox != nil && profile.filesystem != .readOnly
+                    && ClaudeLaunchPolicy.temporaryRoots.contains { Self.isWithinProject(path, cwd: $0) }
+                var inside = inProject || roots.contains { Self.isWithinProject(path, cwd: $0) } || (!writing && ClaudeLaunchPolicy.isAttachment(path)) || temporary
                 if writing, profile.filesystem == .readOnly {
                     inside = profile.scratch.map { Self.isWithinProject(path, cwd: cwd + "/" + $0) } ?? false
                 }

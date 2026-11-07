@@ -126,7 +126,7 @@ extension Project {
         let write = unique([path] + roots.filter(\.writable).map(\.path) + presets.flatMap(\.write))
         let read = unique(write + roots.map(\.path) + presets.flatMap(\.read))
         let commands = (sandboxCommands ?? []).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        return .init(read: read, write: write, readOnly: roots.filter { !$0.writable }.map(\.path),
+        return .init(read: read, write: write,
                      unsandboxed: unique(AccessPresetCatalog.baseUnsandboxed + presets.flatMap(\.unsandboxed) + commands))
     }
 }

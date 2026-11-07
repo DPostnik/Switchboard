@@ -78,7 +78,9 @@ struct ClaudeLaunchPolicy: Equatable {
         }
         if profile.connectors == .read || profile.connectors == .askWrites, !unrestricted { allow.append("mcp__claude_ai_*") }
         allowRules = allow; denyRules = deny; askRules = ask
-        additionalDirectories = profile.extraRoots.map(\.path)
+        // `--add-dir` makes a folder writable for sandboxed commands, and a deny over a read-only folder would also close
+        // the writable folders inside it (deny wins); read-only folders reach commands through `allowRead` instead.
+        additionalDirectories = (sandbox == nil ? profile.extraRoots : profile.extraRoots.filter(\.writable)).map(\.path)
         if let cap = profile.subagentRole {
             // A capped worker gets no scratch writes: the parent's edit mode would widen them beyond the scratch folder.
             var capped = AgentRoleCatalog.preset(cap).profile.effective; capped.scratch = nil
@@ -134,10 +136,9 @@ struct ClaudeLaunchPolicy: Equatable {
         func unique(_ values: [String]) -> [String] { var seen = Set<String>(); return values.filter { !$0.isEmpty && seen.insert($0).inserted } }
         let write = unique([cwd].compactMap { $0 } + sandbox.write + ["/private/tmp"] + extraWrites)
         let read = unique(write + sandbox.read + extraReads)
-        var filesystem: [String: JSONValue] = ["denyRead": .array([.string("~/")]),
+        let filesystem: [String: JSONValue] = ["denyRead": .array([.string("~/")]),
                                                "allowRead": .array(read.map(JSONValue.string)),
                                                "allowWrite": .array(write.map(JSONValue.string))]
-        if !sandbox.readOnly.isEmpty { filesystem["denyWrite"] = .array(sandbox.readOnly.map(JSONValue.string)) }
         let excluded = sandbox.unsandboxed.flatMap { [$0, $0 + " *"] }
         // `*` keeps the network open for roles that have it; the CLI's proxy then passes every host.
         let network: [String: JSONValue] = ["allowedDomains": .array(profile.network ? [.string("*")] : []),
@@ -151,16 +152,99 @@ struct ClaudeLaunchPolicy: Equatable {
         guard let sandbox, !disableSandbox else { return false }
         return !Self.heads(command + " ").contains { head in sandbox.unsandboxed.contains { Self.prefix(head, $0) } }
     }
-    /// Whether a command outside the sandbox runs without a prompt: every segment, as written, is a trusted command
-    /// or a `cd`. Environment prefixes and wrappers (`GIT_SSH_COMMAND=…`, `env`, `nohup`) and redirections could run
-    /// or read anything outside the sandbox, so they are asked.
+    /// Whether a command outside the sandbox runs without a prompt: every segment, as written, is a trusted command,
+    /// a `cd`, an `echo`, or a filter that reads only its input (`| tail -5`, `| grep -E 'x'`). Allowed redirections:
+    /// descriptor copies (`2>&1`), `/dev/null` and files in temporary folders. Environment prefixes and wrappers
+    /// (`GIT_SSH_COMMAND=…`, `env`, `nohup`), reading redirections and any other target could run or reach anything
+    /// outside the sandbox, so they are asked.
     func trusts(_ command: String) -> Bool {
         guard let sandbox else { return false }
-        let segments = ShellSegments.commands(command + " ").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        // The segment parser splits at `&`: descriptor copies (`2>&1`) only route output and are dropped first, and
+        // `&>` writes like `>`. Both only remove characters, so quoted text cannot gain a command this way.
+        let normalized = command.replacingOccurrences(of: #"\d*>&\d+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "&>", with: ">")
+        let segments = ShellSegments.commands(normalized + " ").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         return !segments.isEmpty && segments.allSatisfy { segment in
-            guard !segment.contains(">"), !segment.contains("<") else { return false }
-            return segment == "cd" || segment.hasPrefix("cd ") || sandbox.unsandboxed.contains { Self.prefix(segment, $0) }
+            guard var words = Self.words(segment).flatMap(Self.withoutSafeRedirections) else { return false }
+            while let first = words.first, ["{", "(", "!"].contains(first.text) { words.removeFirst() }
+            while let last = words.last, ["}", ")"].contains(last.text) { words.removeLast() }
+            guard let head = words.first?.text else { return true }
+            // Only assignments (`status=$?`) set a variable; before a command they would change what it runs.
+            if words.allSatisfy({ !$0.quoted && $0.text.contains("=") && !$0.text.hasPrefix("=") }) { return true }
+            if ["cd", "echo", "true", "stat"].contains(head) { return true }
+            let texts = words.map(\.text)
+            if sandbox.unsandboxed.contains(where: { pattern in
+                let parts = pattern.split(separator: " ").map(String.init)
+                return !parts.isEmpty && texts.count >= parts.count && Array(texts.prefix(parts.count)) == parts
+            }) { return true }
+            return Self.readsOnlyInput(texts)
         }
+    }
+    /// A filter after a pipe that reads only its input: no file operands.
+    static func readsOnlyInput(_ words: [String]) -> Bool {
+        guard let head = words.first else { return false }
+        let arguments = words.dropFirst()
+        func optionOrNumber(_ word: String) -> Bool { word.hasPrefix("-") || (!word.isEmpty && word.allSatisfy(\.isNumber)) }
+        switch head {
+        case "tail", "head", "wc", "sort", "uniq", "sleep": return arguments.allSatisfy(optionOrNumber)
+        case "grep", "egrep":
+            // Options, then at most one pattern; `-e` takes the next word as a pattern.
+            var patterns = 0, index = arguments.startIndex
+            while index < arguments.endIndex {
+                let word = arguments[index]
+                if word == "-e" { patterns += 1; index = arguments.index(after: index) }
+                else if !word.hasPrefix("-") || word == "-" { patterns += 1 }
+                index = arguments.index(after: index)
+            }
+            return patterns <= 1
+        default: return false
+        }
+    }
+    struct Word: Equatable { var text: String; var quoted: Bool }
+    /// Shell words with quotes removed; nil for an unfinished quote.
+    static func words(_ segment: String) -> [Word]? {
+        var result: [Word] = [], current = "", quoted = false, inWord = false
+        var quote: Character?
+        for char in segment {
+            if let open = quote {
+                if char == open { quote = nil } else { current.append(char) }
+            } else if char == "'" || char == "\"" {
+                quote = char; quoted = true; inWord = true
+            } else if char == " " || char == "\t" {
+                if inWord { result.append(.init(text: current, quoted: quoted)); current = ""; quoted = false; inWord = false }
+            } else { current.append(char); inWord = true }
+        }
+        guard quote == nil else { return nil }
+        if inWord { result.append(.init(text: current, quoted: quoted)) }
+        return result
+    }
+    /// Words without harmless redirections; nil when a redirection reads a file or writes outside temporary folders.
+    static func withoutSafeRedirections(_ words: [Word]) -> [Word]? {
+        var result: [Word] = [], index = 0
+        while index < words.count {
+            let word = words[index]
+            guard !word.quoted, let range = word.text.range(of: #"^(\d*|&)(>>?|<)(&\d+)?"#, options: .regularExpression) else {
+                if !word.quoted, word.text.contains(where: { $0 == ">" || $0 == "<" }) { return nil }
+                result.append(word); index += 1; continue
+            }
+            let operatorText = String(word.text[range])
+            if operatorText.contains("<") { return nil }
+            if operatorText.contains(">&") { index += 1; continue }
+            var target = String(word.text[range.upperBound...])
+            if target.isEmpty {
+                guard index + 1 < words.count else { return nil }
+                target = words[index + 1].text; index += 1
+            }
+            guard target == "/dev/null" || isTemporary(target) else { return nil }
+            index += 1
+        }
+        return result
+    }
+    /// A plain absolute path inside a temporary folder (no `..`, variables or `~`).
+    static func isTemporary(_ path: String) -> Bool {
+        guard path.hasPrefix("/"), !path.contains("$"), !path.split(separator: "/").contains("..") else { return false }
+        let roots = ["/tmp", "/private/tmp", "/var/folders", "/private/var/folders"]
+        return roots.contains { path.hasPrefix($0 + "/") }
     }
     private static func prefix(_ head: String, _ pattern: String) -> Bool {
         let trimmed = pattern.trimmingCharacters(in: .whitespaces)
@@ -256,6 +340,8 @@ struct ClaudeLaunchPolicy: Equatable {
         let temporary = ["/tmp", "/var/folders"] + [ProcessInfo.processInfo.environment["TMPDIR"]].compactMap { $0 }
         return temporary.contains { ClaudeIntegration.isWithinProject(path, cwd: $0) }
     }
+    /// Temporary folders a sandboxed command may write (`/private/tmp`, the user's `/private/var/folders` ones).
+    static var temporaryRoots: [String] { ["/private/tmp"] + ClaudeIntegration.userTemporaryFolders }
     static var attachmentRoots: [String] {
         [DroppedFiles.directory.path, Locations.root.appendingPathComponent("mobile-photos", isDirectory: true).path]
     }
