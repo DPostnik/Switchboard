@@ -987,6 +987,11 @@ private struct ChatRunState: Equatable {
         }
         do { try await store.save(state) } catch { self.error = error.localizedDescription }
     }
+    func showProject(_ id: UUID) {
+        guard state.showProject(id) else { return }
+        persist()
+        selectProject(id)
+    }
     func openArchive() {
         showingJobs = false; showingAttention = false
         archiveViewingChat = false

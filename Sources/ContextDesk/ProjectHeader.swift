@@ -58,8 +58,23 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
 
 /// One project menu for the row's "…" button and its right-click menu, so both list the same items in the same order.
 @MainActor enum ProjectMenu {
+    static var hideTitle: String { L10n.text("Скрыть проект", "Hide project") }
     static var removeHelp: String {
-        L10n.text("Файлы и чаты сохранятся. Вернуть проект можно через «Добавить проект».", "Files and chats are kept. Restore it with Add project.")
+        L10n.text("Файлы и чаты сохранятся. Вернуть проект можно кнопкой скрытых проектов рядом с «Проекты».",
+                  "Files and chats are kept. Show it again with the hidden projects button next to Projects.")
+    }
+
+    /// The hidden projects button's menu: one item per project, then "Show all" when there are several.
+    static func hiddenActions(_ projects: [Project], show: @escaping (UUID) -> Void) -> [SidebarMenuAction] {
+        var actions = projects.map { project in
+            SidebarMenuAction(title: project.name, systemImage: "folder", help: project.path) { show(project.id) }
+        }
+        if projects.count > 1 {
+            actions += [.separator, SidebarMenuAction(title: L10n.text("Показать все", "Show all"), systemImage: "eye") {
+                projects.forEach { show($0.id) }
+            }]
+        }
+        return actions
     }
 
     static func actions(path: String, hasChats: Bool, settings: @escaping () -> Void, newChat: @escaping () -> Void,
@@ -84,7 +99,7 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
             SidebarMenuAction(title: L10n.text("Выделить все чаты", "Select all chats"), systemImage: "checkmark.circle",
                               enabled: hasChats, perform: selectAllChats),
             .separator,
-            SidebarMenuAction(title: L10n.text("Убрать проект из списка", "Remove project from list"), systemImage: "minus.circle",
+            SidebarMenuAction(title: hideTitle, systemImage: "eye.slash",
                               help: removeHelp, perform: remove),
         ]
     }

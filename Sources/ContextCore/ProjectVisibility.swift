@@ -14,6 +14,13 @@ extension SavedState {
         return true
     }
 
+    /// Brings a hidden project back to the sidebar with its chats, name and settings.
+    @discardableResult public mutating func showProject(_ id: UUID) -> Bool {
+        guard let index = projects.firstIndex(where: { $0.id == id }), projects[index].isHidden else { return false }
+        projects[index].hidden = nil
+        return true
+    }
+
     /// Display name only; the folder is never touched. An empty name restores the folder name.
     @discardableResult public mutating func renameProject(_ id: UUID, to name: String) -> Bool {
         guard let index = projects.firstIndex(where: { $0.id == id }) else { return false }

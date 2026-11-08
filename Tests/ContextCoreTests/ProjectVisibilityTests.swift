@@ -128,9 +128,9 @@ import Testing
     let menu = try #require(view.menu(for: event))
     let index = menu.items.count - 1
     let item = menu.items[index]
-    #expect(item.title == L10n.text("Убрать проект из списка", "Remove project from list"))
+    #expect(item.title == ProjectMenu.hideTitle)
     #expect(item.isEnabled)
-    #expect(item.toolTip == L10n.text("Файлы и чаты сохранятся. Вернуть проект можно через «Добавить проект».", "Files and chats are kept. Restore it with Add project."))
+    #expect(item.toolTip == ProjectMenu.removeHelp)
     menu.performActionForItem(at: index)
     #expect(removed)
 }
@@ -146,10 +146,43 @@ import Testing
         L10n.text("Настройки проекта…", "Project settings…"), L10n.text("Новый чат", "New chat"),
         L10n.text("Открыть в Finder", "Open in Finder"), EditorLauncher.openTitle, L10n.text("Скопировать путь", "Copy path"),
         L10n.text("Переименовать…", "Rename…"), L10n.text("Выделить все чаты", "Select all chats"),
-        L10n.text("Убрать проект из списка", "Remove project from list"),
+        ProjectMenu.hideTitle,
     ])
     #expect(menu.items.first { $0.title == L10n.text("Выделить все чаты", "Select all chats") }?.isEnabled == false)
     #expect(!menu.items.contains { $0.title == L10n.text("Переместить выше", "Move up") })
+}
+
+@Test @MainActor func hiddenProjectsMenuShowsAProjectAgainWithItsChats() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = AppStore(file: root.appendingPathComponent("metadata.sqlite"))
+    let model = DeskModel(store: store, pluginDirectory: root, summaryResources: nil,
+                          jobStore: JobStore(file: root.appendingPathComponent("jobs.json")))
+    let a = model.state.addProject(path: root.appendingPathComponent("a").path)
+    let b = model.state.addProject(path: root.appendingPathComponent("b").path)
+    let c = model.state.addProject(path: root.appendingPathComponent("c").path)
+    model.state.chats = [Chat(id: "kept", projectID: b, title: "Kept", model: "")]
+    await model.hideProject(b)
+    await model.hideProject(c)
+    let listing = SidebarListing()
+    #expect(model.sidebarSnapshot(listing).hiddenProjects.map(\.id) == [b, c])
+    #expect(model.sidebarSnapshot(listing).projects.map(\.id) == [a])
+
+    var shown: [UUID] = []
+    let actions = ProjectMenu.hiddenActions(model.state.projects.filter(\.isHidden)) { shown.append($0) }
+    #expect(actions.filter { !$0.isSeparator }.map(\.title) == ["b", "c", L10n.text("Показать все", "Show all")])
+    actions.last?.perform()
+    #expect(shown == [b, c])
+    #expect(ProjectMenu.hiddenActions([model.state.projects[1]]) { _ in }.count == 1) // One project: no "Show all".
+
+    model.showProject(b)
+    #expect(model.projectID == b)
+    #expect(model.state.visibleProjects.map(\.id) == [a, b])
+    #expect(model.state.chats.map(\.id) == ["kept"])
+    let repeated = model.state.showProject(b)
+    #expect(!repeated) // Already shown.
+    await model.flushPersist()
+    #expect(try await store.load().visibleProjects.map(\.id) == [a, b])
 }
 
 @Test @MainActor func chatRowMenuNestsAgentToolsInASubmenu() throws {

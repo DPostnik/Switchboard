@@ -184,7 +184,7 @@ struct DeskView: View {
             }
             Divider().padding(.vertical, .ui(6))
         }
-        projectsHeader
+        projectsHeader(hidden: snapshot.hiddenProjects)
         ForEach(snapshot.projects) { entry in
             projectEntries(entry, snapshot, list)
         }
@@ -245,11 +245,25 @@ struct DeskView: View {
         .accessibilityLabel(count > 0 ? "\(title): \(count)" : title)
         .accessibilityAddTraits(model.showingAttention && !model.showingArchive ? .isSelected : [])
     }
-    /// "Projects" with the add button at its trailing edge.
-    private var projectsHeader: some View {
+    /// "Projects" with the hidden projects menu (while any are hidden) and the add button at its trailing edge.
+    private func projectsHeader(hidden: [Project]) -> some View {
         HStack(spacing: 0) {
             Text(L10n.text("Проекты", "Projects")).font(.ui(.caption).weight(.semibold)).foregroundStyle(.secondary)
             Spacer(minLength: 0)
+            if !hidden.isEmpty {
+                SidebarMenuButton(actions: { ProjectMenu.hiddenActions(hidden) { model.showProject($0) } }) {
+                    HStack(spacing: .ui(3)) {
+                        Image(systemName: "eye.slash")
+                        Text("\(hidden.count)").monospacedDigit()
+                    }
+                    .font(.ui(.caption).weight(.semibold)).foregroundStyle(.secondary)
+                    .padding(.horizontal, .ui(6)).frame(height: .ui(22)).contentShape(Rectangle())
+                }
+                .fixedSize()
+                .help(L10n.text("Скрытые проекты: \(hidden.count). Нажми, чтобы вернуть проект в список",
+                                "Hidden projects: \(hidden.count). Click to show a project again"))
+                .accessibilityLabel(L10n.text("Скрытые проекты: \(hidden.count)", "Hidden projects: \(hidden.count)"))
+            }
             Button { model.openProject() } label: {
                 Image(systemName: "plus").font(.ui(.caption).weight(.semibold))
             }

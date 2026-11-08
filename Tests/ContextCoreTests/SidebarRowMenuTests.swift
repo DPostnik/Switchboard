@@ -47,6 +47,6 @@ import Testing
     let header = try #require(views(host, ProjectHeaderView.self).first)
     let projectTitles = try #require(header.menu(for: event)).items.map(\.title)
     #expect(projectTitles.contains(L10n.text("Настройки проекта…", "Project settings…")))
-    #expect(projectTitles.contains(L10n.text("Убрать проект из списка", "Remove project from list")))
+    #expect(projectTitles.contains(ProjectMenu.hideTitle))
     #expect(header.accessibilityCustomActions()?.isEmpty == true) // One project: nowhere to move.
 }

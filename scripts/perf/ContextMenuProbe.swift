@@ -178,7 +178,7 @@ struct ProbePending { let threadID: String }
                 _ = self.orderedChats(projectID: project, archived: false)
             },
             .separator,
-            SidebarMenuAction(title: text("Убрать проект из списка", "Remove project from list"), systemImage: "minus.circle",
+            SidebarMenuAction(title: text("Скрыть проект", "Hide project"), systemImage: "eye.slash",
                               help: text("Файлы и чаты сохранятся.", "Files and chats are kept.")) {},
         ]
     }

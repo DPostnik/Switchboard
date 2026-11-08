@@ -45,6 +45,8 @@ struct SidebarSnapshot: Equatable {
     var projects: [SidebarProjectRow] = []
     var matching = 0
     var hidden = 0
+    /// Projects the user hid from the list; the button next to "Projects" shows them again.
+    var hiddenProjects: [Project] = []
     var chatID: String?
     var projectID: UUID?
     /// The schedule, "Needs you" or archive page is open: no chat or project row is selected.
@@ -96,6 +98,7 @@ extension DeskModel {
                                      waiting: chats.contains { pendingChats.contains($0.id) || restartWaiting.contains($0.id) },
                                      unread: chats.contains(where: \.hasUnreadResponse))
         }
+        snapshot.hiddenProjects = state.projects.filter(\.isHidden)
         snapshot.chatID = chatID; snapshot.projectID = projectID
         snapshot.pageOpen = showingJobs || showingAttention || showingArchive
         return snapshot
