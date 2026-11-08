@@ -128,11 +128,13 @@ private func writeState(_ rows: [String: Any], to url: URL) throws {
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: root) }
     let target = UUID().uuidString, caller = UUID().uuidString, session = UUID().uuidString, turn = UUID().uuidString, project = UUID().uuidString
+    let web = WebChats.prefix + UUID().uuidString.lowercased()
     try writeState([
         "app": ["projects": [["id": project, "name": "switchboard", "path": "/p"]],
                 "chats": [["id": target, "title": "Files", "projectID": project, "updated": 815_741_411,
                            "nativeSession": ["nativeID": session, "connection": ["agent": "claude-code", "id": "c"]]],
-                          ["id": caller, "title": "Caller", "projectID": project]]],
+                          ["id": caller, "title": "Caller", "projectID": project],
+                          ["id": web, "title": "Web", "projectID": project]]],
         "timing:" + target: [turn: ["startedAt": 815_741_411, "completedAt": 815_741_495, "tokens": ["counts": ["output": 5]]]],
     ], to: root.appendingPathComponent("metadata.sqlite"))
     let folder = root.appendingPathComponent("claude/projects/-p")
@@ -175,6 +177,9 @@ private func writeState(_ rows: [String: Any], to url: URL) throws {
     // A chat with access to all chats needs no reference.
     let open = try serve([call(target)], arguments: ["--chat", UUID().uuidString, "--root", root.path])
     #expect(text(open[2])["chat_id"] as? String == target)
+    // A web client chat keeps its `web:` prefix in the ID.
+    let webChat = try serve([call("switchboard-chat:" + web)], arguments: ["--chat", UUID().uuidString, "--root", root.path])
+    #expect(text(webChat[2])["chat_id"] as? String == web)
 }
 
 @Test func chatReferencesAndEventsStayInTheirFiles() throws {
@@ -214,6 +219,13 @@ private func writeState(_ rows: [String: Any], to url: URL) throws {
     // The agent session ID names its chat too.
     model.noteChatReferences(chatID: caller.id, text: "session " + (other.nativeSession?.nativeID ?? ""))
     #expect(ChatReferences.load(chat: caller.id) == [other.id])
+    // A web client chat is named by its UUID without the `web:` prefix.
+    var web = Chat(session: .init(connection: .appClaude, nativeID: UUID().uuidString), projectID: project.id, title: "Web", model: "claude")
+    web.id = WebChats.prefix + UUID().uuidString.lowercased()
+    model.state.chats.append(web)
+    #expect(web.startedOnWeb && !other.startedOnWeb)
+    model.noteChatReferences(chatID: caller.id, text: "switchboard-chat:" + web.id)
+    #expect(ChatReferences.load(chat: caller.id) == [other.id, web.id])
     let args = try #require(model.chatDirectoryArguments(for: caller.id, script: directoryServer))
     #expect(args.contains("--references") && args.contains("--root") && !args.contains("--snapshot") && !args.contains("--index"))
     model.toggleChatDirectory(caller.id)

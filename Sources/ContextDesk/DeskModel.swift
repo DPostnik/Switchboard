@@ -1741,7 +1741,7 @@ private struct ChatRunState: Equatable {
     func noteChatReferences(chatID: String, text: String) {
         let found = ChatReferences.identifiers(in: text)
         var named = found.compactMap { id in
-            state.chats.first { $0.id.lowercased() == id || $0.nativeSession?.nativeID.lowercased() == id }?.id
+            state.chats.first { [id, WebChats.prefix + id].contains($0.id.lowercased()) || $0.nativeSession?.nativeID.lowercased() == id }?.id
         }.filter { $0 != chatID }
         // The first reference adds the server to the launch, which restarts a live CLI and would end its background
         // tasks and sub-agents; it waits for a message sent while none run.

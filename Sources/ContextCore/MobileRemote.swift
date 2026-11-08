@@ -477,6 +477,10 @@ public enum WebChats {
         return result
     }
 }
+extension Chat {
+    /// Started from the web client: such chats keep the `web:` ID they were created with.
+    public var startedOnWeb: Bool { id.hasPrefix(WebChats.prefix) }
+}
 /// One message of a web chat, full text up to `textLimit` characters.
 public struct RemoteWebMessage: Codable, Sendable, Hashable {
     public static let textLimit = 100_000

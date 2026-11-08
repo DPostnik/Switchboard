@@ -304,7 +304,8 @@ def resolve(root, wanted):
     app = state_value(root, "app") or {}
     chats, key = app.get("chats", []), wanted.lower()
     for chat in chats:
-        if chat.get("id", "").lower() == key:
+        # Web client chats keep their `web:` prefix; callers pass the bare UUID.
+        if chat.get("id", "").lower() in (key, "web:" + key):
             return chat, "chat", app
     for chat in chats:
         if ((chat.get("nativeSession") or {}).get("nativeID") or "").lower() == key:

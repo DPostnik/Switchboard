@@ -362,7 +362,9 @@ struct DeskView: View {
         model.showingArchive ? L10n.text("Архив", "Archive") : model.showingAttention ? L10n.text("Ждёт тебя", "Needs you") : model.showingJobs ? L10n.text("Расписание", "Schedule") : (model.selectedChat?.title ?? L10n.text("Новый чат", "New chat"))
     }
     private var detailSubtitle: String {
-        model.showingArchive || model.showingJobs || model.showingAttention ? "" : model.selectedProject?.name ?? ""
+        guard !(model.showingArchive || model.showingJobs || model.showingAttention) else { return "" }
+        let web = model.selectedChat?.startedOnWeb == true ? L10n.text("начат в веб-клиенте", "started in the web client") : nil
+        return [model.selectedProject?.name, web].compactMap { $0 }.joined(separator: " · ")
     }
     private func adjacentProjectMove(_ project: Project, offset: Int) -> (() -> Void)? {
         let projects = model.state.visibleProjects
@@ -710,6 +712,11 @@ struct DeskView: View {
                         Text(name).font(.ui(.caption2)).foregroundStyle(.secondary).lineLimit(1)
                             .help(row.projectPath ?? "")
                     }
+                }
+                if chat.startedOnWeb {
+                    Image(systemName: "safari").font(.ui(.caption2)).foregroundStyle(.secondary)
+                        .help(L10n.text("Чат начат в веб-клиенте", "This chat was started in the web client"))
+                        .accessibilityLabel(L10n.text("Начат в веб-клиенте", "Started in the web client"))
                 }
                 if row.browserOpen {
                     Image(systemName: "globe").font(.ui(.caption2)).foregroundStyle(DeskPalette.browser)
