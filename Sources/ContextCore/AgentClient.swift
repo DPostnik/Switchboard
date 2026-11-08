@@ -8,6 +8,7 @@ public struct AgentOperationFailure: LocalizedError, Sendable {
     public var errorDescription: String? {
         if let diagnostic = failure?.diagnostic { return diagnostic }
         switch rejection {
+        case .unverifiedEngineVersion(let version): return Self.versionMessage(version)
         case .incompatibleContract: return L10n.text("Версия движка не поддерживается этим адаптером. Подключение остановлено.", "This adapter does not support the engine version. Connection stopped.")
         case .staleContext: return L10n.text("Аккаунт или подключение изменились. Действие не повторено.", "The account or connection changed. The action was not retried.")
         case .routeUnavailable: return L10n.text("Выбранный маршрут недоступен", "The selected route is unavailable")
@@ -17,6 +18,11 @@ public struct AgentOperationFailure: LocalizedError, Sendable {
         case .unknownRequest, .invalidResponse, .invalidInput: return L10n.text("Запрос устарел или недопустим. Действие не повторено.", "The request is stale or invalid. The action was not retried.")
         case nil: return L10n.text("Движок недоступен. Подключись заново.", "The engine is unavailable. Reconnect.")
         }
+    }
+    public static func versionMessage(_ version: String?, language: AppLanguage = L10n.language) -> String {
+        let suffix = version.map { " " + $0 } ?? ""
+        return L10n.text("Версия Codex\(suffix) не проверена. Подключение остановлено до проверки аккаунта. Повторный вход не поможет. Используй проверенную версию Codex и нажми «Переподключить».",
+                         "Codex version\(suffix) is unverified. Connection stopped before checking your account. Signing in again will not help. Use a verified Codex version, then reconnect.", language: language)
     }
     public func result<T: Sendable>() -> AgentResult<T> {
         if let rejection { return .rejected(rejection) }

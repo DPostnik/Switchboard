@@ -4,7 +4,7 @@
 Cheap by design (user requirement): nothing runs on battery; installed versions cost one `--version` each;
 the latest published version is one `npm view <package> version` per agent, at most once per 24 h; the live
 no-inference tests run only for an installed version that is neither verified nor checked before. No model
-requests, no downloads, nothing executed except the installed CLIs and this repository's own test script.
+inference. New stable Codex packages are staged separately and promoted only after all candidate scenarios pass.
 
   python3 -I scripts/compat-check.py [--worktree DIR] [--app PATH] [--no-live] [--force-npm]
                                      [--state FILE] [--status FILE] [--no-notify]
@@ -18,6 +18,7 @@ import datetime as dt
 import json
 import os
 import re
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -210,7 +211,25 @@ def main():
         state['npmCheckedAt'] = now.isoformat(timespec='seconds')
     versions = {agent: installed(agent) for agent in AGENTS}
     live = None if args.no_live else (lambda agent, version: run_live(agent, args.worktree))
-    line, findings, state = evaluate(state, verified_versions(args.worktree), versions, state.get('latest') or {}, live, now)
+    verified = verified_versions(args.worktree)
+    managed = HOME / 'Library/Application Support/Switchboard/agents/codex'
+    trial = runpy.run_path(str(args.worktree / 'scripts/codex-candidate.py'))
+    if versions['codex'] and versions['codex'] not in verified['codex'] and trial['verified_active'](managed, versions['codex']):
+        verified['codex'].append(versions['codex'])
+    line, findings, state = evaluate(state, verified, versions, state.get('latest') or {}, live, now)
+    newest, active = (state.get('latest') or {}).get('codex'), versions.get('codex')
+    if live and newest and active and newest != active:
+        try:
+            outcome = trial['check'](newest, active, args.worktree, managed)
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+            print(f'Codex candidate: {exc}', file=sys.stderr)
+            outcome = 'failed: candidate setup or check'
+        line += f'; Codex candidate {newest}: {outcome}'
+        if outcome.startswith('failed'):
+            line = re.sub('^ok ', 'attention ', line)
+        if outcome.startswith(('failed', 'promoted')):
+            findings.append((f'codex:trial:{newest}:{outcome.split(":")[0]}', (f'Codex {newest}: проверка не прошла / check failed' if outcome.startswith('failed')
+                             else f'Codex {newest}: проверено и выбрано / verified and selected')))
     notified = set(state.get('notified', []))
     fresh = [text for key, text in findings if key not in notified]
     state['notified'] = sorted(notified | {key for key, _ in findings})

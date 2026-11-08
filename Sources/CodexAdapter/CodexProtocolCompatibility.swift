@@ -26,8 +26,9 @@ enum CodexProtocolCompatibility {
     static func accepts(userAgent: String) -> Bool { verdict(userAgent: userAgent) != .rejected }
 
     /// The engine as the descriptor reports it; nil when the version is rejected.
-    static func engine(userAgent: String) -> AgentEngineVersion? {
+    static func engine(userAgent: String, verifiedInstall: String? = nil) -> AgentEngineVersion? {
         guard let version = version(userAgent: userAgent) else { return nil }
+        if version == verifiedInstall { return AgentEngineVersion(version: version, verified: true) }
         switch AgentVersionPolicy.evaluate(version, verified: supportedVersions) {
         case .verified: return AgentEngineVersion(version: version, verified: true)
         case .sameMinor(let nearest): return AgentEngineVersion(version: version, verified: false, nearestVerified: nearest)

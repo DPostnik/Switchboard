@@ -1790,19 +1790,23 @@ struct SettingsView: View {
                     Text(installation.hint()).font(.ui(.caption)).foregroundStyle(.secondary).textSelection(.enabled)
                     Button(L10n.text("Проверить снова", "Check again")) { model.refreshInstallations() }
                 } else if profile.traits.contains(.sharedEngine) {
-                    LabeledContent(L10n.text("Аккаунт", "Account"), value: agent.signingIn
-                        ? L10n.text("Ждёт входа в браузере…", "Waiting for sign-in in the browser…") : agent.accountLabel)
-                    if let note = copy.note { Text(note()).font(.ui(.caption)).foregroundStyle(.secondary) }
-                    if agent.authenticated {
-                        if agent.canSignOut { Button(copy.signOut()) { Task { await model.logout(id) } }.disabled(model.anyBusy) }
-                        else {
-                            Text(L10n.text("\(profile.productName) не предлагает выход из аккаунта.", "\(profile.productName) offers no sign-out."))
-                                .font(.ui(.caption)).foregroundStyle(.secondary)
-                        }
+                    if let issue = agent.versionIssue {
+                        Label(issue, systemImage: "exclamationmark.triangle").textSelection(.enabled)
                     } else {
-                        // An agent that connects on first use connects on the way to signing in.
-                        Button(copy.signIn()) { Task { await model.login(id) } }
-                            .disabled(agent.signingIn || agent.connecting || (!agent.connected && profile.traits.contains(.connectsAtLaunch)))
+                        LabeledContent(L10n.text("Аккаунт", "Account"), value: agent.signingIn
+                            ? L10n.text("Ждёт входа в браузере…", "Waiting for sign-in in the browser…") : agent.accountLabel)
+                        if let note = copy.note { Text(note()).font(.ui(.caption)).foregroundStyle(.secondary) }
+                        if agent.authenticated {
+                            if agent.canSignOut { Button(copy.signOut()) { Task { await model.logout(id) } }.disabled(model.anyBusy) }
+                            else {
+                                Text(L10n.text("\(profile.productName) не предлагает выход из аккаунта.", "\(profile.productName) offers no sign-out."))
+                                    .font(.ui(.caption)).foregroundStyle(.secondary)
+                            }
+                        } else {
+                            // An agent that connects on first use connects on the way to signing in.
+                            Button(copy.signIn()) { Task { await model.login(id) } }
+                                .disabled(agent.signingIn || agent.connecting || (!agent.connected && profile.traits.contains(.connectsAtLaunch)))
+                        }
                     }
                     Button(L10n.text("Переподключить \(profile.name)", "Reconnect \(profile.name)")) { Task { await model.connect(id) } }
                         .disabled(agent.connecting || agent.signingIn || model.anyBusy)

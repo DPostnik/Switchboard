@@ -32,6 +32,7 @@ import ContextCore
     private var timeouts: [String: Task<Void, Never>] = [:]
     private var reader: Task<Void, Never>?
     public private(set) var serverUserAgent: String?
+    private(set) var verifiedInstallVersion: String?
     private(set) var activeHome: URL?
 
     public init(maximumLineBytes: Int = 32 * 1024 * 1024) {
@@ -46,7 +47,11 @@ import ContextCore
                                                attributes: [.posixPermissions: 0o700])
         let child = Process(), stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
         let token = UUID(); generation = token; accountEpoch = UUID()
-        child.executableURL = executable
+        // Pin the managed pointer for this process. Other launchers may dispatch by their symlink name.
+        let managed = Locations.agentsHome.appendingPathComponent("codex/bin/codex").standardizedFileURL
+        let binary = executable.standardizedFileURL == managed ? executable.resolvingSymlinksInPath() : executable
+        verifiedInstallVersion = CodexVerifiedInstall.version(of: binary, selected: executable)
+        child.executableURL = binary
         child.arguments = ["app-server", "--listen", "stdio://", "-c", "cli_auth_credentials_store=\"file\"",
                            "-c", "analytics.enabled=false"] + extraArguments
         var environment = ProcessInfo.processInfo.environment

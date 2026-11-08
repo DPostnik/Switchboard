@@ -1,5 +1,8 @@
 """Decision checks for compat-check.py; pure, no processes, network or files outside the repository sources."""
 import datetime
+import runpy
+import tempfile
+import json
 import importlib.util
 import unittest
 from pathlib import Path
@@ -13,6 +16,30 @@ VERIFIED = {'codex': ['0.158.0-alpha.2.1', '0.159.0', '0.160.0'], 'claude': ['2.
 
 
 class CompatCheckTests(unittest.TestCase):
+    def test_candidate_must_pass_every_live_scenario_on_its_first_run(self):
+        trial = runpy.run_path(str(Path(__file__).with_name('codex-candidate.py')))
+        required, passed = trial['REQUIRED'], trial['passed']
+        rows = [f'✔ Test {name}() passed after 0.6 seconds.' for name in required]
+        self.assertTrue(passed('\n'.join(rows), 0))
+        self.assertFalse(passed('\n'.join(rows[:-1]), 0))
+        self.assertFalse(passed('\n'.join(rows + ['FLAKY']), 0))
+        self.assertFalse(passed('\n'.join(rows), 1))
+
+    def test_receipt_is_bound_to_the_selected_binary_and_reported_version(self):
+        trial = runpy.run_path(str(Path(__file__).with_name('codex-candidate.py')))
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            install = root / 'tested'
+            install.mkdir()
+            (root / 'bin').symlink_to(install)
+            exe = install / 'codex'
+            exe.write_bytes(b'original')
+            (install / trial['RECEIPT']).write_text(json.dumps(dict(version='1.2.3', sha256=trial['sha'](exe))))
+            self.assertTrue(trial['verified_active'](root, '1.2.3'))
+            self.assertFalse(trial['verified_active'](root, '1.2.4'))
+            exe.write_bytes(b'replaced')
+            self.assertFalse(trial['verified_active'](root, '1.2.3'))
+
     def test_policy_matches_the_app(self):
         self.assertEqual(compat.classify('0.160.0', VERIFIED['codex']), 'verified')
         self.assertEqual(compat.classify('0.160.4', VERIFIED['codex']), 'same-minor')

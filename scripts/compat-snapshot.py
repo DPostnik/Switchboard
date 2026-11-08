@@ -57,7 +57,7 @@ def write(name, index):
             lines.append(f'  {json.dumps(key)}: {json.dumps(value, sort_keys=True)}{comma}')
     lines.append('}')
     path.write_text('\n'.join(lines) + '\n')
-    print(f'wrote {path.relative_to(ROOT)} ({path.stat().st_size} bytes)')
+    print(f'wrote {path} ({path.stat().st_size} bytes)')
 
 
 # --- Codex ---------------------------------------------------------------------------------------
@@ -301,10 +301,13 @@ def acp(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest='agent', required=True)
-    c = sub.add_parser('codex'); c.add_argument('--binary')
+    c = sub.add_parser('codex'); c.add_argument('--binary'); c.add_argument('--out', type=Path)
     k = sub.add_parser('claude'); k.add_argument('--version', required=True); k.add_argument('--sdk')
     a = sub.add_parser('acp'); a.add_argument('--schema', required=True, help='schema/v1 folder of an ACP checkout')
     args = parser.parse_args()
+    global OUT
+    if getattr(args, "out", None):
+        OUT = args.out
     {'codex': codex, 'claude': claude, 'acp': acp}[args.agent](args)
 
 

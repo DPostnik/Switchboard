@@ -82,7 +82,7 @@ public actor ArchiveSummaryRunner {
             try await connection.start(executable: executable, home: home,
                 extraArguments: providerArguments + Self.isolationArguments)
             let agent = await connection.serverUserAgent ?? ""
-            guard CodexProtocolCompatibility.accepts(userAgent: agent) else {
+            guard CodexProtocolCompatibility.engine(userAgent: agent, verifiedInstall: await connection.verifiedInstallVersion) != nil else {
                 let supported = CodexProtocolCompatibility.supportedVersions.joined(separator: ", ")
                 throw ClientFailure(L10n.text("Версия Codex не проверена для подготовки итогов. Поддерживаются: \(supported)",
                                              "Codex version is not verified for summaries. Supported: \(supported)"))

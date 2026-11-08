@@ -84,7 +84,12 @@ public actor CodexIntegration: AgentIntegration {
     public func descriptor() async -> AgentResult<AgentDescriptor> {
         guard await client.transport.isRunning else { return .unavailable }
         let version = await client.transport.serverUserAgent ?? ""
-        guard let engine = CodexProtocolCompatibility.engine(userAgent: version) else { return .rejected(.incompatibleContract) }
+        guard let engine = CodexProtocolCompatibility.engine(userAgent: version, verifiedInstall: await client.transport.verifiedInstallVersion) else {
+            let token = CodexProtocolCompatibility.version(userAgent: version).flatMap { value in
+                value.count <= 80 && value.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || ".-".contains($0)) } ? value : nil
+            }
+            return .rejected(.unverifiedEngineVersion(token))
+        }
         if !engine.verified { CompatibilityDrift.shared.noteUnverified(.codex, version: engine.version) }
         let epoch = await client.transport.accountEpoch
         return .success(AgentDescriptor(context: .init(connection: .originalCodex, accountRevision: epoch), identityMode: .appOwnedHome,

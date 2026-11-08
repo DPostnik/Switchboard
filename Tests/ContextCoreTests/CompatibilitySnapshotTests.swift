@@ -101,6 +101,14 @@ private struct CodexSnapshot {
     #expect(checked.contains(CodexProtocolCompatibility.currentVersion))
 }
 
+@Test func candidateCodexSurfaceMatchesAdapter() throws {
+    guard let version = ProcessInfo.processInfo.environment["SWITCHBOARD_CODEX_CANDIDATE"] else { return }
+    let path = try #require(ProcessInfo.processInfo.environment["SWITCHBOARD_CODEX_SNAPSHOT"])
+    let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path))) as? [String: Any])
+    #expect(json["version"] as? String == version)
+    #expect(CodexSnapshot(json).missing().isEmpty)
+}
+
 @Test func codexKnownProtocolMatchesTheCurrentSnapshot() throws {
     let snapshot = CodexSnapshot(try #require(try load("codex-\(CodexProtocolCompatibility.currentVersion).json")))
     #expect(Set(snapshot.notifications.keys) == CodexProtocolSurface.notifications)

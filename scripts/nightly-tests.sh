@@ -43,7 +43,7 @@ if [[ $result != passed ]]; then
 fi
 # Upstream agent CLI check (seconds; skipped on battery). Live no-inference tests only for a newly installed,
 # unverified version and only when the suite built and passed. Writes compat-status next to latest-status.
-live=(); [[ $code != 0 ]] && live=(--no-live)
+live=(); [[ $result != passed ]] && live=(--no-live)
 { echo; echo "Compatibility check, $(date)"; } >>"$log"
 [[ -f "$WORK/scripts/compat-check.py" ]] && python3 -I "$WORK/scripts/compat-check.py" --worktree "$WORK" --app "$REPO/build/Switchboard.app/Contents/MacOS/Switchboard" $live >>"$log" 2>&1
 exit $code

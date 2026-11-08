@@ -185,6 +185,7 @@ struct AgentConnectionState {
     var canSignOut = true
     /// A sign-in the agent runs itself is in progress (for example Gemini CLI waiting for the browser).
     var signingIn = false
+    var versionIssue: String?
     /// The agent's CLI is present; false keeps it out of pickers and starts no process.
     var installed = true
 }

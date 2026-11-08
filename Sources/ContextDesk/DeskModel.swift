@@ -670,6 +670,8 @@ private struct ChatRunState: Equatable {
         if shared && (agentState(id).connected || traits.contains(.optimizerPlugins)) { guard !anyBusy else { return } }
         else { guard !state.chats.contains(where: { $0.nativeSession?.connection == id && isBusy(threadID: $0.id) }) else { return } }
         if traits.contains(.optimizerPlugins) { refreshPlugins() }
+        if let old = agentState(id).versionIssue, error == old { error = nil }
+        agentStates[id]?.versionIssue = nil
         agentStates[id]?.connecting = true; agentStates[id]?.connected = false
         clearLimits(id)
         defer { agentStates[id]?.connecting = false }
@@ -722,6 +724,11 @@ private struct ChatRunState: Equatable {
             slot.historyBackfillTask = Task { [weak self] in await self?.backfillHistory(chats) }
             if traits.contains(.optimizerPlugins) { monitorPlugins(host: id) }
         } catch {
+            if let failure = error as? AgentOperationFailure, case .unverifiedEngineVersion = failure.rejection {
+                agentStates[id]?.versionIssue = failure.localizedDescription
+                agentStates[id]?.authenticated = false
+                agentStates[id]?.models = []
+            }
             agentStates[id]?.connected = false; self.error = error.localizedDescription
             if traits.contains(.optimizerPlugins) { await stopPlugins() }
         }

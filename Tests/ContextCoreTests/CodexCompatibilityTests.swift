@@ -54,8 +54,12 @@ private func liveCodexExecutable() throws -> URL {
     let wire = CodexConnection()
     let app = AgentClient(integration: CodexIntegration(client: CodexClient(transport: wire)))
     do {
-        _ = try await app.start(.init(executable: liveCodexExecutable(), home: root.appendingPathComponent("codex")))
+        let descriptor = try await app.start(.init(executable: liveCodexExecutable(), home: root.appendingPathComponent("codex")))
+        if let expected = ProcessInfo.processInfo.environment["SWITCHBOARD_CODEX_CANDIDATE"] {
+            #expect(descriptor.engine?.version == expected && descriptor.engine?.verified == true)
+        }
         #expect(try await app.account().authenticated == false)
+        #expect(try await !app.models().isEmpty)
         try await app.registerWorkflows(at: root)
         await app.stop()
 

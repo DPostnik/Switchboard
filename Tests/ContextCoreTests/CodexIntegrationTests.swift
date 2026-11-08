@@ -42,7 +42,11 @@ func contractRuntimeRejectsUnverifiedVersionsBeforeSessionDispatch(version: Stri
     let (root, executable) = try contractFixture(version: version)
     defer { try? FileManager.default.removeItem(at: root) }
     let integration: any AgentIntegration = CodexIntegration()
-    if case .rejected(.incompatibleContract) = await integration.connect(.init(executable: executable, home: root)) {} else { Issue.record("Unverified version accepted") }
+    if case .rejected(.unverifiedEngineVersion(let detected)) = await integration.connect(.init(executable: executable, home: root)) {
+        #expect(detected == version.split(separator: " ").first.map(String.init))
+        #expect(AgentOperationFailure.versionMessage(detected, language: .english).contains("before checking your account"))
+        #expect(AgentOperationFailure.versionMessage(detected, language: .russian).contains("до проверки аккаунта"))
+    } else { Issue.record("Unverified version accepted") }
     if case .unavailable = await integration.descriptor() {} else { Issue.record("Rejected connection left usable") }
 }
 

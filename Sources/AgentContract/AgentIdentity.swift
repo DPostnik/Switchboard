@@ -123,6 +123,7 @@ public struct AgentDescriptor: Sendable {
 
 public enum AgentRejection: Equatable, Sendable {
     case incompatibleContract, staleContext, wrongConnection, routeUnavailable, unsupportedPermissions
+    case unverifiedEngineVersion(String?)
     case unsupported(AgentCapability)
     case unknownRequest, invalidResponse, invalidInput
 }

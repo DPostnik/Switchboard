@@ -6,6 +6,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Added
 
+- Test stable Codex updates in isolation before switching the managed CLI; account settings explain when an unverified version prevents connection.
 - Web client chats: the sidebar marks chats started in the web client with a Safari icon and the window subtitle says "started in the web client"; `switchboard-chat:web:<ID>` references now work with `inspect_chat` and `scripts/chat-lookup.sh`.
 - Sidebar: "Remove project from list" is now "Hide project"; while projects are hidden, a button next to "Projects" lists them and shows any of them again with its chats, without adding the folder again.
 - Chat servers: a "Servers" line above the composer lists the servers the chat's agent started (any process listening on a port, such as `npm run dev`), with the address that opens in the browser on click and a button that stops the server and its child processes; the right-click menu opens other ports, opens in Chrome or Safari and copies the address or the command. Codex servers are shown in the chats of their folder.
