@@ -63,6 +63,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ### Fixed
 
+- Command sandbox: a trusted command that writes its log to a temporary file, shows its end with `tail`/`head` and exits with the command's status (`> "$TMPDIR/build.log" 2>&1; code=$?; tail -15 "$TMPDIR/build.log"; exit $code`) no longer asks
 - Chat: a quick double click on the Project files button no longer leaves an empty column where the side panel was.
 - Claude chats: when a background command ended before the agent's turn did, the agent's next turn on its result no longer runs unseen: its reply reaches the chat, its requests ask you instead of being refused as unattended, and the Claude process stays open for the following notifications.
 - iPhone app: changing a chat's role from the phone is no longer rejected by the cloud database.

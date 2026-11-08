@@ -53,7 +53,7 @@ class AccessReviewTests(unittest.TestCase):
             self.row('C1', 'read', '/tmp/probe-a/shot.png', tool='Read'),
             self.row('C2', 'read', '/private/tmp/x/y.png', tool='Read'),
             self.row('C3', 'read', '/tmp/probe-b/log.txt', tool='Read'),
-            self.row('C1', 'shell', 'zsh scripts/test.sh --filter A > "$TMPDIR/t.log" 2>&1; code=$?; tail -5 "$TMPDIR/t.log"; exit $code'),
+            self.row('C1', 'shell', 'zsh scripts/test.sh --filter A > "$TMPDIR/t.log" 2>&1; code=$?; tail -5 "$TMPDIR/t.log"; exit $code', age=30),
             self.row('C2', 'shell', 'cd /work/app && zsh scripts/test.sh --filter B'),
             self.row('C1', 'shell', 'git push origin main', decision='used'),
             self.row('C1', 'read', '/work/notes/a.md', tool='Read', age=30 * 86400),
