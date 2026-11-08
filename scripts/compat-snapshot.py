@@ -68,6 +68,7 @@ def codex_binary(explicit):
     home = Path.home()
     candidates = [f'{d}/{app}/Contents/Resources/{rel}' for d in ['/Applications', str(home / 'Applications')]
                   for app in ['ChatGPT.app', 'Codex.app'] for rel in ['codex-cli/CodexCLI.app/Contents/MacOS/codex', 'codex']]
+    candidates.insert(0, str(home / "Library/Application Support/Switchboard/agents/codex/bin/codex"))
     candidates += ['/opt/homebrew/bin/codex', '/usr/local/bin/codex']
     for candidate in candidates:
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):

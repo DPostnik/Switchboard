@@ -38,6 +38,14 @@ import Testing
     #expect(AgentVersionPolicy.evaluate("1.0.0", verified: []) == .rejected)
 }
 
+/// The nightly check can select the app-managed executable while the test home stays isolated.
+private func liveCodexExecutable() throws -> URL {
+    if let path = ProcessInfo.processInfo.environment["SWITCHBOARD_CODEX_EXECUTABLE"], path.hasPrefix("/") {
+        return URL(fileURLWithPath: path)
+    }
+    return try Locations.codexExecutable()
+}
+
 /// Explicit opt-in: uses a temporary unauthenticated home and never sends a model turn.
 @Test func installedCodexCompatibilityWithoutInference() async throws {
     guard ProcessInfo.processInfo.environment["SWITCHBOARD_CODEX_COMPATIBILITY_LIVE"] == "1" else { return }
@@ -46,13 +54,13 @@ import Testing
     let wire = CodexConnection()
     let app = AgentClient(integration: CodexIntegration(client: CodexClient(transport: wire)))
     do {
-        _ = try await app.start(.init(executable: Locations.codexExecutable(), home: root.appendingPathComponent("codex")))
+        _ = try await app.start(.init(executable: liveCodexExecutable(), home: root.appendingPathComponent("codex")))
         #expect(try await app.account().authenticated == false)
         try await app.registerWorkflows(at: root)
         await app.stop()
 
         // Exercise the real summary setup through the last pre-inference isolation checks.
-        try await wire.start(executable: Locations.codexExecutable(), home: root.appendingPathComponent("codex"),
+        try await wire.start(executable: liveCodexExecutable(), home: root.appendingPathComponent("codex"),
                              extraArguments: ArchiveSummaryRunner.isolationArguments)
         let config = try await wire.request("config/read", params: .object(["includeLayers": .bool(false)]))
         #expect(config["config"] != .null)
@@ -150,7 +158,7 @@ import Testing
     let wire = CodexConnection(), client: CodexClient
     client = CodexClient(transport: wire)
     do {
-        let executable = try Locations.codexExecutable()
+        let executable = try liveCodexExecutable()
         let home = root.appendingPathComponent("codex")
         try await client.start(executable: executable, home: home, extraArguments: overrides, browserResources: resources, browserRoot: browserRoot)
         let first = try await client.createSession(projectPath: root.path, access: .standard, model: "", route: RequestRoute(rawValue: "browser_fixture"))

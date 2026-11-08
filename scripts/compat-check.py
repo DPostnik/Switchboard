@@ -35,7 +35,7 @@ def codex_candidates():
     apps = [f'{d}/{app}/Contents/Resources/{rel}' for d in ['/Applications', str(HOME / 'Applications')]
             for app in ['ChatGPT.app', 'Codex.app'] for rel in ['codex-cli/CodexCLI.app/Contents/MacOS/codex', 'codex']]
     path = [f'{p}/codex' for p in os.environ.get('PATH', '').split(':') if p.startswith('/')]
-    return apps + ['/opt/homebrew/bin/codex', '/usr/local/bin/codex'] + path
+    return [str(HOME / 'Library/Application Support/Switchboard/agents/codex/bin/codex')] + apps + ['/opt/homebrew/bin/codex', '/usr/local/bin/codex'] + path
 
 
 def claude_candidates():
@@ -130,8 +130,8 @@ def on_ac_power():
 def run_live(agent, worktree, timeout=900):
     variable, test = AGENTS[agent]['live']
     env = dict(os.environ, **{variable: '1'})
-    if agent == 'gemini' and executable(agent):
-        env['SWITCHBOARD_GEMINI_EXECUTABLE'] = executable(agent)
+    if agent in ('gemini', 'codex') and executable(agent):
+        env[f'SWITCHBOARD_{agent.upper()}_EXECUTABLE'] = executable(agent)
     try:
         code = subprocess.run(['zsh', 'scripts/test.sh', '--filter', test], cwd=worktree, env=env, timeout=timeout).returncode
     except subprocess.TimeoutExpired:

@@ -5,14 +5,15 @@ extension Locations {
     public static func codexExecutable() throws -> URL {
         try codexExecutable(
             applicationDirectories: ["/Applications", FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications").path],
-            path: ProcessInfo.processInfo.environment["PATH"] ?? ""
+            path: ProcessInfo.processInfo.environment["PATH"] ?? "",
+            managedExecutable: agentsHome.appendingPathComponent("codex/bin/codex").path
         )
     }
 
     static func codexExecutable(applicationDirectories: [String], path: String,
-                                cliDirectories: [String] = ["/opt/homebrew/bin", "/usr/local/bin"]) throws -> URL {
+                                cliDirectories: [String] = ["/opt/homebrew/bin", "/usr/local/bin"], managedExecutable: String? = nil) throws -> URL {
         // Desktop releases may embed the CLI as a nested app instead of a loose binary.
-        let candidates = applicationDirectories.flatMap { directory in
+        let candidates = [managedExecutable].compactMap { $0 } + applicationDirectories.flatMap { directory in
             ["ChatGPT.app", "Codex.app"].flatMap { app in
                 ["codex-cli/CodexCLI.app/Contents/MacOS/codex", "codex"].map {
                     "\(directory)/\(app)/Contents/Resources/\($0)"

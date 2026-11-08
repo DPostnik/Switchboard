@@ -55,7 +55,7 @@ open 'build/Switchboard.app'
 
 The build creates an ad-hoc signed local app. It does not need an Apple Developer subscription, a DMG, Headroom, Node.js or a model account. The build runner uses Python; ordinary Direct chats do not run a Headroom process.
 
-To **use agents**, install the [official Codex CLI](https://learn.chatgpt.com/docs/codex/cli), or have a supported ChatGPT/Codex desktop installation. Switchboard discovers its local binary; Codex is not bundled. Open a disposable project folder, choose **Sign in**, and complete the separate ChatGPT sign-in. An account with Codex access and network access are required; normal account limits apply. Select an available model and keep **No plugin** selected for the first run.
+To **use agents**, install the [official Codex CLI](https://learn.chatgpt.com/docs/codex/cli), or have a supported ChatGPT/Codex desktop installation. To keep Codex independent of desktop app updates, run `zsh scripts/install-codex-cli.sh` (requires npm). Switchboard prefers this verified CLI in its own application support folder; without it, it discovers the desktop or system CLI. Codex is not bundled. Open a disposable project folder, choose **Sign in**, and complete the separate ChatGPT sign-in. An account with Codex access and network access are required; normal account limits apply. Select an available model and keep **No plugin** selected for the first run.
 
 For **Claude Code**, install the [official Claude Code CLI](https://code.claude.com/docs). In Settings, **Sign in** opens the official `claude auth login --claudeai` in Terminal with the app's own profile; then choose **Check sign-in**. A Claude subscription is required. Your existing `~/.claude` login, settings and history are not used or copied.
 
