@@ -390,12 +390,15 @@ func chatTitleRunnerPreservesRouteAndIsolation(mode: String) async throws {
 
 @Test func chatTitleLiveSyntheticProbe() async throws {
     guard ProcessInfo.processInfo.environment["SWITCHBOARD_TITLE_LIVE"] == "1" else { return }
+    let model = ProcessInfo.processInfo.environment["SWITCHBOARD_TITLE_MODEL"] ?? CodexModelDefaults.model
+    let executable = try ProcessInfo.processInfo.environment["SWITCHBOARD_TITLE_EXECUTABLE"].map { URL(fileURLWithPath: $0) } ?? Locations.codexExecutable()
+    let home = ProcessInfo.processInfo.environment["SWITCHBOARD_TITLE_HOME"].map { URL(fileURLWithPath: $0) } ?? Locations.codexHome
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
     for message in ["У нас есть слева меню, где есть проекты, у них есть чаты. В тайтл чата нужно вставлять короткое резюме первого запроса вместо сырого текста.",
                     "Hi, could you help me? Every Monday I combine three sales CSV files manually. I'd like a script that produces a weekly sales report."] {
-        let title = try await ArchiveSummaryRunner().title(firstMessage: message, model: "gpt-6-astra", route: .direct,
-            executable: Locations.codexExecutable(), home: Locations.codexHome, workspace: root, providerArguments: [])
+        let title = try await ArchiveSummaryRunner().title(firstMessage: message, model: model, route: .direct,
+            executable: executable, home: home, workspace: root, providerArguments: [])
         #expect(!title.isEmpty && title.count <= 60)
         #expect(!message.hasPrefix(title))
         print("SYNTHETIC CHAT TITLE: \(title)")

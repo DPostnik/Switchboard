@@ -525,6 +525,7 @@ private struct ChatRunState: Equatable {
         do { state = try await store.load(); usage = try await store.loadUsage(); projectID = state.visibleProjects.first?.id } catch { self.error = error.localizedDescription; return }
         if state.migrateRoles() { persist() }
         if state.migrateAccessPresets() { persist() }
+        if state.applyCodexSolDefault() { persist() }
         // Sign the cookie-import consent files once, when the signing key is first created (audit H2).
         do {
             let signed = try ChromeSessionImportPolicy.adoptExistingPolicies()
@@ -878,8 +879,8 @@ private struct ChatRunState: Equatable {
         do {
             let models = try await client.models()
             if agentState(id).models != models { agentStates[id]?.models = models }
-            if ownsDefaultModelSetting(id), !models.contains(where: { $0.id == state.model }) {
-                state.model = (models.first { $0.isDefault } ?? models.first)?.id ?? ""
+            if ownsDefaultModelSetting(id) {
+                state.model = CodexModelDefaults.resolve(state.model, available: models)
             }
             // A session-models agent's default that its sessions no longer offer falls back to the agent's own default.
             let configured = defaultModelSetting(id)

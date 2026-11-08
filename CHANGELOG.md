@@ -4,6 +4,10 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Changed
+
+- New Codex chats default to GPT-6.1 Sol. Existing installations adopt the app default once; saved chat and project model choices and later changes to the app default are preserved.
+
 ### Added
 
 - Test stable Codex updates in isolation before switching the managed CLI; account settings explain when an unverified version prevents connection.

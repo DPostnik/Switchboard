@@ -190,7 +190,9 @@ public struct SavedState: Codable, Sendable {
     public var roleMigration: RoleMigrationRecord?
     public var projects: [Project] = []
     public var chats: [Chat] = []
-    public var model: String = ""
+    public var model: String = CodexModelDefaults.model
+    /// One-time adoption of the requested app default; later user choices remain authoritative.
+    public var codexSolDefaultApplied: Bool?
     public init() {}
 
     /// Move onto a project's position: before it when moving up, after it when moving down.
