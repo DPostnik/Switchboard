@@ -93,7 +93,12 @@ private func text(_ reply: [String: Any]?) -> [String: Any] {
     try? FileManager.default.removeItem(at: model.chatDirectoryFile)
     await model.refreshChatDirectory()
     #expect(!FileManager.default.fileExists(atPath: model.chatDirectoryFile.path))
-    #expect(model.chatDirectoryArguments(for: master.id) == nil)
+    let diagnosticsOnly = try #require(model.chatDirectoryArguments(for: master.id, script: directoryServer))
+    #expect(diagnosticsOnly.contains("--diagnostics-project"))
+    #expect(!diagnosticsOnly.contains("--root") && !diagnosticsOnly.contains("--snapshot"))
+    model.state.chats[0].roleID = AgentRoleID.reader
+    #expect(model.chatDirectoryArguments(for: master.id, script: directoryServer) == nil)
+    model.state.chats[0].roleID = nil
     model.toggleChatDirectory(master.id)
     #expect(model.state.chats.first?.chatDirectoryAccess == true)
     await model.refreshChatDirectory()
@@ -213,9 +218,11 @@ private func writeState(_ rows: [String: Any], to url: URL) throws {
     model.state.projects = [project]; model.state.chats = [caller, other]
     defer { ChatReferences.remove(chat: caller.id) }
     ChatReferences.remove(chat: caller.id)
-    #expect(model.chatDirectoryArguments(for: caller.id, script: directoryServer) == nil)
+    let diagnosticsOnly = try #require(model.chatDirectoryArguments(for: caller.id, script: directoryServer))
+    #expect(diagnosticsOnly.contains("--diagnostics-project"))
+    #expect(!diagnosticsOnly.contains("--root") && !diagnosticsOnly.contains("--references") && !diagnosticsOnly.contains("--index") && !diagnosticsOnly.contains("--snapshot"))
     model.noteChatReferences(chatID: caller.id, text: "Why did " + UUID().uuidString + " and our own " + caller.id + " stop?")
-    #expect(model.chatDirectoryArguments(for: caller.id, script: directoryServer) == nil)
+    #expect(model.chatDirectoryArguments(for: caller.id, script: directoryServer) == diagnosticsOnly)
     // The agent session ID names its chat too.
     model.noteChatReferences(chatID: caller.id, text: "session " + (other.nativeSession?.nativeID ?? ""))
     #expect(ChatReferences.load(chat: caller.id) == [other.id])
@@ -231,4 +238,20 @@ private func writeState(_ rows: [String: Any], to url: URL) throws {
     model.toggleChatDirectory(caller.id)
     let full = try #require(model.chatDirectoryArguments(for: caller.id, script: directoryServer))
     #expect(full.contains("--snapshot") && full.contains("--root") && !full.contains("--references"))
+}
+
+@Test func projectDiagnosticsRejectsExtraArgumentsAndHasNoChatAccess() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let replies = try serve([
+        ["jsonrpc": "2.0", "id": 1, "method": "tools/list"],
+        ["jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": ["name": "project_diagnostics", "arguments": ["operation": "load"]]],
+        ["jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": ["name": "project_diagnostics", "arguments": ["operation": "load", "project": "/"]]],
+        ["jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": ["name": "inspect_chat", "arguments": ["id": UUID().uuidString]]],
+        ["jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": ["name": "project_diagnostics", "arguments": ["operation": "shell"]]],
+    ], arguments: ["--diagnostics-project", root.path])
+    #expect(((replies[1]?["result"] as? [String: Any])?["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String } == ["project_diagnostics"])
+    #expect(text(replies[2])["cores"] as? Int != nil)
+    for id in [3, 4, 5] { #expect((replies[id]?["result"] as? [String: Any])?["isError"] as? Bool == true) }
 }

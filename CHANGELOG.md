@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Coding chats gain project-scoped load, build-task and app diagnostics, plus a shared app verification workflow.
+
 ### Changed
 
 - New Codex chats default to GPT-6.1 Sol. Existing installations adopt the app default once; saved chat and project model choices and later changes to the app default are preserved.

@@ -59,7 +59,7 @@ extension DeskModel {
         guard let summaryResources else { return }
         let manager = FileManager.default
         try manager.createDirectory(at: summarySkillsDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        for name in ["archive-summary", "routine-optimizer", "history-patterns"] {
+        for name in ["archive-summary", "routine-optimizer", "history-patterns", "verify-app"] {
             let destination = summarySkillsDirectory.appendingPathComponent(name)
             // Recipes are user-editable. Rebuilding the app does not overwrite them.
             if !manager.fileExists(atPath: destination.path) {

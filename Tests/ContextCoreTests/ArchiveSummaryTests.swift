@@ -304,11 +304,15 @@ func summaryRunnerRoutesAndFailsClosed(mode: String, version: String) async thro
     let model = DeskModel(pluginDirectory: root.appendingPathComponent("plugins"), summaryResources: skills,
                           summaryHome: root.appendingPathComponent("codex"))
     try model.prepareSummarySkills()
-    let file = model.summarySkillsDirectory.appendingPathComponent("routine-optimizer/SKILL.md")
-    let original = try String(contentsOf: file, encoding: .utf8)
-    try (original + "\nUser-specific recipe adjustment.\n").write(to: file, atomically: true, encoding: .utf8)
+    let files = ["routine-optimizer", "verify-app"].map { model.summarySkillsDirectory.appendingPathComponent("\($0)/SKILL.md") }
+    for file in files {
+        let original = try String(contentsOf: file, encoding: .utf8)
+        try (original + "\nUser-specific recipe adjustment.\n").write(to: file, atomically: true, encoding: .utf8)
+    }
     try model.prepareSummarySkills()
-    #expect(try String(contentsOf: file, encoding: .utf8).contains("User-specific recipe adjustment."))
+    for file in files {
+        #expect(try String(contentsOf: file, encoding: .utf8).contains("User-specific recipe adjustment."))
+    }
     guard ProcessInfo.processInfo.environment["SWITCHBOARD_SUMMARY_LIVE"] != nil else { return }
     let connection = CodexConnection()
     try await connection.start(executable: Locations.codexExecutable(), home: root.appendingPathComponent("codex"),
@@ -316,7 +320,7 @@ func summaryRunnerRoutesAndFailsClosed(mode: String, version: String) async thro
     _ = try await connection.request("skills/extraRoots/set", params: .object(["extraRoots": .array([.string(model.summarySkillsDirectory.path)])]))
     let result = try await connection.request("skills/list", params: .object(["cwds": .array([.string(root.path)]), "forceReload": .bool(true)]))
     let names = Set(result["data"].array.flatMap { $0["skills"].array }.compactMap { $0["name"].string })
-    #expect(names.isSuperset(of: ["archive-summary", "routine-optimizer", "history-patterns"]))
+    #expect(names.isSuperset(of: ["archive-summary", "routine-optimizer", "history-patterns", "verify-app"]))
     await connection.stop()
 }
 

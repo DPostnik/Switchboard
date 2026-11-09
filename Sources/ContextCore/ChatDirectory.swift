@@ -71,8 +71,9 @@ public enum ChatDirectory {
     /// full-text search tools; `recipe` makes the server hand its search instructions to a chat-search chat; `root`
     /// (the app's data folder) adds `inspect_chat`, limited to the chats in `references` when that file is given.
     public static func serverArguments(script: String, snapshot: String?, chat: String, index: String? = nil, recipe: String? = nil,
-                                       root: String? = nil, references: String? = nil) -> [String] {
+                                       root: String? = nil, references: String? = nil, diagnosticsProject: String? = nil) -> [String] {
         [script] + (snapshot.map { ["--snapshot", $0] } ?? []) + ["--chat", chat] + (index.map { ["--index", $0] } ?? [])
+            + (diagnosticsProject.map { ["--diagnostics-project", $0, "--language", L10n.language.rawValue] } ?? [])
             + (recipe.map { ["--recipe", $0] } ?? []) + (root.map { ["--root", $0] } ?? []) + (references.map { ["--references", $0] } ?? [])
     }
 }

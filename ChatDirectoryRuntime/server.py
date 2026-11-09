@@ -16,6 +16,10 @@ import os
 import re
 import sqlite3
 import sys
+import subprocess
+import plistlib
+import stat
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 PROTOCOL = "2025-06-18"
@@ -104,6 +108,139 @@ INSPECT_TOOL = {
         "required": ["id"], "additionalProperties": False},
     "annotations": {"readOnlyHint": True},
 }
+DIAGNOSTICS_TOOL = {
+    "name": "project_diagnostics",
+    "description": "Read Mac load, active build/test tasks, or running application identity for this chat's fixed project. "
+                   "No commands or paths are accepted. / Нагрузка Mac, сборки и тесты, либо сведения о приложении текущего проекта.",
+    "inputSchema": {"type": "object", "properties": {
+        "operation": {"type": "string", "enum": ["load", "heavy_tasks", "app"]}},
+        "required": ["operation"], "additionalProperties": False},
+    "annotations": {"readOnlyHint": True},
+}
+
+
+def diagnostic_command(arguments):
+    # Fixed argv only; stdout is consumed locally and never returned verbatim.
+    return subprocess.run(arguments, capture_output=True, text=True, timeout=5, check=True).stdout
+
+
+DIAGNOSTIC_ROOTS = {}
+
+
+def diagnostic_open(root, relative, mode="rb", metadata=True):
+    """Open each component without symlink traversal, including the fixed project directory."""
+    parts = Path(relative).parts
+    if not parts or any(part in ("..", "/") for part in parts):
+        raise ValueError("Invalid project path / Некорректный путь проекта")
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        expected = DIAGNOSTIC_ROOTS.get(str(root))
+        actual = os.fstat(descriptor)
+        if expected is not None and expected != (actual.st_dev, actual.st_ino):
+            raise ValueError("Project path changed / Путь проекта изменился")
+        for part in parts[:-1]:
+            following = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = following
+        final = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
+        if not stat.S_ISREG(os.fstat(final).st_mode):
+            os.close(final)
+            raise ValueError("Not a regular file / Не обычный файл")
+        if metadata and os.fstat(final).st_size > 1024 * 1024:
+            os.close(final)
+            raise ValueError("Metadata too large / Метаданные слишком велики")
+        return os.fdopen(final, mode)
+    finally:
+        os.close(descriptor)
+
+
+def diagnostic_scalar(value):
+    if isinstance(value, (bool, int, float)) or value is None:
+        return value
+    return value[:200] if isinstance(value, str) else None
+
+
+def project_diagnostics(project, arguments):
+    if not isinstance(arguments, dict) or set(arguments) != {"operation"} or arguments["operation"] not in ("load", "heavy_tasks", "app"):
+        raise ValueError("Choose load, heavy_tasks or app only / Выбери load, heavy_tasks или app")
+    root = Path(project)
+    if root.is_symlink():
+        raise ValueError("Project path changed / Путь проекта изменился")
+    status = root.stat()
+    identity = (status.st_dev, status.st_ino)
+    if DIAGNOSTIC_ROOTS.setdefault(str(root), identity) != identity:
+        raise ValueError("Project path changed / Путь проекта изменился")
+    if not root.is_dir():
+        raise ValueError("Project unavailable / Проект недоступен")
+    operation = arguments["operation"]
+    result = {"operation": operation, "sampledAt": datetime.now().astimezone().isoformat(timespec="seconds")}
+    if operation == "load":
+        result.update(cores=os.cpu_count(), loadAverage=list(os.getloadavg()))
+    elif operation == "heavy_tasks":
+        output = diagnostic_command(["/bin/ps", "-axo", "pid=,args="])
+        tasks = []
+        for line in output.splitlines():
+            fields = line.strip().split(None, 1)
+            if len(fields) != 2 or not fields[0].isdigit():
+                continue
+            command = fields[1]
+            # Anchored executable/script shapes avoid matching agent prompts containing these words.
+            kind = None
+            if re.match(r"^(?:\S*/)?[Pp]ython[0-9.]*(?: -I)? (?:[^ ]*/)?swift-task\.py(?: |$)", command):
+                kind = "swift-task"
+            elif re.match(r"^(?:\S*/)?[Pp]ython[0-9.]*(?: -I)? (?:[^ ]*/)?scripts/perf/[^ ]+", command):
+                kind = "performance-probe"
+            elif re.match(r"^(?:\S*/)?xcodebuild(?: |$)", command):
+                kind = "xcodebuild"
+            elif re.match(r"^(?:\S*/)?swift (?:build|test|run|package)(?: |$)", command):
+                kind = "swift"
+            elif re.match(r"^(?:\S*/)?swiftc(?: |$)", command):
+                kind = "swiftc"
+            if kind:
+                tasks.append({"pid": int(fields[0]), "kind": kind})
+        result.update(tasks=tasks[:100], truncated=len(tasks) > 100,
+                      scope="Recognized build/test/probe processes across the Mac; not all CPU work / Известные сборки, тесты и замеры на Mac; не вся нагрузка")
+    else:
+        processes = diagnostic_command(["/bin/ps", "-axo", "pid=,lstart=,comm="])
+        applications = []
+        candidates = sorted({str(path.relative_to(root)) for pattern in ("*.app", "build/*.app") for path in root.glob(pattern)})
+        unavailable = []
+        for relative in candidates[:20]:
+            try:
+                bundle = root / relative
+                with diagnostic_open(root, relative + "/Contents/Info.plist") as handle:
+                    info = plistlib.load(handle)
+                if not isinstance(info, dict):
+                    raise ValueError("Invalid app metadata / Некорректные метаданные приложения")
+                executable_name = info.get("CFBundleExecutable", "")
+                if not isinstance(executable_name, str) or not executable_name or Path(executable_name).name != executable_name:
+                    continue
+                executable = bundle / "Contents/MacOS" / executable_name
+                with diagnostic_open(root, relative + "/Contents/MacOS/" + executable_name, metadata=False) as handle:
+                    executable_mtime = os.fstat(handle.fileno()).st_mtime
+                running = []
+                for line in processes.splitlines():
+                    fields = line.strip().split(None, 6)
+                    if len(fields) == 7 and fields[0].isdigit() and os.path.realpath(fields[6]) == str(executable):
+                        running.append({"pid": int(fields[0]), "startedLocal": " ".join(fields[1:6])})
+                identity = {"bundle": relative, "identifier": diagnostic_scalar(info.get("CFBundleIdentifier")),
+                            "version": diagnostic_scalar(info.get("CFBundleShortVersionString")), "build": diagnostic_scalar(info.get("CFBundleVersion")),
+                            "executableModifiedAt": datetime.fromtimestamp(executable_mtime).astimezone().isoformat(),
+                            "running": running}
+                try:
+                    with diagnostic_open(root, relative + "/Contents/Resources/build-info.json") as handle:
+                        record = json.load(handle)
+                    if isinstance(record, dict):
+                        identity["buildIdentity"] = {key: diagnostic_scalar(record[key]) for key in ("builtAt", "commit", "dirty", "sourceSHA256") if key in record}
+                except FileNotFoundError:
+                    pass
+                applications.append(identity)
+            except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
+                unavailable.append(relative)
+        result.update(applications=applications, unavailable=unavailable, truncated=len(candidates) > 20, behaviorVerified=False)
+    return result
+
+
 UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 REFERENCE_DATE = 978307200  # Seconds from 1970 to 2001-01-01, the epoch of the app's stored dates.
 TEXT_LIMIT = 400
@@ -527,11 +664,15 @@ def handle(request, options):
     if method == "ping":
         return {}
     if method == "tools/list":
-        return {"tools": (TOOLS if options.snapshot else []) + (SEARCH_TOOLS if options.index else []) + ([INSPECT_TOOL] if options.root else [])}
+        return {"tools": (TOOLS if options.snapshot else []) + (SEARCH_TOOLS if options.index else []) + ([INSPECT_TOOL] if options.root else []) + ([DIAGNOSTICS_TOOL] if getattr(options, "diagnostics_project", None) else [])}
     if method == "tools/call":
         name, arguments = params.get("name"), params.get("arguments") or {}
         try:
-            if name == "inspect_chat":
+            if name == "project_diagnostics":
+                if not getattr(options, "diagnostics_project", None):
+                    raise ValueError("Diagnostics unavailable / Диагностика недоступна")
+                result = project_diagnostics(options.diagnostics_project, arguments)
+            elif name == "inspect_chat":
                 if not options.root:
                     raise ValueError("Unknown tool")
                 result = inspect_chat(options.root, options.chat, options.references, arguments)
@@ -556,7 +697,7 @@ def handle(request, options):
                 result = list_chats(snapshot, options.chat, arguments) if name == "list_chats" else read_chat(snapshot, arguments)
             else:
                 raise ValueError("Unknown tool")
-        except (ValueError, TypeError, OSError) as error:
+        except (ValueError, TypeError, OSError, subprocess.SubprocessError, plistlib.InvalidFileException) as error:
             return {"isError": True, "content": [{"type": "text", "text": str(error)}]}
         return {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]}
     raise LookupError(method)
@@ -569,6 +710,8 @@ def default_root():
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--diagnostics-project")
+    parser.add_argument("--language", choices=["ru", "en"], default="en")
     parser.add_argument("--snapshot")
     parser.add_argument("--chat", default="")
     parser.add_argument("--index")
@@ -579,11 +722,15 @@ def main():
     parser.add_argument("--events", type=int, default=40)
     parser.add_argument("--before", type=int, default=0)
     options = parser.parse_args()
+    if options.diagnostics_project:
+        options.diagnostics_project = str(Path(options.diagnostics_project).resolve(strict=True))
+        status = os.stat(options.diagnostics_project)
+        DIAGNOSTIC_ROOTS[options.diagnostics_project] = (status.st_dev, status.st_ino)
     if options.inspect is not None:
         try:
             result = inspect_chat(options.root or default_root(), options.chat, options.references,
                                   {"id": options.inspect, "events": options.events, "before": options.before})
-        except (ValueError, TypeError, OSError) as error:
+        except (ValueError, TypeError, OSError, subprocess.SubprocessError, plistlib.InvalidFileException) as error:
             sys.exit(str(error))
         print(json.dumps(result, ensure_ascii=False, indent=1))
         return

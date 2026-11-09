@@ -12,6 +12,8 @@ public actor CodexClient {
     var requestGeneration: UUID?
     var seenRequestIDs = Set<JSONValue>()
     var knownSessions = Set<AgentSessionReference>()
+    private var diagnosticScopes: [AgentSessionReference: (project: String, shell: AgentPermissionProfile.Shell, route: RequestRoute, scheduled: Bool)] = [:]
+    private var diagnosticsResources: URL?
     private var browserResources: URL?
     private var browserRoot = BrowserConfiguration.directory
     var interactions: [UUID: (pending: CodexPendingInteraction, generation: UUID, token: UUID)] = [:]
@@ -30,7 +32,9 @@ public actor CodexClient {
     }
 
     public func start(executable: URL, home: URL, extraArguments: [String] = [],
-                      browserResources: URL? = nil, browserRoot: URL = BrowserConfiguration.directory) async throws {
+                      diagnosticsResources: URL? = nil, browserResources: URL? = nil, browserRoot: URL = BrowserConfiguration.directory) async throws {
+        diagnosticScopes.removeAll()
+        self.diagnosticsResources = diagnosticsResources
         self.browserResources = browserResources
         self.browserRoot = browserRoot
         observeEvents()
@@ -75,6 +79,7 @@ public actor CodexClient {
         }
         params["config"] = permissions.codexThreadConfiguration(browser: try BrowserConfiguration.threadConfiguration(resources: browserResources, root: browserRoot, environment: grant?.environment, grant: grant,
                                                                                                                      policy: BrowserLaunchPolicy(permissions, scheduled: scheduled)))
+        params["config"] = diagnosticsConfiguration(params["config"] ?? .object([:]), project: projectPath, permissions: permissions)
         params["cwd"] = .string(projectPath)
         params["modelProvider"] = .string(route.providerID)
         params["developerInstructions"] = .string(AgentAutonomy.instructions())
@@ -85,6 +90,7 @@ public actor CodexClient {
         }
         let session = AgentSessionReference(connection: .originalCodex, nativeID: id)
         if let grant { try profiles.acknowledge(grant, session: session) }
+        diagnosticScopes[session] = (projectPath, permissions.shell, route, scheduled)
         knownSessions.insert(session)
         return session
     }
@@ -97,15 +103,36 @@ public actor CodexClient {
         params["config"] = permissions.codexThreadConfiguration(browser: try BrowserConfiguration.threadConfiguration(resources: browserResources, root: browserRoot, environment: grant?.environment, grant: grant,
                                                                                                                      policy: BrowserLaunchPolicy(permissions, scheduled: scheduled)))
         params["threadId"] = .string(id)
+        params["config"] = diagnosticsConfiguration(params["config"] ?? .object([:]), project: projectPath, permissions: permissions)
         params["cwd"] = .string(projectPath)
         params["modelProvider"] = .string(route.providerID)
         params["developerInstructions"] = .string(AgentAutonomy.instructions())
         _ = try await transport.request("thread/resume", params: .object(params))
         if let grant { try profiles.acknowledge(grant, session: session) }
+        diagnosticScopes[session] = (projectPath, permissions.shell, route, scheduled)
+    }
+    private func diagnosticsConfiguration(_ base: JSONValue, project: String, permissions: AgentPermissionProfile) -> JSONValue {
+        var config = base.object
+        let script = diagnosticsResources?.appendingPathComponent("ChatDirectoryRuntime/server.py")
+        let enabled = permissions.shell != .off && script.map { FileManager.default.fileExists(atPath: $0.path) } == true
+        config["mcp_servers.switchboard_diagnostics"] = .object([
+            "command": .string(enabled ? "/usr/bin/python3" : "/usr/bin/false"),
+            "args": .array(enabled ? ["-I", script!.path, "--diagnostics-project", project, "--language", L10n.language.rawValue].map(JSONValue.string) : []),
+            "enabled": .bool(enabled), "required": .bool(false), "tool_timeout_sec": .number(15)
+        ])
+        return .object(config)
     }
     /// Acknowledges submission only. Never retries after any transport failure.
     public func send(_ text: String, to session: AgentSessionReference, projectPath: String,
                      permissions: AgentPermissionProfile, model: String, effort: String) async throws -> String? {
+        if diagnosticsResources != nil {
+            guard let scope = diagnosticScopes[session] else {
+                throw ClientFailure(L10n.text("Сначала возобнови чат для обновления диагностики.", "Resume this chat before updating diagnostics."))
+            }
+            if scope.project != projectPath || scope.shell != permissions.shell {
+                try await resume(session, projectPath: projectPath, permissions: permissions, route: scope.route, scheduled: scope.scheduled)
+            }
+        }
         var params: [String: JSONValue] = [
             "threadId": .string(try nativeID(session)),
             "input": .array([.object(["type": .string("text"), "text": .string(text), "text_elements": .array([])])])

@@ -202,3 +202,42 @@ private func commandFixture() throws -> (URL, URL) {
     #expect(try String(contentsOf: root.appendingPathComponent("resume-dispatches"), encoding: .utf8) == "sent\n")
     await client.stop()
 }
+
+@Test func diagnosticsMCPBindsProjectWithoutBrowserAndDisablesBeforeRoleDowngrade() async throws {
+    let (root, executable) = try commandFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let resources = root.appendingPathComponent("resources")
+    let runtime = resources.appendingPathComponent("ChatDirectoryRuntime")
+    try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
+    try Data().write(to: runtime.appendingPathComponent("server.py"))
+    let wire = CodexConnection()
+    let client = CodexClient(transport: wire)
+    try await client.start(executable: executable, home: root, diagnosticsResources: resources)
+    let allowed = AgentPermissionProfile.workspace()
+    let session = try await client.createSession(projectPath: "/workspace-one", permissions: allowed, model: "", route: .direct)
+    var calls = try await wire.request("test/calls").array
+    let initial = try #require(calls.first { $0["method"].string == "thread/start" })["params"]["config"]
+    #expect(initial["mcp_servers.switchboard_browser"]["enabled"].bool == false)
+    #expect(initial["mcp_servers.switchboard_diagnostics"]["enabled"].bool == true)
+    #expect(initial["mcp_servers.switchboard_diagnostics"]["args"].array.contains(.string("/workspace-one")))
+    var denied = allowed
+    denied.shell = .off
+    _ = try await client.send("reader turn", to: session, projectPath: "/workspace-one", permissions: denied, model: "", effort: "")
+    calls = try await wire.request("test/calls").array
+    let lastTwo = Array(calls.suffix(2))
+    #expect(lastTwo.map { $0["method"].string } == ["thread/resume", "turn/start"])
+    let disabled = lastTwo[0]["params"]["config"]["mcp_servers.switchboard_diagnostics"]
+    #expect(disabled["enabled"].bool == false)
+    #expect(disabled["command"].string == "/usr/bin/false")
+    #expect(disabled["args"].array.isEmpty)
+    _ = try await client.send("new project", to: session, projectPath: "/workspace-two", permissions: allowed, model: "", effort: "")
+    calls = try await wire.request("test/calls").array
+    let rebound = Array(calls.suffix(2))
+    #expect(rebound.map { $0["method"].string } == ["thread/resume", "turn/start"])
+    #expect(rebound[0]["params"]["config"]["mcp_servers.switchboard_diagnostics"]["args"].array.contains(.string("/workspace-two")))
+    _ = try await client.send("same scope", to: session, projectPath: "/workspace-two", permissions: allowed, model: "", effort: "")
+    let finalCalls = try await wire.request("test/calls").array
+    #expect(finalCalls.count == calls.count + 1)
+    #expect(finalCalls.last?["method"].string == "turn/start")
+    await client.stop()
+}

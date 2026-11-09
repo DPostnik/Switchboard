@@ -71,7 +71,7 @@ public actor CodexIntegration: AgentIntegration {
             _ = try BrowserConfiguration.arguments(enabled: configuration.browserEnabled, resources: configuration.resources)
             try await client.start(executable: configuration.executable ?? Locations.codexExecutable(), home: configuration.home,
                                    extraArguments: arguments,
-                                   browserResources: configuration.browserEnabled ? configuration.resources : nil)
+                                   diagnosticsResources: configuration.resources, browserResources: configuration.browserEnabled ? configuration.resources : nil)
             providerArguments = arguments
             browserProfilesEnabled = configuration.browserEnabled
             routes = Set([.direct] + configuration.optimizers.map { .optimizer(id: $0.id) })
