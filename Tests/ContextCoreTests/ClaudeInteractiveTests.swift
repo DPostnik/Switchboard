@@ -2060,3 +2060,39 @@ func claudeCompactBoundaryBecomesADividerWithItsSizes(prompt: String) async thro
     #expect(await adapter.recordWriteCount == started + 2)
     #expect(try savedIDs("turns").contains("w1"))
 }
+
+@Test func claudeRelocatedSessionResumesFromTheNewFolderWithItsTranscript() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let moved = root.appendingPathComponent("moved project")
+    try FileManager.default.createDirectory(at: moved, withIntermediateDirectories: true)
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session)).value()
+    try await waitFor { await events.completionCount() == 1 }
+    // The CLI's own transcript under the old folder's name, as the real CLI writes it.
+    let projects = home.appendingPathComponent("projects")
+    let old = projects.appendingPathComponent(ClaudeIntegration.transcriptFolder(root.resolvingSymlinksInPath().path))
+    try FileManager.default.createDirectory(at: old.appendingPathComponent(session.nativeID + "/subagents"), withIntermediateDirectories: true)
+    try Data("{}\n".utf8).write(to: old.appendingPathComponent(session.nativeID + ".jsonl"))
+
+    try await adapter.relocate(session, to: moved.path, context: descriptor.context).value()
+    let new = projects.appendingPathComponent(ClaudeIntegration.transcriptFolder(moved.resolvingSymlinksInPath().path))
+    #expect(new.lastPathComponent.hasSuffix("-moved-project"))
+    #expect(FileManager.default.fileExists(atPath: new.appendingPathComponent(session.nativeID + ".jsonl").path))
+    #expect(FileManager.default.fileExists(atPath: new.appendingPathComponent(session.nativeID + "/subagents").path))
+    #expect(FileManager.default.fileExists(atPath: old.appendingPathComponent(session.nativeID + ".jsonl").path)) // The old copy stays.
+    let file = home.appendingPathComponent("contextdesk-sessions").appendingPathComponent(session.nativeID + ".json")
+    let record = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+    #expect(record["cwd"] as? String == moved.path)
+    // The old folder is refused now, the new one resumes.
+    if case .success = await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session)) { Issue.record("old folder accepted") }
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: moved, session: session)).value()
+    try await waitFor { await events.completionCount() == 2 }
+    #expect(ClaudeIntegration.transcriptFolder("/Users/a/my.project_ü") == "-Users-a-my-project--")
+    await adapter.disconnect()
+}

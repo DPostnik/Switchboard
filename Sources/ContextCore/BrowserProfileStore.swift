@@ -12,7 +12,7 @@ public struct BrowserProfile: Codable, Identifiable, Equatable, Sendable {
     public enum State: String, Codable, Sendable { case pending, configuring, active, human, available }
     public let id: UUID
     public var name: String?
-    public let project: String
+    public var project: String
     public let connection: AgentConnectionID
     public var owner: String?
     public var generation: UUID
@@ -135,6 +135,16 @@ public struct BrowserProfileStore: Sendable {
         let path = try canonical(project)
         return try read().profiles.values.filter { $0.name != nil && $0.project == path && $0.connection == connection }
             .sorted { ($0.name ?? "").localizedStandardCompare($1.name ?? "") == .orderedAscending }
+    }
+    /// A moved project folder takes its browser profiles along; their data stays in place.
+    public func moveProject(from old: String, to new: String) throws {
+        let from = try canonical(old), to = try canonical(new)
+        guard from != to, try read().profiles.values.contains(where: { $0.project == from }) else { return }
+        try change { c, _ in
+            for (key, var profile) in c.profiles where profile.project == from {
+                profile.project = to; c.profiles[key] = profile
+            }
+        }
     }
     /// Session keys whose bound profile has a live Chrome for Testing, with that Chrome's PID.
     /// Read-only status for the UI: never launches, adopts or signals a process.

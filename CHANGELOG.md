@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Relocate project sessions and archive removed projects.
+
 - Deliver session-scoped generated image previews to native and web chats.
 
 - Preserve task ownership and restart boundaries in verification guidance.

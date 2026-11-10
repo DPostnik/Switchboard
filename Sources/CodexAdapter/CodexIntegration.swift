@@ -433,7 +433,10 @@ public actor CodexIntegration: AgentIntegration {
     public func delete(_ session: AgentSessionReference, context: AgentContext) async -> AgentResult<Void> {
         await perform(context, session: session) { try await self.worker(for: session).delete(session) }
     }
-
+    /// `thread/resume` and `turn/start` carry the folder each time; nothing stored names the old one.
+    public func relocate(_ session: AgentSessionReference, to directory: String, context: AgentContext) async -> AgentResult<Void> {
+        await perform(context, session: session, delivery: .notSent, verifyAfter: false, readOnly: true) { () }
+    }
     public func generate(_ request: AgentGenerationRequest, environment: AgentGenerationEnvironment,
                          willStart: @escaping @Sendable () async throws -> Void) async -> AgentResult<AgentGenerationOutput> {
         let runner = ArchiveSummaryRunner()

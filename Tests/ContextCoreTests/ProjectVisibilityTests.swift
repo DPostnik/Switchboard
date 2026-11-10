@@ -126,7 +126,7 @@ import Testing
     let event = try #require(NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [],
         timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
     let menu = try #require(view.menu(for: event))
-    let index = menu.items.count - 1
+    let index = try #require(menu.items.firstIndex { $0.title == ProjectMenu.hideTitle })
     let item = menu.items[index]
     #expect(item.title == ProjectMenu.hideTitle)
     #expect(item.isEnabled)
@@ -146,7 +146,7 @@ import Testing
         L10n.text("Настройки проекта…", "Project settings…"), L10n.text("Новый чат", "New chat"),
         L10n.text("Открыть в Finder", "Open in Finder"), EditorLauncher.openTitle, L10n.text("Скопировать путь", "Copy path"),
         L10n.text("Переименовать…", "Rename…"), L10n.text("Выделить все чаты", "Select all chats"),
-        ProjectMenu.hideTitle,
+        ProjectMenu.movedTitle, ProjectMenu.hideTitle, ProjectMenu.deleteTitle,
     ])
     #expect(menu.items.first { $0.title == L10n.text("Выделить все чаты", "Select all chats") }?.isEnabled == false)
     #expect(!menu.items.contains { $0.title == L10n.text("Переместить выше", "Move up") })
@@ -235,4 +235,65 @@ import Testing
     #expect(item.isEnabled)
     _ = (item.target as? NSObject)?.perform(item.action)
     #expect(renamed == 1)
+}
+
+@Test func movedProjectFolderChangesThePathOrMergesIntoTheProjectThatHasIt() {
+    var state = SavedState()
+    let old = state.addProject(path: "/tmp/conversation-assistant")
+    let renamed = state.addProject(path: "/tmp/OtherOld")
+    state.renameProject(renamed, to: "Custom")
+    let existing = state.addProject(path: "/tmp/prompter")
+    state.hideProject(existing)
+    state.chats = [Chat(id: "a", projectID: old, title: "A", model: ""), Chat(id: "b", projectID: existing, title: "B", model: "")]
+    state.chats[0].archived = true
+    state.queuedMessages = [.init(id: "q", threadID: "a", projectID: old, text: "Later", model: "", effort: "")]
+
+    #expect(state.relocateProject(old, to: "/tmp/prompter/") == .merged(into: existing))
+    #expect(state.projects.map(\.id) == [renamed, existing])
+    #expect(state.chats.map(\.projectID) == [existing, existing])
+    #expect(state.chats[0].isArchived) // Archived chats move along and stay archived.
+    #expect(state.queuedMessages?.map(\.projectID) == [existing])
+    #expect(state.visibleProjects.map(\.id) == [renamed, existing]) // The target is shown.
+
+    #expect(state.relocateProject(renamed, to: "/tmp/NewPlace") == .moved)
+    #expect(state.projects[0].path == URL(fileURLWithPath: "/tmp/NewPlace").resolvingSymlinksInPath().path)
+    #expect(state.projects[0].name == "Custom") // A custom name stays.
+    let plain = state.addProject(path: "/tmp/Plain")
+    #expect(state.relocateProject(plain, to: "/tmp/Fresh") == .moved)
+    #expect(state.projects.last?.name == "Fresh") // The folder's name follows the folder.
+    #expect(state.relocateProject(plain, to: "/tmp/Fresh") == nil)
+    #expect(state.relocateProject(UUID(), to: "/tmp/Any") == nil)
+}
+
+@Test @MainActor func deletedProjectLeavesTheHiddenMenuAndReturnsWithARestoredChat() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = AppStore(file: root.appendingPathComponent("metadata.sqlite"))
+    let model = DeskModel(store: store, pluginDirectory: root, summaryResources: nil,
+                          jobStore: JobStore(file: root.appendingPathComponent("jobs.json")))
+    let keep = model.state.addProject(path: root.appendingPathComponent("keep").path)
+    let gone = model.state.addProject(path: root.appendingPathComponent("gone").path)
+    var chat = Chat(id: "old", projectID: gone, title: "Old", model: ""); chat.archived = true
+    model.state.chats = [chat]
+    #expect(model.projectFolderMissing(model.state.projects[1]))
+    #expect(ProjectMenu.actions(path: "/tmp", hasChats: false, settings: {}, newChat: {}, rename: {}, selectAllChats: {}, remove: {})
+        .filter { !$0.isSeparator }.suffix(3).map(\.title) == [ProjectMenu.movedTitle, ProjectMenu.hideTitle, ProjectMenu.deleteTitle])
+
+    var job = ManagedJob(); job.projectID = gone
+    model.jobLedger.jobs = [job]
+    await model.deleteProject(gone)
+    #expect(model.state.visibleProjects.count == 2 && model.error != nil) // A scheduled job blocks it.
+    model.error = nil
+    model.jobLedger.jobs = []
+    model.selectProject(gone)
+    await model.deleteProject(gone)
+    #expect(model.error == nil)
+    #expect(model.state.visibleProjects.map(\.id) == [keep] && model.projectID == keep)
+    #expect(model.state.hiddenProjects.isEmpty && model.sidebarSnapshot(SidebarListing()).hiddenProjects.isEmpty)
+    #expect(model.state.chats.count == 1) // The archive keeps its chat and the record its name.
+    await model.flushPersist()
+    #expect(try await store.load().projects.first { $0.id == gone }?.isRemoved == true)
+
+    #expect(model.state.addProject(path: root.appendingPathComponent("gone").path) == gone)
+    #expect(model.state.visibleProjects.map(\.id) == [keep, gone] && !model.state.projects[1].isRemoved)
 }

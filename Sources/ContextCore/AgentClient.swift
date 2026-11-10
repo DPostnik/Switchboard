@@ -144,7 +144,9 @@ public actor AgentClient {
     public func rename(_ session: AgentSessionReference, title: String) async throws { try await integration.rename(session, title: title, context: descriptor().context).value() }
     public func setArchived(_ archived: Bool, session: AgentSessionReference) async throws { try await integration.setArchived(archived, session: session, context: descriptor().context).value() }
     public func delete(_ session: AgentSessionReference) async throws { try await integration.delete(session, context: descriptor().context).value() }
-
+    public func relocate(_ session: AgentSessionReference, to directory: String) async throws {
+        try await integration.relocate(session, to: directory, context: descriptor().context).value()
+    }
 }
 extension RequestRoute {
     public var agentRoute: AgentRoute { self == .direct ? .direct : .optimizer(id: rawValue) }

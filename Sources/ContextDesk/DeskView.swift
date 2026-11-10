@@ -14,6 +14,7 @@ struct DeskView: View {
     private let searchRowLimit = 50
     @State private var renaming: Chat?
     @State private var renamingProject: Project?
+    @State private var deletingProject: Project?
     @State private var newProjectName = ""
     @State private var permissionsProject: Project?
     @State private var deleting: Chat?
@@ -126,6 +127,14 @@ struct DeskView: View {
             Button(L10n.text("Отмена", "Cancel"), role: .cancel) { renamingProject = nil }
         } message: { project in
             Text(L10n.text("Меняется только название в списке, папка «\(URL(fileURLWithPath: project.path).lastPathComponent)» остаётся прежней. Пустое название вернёт имя папки.", "Only the name in the list changes; the folder “\(URL(fileURLWithPath: project.path).lastPathComponent)” stays the same. An empty name restores the folder name."))
+        }
+        .alert(L10n.text("Удалить проект?", "Delete project?"), isPresented: Binding(get: { deletingProject != nil }, set: { if !$0 { deletingProject = nil } }), presenting: deletingProject) { project in
+            Button(L10n.text("Удалить", "Delete"), role: .destructive) { Task { await model.deleteProject(project.id) }; deletingProject = nil }
+            Button(L10n.text("Отмена", "Cancel"), role: .cancel) { deletingProject = nil }
+        } message: { project in
+            let count = model.state.chats.filter { $0.projectID == project.id && !$0.isArchived }.count
+            Text(L10n.text("«\(project.name)» пропадёт из списка, его чаты (\(count)) уйдут в архив. Файлы в папке не трогаются. Проект вернётся, если восстановить его чат из архива или снова добавить папку.",
+                           "\(project.name) leaves the list and its chats (\(count)) go to the archive. Files in the folder are not touched. The project comes back when you restore one of its chats from the archive or add the folder again."))
         }
         .alert(L10n.text("Удалить чат?", "Delete chat?"), isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), presenting: deleting) { chat in
             Button(L10n.text("Удалить", "Delete"), role: .destructive) { Task { await model.deleteChat(chat.id) } }
@@ -379,7 +388,9 @@ struct DeskView: View {
                             settings: { permissionsProject = project }, newChat: { startChat(in: project) },
                             rename: { startRenaming(project) },
                             selectAllChats: { selection.select(model.state.orderedChats(projectID: project.id, archived: false).map(\.id)) },
-                            remove: { Task { await model.hideProject(project.id) } }) + [
+                            remove: { Task { await model.hideProject(project.id) } },
+                            moved: { model.chooseMovedProjectFolder(project.id) }, delete: { deletingProject = project },
+                            folderMissing: model.projectFolderMissing(project)) + [
             SidebarMenuAction(title: L10n.text("Проверки проекта…", "Project verification…"), systemImage: "checkmark.shield") {
                 ProjectVerificationWindow.show(path: project.path)
             }
@@ -420,7 +431,8 @@ struct DeskView: View {
                 }, actions: { projectActions(project) }, reorder: { projectReorderActions(project) },
                    menuShown: menuShown("project:\(project.id)"),
                    hovered: hover("project:\(project.id)"), pressed: press("project:\(project.id)"),
-                   details: model.projectHeaderDetails(project.path)) {
+                   details: entry.missing ? [ProjectMenu.folderMissingHelp, model.projectHeaderDetails(project.path)].compactMap { $0 }.joined(separator: "\n")
+                                                 : model.projectHeaderDetails(project.path)) {
                     HStack(spacing: .ui(9)) {
                         Image(systemName: "chevron.right")
                             .font(.ui(.caption).weight(.semibold))
@@ -438,6 +450,10 @@ struct DeskView: View {
                                     if let pr = model.pullRequestStatus(folder: project.path) { PullRequestBadge(status: pr) }
                                 }.font(.ui(.caption))
                             }
+                        }
+                        if entry.missing {
+                            // The header view owns the tooltip (`details`); the label only draws.
+                            Image(systemName: "exclamationmark.triangle.fill").font(.ui(.caption)).foregroundStyle(DeskPalette.attention)
                         }
                         if entry.waiting {
                             Circle().fill(DeskPalette.attention).frame(width: .ui(7), height: .ui(7))

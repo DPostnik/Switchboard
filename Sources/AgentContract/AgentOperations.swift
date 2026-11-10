@@ -219,6 +219,9 @@ public protocol AgentIntegration: Sendable {
     func rename(_ session: AgentSessionReference, title: String, context: AgentContext) async -> AgentResult<Void>
     func setArchived(_ archived: Bool, session: AgentSessionReference, context: AgentContext) async -> AgentResult<Void>
     func delete(_ session: AgentSessionReference, context: AgentContext) async -> AgentResult<Void>
+    /// Points an idle session at a moved project folder, so the next turn resumes it from `directory`.
+    /// Adapters that take the folder on every resume only check the session.
+    func relocate(_ session: AgentSessionReference, to directory: String, context: AgentContext) async -> AgentResult<Void>
     /// Callback records the durable dispatch claim after isolation is verified, before any model turn.
     func generate(_ request: AgentGenerationRequest, environment: AgentGenerationEnvironment,
                   willStart: @escaping @Sendable () async throws -> Void) async -> AgentResult<AgentGenerationOutput>
@@ -234,5 +237,7 @@ extension AgentIntegration {
     public func reduceHistory(_ session: AgentSessionReference, context: AgentContext) async -> AgentResult<AgentHistoryReduction?> {
         .rejected(.unsupported(.history))
     }
-
+    public func relocate(_ session: AgentSessionReference, to directory: String, context: AgentContext) async -> AgentResult<Void> {
+        .rejected(.unsupported(.history))
+    }
 }

@@ -28,6 +28,10 @@ public struct Project: Identifiable, Codable, Hashable, Sendable {
     /// Sidebar visibility only; chats, permissions and scheduled work are retained.
     public var hidden: Bool?
     public var isHidden: Bool { hidden == true }
+    /// Deleted by the user: hidden, its chats archived, and left out of the hidden projects menu. The record stays so
+    /// the archive still lists its chats; restoring one of them or adding the folder again brings the project back.
+    public var removed: Bool?
+    public var isRemoved: Bool { removed == true }
     /// Agent ID -> model and effort new chats of the project start with; a missing field follows the app default.
     public var chatModels: [String: ModelChoice]?
     public init(path: String) {

@@ -237,3 +237,50 @@ private final class Flag: @unchecked Sendable { var value = false }
     #expect(await counting.connects == 1)
     await model.shutdown()
 }
+
+@Test @MainActor func permissionPresentationIsProviderNeutralAndDeduplicated() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("permission-presentation-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let third = ThirdAgent()
+    let model = model(root: root, third: third)
+    await model.connect(thirdConnection)
+    let project = Project(path: root.path)
+    let session = AgentSessionReference(connection: thirdConnection, nativeID: "permission-session")
+    let chat = Chat(session: session, projectID: project.id, title: "Permissions", model: "")
+    model.state.projects = [project]; model.state.chats = [chat]
+    let interaction = AgentInteraction(id: UUID(), session: session, turn: "t1",
+        kind: .form(message: "Private MCP prompt", fields: []), reason: nil, details: "Private diagnostic payload",
+        auditSource: "mcpServer/elicitation/request", origin: .tool)
+    let event = AgentEvent(session: session, payload: .interaction(interaction))
+    await model.receive(event, from: thirdConnection)
+    await model.receive(event, from: thirdConnection)
+    #expect(model.pending.count == 1)
+    #expect(model.permissionExplanation(for: try #require(model.pending.first)) != nil)
+    var rows: [CapabilityDecision] = []
+    for _ in 0..<100 {
+        rows = try await model.capabilityLedger.recent(days: 1)
+        if !rows.isEmpty { break }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(rows.count == 1)
+    let row = try #require(rows.first)
+    #expect(row.stage == .presented && row.requestID == interaction.id.uuidString)
+    #expect(row.source == "mcpServer/elicitation/request" && row.target == nil)
+    #expect(try await model.capabilityLedger.interruptions(days: 1) == 1)
+    #expect(model.pending.count == 1) // Observation never accepts a request.
+    model.state.projects[0].sandboxCommands = ["zsh scripts/test.sh"]
+    model.state.chats[0].roleID = AgentRoleID.developer
+    func commandAction(cwd: String, command: String = "zsh scripts/test.sh") -> PendingAction {
+        PendingAction(interaction: AgentInteraction(id: UUID(), session: session, turn: "t1",
+            kind: .approval(canAllow: true), reason: nil, details: "display-only",
+            command: command, workingDirectory: cwd), threadID: chat.id)
+    }
+    let matching = commandAction(cwd: root.path)
+    #expect(model.commandAssessment(for: matching)?.decision == .unsupportedGrant)
+    #expect(model.permissionExplanation(for: matching) != nil)
+    #expect(model.commandAssessment(for: commandAction(cwd: root.path, command: "/bin/zsh -lc 'zsh scripts/test.sh'"))?.decision == .unsupportedGrant)
+    #expect(model.commandAssessment(for: commandAction(cwd: "/another-project")) == nil)
+    #expect(model.pending.count == 1)
+    await model.shutdown()
+}

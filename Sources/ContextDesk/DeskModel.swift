@@ -1005,6 +1005,76 @@ private struct ChatRunState: Equatable {
         persist()
         selectProject(id)
     }
+    /// The project's folder is gone, for example after it was renamed or moved.
+    func projectFolderMissing(_ project: Project) -> Bool {
+        var directory: ObjCBool = false
+        return !FileManager.default.fileExists(atPath: project.path, isDirectory: &directory) || !directory.boolValue
+    }
+    func chooseMovedProjectFolder(_ id: UUID) {
+        guard let project = project(id) else { return }
+        let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false; panel.prompt = L10n.text("Выбрать", "Choose")
+        panel.message = L10n.text("Где теперь папка проекта «\(project.name)»? Если там уже есть проект, чаты перейдут в него.",
+                                  "Where is the folder of \(project.name) now? If a project already uses it, the chats move to that project.")
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task { await relocateProject(id, to: url.path) }
+    }
+    /// Points a project at its moved folder, or merges it into the project that already has that folder (`relocateProject`).
+    /// Agent sessions are pointed at the new folder first, so the chats go on in it; a chat with its own worktree keeps it.
+    func relocateProject(_ id: UUID, to path: String) async {
+        guard let project = project(id) else { return }
+        let chats = state.chats.filter { $0.projectID == id }
+        let waiting = Set(pending.map(\.threadID))
+        if let busy = chats.first(where: { isBusy(threadID: $0.id) || isChangingChat($0.id) || runs[$0.id]?.sending == true || waiting.contains($0.id) }) {
+            error = L10n.text("Чат «\(busy.title)» сейчас работает. Дождись конца хода и попробуй снова.", "The chat \(busy.title) is working. Wait for the turn to end and try again.")
+            return
+        }
+        let directory = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+        var failed: [String] = []
+        for chat in chats where chat.worktree == nil && !isScheduledRecord(chat.id) {
+            do { try await clientForChat(chat.id).relocate(sessionForChat(chat.id), to: directory) }
+            catch { failed.append(chat.title) }
+        }
+        do { try BrowserProfileStore().moveProject(from: project.path, to: directory) }
+        catch { failed.append(L10n.text("профили браузера", "browser profiles")) }
+        guard let result = state.relocateProject(id, to: directory) else { return }
+        var target = id
+        if case .merged(let into) = result {
+            target = into
+            for var job in jobLedger.jobs where job.projectID == id {
+                job.projectID = into
+                do { jobLedger = try await jobStore.save(job) } catch { failed.append(job.name) }
+            }
+            // The phone keeps showing the chats when it showed the merged project.
+            if mobileRemote.projects.contains(id.uuidString), !mobileRemote.setProject(into, shown: true) {
+                failed.append(L10n.text("показ на телефоне", "phone access"))
+            }        }
+        persist()
+        selectProject(target)
+        if !failed.isEmpty {
+            error = L10n.text("Папка проекта обновлена, но не всё удалось перенести: \(failed.joined(separator: ", ")). Эти чаты могут не продолжиться.",
+                              "The project folder was updated, but some items did not move: \(failed.joined(separator: ", ")). These chats may not continue.")
+        }
+    }
+    /// Archives the project's chats and removes it from the sidebar; the archive keeps its chats, and restoring one
+    /// brings the project back. Scheduled jobs block it: they would keep running in a project that is gone.
+    func deleteProject(_ id: UUID) async {
+        guard state.projects.contains(where: { $0.id == id }) else { return }
+        if jobLedger.jobs.contains(where: { $0.projectID == id }) {
+            error = L10n.text("У проекта есть задачи по расписанию. Удали их или перенеси в другой проект, потом удали проект.",
+                              "The project has scheduled jobs. Delete them or move them to another project, then delete the project.")
+            return
+        }
+        let active = state.chats.filter { $0.projectID == id && !$0.isArchived }.map(\.id)
+        await archiveChats(active)
+        guard !state.chats.contains(where: { $0.projectID == id && !$0.isArchived }) else { return } // archiveChats reported why.
+        guard state.removeProject(id) else { return }
+        if projectID == id {
+            projectID = state.visibleProjects.first?.id
+            newChat()
+        }
+        persist()
+    }
     func openArchive() {
         showingJobs = false; showingAttention = false
         archiveViewingChat = false
@@ -1350,6 +1420,8 @@ private struct ChatRunState: Equatable {
             if archived { state.chats[index].limitResume = nil }
             // Further turns add bodies to the history file; the next archive pass reads it again.
             if !archived { state.chats[index].historyReduced = nil }
+            // A restored chat of a hidden or deleted project brings the project back to the sidebar.
+            if !archived { state.showProject(state.chats[index].projectID) }
             if chatID == id {
                 if !archived { archiveViewingChat = false }
                 else if revealArchive { openArchive() }

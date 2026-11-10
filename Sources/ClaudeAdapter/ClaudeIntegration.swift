@@ -49,7 +49,7 @@ public actor ClaudeIntegration: AgentIntegration {
     private struct Session: Codable {
         var version = 1
         let id: String
-        let cwd: String
+        var cwd: String
         var access: AccessMode
         /// The role's profile; legacy records carry only `access` and resolve to the editor or operator preset.
         var profile: AgentPermissionProfile?
@@ -1400,6 +1400,47 @@ public actor ClaudeIntegration: AgentIntegration {
         subagents.removeValue(forKey: session.nativeID); tasks.removeValue(forKey: session.nativeID)
         // Native execution files stay in the isolated engine home; app deletion only hides the chat.
         return .success(())
+    }
+    /// Points an idle session at a moved project folder: the record gets the new folder, and the CLI's transcript
+    /// (`projects/<folder name>/<id>.jsonl` and the side folder with its sub-agents) is copied to the new folder's name,
+    /// so `--resume` from the new folder finds it. The old copy stays in the engine home.
+    public func relocate(_ session: AgentSessionReference, to directory: String, context: AgentContext) async -> AgentResult<Void> {
+        let id = session.nativeID
+        guard checked(session, context: context), let home else { return .rejected(.wrongConnection) }
+        guard sessions[id]?.active == nil, !submitting.contains(id), waiting[id] == nil else { return .rejected(.invalidInput) }
+        do {
+            let old = try load(id).cwd
+            guard old != directory else { return .success(()) }
+            // A warm process runs in the old folder.
+            if let entry = warm[id] { await expireWarm(id, token: entry.token) }
+            var record = try load(id)
+            guard record.active == nil, wires[id] == nil, !submitting.contains(id) else { return .rejected(.invalidInput) }
+            if record.sent { try Self.copyTranscript(id, home: home, from: old, to: directory) }
+            record.cwd = directory
+            sessions[id] = record
+            try save(id)
+            release(id)
+            return .success(())
+        } catch { return failed(error) }
+    }
+    /// The CLI's folder name for a working directory: every UTF-16 unit that is not an ASCII letter or digit becomes "-".
+    static func transcriptFolder(_ directory: String) -> String {
+        String(decoding: directory.utf16.map { unit -> UInt16 in
+            switch unit { case 48...57, 65...90, 97...122: unit; default: 45 }
+        }, as: UTF16.self)
+    }
+    private static func copyTranscript(_ id: String, home: URL, from old: String, to new: String) throws {
+        let projects = home.appendingPathComponent("projects")
+        let resolved = URL(fileURLWithPath: old).resolvingSymlinksInPath().path
+        guard let source = [old, resolved].lazy.map({ projects.appendingPathComponent(transcriptFolder($0)) })
+            .first(where: { FileManager.default.fileExists(atPath: $0.appendingPathComponent(id + ".jsonl").path) }) else { return }
+        let target = projects.appendingPathComponent(transcriptFolder(URL(fileURLWithPath: new).resolvingSymlinksInPath().path))
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        for name in [id + ".jsonl", id] {
+            let from = source.appendingPathComponent(name), to = target.appendingPathComponent(name)
+            guard FileManager.default.fileExists(atPath: from.path), !FileManager.default.fileExists(atPath: to.path) else { continue }
+            try FileManager.default.copyItem(at: from, to: to)
+        }
     }
     public func summarySource(_ session: AgentSessionReference, context: AgentContext) -> AgentResult<AgentSummarySource> {
         guard checked(session, context: context) else { return .rejected(.wrongConnection) }

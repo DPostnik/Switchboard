@@ -59,6 +59,20 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
 /// One project menu for the row's "…" button and its right-click menu, so both list the same items in the same order.
 @MainActor enum ProjectMenu {
     static var hideTitle: String { L10n.text("Скрыть проект", "Hide project") }
+    static var movedTitle: String { L10n.text("Папка переехала…", "Folder moved…") }
+    static var movedHelp: String {
+        L10n.text("Указать, где теперь папка проекта. Чаты продолжатся в ней; если там уже есть проект, они перейдут в него.",
+                  "Choose where the project folder is now. The chats go on there; if a project already uses it, they move to that project.")
+    }
+    static var deleteTitle: String { L10n.text("Удалить проект…", "Delete project…") }
+    static var deleteHelp: String {
+        L10n.text("Чаты уйдут в архив, файлы останутся. Проект вернётся при восстановлении его чата.",
+                  "The chats go to the archive and the files stay. The project comes back when one of its chats is restored.")
+    }
+    static var folderMissingHelp: String {
+        L10n.text("Папка проекта не найдена. Если её переименовали или перенесли, выбери «Папка переехала…» в меню проекта.",
+                  "The project folder was not found. If it was renamed or moved, choose Folder moved… in the project menu.")
+    }
     static var removeHelp: String {
         L10n.text("Файлы и чаты сохранятся. Вернуть проект можно кнопкой скрытых проектов рядом с «Проекты».",
                   "Files and chats are kept. Show it again with the hidden projects button next to Projects.")
@@ -79,7 +93,8 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
 
     static func actions(path: String, hasChats: Bool, settings: @escaping () -> Void, newChat: @escaping () -> Void,
                         rename: @escaping () -> Void, selectAllChats: @escaping () -> Void,
-                        remove: @escaping () -> Void) -> [SidebarMenuAction] {
+                        remove: @escaping () -> Void, moved: @escaping () -> Void = {}, delete: @escaping () -> Void = {},
+                        folderMissing: Bool = false) -> [SidebarMenuAction] {
         [
             SidebarMenuAction(title: L10n.text("Настройки проекта…", "Project settings…"), systemImage: "slider.horizontal.3", perform: settings),
             SidebarMenuAction(title: L10n.text("Новый чат", "New chat"), systemImage: "square.and.pencil", perform: newChat),
@@ -99,8 +114,11 @@ struct ProjectHeader<Content: View>: NSViewRepresentable {
             SidebarMenuAction(title: L10n.text("Выделить все чаты", "Select all chats"), systemImage: "checkmark.circle",
                               enabled: hasChats, perform: selectAllChats),
             .separator,
+            SidebarMenuAction(title: movedTitle, systemImage: folderMissing ? "exclamationmark.triangle" : "folder.badge.questionmark",
+                              help: movedHelp, perform: moved),
             SidebarMenuAction(title: hideTitle, systemImage: "eye.slash",
                               help: removeHelp, perform: remove),
+            SidebarMenuAction(title: deleteTitle, systemImage: "trash", help: deleteHelp, perform: delete),
         ]
     }
 }

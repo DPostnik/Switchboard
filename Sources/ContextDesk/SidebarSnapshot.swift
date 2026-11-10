@@ -32,6 +32,8 @@ struct SidebarProjectRow: Equatable, Identifiable {
     /// A chat waits for an action or for the app restart (amber dot).
     let waiting: Bool
     let unread: Bool
+    /// The project's folder is gone (`DeskModel.projectFolderMissing`).
+    let missing: Bool
 }
 
 /// Everything the sidebar's project and chat list reads from the model, as values. `DeskView` builds it on each
@@ -96,9 +98,9 @@ extension DeskModel {
             return SidebarProjectRow(project: section.project, expanded: section.expanded, limit: section.limit, total: section.chats.count,
                                      rows: section.chats.prefix(section.limit).map { row($0, favorite: false) }, hasChats: !chats.isEmpty,
                                      waiting: chats.contains { pendingChats.contains($0.id) || restartWaiting.contains($0.id) },
-                                     unread: chats.contains(where: \.hasUnreadResponse))
+                                     unread: chats.contains(where: \.hasUnreadResponse), missing: projectFolderMissing(section.project))
         }
-        snapshot.hiddenProjects = state.projects.filter(\.isHidden)
+        snapshot.hiddenProjects = state.hiddenProjects
         snapshot.chatID = chatID; snapshot.projectID = projectID
         snapshot.pageOpen = showingJobs || showingAttention || showingArchive
         return snapshot
