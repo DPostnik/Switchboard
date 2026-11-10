@@ -7,7 +7,7 @@ extension AgentPermissionSupport {
     /// (a sandboxed shell becomes no shell), cannot keep the network off while the shell runs and never prompts without
     /// restrictions.
     public static let claudeRestrictedFiles = Self(roleProfiles: true,
-        enforced: [.shellOff, .commandInspection, .selectedConnectors, .scratchInReadOnly, .userChrome])
+        enforced: [.shellOff, .commandInspection, .commandSandboxPaths, .trustedCommands, .selectedConnectors, .scratchInReadOnly, .userChrome])
 }
 
 /// Role encoding for the Claude CLI. Claude has no OS sandbox here, so a role is layered: the tool set,
@@ -139,7 +139,7 @@ struct ClaudeLaunchPolicy: Equatable {
         let filesystem: [String: JSONValue] = ["denyRead": .array([.string("~/")]),
                                                "allowRead": .array(read.map(JSONValue.string)),
                                                "allowWrite": .array(write.map(JSONValue.string))]
-        let excluded = sandbox.unsandboxed.flatMap { [$0, $0 + " *"] }
+        let excluded = AgentCommandPolicy(profile).trustedPrefixes.flatMap { [$0.command, $0.command + " *"] }
         // `*` keeps the network open for roles that have it; the CLI's proxy then passes every host.
         let network: [String: JSONValue] = ["allowedDomains": .array(profile.network ? [.string("*")] : []),
                                             "allowLocalBinding": .bool(profile.network)]
@@ -149,141 +149,14 @@ struct ClaudeLaunchPolicy: Equatable {
     }
     /// Whether a command runs inside the sandbox: not asked to leave it and no segment is an excluded command.
     func runsSandboxed(_ command: String, disableSandbox: Bool) -> Bool {
-        guard let sandbox, !disableSandbox else { return false }
-        return !Self.heads(command + " ").contains { head in sandbox.unsandboxed.contains { Self.prefix(head, $0) } }
+        guard sandbox != nil, !disableSandbox else { return false }
+        // The inspection scanner does not decode shell escapes. An escaped executable may still match a CLI
+        // exclusion, so a provider question about that command cannot be classified as confined from text alone.
+        guard !command.contains("\\") else { return false }
+        return !AgentCommandPolicy(profile).containsTrustedCommand(command)
     }
-    /// Whether a command outside the sandbox runs without a prompt: every segment, as written, is a trusted command,
-    /// a `cd`, an `echo`, an `exit` with a status, or a filter that reads only its input (`| tail -5`, `| grep -E 'x'`)
-    /// or `tail`/`head` of a temporary file the same command overwrote before. Allowed redirections: descriptor copies (`2>&1`), `/dev/null`
-    /// and files in temporary folders, also as `$TMPDIR/…` when the command never sets `TMPDIR`. Environment prefixes
-    /// and wrappers (`GIT_SSH_COMMAND=…`, `env`, `nohup`), reading redirections and any other target could run or
-    /// reach anything outside the sandbox, so they are asked.
-    func trusts(_ command: String) -> Bool {
-        guard let sandbox else { return false }
-        // The segment parser splits at `&`: descriptor copies (`2>&1`) only route output and are dropped first, and
-        // `&>` writes like `>`. Both only remove characters, so quoted text cannot gain a command this way.
-        let normalized = command.replacingOccurrences(of: #"\d*>&\d+"#, with: " ", options: .regularExpression)
-            .replacingOccurrences(of: "&>", with: ">")
-        let temporaryVariable = Self.onlyExpandsTemporaryVariable(command)
-        let segments = ShellSegments.commands(normalized + " ").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        // Temporary files an earlier segment overwrote with `>`: their content is that segment's output, even when the
-        // path was a planted link, so `tail`/`head` may read them back. Only in a sequential command: in a pipeline or
-        // with `&` the reader could run before the file is overwritten.
-        var written = Set<String>()
-        let sequential = normalized.range(of: #"(^|[^|])\|([^|]|$)|(^|[^&])&([^&]|$)"#, options: .regularExpression) == nil
-        for segment in segments {
-            guard let raw = Self.words(segment), var words = Self.withoutSafeRedirections(raw, temporaryVariable: temporaryVariable) else { return false }
-            while let first = words.first, ["{", "(", "!"].contains(first.text) { words.removeFirst() }
-            while let last = words.last, ["}", ")"].contains(last.text) { words.removeLast() }
-            defer { if sequential { written.formUnion(Self.overwrittenFiles(raw)) } }
-            guard let head = words.first?.text else { continue }
-            // Only assignments (`status=$?`) set a variable; before a command they would change what it runs.
-            if words.allSatisfy({ !$0.quoted && $0.text.contains("=") && !$0.text.hasPrefix("=") }) { continue }
-            if ["cd", "echo", "true", "stat"].contains(head) { continue }
-            let texts = words.map(\.text)
-            // `exit $code` after `code=$?` returns the trusted command's status.
-            if head == "exit", texts.count <= 2,
-               texts.dropFirst().allSatisfy({ $0.range(of: #"^(\d+|\$[A-Za-z_?][A-Za-z0-9_]*)$"#, options: .regularExpression) != nil }) { continue }
-            if sandbox.unsandboxed.contains(where: { pattern in
-                let parts = pattern.split(separator: " ").map(String.init)
-                return !parts.isEmpty && texts.count >= parts.count && Array(texts.prefix(parts.count)) == parts
-            }) { continue }
-            guard Self.readsOnlyInput(texts, written: written) else { return false }
-        }
-        return !segments.isEmpty
-    }
-    /// Whether every mention of `TMPDIR` reads it (`$TMPDIR`, `${TMPDIR}`), so the command cannot point it elsewhere.
-    static func onlyExpandsTemporaryVariable(_ command: String) -> Bool {
-        func count(_ text: String) -> Int { command.components(separatedBy: text).count - 1 }
-        return count("TMPDIR") == count("$TMPDIR") + count("${TMPDIR}")
-    }
-    /// Targets of truncating output redirections (`>`, `2>`; not `>>` or descriptor copies).
-    static func overwrittenFiles(_ words: [Word]) -> [String] {
-        var result: [String] = []
-        for (index, word) in words.enumerated() where !word.quoted {
-            guard let range = word.text.range(of: #"^\d*>(?![>&])"#, options: .regularExpression) else { continue }
-            let target = String(word.text[range.upperBound...])
-            if !target.isEmpty { result.append(target) } else if index + 1 < words.count { result.append(words[index + 1].text) }
-        }
-        return result
-    }
-    /// A filter after a pipe that reads only its input: no file operands. `tail` and `head` may also read a temporary
-    /// file an earlier segment of the same command overwrote (`written`), such as a trusted command's log.
-    static func readsOnlyInput(_ words: [String], written: Set<String> = []) -> Bool {
-        guard let head = words.first else { return false }
-        let arguments = words.dropFirst()
-        func optionOrNumber(_ word: String) -> Bool { word.hasPrefix("-") || (!word.isEmpty && word.allSatisfy(\.isNumber)) }
-        switch head {
-        case "tail", "head": return arguments.allSatisfy { optionOrNumber($0) || written.contains($0) }
-        case "wc", "sort", "uniq", "sleep": return arguments.allSatisfy(optionOrNumber)
-        case "grep", "egrep":
-            // Options, then at most one pattern; `-e` takes the next word as a pattern.
-            var patterns = 0, index = arguments.startIndex
-            while index < arguments.endIndex {
-                let word = arguments[index]
-                if word == "-e" { patterns += 1; index = arguments.index(after: index) }
-                else if !word.hasPrefix("-") || word == "-" { patterns += 1 }
-                index = arguments.index(after: index)
-            }
-            return patterns <= 1
-        default: return false
-        }
-    }
-    struct Word: Equatable { var text: String; var quoted: Bool }
-    /// Shell words with quotes removed; nil for an unfinished quote.
-    static func words(_ segment: String) -> [Word]? {
-        var result: [Word] = [], current = "", quoted = false, inWord = false
-        var quote: Character?
-        for char in segment {
-            if let open = quote {
-                if char == open { quote = nil } else { current.append(char) }
-            } else if char == "'" || char == "\"" {
-                quote = char; quoted = true; inWord = true
-            } else if char == " " || char == "\t" {
-                if inWord { result.append(.init(text: current, quoted: quoted)); current = ""; quoted = false; inWord = false }
-            } else { current.append(char); inWord = true }
-        }
-        guard quote == nil else { return nil }
-        if inWord { result.append(.init(text: current, quoted: quoted)) }
-        return result
-    }
-    /// Words without harmless redirections; nil when a redirection reads a file or writes outside temporary folders.
-    static func withoutSafeRedirections(_ words: [Word], temporaryVariable: Bool = false) -> [Word]? {
-        var result: [Word] = [], index = 0
-        while index < words.count {
-            let word = words[index]
-            guard !word.quoted, let range = word.text.range(of: #"^(\d*|&)(>>?|<)(&\d+)?"#, options: .regularExpression) else {
-                if !word.quoted, word.text.contains(where: { $0 == ">" || $0 == "<" }) { return nil }
-                result.append(word); index += 1; continue
-            }
-            let operatorText = String(word.text[range])
-            if operatorText.contains("<") { return nil }
-            if operatorText.contains(">&") { index += 1; continue }
-            var target = String(word.text[range.upperBound...])
-            if target.isEmpty {
-                guard index + 1 < words.count else { return nil }
-                target = words[index + 1].text; index += 1
-            }
-            guard target == "/dev/null" || isTemporary(target, temporaryVariable: temporaryVariable) else { return nil }
-            index += 1
-        }
-        return result
-    }
-    /// A plain absolute path inside a temporary folder (no `..`, `~` or variables other than a leading `$TMPDIR/`
-    /// when `temporaryVariable` says the command never sets it).
-    static func isTemporary(_ path: String, temporaryVariable: Bool = false) -> Bool {
-        if temporaryVariable, let rest = ["$TMPDIR/", "${TMPDIR}/"].first(where: path.hasPrefix).map({ String(path.dropFirst($0.count)) }) {
-            return !rest.isEmpty && !rest.contains("$") && !rest.contains("`") && !rest.split(separator: "/").contains("..")
-        }
-        guard path.hasPrefix("/"), !path.contains("$"), !path.split(separator: "/").contains("..") else { return false }
-        let roots = ["/tmp", "/private/tmp", "/var/folders", "/private/var/folders"]
-        return roots.contains { path.hasPrefix($0 + "/") }
-    }
-    private static func prefix(_ head: String, _ pattern: String) -> Bool {
-        let trimmed = pattern.trimmingCharacters(in: .whitespaces)
-        return !trimmed.isEmpty && (head == trimmed || head.hasPrefix(trimmed + " "))
-    }
-
+    /// Existing project command grants are evaluated by the shared deterministic policy.
+    func trusts(_ command: String) -> Bool { AgentCommandPolicy(profile).trusts(command) }
     enum CommandDecision: Equatable { case allow, ask, deny(String) }
     /// Inspection of one shell command against the role: deny-list first, then the network list, then the ask-list.
     /// A recursive delete whose every target stays inside the project, a writable root or a temporary folder is not asked.
@@ -320,29 +193,8 @@ struct ClaudeLaunchPolicy: Equatable {
             }
         }
     }
-    /// The commands a shell line runs (see `ShellSegments`), with leading environment assignments and
-    /// command wrappers (`nohup`, `env`, `exec`…) removed so the real command is what gets matched.
-    static func heads(_ text: String) -> [String] {
-        ShellSegments.commands(text).map { segment in
-            var head = segment.trimmingCharacters(in: .whitespaces)
-            var changed = true
-            while changed {
-                changed = false
-                if let space = head.firstIndex(of: " "), head[..<space].contains("="), !head[..<space].contains("/") {
-                    head = String(head[head.index(after: space)...]).trimmingCharacters(in: .whitespaces); changed = true
-                }
-                for wrapper in ShellSegments.wrappers where head.hasPrefix(wrapper + " ") {
-                    head = String(head.dropFirst(wrapper.count + 1)).trimmingCharacters(in: .whitespaces); changed = true
-                }
-            }
-            return head
-        }
-    }
-    /// A pattern matches the head of a command segment (after `|`, `;`, `&&`, `(`, backticks, `$(` or a newline),
-    /// so `sudo ` is found in `cd x && sudo rm` but not inside `pseudo ` or as an argument such as `echo curl`.
-    static func matches(_ text: String, _ pattern: String) -> Bool {
-        heads(text).contains { ($0 + " ").hasPrefix(pattern) }
-    }
+    static func heads(_ text: String) -> [String] { AgentCommandPolicy.heads(text) }
+    static func matches(_ text: String, _ pattern: String) -> Bool { AgentCommandPolicy.matches(text, pattern) }
 
     /// Tools the app answers `can_use_tool` for; anything else is unsupported and denied.
     func permits(tool name: String) -> Bool {

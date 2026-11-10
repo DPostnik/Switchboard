@@ -140,6 +140,10 @@ public enum AgentPermissionRule: String, Codable, CaseIterable, Sendable {
     case networkOffWithShell
     /// Command text inspection before a command runs.
     case commandInspection
+    /// Project toolchain folders apply only to commands, without broadening file-tool access.
+    case commandSandboxPaths
+    /// Project command prefixes may leave the sandbox under native, scoped provider rules.
+    case trustedCommands
     /// Some connectors only, or connectors with write prompts (neither `off` nor `all`).
     case selectedConnectors
     /// A writable research folder inside an otherwise read-only role.
@@ -155,6 +159,8 @@ public enum AgentPermissionRule: String, Codable, CaseIterable, Sendable {
         case .shellOff, .sandboxedShell: .shell
         case .networkOffWithShell: .network
         case .commandInspection: .commandInspection
+        case .commandSandboxPaths: .filesystem
+        case .trustedCommands: .shell
         case .selectedConnectors: .connectors
         case .scratchInReadOnly: .scratch
         case .userChrome: .browser
@@ -169,6 +175,10 @@ public enum AgentPermissionRule: String, Codable, CaseIterable, Sendable {
         case .sandboxedShell: profile.shell == .sandboxed
         case .networkOffWithShell: profile.shell == .on && !profile.network
         case .commandInspection: !profile.commandInspection.isEmpty
+        case .commandSandboxPaths:
+            profile.filesystem != .unrestricted && profile.shell == .on && profile.commandSandbox.map { !$0.read.isEmpty || !$0.write.isEmpty } == true
+        case .trustedCommands:
+            profile.filesystem != .unrestricted && profile.shell == .on && profile.commandSandbox?.unsandboxed.isEmpty == false
         case .selectedConnectors: profile.connectors != .off && profile.connectors != .all
         case .scratchInReadOnly: profile.scratch != nil && profile.filesystem == .readOnly
         case .userChrome: profile.browser == .appAndUserChrome
@@ -212,5 +222,10 @@ public struct AgentPermissionSupport: Codable, Hashable, Sendable {
             if !result.contains(rule.dimension) { result.append(rule.dimension) }
         }
         return result
+    }
+
+    /// Concrete gaps behind the dimension summary. A saved project grant is not evidence that an engine enforces it.
+    public func unenforcedRules(_ profile: AgentPermissionProfile) -> [AgentPermissionRule] {
+        AgentPermissionRule.allCases.filter { !enforced.contains($0) && $0.applies(to: profile.effective) }
     }
 }

@@ -4,6 +4,9 @@ import AgentContract
 
 /// Role encoding for the Codex app server. The sandbox is enforced by the OS; the shell cannot be removed,
 /// so `shell: off` is reported as an approximation rather than encoded.
+/// Codex 0.167 loads allow-prefix rules from trusted config-layer `rules/*.rules` files, not thread overrides.
+/// Never write project command exemptions into its shared app home: they would leak between projects and roles.
+/// Shell-only preset paths also stay distinct from file-tool roots. Both gaps are declared by permission support.
 extension AgentPermissionProfile {
     var codexSandbox: String {
         switch effective.filesystem {

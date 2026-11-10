@@ -224,7 +224,8 @@ def main():
                 command += ['-Xswiftc', '-plugin-path', '-Xswiftc', macros]
             if has_testing_framework:
                 command += ['-Xswiftc', '-F', '-Xswiftc', frameworks, '-Xlinker', '-F', '-Xlinker', frameworks, '-Xlinker', '-rpath', '-Xlinker', frameworks, '-Xlinker', '-rpath', '-Xlinker', testing_libraries]
-            run_tests(execute, command, filters)
+            # Full-suite checks cover process fixtures with fixed deadlines; execute those serially.
+            run_tests(execute, command, filters, serial=not filters)
     else:
         resolved = json.loads((ROOT / 'Package.resolved').read_text())
         pins = resolved['pins']
@@ -259,7 +260,7 @@ def main():
                 # the process-exiting entry point, including its failing exit status.
                 runner.write_text('import Testing\n@main struct Runner { static func main() async { let _: Never = await Testing.__swiftPMEntryPoint() } }\n')
                 execute(base + test_flags + ['-module-name', 'ContextCoreTests'] + sources('Tests/ContextCoreTests') + [runner, '-lContextDesk', '-lACPAdapter'] + libraries + ['-o', work / 'Tests'])
-                run_tests(execute, [work / 'Tests'], filters)
+                run_tests(execute, [work / 'Tests'], filters, serial=not filters)
     if args.task == 'build':
         digest = hashlib.sha256()
         browser_resources = [ROOT / 'BrowserRuntime' / name for name in

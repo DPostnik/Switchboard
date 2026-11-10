@@ -74,7 +74,7 @@ private func sandboxSettings(_ profile: AgentPermissionProfile, cwd: String) thr
     #expect(!policy.runsSandboxed("echo x && swift build", disableSandbox: false))
     for trusted in ["gh pr list", "cd sub && git push origin main", "swift build -c release", "gh",
                     "zsh scripts/test.sh --filter X 2>&1 | tail -30", "git push 2>&1 | tail -3", "gh pr create --body 'a > b'",
-                    "cd /p; zsh scripts/test.sh > /tmp/claude-501/t.log 2>&1; echo \"exit=$?\"",
+                    "zsh scripts/test.sh > /tmp/claude-501/t.log 2>&1; echo \"exit=$?\"",
                     "ps -axo pid,command | grep -E 'swift-task\\.py|xcodebuild' | grep -v grep",
                     "sysctl -n vm.loadavg hw.ncpu; { ps -ax; }", "swift build &>/dev/null; status=$?",
                     "zsh scripts/test.sh --filter X > \"$TMPDIR/test.log\" 2>&1; code=$?; tail -15 \"$TMPDIR/test.log\"; exit $code",

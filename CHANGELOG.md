@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Share conservative project command matching across providers and explain unsupported Codex command exemptions without broadening file access.
+
 - Select leased Chrome tabs for pointer and key input, focus text fields, and let observed JavaScript dialogs yield the command queue without replaying input.
 
 - Let Codex chats control regular Google Chrome through a paired Switchboard extension, with per-chat tab ownership and the My Chrome permission.

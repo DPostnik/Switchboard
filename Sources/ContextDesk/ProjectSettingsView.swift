@@ -334,8 +334,8 @@ struct ProjectSettingsView: View {
                     .modifier(DeskFieldChrome(focused: sandboxCommandsFocused))
                     .accessibilityLabel(L10n.text("Команды вне песочницы", "Commands outside the sandbox"))
                     .disabled(!sandboxEnabled)
-                hint(L10n.text("По одной в строке, начало команды: например zsh scripts/build-app.sh. Такие команды получают доступ ко всему Mac без вопроса; другие команды вне песочницы агент запускает только после твоего подтверждения.",
-                               "One per line, the start of a command: for example zsh scripts/build-app.sh. These commands get access to the whole Mac without a prompt; other commands outside the sandbox run only after you confirm them."))
+                hint(L10n.text("По одной в строке, начало команды: например zsh scripts/build-app.sh. В Claude эти команды получают доступ ко всему Mac без вопроса. Codex пока не поддерживает такие разрешения отдельно для проекта или чата и продолжает запрашивать подтверждение.",
+                               "One literal command prefix per line, for example zsh scripts/build-app.sh. In Claude these commands get access to the whole Mac without a prompt. Codex cannot yet apply these grants separately to a project or chat and still requests approval."))
             }
         }
     }
