@@ -60,6 +60,13 @@ handles (or the main page text with `mode=text`), including open shadow DOM and
 same-origin iframes; passwords and card fields are redacted. `browser_input` accepts a
 `ref` instead of coordinates: the element is scrolled into view, and a stale or covered
 element is refused without dispatch. `select` picks a `<select>` option by label or value.
+For ordinary DOM checks, use `browser_read` with `mode=inspect` and a CSS `selector`.
+It reports the total match count and up to `limit` elements (20 by default, at most
+50), including text, control state, allowed attributes and layout rectangles.
+It inspects the top document only; iframe and shadow DOM contents need the tree
+reader. Password, card and hidden-field values are redacted. `maxChars` bounds the
+match output; inspect `truncated` and `reason` before treating it as complete.
+Inspection does not scroll, focus, activate elements or run caller-provided code.
 After each input the adapter waits until navigation, network and DOM go quiet
 (`settle`, default 3 s) and returns `changes`: added, changed and removed controls
 keyed by ref, or the head of a new page. A plain in-page click needs no
@@ -143,6 +150,14 @@ Chrome остаётся открытым при переподключении �
 вместо координат: элемент прокручивается в видимую область, а устаревший или перекрытый
 элемент отклоняется без отправки события. `select` выбирает пункт `<select>` по подписи
 или значению.
+Для обычных проверок DOM используй `browser_read` с `mode=inspect` и CSS `selector`.
+Ответ содержит общее число совпадений и до `limit` элементов (по умолчанию 20,
+максимум 50): текст, состояние полей, разрешённые атрибуты и прямоугольники элементов.
+Проверка охватывает только верхний документ; для содержимого iframe и shadow DOM
+используй дерево. Значения паролей, карт и скрытых полей скрыты. `maxChars`
+ограничивает данные совпадений; проверяй `truncated` и `reason` перед выводом о полноте.
+Проверка не прокручивает страницу, не переводит фокус, не активирует элементы
+и не выполняет переданный агентом код.
 После каждого действия адаптер ждёт окончания навигации, сетевых запросов и изменений
 DOM (`settle`, по умолчанию 3 с) и возвращает `changes`: добавленные, изменённые
 и удалённые элементы управления по ref или начало новой страницы. Обычному клику
@@ -164,6 +179,30 @@ JavaScript (с записью в журнал и обязательным expect
 на кнопках отправки во фреймах подчиняются тем же правилам, что и на самой странице.
 
 ## Development contract
+
+MCP capability hints describe the entire tool, including its most consequential
+supported action. They are metadata, not authorization. Role gates, URL checks,
+upload roots, import permissions and action journals still apply.
+
+| Tools | Read-only | Destructive | Reason |
+| --- | --- | --- | --- |
+| `browser_read`, `browser_find`, `browser_screenshot`, `browser_verify`, `browser_snapshot`, `browser_logs` | yes | no | Fixed observations; no caller-provided scripts or input events. |
+| `browser_status` | yes | no | Local metrics/checkpoint only; also `openWorldHint=false`. |
+| `browser_open` | no | no | Creates and navigates an agent-owned tab. |
+| `browser_cards` | no | no | Scrolls the owned page and can trigger lazy loading. |
+| `browser_input`, `browser_action`, `browser_next` | no | yes | Their general action surface can submit data or trigger site behavior. |
+| `browser_eval` | no | yes | Arbitrary page JavaScript can mutate the page or make network requests. |
+| `browser_import_session`, `browser_import_indexeddb` | no | yes | Replace browser authentication/storage state. |
+| `browser_close` | no | yes | Can discard unsaved tab state; failure recovery can close the chat's browser. |
+
+Every external-page tool keeps `openWorldHint=true`. There is no heuristic that
+relabels an eval expression or an input action as read-only. Inspect mode is a
+fixed observation path and remains available when the role hides `browser_eval`.
+DOM observations run in the page's main world: hostile page getters and modified
+DOM APIs can affect results. The hints do not assert a sandbox against page code.
+Selectors are JSON-quoted data; inspect does not expose arbitrary attribute lists,
+HTML, cookies, storage, fetch or a script parameter. It returns only a fixed list
+of attributes and bounded properties. It does not cross frame or shadow boundaries.
 
 - `browser_open` returns an opaque session token. Every subsequent call needs it.
 - `browser_cards` accepts CSS selectors as data; at most 500 cards, bounded fields,

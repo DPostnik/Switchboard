@@ -246,8 +246,50 @@
 
   const started = performance.now();
   const limits = {characters: request.maxChars, nodes: 40000, milliseconds: 2500, depth: request.depth};
-  const result = {kind: request.mode === 'text' ? 'page_text' : 'page_tree', url: location.href.slice(0, 8192).toWellFormed(),
+  const result = {kind: request.mode === 'inspect' ? 'page_inspect' : request.mode === 'text' ? 'page_text' : 'page_tree', url: location.href.slice(0, 8192).toWellFormed(),
     title: clip(document.title, 300), readyState: document.readyState, truncated: false, reason: null};
+
+  if (request.mode === 'inspect') {
+    // Fixed DOM observations only. The selector is data, never code. Deliberately
+    // stay in the top document: no scrolling, focus, event dispatch or network API.
+    let nodes;
+    try { nodes = document.querySelectorAll(request.selector); }
+    catch (_) { return {...result, error: 'invalid_selector'}; }
+    result.scope = 'top_document';
+    result.count = nodes.length;
+    result.matches = [];
+    for (let index = 0; index < Math.min(nodes.length, request.limit); index++) {
+      const element = nodes[index];
+      const rect = element.getBoundingClientRect(), style = getComputedStyle(element);
+      const redacted = sensitive(element) || hidden(element);
+      const attributes = {};
+      for (const key of ['id', 'class', 'role', 'type', 'aria-label', 'aria-disabled', 'aria-checked',
+                         'aria-expanded', 'aria-selected', 'aria-busy', 'aria-live', 'data-testid']) {
+        const value = element.getAttribute(key);
+        if (value !== null) attributes[key] = clip(value, 200);
+      }
+      const observation = {tag: element.tagName.toLowerCase(), role: roleOf(element),
+        name: redacted ? '[redacted]' : nameOf(element, roleOf(element)), text: redacted ? '[redacted]' : clip(element.innerText, 500),
+        visible: !!element.getClientRects().length && style.display !== 'none' &&
+          style.visibility !== 'hidden' && style.visibility !== 'collapse',
+        disabled: !!element.disabled || element.getAttribute('aria-disabled') === 'true',
+        attributes, rect: {x: rect.x, y: rect.y, width: rect.width, height: rect.height}};
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName))
+        observation.value = redacted ? '[redacted]' : clip(element.value, 200);
+      if (element.tagName === 'INPUT' && ['checkbox', 'radio'].includes(element.type))
+        observation.checked = !!element.checked;
+      if (element.tagName === 'A' && element.href && !element.href.startsWith('javascript:'))
+        observation.href = clip(element.href, 1000);
+      result.matches.push(observation);
+      if (JSON.stringify(result).length > limits.characters) {
+        result.matches.pop(); result.truncated = true; result.reason = 'character_limit'; break;
+      }
+    }
+    if (!result.truncated && result.count > result.matches.length) {
+      result.truncated = true; result.reason = 'match_limit';
+    }
+    return result;
+  }
 
   if (request.mode === 'text') {
     const root = request.ref ? lookup(request.ref) :
