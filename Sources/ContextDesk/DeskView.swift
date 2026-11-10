@@ -379,7 +379,11 @@ struct DeskView: View {
                             settings: { permissionsProject = project }, newChat: { startChat(in: project) },
                             rename: { startRenaming(project) },
                             selectAllChats: { selection.select(model.state.orderedChats(projectID: project.id, archived: false).map(\.id)) },
-                            remove: { Task { await model.hideProject(project.id) } })
+                            remove: { Task { await model.hideProject(project.id) } }) + [
+            SidebarMenuAction(title: L10n.text("Проверки проекта…", "Project verification…"), systemImage: "checkmark.shield") {
+                ProjectVerificationWindow.show(path: project.path)
+            }
+        ]
     }
     /// Projects reorder by dragging; VoiceOver gets the same moves as custom actions.
     private func projectReorderActions(_ project: Project) -> [SidebarMenuAction] {

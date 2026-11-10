@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Show native project verification status.
+
 - Count waiting chats once on the Needs you page and badge.
 
 - Add an explicit verification queue with isolated task snapshots and contained executor locks.
