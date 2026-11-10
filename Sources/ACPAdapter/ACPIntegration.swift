@@ -634,7 +634,7 @@ public actor ACPIntegration: AgentIntegration {
             result = ACPPermissionOutcome.selected(option.optionId); decision = .allowed
         case .deny: result = Self.reject(pending.options); decision = .denied
         // ACP has no turn-scoped grant, and `allow_always` would outlive the role inside the agent.
-        case .allowTurn, .answers, .completed: return .rejected(.invalidResponse)
+        case .allowTurn, .allowChat, .answers, .completed: return .rejected(.invalidResponse)
         }
         permissions[id] = nil
         sink.yield(.init(session: session, payload: .resolved(id)))

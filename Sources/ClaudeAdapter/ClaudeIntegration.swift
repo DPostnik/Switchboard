@@ -655,11 +655,17 @@ public actor ClaudeIntegration: AgentIntegration {
             guard let questions = interaction.questions, Set(answers.keys) == questions else { return .rejected(.invalidResponse) }
             var input = interaction.input.object; input["answers"] = .object(answers.mapValues(JSONValue.string))
             result = .object(["behavior": .string("allow"), "updatedInput": .object(input)])
-        case .completed: return .rejected(.invalidResponse)
+        case .completed, .allowChat: return .rejected(.invalidResponse)
         }
         interactions.removeValue(forKey: id)
+        let tool = interaction.tool == Self.unsandboxedGrant ? "Bash" : interaction.tool
+        let capability = Self.capability(tool: tool, input: interaction.input, cwd: sessions[interaction.session]?.cwd)
+        let decision: AgentCapabilityRecord.Decision
+        switch response { case .deny: decision = .denied; case .answers: decision = .answered; default: decision = .allowed }
         do {
             try await respond(wire, requestID: interaction.requestID, response: result)
+            record(.init(tool: tool, capability: capability, decision: decision, turn: interaction.turn,
+                         requestID: id.uuidString, source: "can_use_tool", stage: .responded), session: interaction.session)
             if case .allowTurn = response, let turn = interaction.turn {
                 var grant = turnGrants[interaction.session].flatMap { $0.turn == turn ? $0 : nil } ?? (turn: turn, tools: [])
                 grant.tools.insert(interaction.tool)
@@ -668,7 +674,11 @@ public actor ClaudeIntegration: AgentIntegration {
             if case .deny = response { updateCall(interaction.toolUseID, session: interaction.session, status: .rejected) }
             else { updateCall(interaction.toolUseID, session: interaction.session, status: .inProgress) }
             sink.yield(.init(session: session, payload: .resolved(id))); return .success(())
-        } catch { await wire.close(); return failed(error, uncertain: true) }
+        } catch {
+            record(.init(tool: tool, capability: capability, decision: decision, turn: interaction.turn,
+                         requestID: id.uuidString, source: "can_use_tool", stage: .resolved, outcome: .unknown), session: interaction.session)
+            await wire.close(); return failed(error, uncertain: true)
+        }
     }
     public func rejectInteraction(_ id: UUID) async {
         guard let interaction = interactions[id] else { return }
@@ -746,7 +756,8 @@ public actor ClaudeIntegration: AgentIntegration {
                     sink.yield(.init(session: reference(id), payload: .plan(turn: turn, plan)))
                 }
                 record(.init(tool: part["name"].string ?? "", capability: Self.capability(tool: part["name"].string ?? "", input: part["input"], cwd: sessions[id]?.cwd),
-                             target: Self.target(tool: part["name"].string ?? "", input: part["input"]), decision: .used, turn: turn), session: id)
+                             target: Self.target(tool: part["name"].string ?? "", input: part["input"]), decision: .used, turn: turn,
+                             requestID: part["id"].string, source: "assistant.tool_use", stage: .requested), session: id)
             }
             if message["stop_reason"].string == "refusal", let key = message["id"].string {
                 refusal(key, category: message["stop_details"]["category"].string, session: id)
@@ -762,6 +773,14 @@ public actor ClaudeIntegration: AgentIntegration {
                                                                                 result: result.text, isError: part["is_error"].bool == true)
                 emit(result, session: id)
                 updateCall(key, session: id, status: part["is_error"].bool == true ? .failed : .completed)
+                if let call = sessions[id]?.current.first(where: { $0.id == key }) {
+                    let background = ActivityRetention.parsedCall(call.text)?.input["run_in_background"] as? Bool == true
+                    let outcome: AgentCapabilityRecord.Outcome = background ? .unknown
+                        : (part["is_error"].bool == true || result.failed == true || (result.exitCode ?? 0) != 0 ? .failed : .succeeded)
+                    record(.init(tool: call.text.components(separatedBy: "\n").first ?? "", capability: call.toolCall?.kind == .execute ? .shell : .other,
+                                 decision: .used, turn: sessions[id]?.active, requestID: key, source: "user.tool_result",
+                                 stage: background ? .responded : .completed, outcome: outcome), session: id)
+                }
             }
         case "command_lifecycle":
             guard let command = commands[id], value["command_uuid"].string?.lowercased() == command.uuid else { return }
@@ -935,14 +954,28 @@ public actor ClaudeIntegration: AgentIntegration {
         let turn = sessions[id]?.active
         let capability = Self.capability(tool: name, input: input, cwd: cwd), target = Self.target(tool: name, input: input)
         let toolUseID = request["tool_use_id"].string
+        let token = UUID()
+        func sendDecision(_ response: JSONValue, decision: AgentCapabilityRecord.Decision) async {
+            do {
+                try await respond(wire, requestID: requestID, response: response)
+                record(.init(tool: name, capability: capability, decision: decision, turn: turn,
+                             requestID: token.uuidString, source: "can_use_tool", stage: .responded), session: id)
+            } catch {
+                record(.init(tool: name, capability: capability, decision: decision, turn: turn,
+                             requestID: token.uuidString, source: "can_use_tool", stage: .resolved, outcome: .unknown), session: id)
+                await wire.close()
+            }
+        }
         func deny(_ message: String, _ decision: AgentCapabilityRecord.Decision = .denied) async {
-            record(.init(tool: name, capability: capability, target: target, decision: decision, turn: turn), session: id)
-            try? await respond(wire, requestID: requestID, response: .object(["behavior": .string("deny"), "message": .string(message)]))
+            record(.init(tool: name, capability: capability, target: target, decision: decision, turn: turn,
+                         requestID: token.uuidString, source: "can_use_tool", stage: .requested), session: id)
+            await sendDecision(.object(["behavior": .string("deny"), "message": .string(message)]), decision: decision)
             updateCall(toolUseID, session: id, status: .rejected)
         }
         func allow() async {
-            record(.init(tool: name, capability: capability, target: target, decision: .allowed, turn: turn), session: id)
-            try? await respond(wire, requestID: requestID, response: .object(["behavior": .string("allow"), "updatedInput": input]))
+            record(.init(tool: name, capability: capability, target: target, decision: .allowed, turn: turn,
+                         requestID: token.uuidString, source: "can_use_tool", stage: .requested), session: id)
+            await sendDecision(.object(["behavior": .string("allow"), "updatedInput": input]), decision: .allowed)
         }
         guard policy.permits(tool: name) else {
             await deny(L10n.text("Неподдерживаемый запрос", "Unsupported request"), .unsupportedTool); return
@@ -1035,16 +1068,17 @@ public actor ClaudeIntegration: AgentIntegration {
             // "Allow for this turn" answered earlier in the same turn covers later requests of the same tool.
             if !unsandboxed, let grant = turnGrants[id], grant.turn == turn, grant.tools.contains(name) { await allow(); return }
             kind = .approval(canAllow: true)
-            record(.init(tool: name, capability: capability, target: target, decision: .asked, turn: turn), session: id)
+            record(.init(tool: name, capability: capability, target: target, decision: .asked, turn: turn,
+                         requestID: token.uuidString, source: "can_use_tool", stage: .requested), session: id)
         }
-        let token = UUID()
         // The grant key of a command outside the sandbox never matches a tool name, so it cannot widen later requests.
         interactions[token] = .init(session: id, requestID: requestID, tool: unsandboxed ? Self.unsandboxedGrant : name, turn: turn, input: input,
                                     questions: questions, epoch: context.accountRevision, toolUseID: toolUseID)
         updateCall(toolUseID, session: id, status: .awaitingApproval)
         let reason = unsandboxed ? L10n.text("Bash вне песочницы: команда получит доступ ко всему Mac", "Bash outside the sandbox: the command gets access to the whole Mac") : name
         sink.yield(.init(session: reference(id), payload: .interaction(.init(id: token, session: reference(id), turn: turn,
-            kind: kind, reason: reason, details: input.display, canAllowTurn: questions == nil && !unsandboxed))))
+            kind: kind, reason: reason, details: input.display, canAllowTurn: questions == nil && !unsandboxed,
+            auditSource: "can_use_tool", command: name == "Bash" ? input["command"].string : nil, workingDirectory: cwd))))
     }
     /// Resolve existing ancestors through POSIX, including /var versus /private/var.
     /// Missing leaf components are allowed; inaccessible paths and dangling symlinks fail closed.

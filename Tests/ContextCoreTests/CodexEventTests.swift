@@ -27,6 +27,9 @@ private func request(_ method: String = "item/commandExecution/requestApproval",
     #expect(throws: ClientFailure.self) { try future.encode(.allowOnce) }
     #expect(CodexPendingInteraction.parse(request("future/request")) == nil)
     #expect(CodexPendingInteraction.parse(request(id: .number(1.5))) == nil)
+    let longCommand = "echo " + String(repeating: "x", count: 2000)
+    let typed = try #require(CodexPendingInteraction.parse(request(extra: ["command": .string(longCommand), "cwd": .string("/workspace")])) )
+    #expect(typed.interaction.command == longCommand && typed.interaction.workingDirectory == "/workspace")
 }
 
 @Test func typedQuestionsAndFormsValidateAnswersWithoutDroppingSchemaRestrictions() throws {
@@ -62,6 +65,16 @@ private func request(_ method: String = "item/commandExecution/requestApproval",
 private actor EventLog {
     var values: [CodexEvent] = []
     func append(_ value: CodexEvent) { values.append(value) }
+    func capabilities(count: Int) async throws -> [AgentCapabilityRecord] {
+        for _ in 0..<1000 {
+            let records = values.compactMap { event -> AgentCapabilityRecord? in
+                if case .capability(let value) = event.payload { return value }; return nil
+            }
+            if records.count >= count { return records }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw ClientFailure("Fixture did not deliver capability records")
+    }
     func interaction(count: Int) async throws -> CodexInteraction {
         for _ in 0..<1000 {
             let requests = values.compactMap { event -> CodexInteraction? in
@@ -141,6 +154,22 @@ private func withEventFixture(_ body: (CodexClient, CodexConnection, EventLog) a
     }
 }
 
+@Test func isolatedWorkerAccountAnnouncementKeepsTheSharedAccountRevision() async throws {
+    try await withEventFixture { client, wire, _ in
+        // Real app-servers send `account/updated` right after `initialize`; a Chrome worker's start must not stale a send.
+        let worker = await wire.sibling(preservingAccountRevision: true)
+        let home = try #require(await wire.activeHome)
+        try await worker.start(executable: home.appendingPathComponent("engine.py"), home: home)
+        defer { Task { await worker.stop() } }
+        let epoch = await wire.accountEpoch
+        _ = try await worker.request("test/emit", params: .object(["method": .string("account/updated"), "params": .object([:])]))
+        _ = try await CodexDispatchContext.$epoch.withValue(epoch) { try await wire.request("test/answers") }
+        #expect(await wire.accountEpoch == epoch)
+        _ = try await wire.request("test/emit", params: .object(["method": .string("account/updated"), "params": .object([:])]))
+        #expect(await wire.accountEpoch != epoch)
+    }
+}
+
 @Test func unknownRequestsAndReusedIDsFailClosedAndDisconnectPreventsOldAnswers() async throws {
     try await withEventFixture { client, wire, log in
         _ = try await wire.request("test/emit", params: request())
@@ -203,18 +232,128 @@ private func withEventFixture(_ body: (CodexClient, CodexConnection, EventLog) a
     }
 }
 
-@Test func isolatedWorkerAccountAnnouncementKeepsTheSharedAccountRevision() async throws {
-    try await withEventFixture { client, wire, _ in
-        // Real app-servers send `account/updated` right after `initialize`; a Chrome worker's start must not stale a send.
-        let worker = await wire.sibling(preservingAccountRevision: true)
-        let home = try #require(await wire.activeHome)
-        try await worker.start(executable: home.appendingPathComponent("engine.py"), home: home)
-        defer { Task { await worker.stop() } }
-        let epoch = await wire.accountEpoch
-        _ = try await worker.request("test/emit", params: .object(["method": .string("account/updated"), "params": .object([:])]))
-        _ = try await CodexDispatchContext.$epoch.withValue(epoch) { try await wire.request("test/answers") }
-        #expect(await wire.accountEpoch == epoch)
+@Test func mcpElicitationAuditRecordsTypedLifecycleWithoutSecretPayloadsOrInferredAuthority() async throws {
+    let schema: JSONValue = .object(["type": .string("object"), "properties": .object(["token": .object(["type": .string("string")])])])
+    let params: [String: JSONValue] = ["mode": .string("form"), "message": .string("Allow the secret server to run tool browser_eval?"), "requestedSchema": schema]
+    let parsed = try #require(CodexPendingInteraction.parse(request("mcpServer/elicitation/request", extra: params)))
+    let encoded = try JSONEncoder().encode(parsed.capability(stage: .requested))
+    let auditText = String(decoding: encoded, as: UTF8.self)
+    #expect(!auditText.contains("secret server") && !auditText.contains("browser_eval") && !auditText.contains("token"))
+    #expect(parsed.interaction.auditSource == "mcpServer/elicitation/request")
+    #expect(parsed.interaction.command == nil && parsed.interaction.workingDirectory == nil)
+    try await withEventFixture { client, wire, log in
+        _ = try await wire.request("test/emit", params: request("mcpServer/elicitation/request", extra: params))
+        let interaction = try await log.interaction(count: 1)
+        try await client.answer(interaction.id, session: interaction.session, response: .answers(["token": "never-log-this-answer"]))
+        let records = try await log.capabilities(count: 2)
+        #expect(records.count == 2 && records.allSatisfy { $0.requestID == interaction.id.uuidString })
+        #expect(records.map(\.stage) == [.requested, .responded])
+        #expect(records.map(\.decision) == [.asked, .answered])
+        #expect(records.allSatisfy { $0.capability == .other && $0.tool == "mcpElicitation" && $0.target == nil })
+        #expect(records[1].outcome == .unknown)
+        #expect(!String(decoding: try JSONEncoder().encode(records), as: UTF8.self).contains("never-log-this-answer"))
+    }
+}
+
+private func toolApproval(server: String, id: JSONValue, persist: JSONValue = .array([.string("session"), .string("always")])) -> JSONValue {
+    request("mcpServer/elicitation/request", id: id, extra: [
+        "mode": .string("form"), "serverName": .string(server), "message": .string("Allow \(server) to run tool input?"),
+        "requestedSchema": .object(["type": .string("object"), "properties": .object([:])]),
+        "_meta": .object([CodexPendingInteraction.toolApprovalKindKey: .string("mcp_tool_call"), CodexPendingInteraction.toolApprovalPersistKey: persist])])
+}
+
+@Test func browserToolApprovalsOfferAChatGrantOnlyForAppOwnedServers() throws {
+    let chrome = try #require(CodexPendingInteraction.parse(toolApproval(server: "switchboard_user_chrome", id: .number(1))))
+    guard case .approval(true) = chrome.interaction.kind else { Issue.record("Expected an approval"); return }
+    #expect(chrome.interaction.canAllowChat && chrome.toolApprovalServer == "switchboard_user_chrome")
+    #expect(try chrome.encode(.allowOnce) == .object(["action": .string("accept"), "content": .object([:])]))
+    #expect(try chrome.encode(.allowChat)["_meta"][CodexPendingInteraction.toolApprovalPersistKey] == .string("session"))
+    #expect(try chrome.encode(.deny) == .object(["action": .string("decline")]))
+    #expect(throws: ClientFailure.self) { try chrome.encode(.answers([:])) }
+    let alwaysOnly = try #require(CodexPendingInteraction.parse(toolApproval(server: "switchboard_browser", id: .number(2), persist: .string("always"))))
+    #expect(try alwaysOnly.encode(.allowChat)["_meta"] == .object([:]))
+    let other = try #require(CodexPendingInteraction.parse(toolApproval(server: "github", id: .number(3))))
+    #expect(!other.interaction.canAllowChat)
+    #expect(throws: ClientFailure.self) { try other.encode(.allowChat) }
+    // A server's own form without the engine's approval marker stays a form.
+    var plain = toolApproval(server: "switchboard_user_chrome", id: .number(4)).object
+    var params = plain["params"]!.object; params["_meta"] = nil; plain["params"] = .object(params)
+    let form = try #require(CodexPendingInteraction.parse(.object(plain)))
+    guard case .form = form.interaction.kind else { Issue.record("Expected a form"); return }
+    #expect(!form.interaction.canAllowChat && form.toolApprovalServer == nil)
+}
+
+@Test func chatGrantAnswersLaterCallsOfTheSameServerInTheSameChatUntilReset() async throws {
+    try await withEventFixture { client, wire, log in
+        _ = try await wire.request("test/emit", params: toolApproval(server: "switchboard_user_chrome", id: .string("a")))
+        let first = try await log.interaction(count: 1)
+        try await client.answer(first.id, session: first.session, response: .allowChat)
+        _ = try await wire.request("test/emit", params: toolApproval(server: "switchboard_user_chrome", id: .string("b")))
+        var sent: [JSONValue] = []
+        for _ in 0..<200 {
+            sent = try await wire.request("test/answers").array
+            if sent.count == 2 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(sent.map { $0["id"] } == [.string("a"), .string("b")])
+        #expect(sent.allSatisfy { $0["result"]["action"].string == "accept" })
+        #expect(await client.interactions.isEmpty)
+        // Another server still asks.
+        _ = try await wire.request("test/emit", params: toolApproval(server: "switchboard_browser", id: .string("c")))
+        let other = try await log.interaction(count: 2)
+        try await client.answer(other.id, session: other.session, response: .deny)
+        let records = try await log.capabilities(count: 5)
+        #expect(records.contains { $0.stage == .responded && $0.decision == .allowed && $0.target == "switchboard_user_chrome" && $0.capability == .browser })
+        // A reset forgets the grant.
+        let index = await log.values.count
         _ = try await wire.request("test/emit", params: .object(["method": .string("account/updated"), "params": .object([:])]))
-        #expect(await wire.accountEpoch != epoch)
+        try await log.waitForReset(after: index)
+        #expect(await client.chatToolGrants.isEmpty)
+    }
+}
+
+@Test func failedCodexAnswerAuditRemainsUnknownAndTheRequestCannotReplay() async throws {
+    try await withEventFixture { client, wire, log in
+        _ = try await wire.request("test/emit", params: request())
+        let interaction = try await log.interaction(count: 1)
+        // An invalidated native token makes the transport reject this consumed answer.
+        await wire.invalidateAccount()
+        await #expect(throws: ClientFailure.self) { try await client.answer(interaction.id, session: interaction.session, response: .allowOnce) }
+        await #expect(throws: ClientFailure.self) { try await client.answer(interaction.id, session: interaction.session, response: .allowOnce) }
+        let records = try await log.capabilities(count: 2)
+        #expect(records.count == 2 && records[1].stage == .responded && records[1].outcome == .unknown)
+        #expect(records[1].decision == .allowed && records[1].requestID == interaction.id.uuidString)
+        #expect(try await wire.request("test/answers").array.isEmpty)
+    }
+}
+
+@Test func failedChatGrantAnswerDoesNotAuthorizeLaterBrowserCalls() async throws {
+    try await withEventFixture { client, wire, log in
+        _ = try await wire.request("test/emit", params: toolApproval(server: "switchboard_user_chrome", id: .string("grant-fail")))
+        let interaction = try await log.interaction(count: 1)
+        await wire.invalidateAccount()
+        await #expect(throws: ClientFailure.self) {
+            try await client.answer(interaction.id, session: interaction.session, response: .allowChat)
+        }
+        #expect(await client.chatToolGrants.isEmpty)
+    }
+}
+
+@Test func codexItemAuditNeedsKnownIDsAndExplicitResultsForSuccess() async throws {
+    let item: JSONValue = .object(["type": .string("commandExecution"), "id": .string("command-1"), "command": .string("false"), "status": .string("completed"), "exitCode": .number(1)])
+    let start = try #require(CodexEventDecoder.capability(item, turn: "v"))
+    #expect(start.stage == .started && start.outcome == nil && start.decision == .used)
+    let end = try #require(CodexEventDecoder.capability(item, turn: "v", completed: true))
+    #expect(end.stage == .completed && end.outcome == .failed && end.requestID == start.requestID)
+    try await withEventFixture { _, wire, log in
+        func emit(_ method: String, turn: String) async throws {
+            _ = try await wire.request("test/emit", params: .object(["method": .string(method), "params": .object(["threadId": .string("t"), "turnId": .string(turn), "item": item])]))
+        }
+        try await emit("item/started", turn: "v")
+        try await emit("item/completed", turn: "other") // Same item ID in another turn is not this execution.
+        try await emit("item/completed", turn: "v")
+        let records = try await log.capabilities(count: 2)
+        #expect(records.count == 2 && records.map(\.stage) == [.started, .completed])
+        #expect(records[1].outcome == .failed)
     }
 }

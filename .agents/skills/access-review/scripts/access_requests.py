@@ -170,9 +170,13 @@ def collect(args):
         if not COLUMNS <= found:
             fail(f'decisions lacks columns {sorted(COLUMNS - found)}; the ledger schema changed, update this script')
         since = args.since or datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=args.days)
-        rows = connection.execute(
-            'SELECT date, chat, project, role, agent, tool, capability, target, decision, audit FROM decisions '
-            'WHERE date >= ? AND decision NOT IN (?, ?) ORDER BY date', (since.timestamp(), *SKIPPED)).fetchall()
+        # Nullable additions let this version read old and migrated databases.
+        audit_select = ', '.join(name if name in found else 'NULL AS ' + name
+                                 for name in ('request_id', 'source', 'stage', 'outcome', 'rule_id'))
+        connection.row_factory = sqlite3.Row
+        rows = [dict(row) for row in connection.execute(
+            'SELECT id, date, chat, run, turn, project, role, agent, tool, capability, target, decision, audit, '
+            + audit_select + ' FROM decisions WHERE date >= ? ORDER BY date, id', (since.timestamp(),))]
     selected = None
     if args.project:
         matches = [p for p in projects.values() if args.project in (p['id'], p['name'], p['path'], tilde(p['path']))]
@@ -181,7 +185,10 @@ def collect(args):
         selected = matches[0]['id']
     unknown = collections.Counter()
     groups = {}
-    for date, chat, project_id, role, agent, tool, capability, target, decision, audit in rows:
+    records = 0
+    for row, events, interrupted, old in request_lifecycles(rows):
+        date, chat, project_id, role, agent, tool, capability, target, decision, audit = (
+            row[name] for name in ('date', 'chat', 'project', 'role', 'agent', 'tool', 'capability', 'target', 'decision', 'audit'))
         if selected and project_id != selected:
             continue
         if capabilities is not None and capability not in capabilities:
@@ -202,13 +209,23 @@ def collect(args):
             'project': project['name'] if project else (project_id or '(none)'),
             'capability': capability, 'target': tilde(key), 'tools': collections.Counter(),
             'decisions': collections.Counter(), 'roles': collections.Counter(), 'chats': {}, 'chained': collections.Counter(),
-            'count': 0, 'last': 0, 'covered': collections.Counter()})
+            'count': 0, 'records': 0, 'interruptions': 0, 'legacy': 0, 'stages': collections.Counter(),
+            'sources': collections.Counter(), 'outcomes': collections.Counter(), 'rules': collections.Counter(),
+            'last': 0, 'covered': collections.Counter()})
         if check and (source := coverage(capability, tool, check, project, catalog)):
             group['covered'][source] += 1
         group['count'] += 1
+        group['records'] += len(events)
+        records += len(events)
+        group['interruptions'] += int(interrupted)
+        group['legacy'] += int(old)
         group['last'] = max(group['last'], date)
         group['tools'][tool] += 1
-        group['decisions'][decision + (' (audit)' if audit else '')] += 1
+        for event in events:
+            group['decisions'][event['decision'] + (' (audit)' if event['audit'] else '')] += 1
+            for key, field in [('stages', 'stage'), ('sources', 'source'), ('outcomes', 'outcome'), ('rules', 'rule_id')]:
+                if event[field]:
+                    group[key][event[field]] += 1
         group['roles'][role] += 1
         group['chained'].update(chained)
         if chat:
@@ -220,6 +237,9 @@ def collect(args):
         result.append({
             'project': group['project'], 'capability': group['capability'], 'target': group['target'],
             'requests': group['count'], 'chats': len(group['chats']), 'last': local(group['last']),
+            'records': group['records'], 'interruptions': group['interruptions'], 'legacyRequests': group['legacy'],
+            'stages': dict(group['stages']), 'sources': dict(group['sources']),
+            'outcomes': dict(group['outcomes']), 'rules': dict(group['rules']),
             'decisions': dict(group['decisions'].most_common()), 'tools': dict(group['tools'].most_common(3)),
             'roles': dict(group['roles'].most_common()),
             **({'chained': [h for h, _ in group['chained'].most_common(4)]} if group['chained'] else {}),
@@ -238,6 +258,8 @@ def collect(args):
             kept.append(group)
     result = sorted(kept, key=lambda g: (-totals[g['project']], g['project'], -g['chats'], -g['requests']))
     one_off = {project: {'groups': len(items), 'requests': sum(g['requests'] for g in items),
+                         'records': sum(g['records'] for g in items), 'interruptions': sum(g['interruptions'] for g in items),
+                         'legacyRequests': sum(g['legacyRequests'] for g in items),
                          'targets': [f"{g['capability']} {g['target'][:70]}" for g in sorted(items, key=lambda g: -g['requests'])[:6]]}
                for project, items in one_off.items()}
     settings = {p['name']: {'path': tilde(p['path']), 'sets': p.get('accessPresets') or [],
@@ -245,7 +267,9 @@ def collect(args):
                             'commands': p.get('sandboxCommands') or [],
                             **({'sandbox': False} if p.get('commandSandbox') is False else {})}
                 for p in projects.values() if not selected or p['id'] == selected}
-    return {'version': 1, 'since': local(since.timestamp()), 'requests': sum(totals.values()),
+    return {'version': 2, 'since': local(since.timestamp()), 'requests': sum(totals.values()), 'records': records,
+            'interruptions': sum(g['interruptions'] for g in kept) + sum(g['interruptions'] for g in one_off.values()),
+            'legacyRequests': sum(g['legacyRequests'] for g in kept) + sum(g['legacyRequests'] for g in one_off.values()),
             'groups': result, 'oneOff': one_off, 'settings': settings,
             **({'unknownValues': dict(unknown)} if unknown else {}),
             **({'warning': 'app sources not found: access-set coverage and value checks skipped'} if catalog is None else {})}
@@ -255,9 +279,35 @@ def local(timestamp):
     return datetime.datetime.fromtimestamp(timestamp, LOCAL).strftime('%Y-%m-%d %H:%M')
 
 
+def request_lifecycles(rows):
+    """One entry per unique request; execution records never imply a request or a user interruption."""
+    lifecycles = collections.defaultdict(list)
+    legacy = []
+    for row in rows:
+        if row['request_id'] and row['stage']:
+            # Native item IDs need session and turn scope; local interaction UUIDs are globally unique.
+            identity = (row['chat'], row['agent'], row['turn'], row['request_id'])
+            lifecycles[identity].append(row)
+        elif row['decision'] not in SKIPPED:
+            legacy.append([row])
+    for events in list(lifecycles.values()) + legacy:
+        requested = [row for row in events if row['stage'] == 'requested']
+        presented = [row for row in events if row['stage'] == 'presented']
+        old = all(not row['stage'] for row in events)
+        if not old and not requested and not presented:
+            continue  # A completion or response outside the window is not a new request.
+        evidence = requested or presented or events
+        representative = next((row for row in evidence if row['tool'] != 'interaction'), evidence[0])
+        if not presented and all(row['decision'] in SKIPPED for row in events):
+            continue
+        yield representative, events, bool(presented), old
+
+
 def markdown(report):
     lines = [f"# Access requests since {report['since']} Warsaw",
-             f"{report['requests']} requests; {len(report['groups'])} repeated groups below, "
+             f"{report['requests']} unique requests, {report['interruptions']} verified presented interruptions, "
+             f"{report['records']} request lifecycle records; {report['legacyRequests']} legacy requests lack presentation evidence. "
+             f"{len(report['groups'])} repeated groups below, "
              f"one-off groups (1 chat, few requests) folded per project.", '']
     if 'unknownValues' in report:
         lines += [f"Unknown values (update the skill): {report['unknownValues']}", '']
@@ -284,8 +334,12 @@ def markdown(report):
                 lines.append(f"Now: sets {', '.join(settings['sets']) or '-'}; folders {'; '.join(settings['folders']) or '-'}; "
                              f"commands {'; '.join(settings['commands']) or '-'}" + ('; sandbox off' if settings.get('sandbox') is False else ''))
         decisions = ', '.join(f'{k} {v}' for k, v in group['decisions'].items())
-        lines.append(f"- **{group['capability']}** `{group['target']}`: {group['requests']} req, {group['chats']} chats, last {group['last']}; "
+        lines.append(f"- **{group['capability']}** `{group['target']}`: {group['requests']} req, {group['interruptions']} interruptions, "
+                     f"{group['records']} records, {group['chats']} chats, last {group['last']}; "
                      f"{decisions}; tools {', '.join(group['tools'])}"
+                     + (f"; sources {', '.join(group['sources'])}" if group['sources'] else '')
+                     + (f"; outcomes {group['outcomes']}" if group['outcomes'] else '')
+                     + (f"; rules {', '.join(group['rules'])}" if group['rules'] else '')
                      + (f"; chained {', '.join(group['chained'])}" if group.get('chained') else '')
                      + (f"; ALREADY OPEN BY {group['alreadyOpenBy']}" if group.get('alreadyOpenBy') else ''))
         for example in group['examples']:

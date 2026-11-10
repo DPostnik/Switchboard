@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Count distinct approval prompts, clarify permission outcomes, and revoke failed browser chat grants.
+
 - Share conservative project command matching across providers and explain unsupported Codex command exemptions without broadening file access.
 
 - Select leased Chrome tabs for pointer and key input, focus text fields, and let observed JavaScript dialogs yield the command queue without replaying input.

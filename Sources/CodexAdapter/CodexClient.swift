@@ -20,6 +20,9 @@ public actor CodexClient {
     private var workflowDirectories: [URL] = []
     private var browserRoot = BrowserConfiguration.directory
     var interactions: [UUID: (pending: CodexPendingInteraction, generation: UUID, token: UUID)] = [:]
+    var capabilityItems: [CodexCapabilityItemKey: AgentCapabilityRecord] = [:]
+    /// Tool servers the user allowed for the rest of a chat. Memory only: a reset or restart asks again.
+    var chatToolGrants = Set<CodexChatToolGrant>()
     var compactions = CodexCompactionMeter()
     var reasoning = CodexReasoningStream()
     var subagentTracker = CodexSubagentTracker()

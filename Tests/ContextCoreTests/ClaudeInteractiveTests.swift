@@ -42,8 +42,12 @@ private actor ClaudeEvents {
     func interactions() -> [AgentInteraction] {
         values.compactMap { if case .interaction(let request) = $0.payload { return request }; return nil }
     }
-    func capabilities() -> [AgentCapabilityRecord] {
-        values.compactMap { if case .capability(let record) = $0.payload { return record }; return nil }
+    func capabilities(includeLifecycle: Bool = false) -> [AgentCapabilityRecord] {
+        values.compactMap {
+            if case .capability(let record) = $0.payload,
+               includeLifecycle || record.stage == nil || record.stage == .requested { return record }
+            return nil
+        }
     }
     func items() -> [TranscriptItem] {
         values.compactMap { if case .item(let item) = $0.payload { return item }; return nil }
@@ -396,6 +400,10 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     let reply = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: home.appendingPathComponent("answer")))["response"]["response"]
     #expect(reply["behavior"].string == "allow")
     #expect(await events.capabilities().map(\.decision) == [.allowed])
+    let lifecycle = await events.capabilities(includeLifecycle: true)
+    #expect(lifecycle.map(\.stage) == [.requested, .responded])
+    #expect(lifecycle.allSatisfy { $0.outcome == nil && $0.source == "can_use_tool" })
+    #expect(lifecycle.first?.requestID != nil && lifecycle.first?.requestID == lifecycle.last?.requestID)
     let launch = try String(contentsOf: home.appendingPathComponent("submitted"), encoding: .utf8)
     #expect(launch.contains("acceptEdits") && launch.contains("--restricted"))
     await adapter.disconnect()

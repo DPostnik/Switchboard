@@ -80,6 +80,34 @@ class AccessReviewTests(unittest.TestCase):
         self.assertIn('git push', review.presets()['github']['unsandboxed'])
         self.assertEqual(review.presets()['_base']['unsandboxed'], ['ps', 'sysctl -n'])
 
+    def test_lifecycle_counts_one_presentation_across_run_finalization(self):
+        base = dict(chat='C1', agent='codex', turn='t1', request_id='request-1', audit=0,
+                    decision='asked', tool='mcpElicitation', run='active')
+        rows = [{**base, 'stage': 'requested'},
+                {**base, 'stage': 'presented', 'tool': 'interaction'},
+                {**base, 'stage': 'responded', 'decision': 'answered'},
+                {**base, 'stage': 'resolved', 'run': None}]
+        entries = list(review.request_lifecycles(rows))
+        self.assertEqual(len(entries), 1)
+        representative, events, interrupted, legacy = entries[0]
+        self.assertEqual(representative['tool'], 'mcpElicitation')
+        self.assertEqual(len(events), 4)
+        self.assertTrue(interrupted)
+        self.assertFalse(legacy)
+
+    def test_execution_response_and_audit_do_not_invent_user_interruptions(self):
+        base = dict(chat='C1', agent='codex', turn='t1', request_id='request-1', audit=0,
+                    decision='used', tool='browser_read', run=None)
+        self.assertEqual(list(review.request_lifecycles([
+            {**base, 'stage': 'started'}, {**base, 'stage': 'completed'}])), [])
+        self.assertEqual(list(review.request_lifecycles([
+            {**base, 'stage': 'responded', 'decision': 'answered'}])), [])
+        entries = list(review.request_lifecycles([
+            {**base, 'stage': 'requested', 'decision': 'asked', 'audit': 1},
+            {**base, 'stage': 'presented', 'decision': 'asked', 'audit': 1}]))
+        self.assertEqual(len(entries), 1)
+        self.assertTrue(entries[0][2])
+
 
 if __name__ == '__main__':
     unittest.main()

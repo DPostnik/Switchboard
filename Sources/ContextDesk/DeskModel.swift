@@ -2936,7 +2936,11 @@ private struct ChatRunState: Equatable {
         case .interaction(let request):
             guard let thread else { await client(id)?.rejectInteraction(request.id); return }
             let action = PendingAction(interaction: request, threadID: thread)
-            if !pending.contains(where: { $0.id == action.id }) { pending.append(action); notify(action) }
+            if !pending.contains(where: { $0.id == action.id }) {
+                pending.append(action)
+                recordPresentedInteraction(action)
+                notify(action)
+            }
         case .interactionsReset:
             clearAgentInteractions(id)
         case .capability(let record):

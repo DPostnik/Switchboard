@@ -9,7 +9,7 @@ public struct CapabilityDecision: Codable, Hashable, Sendable {
     public var runID: UUID?
     public var projectID: UUID?
     public var roleID: String
-    /// `codex` or `claude`.
+    /// Stable provider identifier, such as `codex` or `claude`.
     public var agent: String
     public var tool: String
     public var capability: AgentCapabilityRecord.Capability
@@ -17,11 +17,17 @@ public struct CapabilityDecision: Codable, Hashable, Sendable {
     public var decision: AgentCapabilityRecord.Decision
     public var turn: String?
     public var audit: Bool
+    public var requestID: String?
+    public var source: String?
+    public var stage: AgentCapabilityRecord.Stage?
+    public var outcome: AgentCapabilityRecord.Outcome?
+    public var ruleID: String?
     public init(date: Date = Date(), chatID: String?, runID: UUID?, projectID: UUID?, roleID: String, agent: String,
                 record: AgentCapabilityRecord, audit: Bool) {
         self.date = date; self.chatID = chatID; self.runID = runID; self.projectID = projectID; self.roleID = roleID; self.agent = agent
         self.tool = record.tool; self.capability = record.capability; self.target = record.target; self.decision = record.decision
         self.turn = record.turn; self.audit = audit
+        self.requestID = record.requestID; self.source = record.source; self.stage = record.stage; self.outcome = record.outcome; self.ruleID = record.ruleID
     }
 }
 
@@ -97,13 +103,15 @@ public actor CapabilityLedger {
         return try withDatabase { db in
             let since = Date().timeIntervalSince1970 - Double(days) * 86_400
             var statement: OpaquePointer?; defer { sqlite3_finalize(statement) }
-            guard sqlite3_prepare_v2(db, "SELECT date, chat, run, project, role, agent, tool, capability, target, decision, turn, audit FROM decisions WHERE date >= ? ORDER BY id DESC LIMIT ?", -1, &statement, nil) == SQLITE_OK else { throw Self.failure }
+            guard sqlite3_prepare_v2(db, "SELECT date, chat, run, project, role, agent, tool, capability, target, decision, turn, audit, request_id, source, stage, outcome, rule_id FROM decisions WHERE date >= ? ORDER BY id DESC LIMIT ?", -1, &statement, nil) == SQLITE_OK else { throw Self.failure }
             sqlite3_bind_double(statement, 1, since); sqlite3_bind_int(statement, 2, Int32(limit))
             var result: [CapabilityDecision] = []
             while sqlite3_step(statement) == SQLITE_ROW {
                 guard let capability = AgentCapabilityRecord.Capability(rawValue: Self.text(statement, 7) ?? ""),
                       let decision = AgentCapabilityRecord.Decision(rawValue: Self.text(statement, 9) ?? "") else { continue }
-                let record = AgentCapabilityRecord(tool: Self.text(statement, 6) ?? "", capability: capability, target: Self.text(statement, 8), decision: decision, turn: Self.text(statement, 10))
+                let record = AgentCapabilityRecord(tool: Self.text(statement, 6) ?? "", capability: capability, target: Self.text(statement, 8), decision: decision, turn: Self.text(statement, 10),
+                    requestID: Self.text(statement, 12), source: Self.text(statement, 13), stage: Self.text(statement, 14).flatMap(AgentCapabilityRecord.Stage.init(rawValue:)),
+                    outcome: Self.text(statement, 15).flatMap(AgentCapabilityRecord.Outcome.init(rawValue:)), ruleID: Self.text(statement, 16))
                 result.append(CapabilityDecision(date: Date(timeIntervalSince1970: sqlite3_column_double(statement, 0)), chatID: Self.text(statement, 1),
                     runID: Self.text(statement, 2).flatMap(UUID.init), projectID: Self.text(statement, 3).flatMap(UUID.init), roleID: Self.text(statement, 4) ?? "",
                     agent: Self.text(statement, 5) ?? "", record: record, audit: sqlite3_column_int(statement, 11) == 1))
@@ -136,6 +144,23 @@ public actor CapabilityLedger {
         return try withDatabase { db in
             var statement: OpaquePointer?; defer { sqlite3_finalize(statement) }
             guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM decisions", -1, &statement, nil) == SQLITE_OK, sqlite3_step(statement) == SQLITE_ROW else { throw Self.failure }
+            return Int(sqlite3_column_int64(statement, 0))
+        }
+    }
+
+    /// Actual app-presented interruptions, once per request. Historical rows cannot establish presentation.
+    public func interruptions(days: Int) throws -> Int {
+        flush()
+        return try withDatabase { db in
+            var statement: OpaquePointer?; defer { sqlite3_finalize(statement) }
+            let sql = """
+                SELECT COUNT(*) FROM (SELECT agent, chat, request_id FROM decisions
+                WHERE date >= ? AND stage = 'presented' AND request_id IS NOT NULL
+                GROUP BY agent, chat, request_id)
+                """
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { throw Self.failure }
+            sqlite3_bind_double(statement, 1, Date().timeIntervalSince1970 - Double(days) * 86_400)
+            guard sqlite3_step(statement) == SQLITE_ROW else { throw Self.failure }
             return Int(sqlite3_column_int64(statement, 0))
         }
     }
@@ -175,6 +200,19 @@ public actor CapabilityLedger {
             CREATE TABLE IF NOT EXISTS daily (day TEXT NOT NULL, project TEXT NOT NULL, role TEXT NOT NULL, agent TEXT NOT NULL, capability TEXT NOT NULL,
                 decision TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY (day, project, role, agent, capability, decision));
             """)
+        // Nullable additions preserve old rows and let older builds keep inserting their original columns.
+        // Serialize discovery and ALTERs so two ledger instances cannot race the migration.
+        try Self.exec(db, "BEGIN IMMEDIATE")
+        do {
+            var statement: OpaquePointer?; defer { sqlite3_finalize(statement) }
+            guard sqlite3_prepare_v2(db, "PRAGMA table_info(decisions)", -1, &statement, nil) == SQLITE_OK else { throw Self.failure }
+            var columns: Set<String> = []
+            while sqlite3_step(statement) == SQLITE_ROW { if let name = Self.text(statement, 1) { columns.insert(name) } }
+            for name in ["request_id", "source", "stage", "outcome", "rule_id"] where !columns.contains(name) {
+                try Self.exec(db, "ALTER TABLE decisions ADD COLUMN \(name) TEXT")
+            }
+            try Self.exec(db, "COMMIT")
+        } catch { sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         connection = opened
         return db
@@ -184,7 +222,7 @@ public actor CapabilityLedger {
         do {
             var insert: OpaquePointer?, upsert: OpaquePointer?
             defer { sqlite3_finalize(insert); sqlite3_finalize(upsert) }
-            guard sqlite3_prepare_v2(db, "INSERT INTO decisions (date, chat, run, project, role, agent, tool, capability, target, decision, turn, audit) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", -1, &insert, nil) == SQLITE_OK,
+            guard sqlite3_prepare_v2(db, "INSERT INTO decisions (date, chat, run, project, role, agent, tool, capability, target, decision, turn, audit, request_id, source, stage, outcome, rule_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", -1, &insert, nil) == SQLITE_OK,
                   sqlite3_prepare_v2(db, "INSERT INTO daily (day, project, role, agent, capability, decision, count) VALUES (?,?,?,?,?,?,1) ON CONFLICT(day, project, role, agent, capability, decision) DO UPDATE SET count = count + 1", -1, &upsert, nil) == SQLITE_OK else { throw failure }
             let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
             func bind(_ statement: OpaquePointer?, _ index: Int32, _ value: String?) {
@@ -197,6 +235,8 @@ public actor CapabilityLedger {
                 bind(insert, 5, row.roleID); bind(insert, 6, row.agent); bind(insert, 7, row.tool); bind(insert, 8, row.capability.rawValue)
                 bind(insert, 9, row.target); bind(insert, 10, row.decision.rawValue); bind(insert, 11, row.turn)
                 sqlite3_bind_int(insert, 12, row.audit ? 1 : 0)
+                bind(insert, 13, row.requestID); bind(insert, 14, row.source); bind(insert, 15, row.stage?.rawValue)
+                bind(insert, 16, row.outcome?.rawValue); bind(insert, 17, row.ruleID)
                 guard sqlite3_step(insert) == SQLITE_DONE else { throw failure }
                 sqlite3_reset(upsert); sqlite3_clear_bindings(upsert)
                 bind(upsert, 1, day(row.date)); bind(upsert, 2, row.projectID?.uuidString ?? ""); bind(upsert, 3, row.roleID)

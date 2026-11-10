@@ -44,15 +44,37 @@ public struct AgentCapabilityRecord: Codable, Hashable, Sendable {
     public enum Decision: String, Codable, Sendable {
         /// The tool ran under the engine's own rules; the app only observed it.
         case used
-        case allowed, asked, denied, wouldDeny, unsupportedTool, hookDenied, hookAsked
+        case allowed, asked, denied, wouldDeny, unsupportedTool, hookDenied, hookAsked, answered
+    }
+    /// A record is a lifecycle event, not another interruption. Correlate events using `requestID`.
+    public enum Stage: String, Codable, Sendable {
+        case requested, presented
+        /// A response was attempted; this does not establish receipt or execution.
+        case responded
+        case started, completed, resolved
+    }
+    /// Only explicit engine results establish success. A successful response write establishes no tool outcome.
+    public enum Outcome: String, Codable, Sendable {
+        case succeeded, failed, cancelled, unknown
     }
     public var tool: String
     public var capability: Capability
     public var target: String?
     public var decision: Decision
     public var turn: String?
-    public init(tool: String, capability: Capability, target: String? = nil, decision: Decision, turn: String? = nil) {
+    /// Opaque correlation identifier scoped by provider, chat and run. Never a form answer or tool payload.
+    public var requestID: String?
+    /// Protocol method or app-owned policy identifier, never inferred from human-readable prompt text.
+    public var source: String?
+    public var stage: Stage?
+    public var outcome: Outcome?
+    /// Stable app-owned rule identifier when a policy supplies one.
+    public var ruleID: String?
+    public init(tool: String, capability: Capability, target: String? = nil, decision: Decision, turn: String? = nil,
+                requestID: String? = nil, source: String? = nil, stage: Stage? = nil, outcome: Outcome? = nil, ruleID: String? = nil) {
         self.tool = tool; self.capability = capability; self.target = target.map { String($0.prefix(200)) }; self.decision = decision; self.turn = turn
+        self.requestID = requestID.map { String($0.prefix(200)) }; self.source = source.map { String($0.prefix(200)) }
+        self.stage = stage; self.outcome = outcome; self.ruleID = ruleID.map { String($0.prefix(200)) }
     }
 }
 
@@ -82,6 +104,8 @@ public struct AgentUsageLimitStop: Equatable, Sendable {
 }
 
 public struct AgentInteraction: Identifiable, Sendable {
+    /// Presentation provenance only; it grants no authority and is independent of wire method names.
+    public enum Origin: String, Sendable { case provider, tool, agent }
     public let id: UUID
     public let session: AgentSessionReference
     public let turn: String?
@@ -91,9 +115,26 @@ public struct AgentInteraction: Identifiable, Sendable {
     public let details: String
     /// True when `.allowTurn` is accepted: the agent then allows repeats of the same tool for the rest of this turn.
     public let canAllowTurn: Bool
-    public init(id: UUID, session: AgentSessionReference, turn: String?, kind: Kind, reason: String?, details: String, canAllowTurn: Bool = false) {
+    /// True when `.allowChat` is accepted: the adapter then allows later calls to the same app-owned tool server
+    /// in this chat until its connection resets or the app restarts.
+    public let canAllowChat: Bool
+    public let origin: Origin
+    /// Bounded protocol identifier for audit correlation. Presentation text and answers never belong in the audit.
+    public let auditSource: String?
+    /// The adapter's opaque audit correlation ID; falls back to this interaction's UUID when omitted.
+    public let auditRequestID: String?
+    /// Typed command approval inputs. These stay in memory; audit records use their own bounded target policy.
+    public let command: String?
+    public let workingDirectory: String?
+    public init(id: UUID, session: AgentSessionReference, turn: String?, kind: Kind, reason: String?, details: String, canAllowTurn: Bool = false,
+                auditSource: String? = nil, auditRequestID: String? = nil, command: String? = nil, workingDirectory: String? = nil,
+                origin: Origin = .provider, canAllowChat: Bool = false) {
         self.id = id; self.session = session; self.turn = turn; self.kind = kind; self.reason = reason; self.details = details
-        self.canAllowTurn = canAllowTurn
+        self.canAllowTurn = canAllowTurn; self.canAllowChat = canAllowChat
+        self.origin = origin
+        self.auditSource = auditSource.map { String($0.prefix(200)) }
+        self.auditRequestID = auditRequestID.map { String($0.prefix(200)) }
+        self.command = command; self.workingDirectory = workingDirectory
     }
     public enum Kind: Sendable {
         case approval(canAllow: Bool)
@@ -133,6 +174,7 @@ public struct AgentInteraction: Identifiable, Sendable {
 
 public enum AgentInteractionResponse: Sendable {
     /// `allowTurn` allows this request and every later request of the same tool until the turn ends.
-    case allowOnce, allowTurn, deny, answers([String: String]), completed
+    /// `allowChat` allows this request and later calls to the same tool server in this chat (see `canAllowChat`).
+    case allowOnce, allowTurn, allowChat, deny, answers([String: String]), completed
 }
 

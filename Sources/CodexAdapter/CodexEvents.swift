@@ -30,11 +30,28 @@ struct CodexPendingInteraction: Sendable {
     let method: String
     let params: JSONValue
 
+    /// Keep lifecycle evidence separate from schema, message, URL and answer content.
+    func capability(stage: AgentCapabilityRecord.Stage, response: CodexInteractionResponse? = nil,
+                    outcome: AgentCapabilityRecord.Outcome? = nil) -> AgentCapabilityRecord? {
+        guard var record = CodexEventDecoder.capability(request: method, params: params) else { return nil }
+        record.requestID = interaction.id.uuidString
+        record.source = method; record.stage = stage; record.outcome = outcome
+        if let response {
+            switch response {
+            case .allowOnce, .allowTurn, .allowChat: record.decision = .allowed
+            case .deny: record.decision = .denied
+            case .answers, .completed: record.decision = .answered
+            }
+        }
+        return record
+    }
+
     static func parse(_ raw: JSONValue) -> Self? {
         let p = raw["params"], method = raw["method"].string ?? ""
         guard let native = p["threadId"].string, !native.isEmpty,
               validRequestID(raw["id"]) else { return nil }
         let kind: CodexInteraction.Kind
+        var canAllowChat = false
         switch method {
         case "item/commandExecution/requestApproval":
             guard p["turnId"].string != nil, p["kind"] == .null || ["command", "writeStdin"].contains(p["kind"].string ?? "") else { return nil }
@@ -64,7 +81,10 @@ struct CodexPendingInteraction: Sendable {
             kind = .questions(fields)
         case "mcpServer/elicitation/request":
             let message = p["message"].string ?? L10n.text("Инструменту нужен ответ", "The tool needs your input")
-            if p["mode"].string == "url", let rawURL = p["url"].string, let url = URL(string: rawURL), url.scheme == "https", url.host != nil {
+            if let server = toolApprovalServer(p) {
+                kind = .approval(canAllow: true)
+                canAllowChat = chatGrantServers.contains(server)
+            } else if p["mode"].string == "url", let rawURL = p["url"].string, let url = URL(string: rawURL), url.scheme == "https", url.host != nil {
                 kind = .link(message: message, url: url)
             } else if p["mode"].string == "form", let fields = formFields(p["requestedSchema"]) {
                 kind = .form(message: message, fields: fields)
@@ -74,9 +94,29 @@ struct CodexPendingInteraction: Sendable {
         default: return nil
         }
         let interaction = CodexInteraction(id: UUID(), session: .init(connection: .originalCodex, nativeID: native),
-                                           turn: p["turnId"].string, kind: kind, reason: p["reason"].string, details: p.display)
+                                           turn: p["turnId"].string, kind: kind, reason: p["reason"].string, details: p.display, auditSource: method,
+                                           command: method == "item/commandExecution/requestApproval" ? p["command"].string : nil,
+                                           workingDirectory: method == "item/commandExecution/requestApproval" ? p["cwd"].string : nil,
+                                           origin: method == "mcpServer/elicitation/request" ? .tool : (method == "item/tool/requestUserInput" ? .agent : .provider),
+                                           canAllowChat: canAllowChat)
         return Self(interaction: interaction, rpcID: raw["id"], method: method, params: p)
     }
+
+    /// App-owned browser servers whose tool calls the user may allow for the rest of a chat.
+    static let chatGrantServers: Set<String> = ["switchboard_browser", UserChromeConfiguration.server]
+    static let toolApprovalKindKey = "codex/approvals/mcp_tool_call/kind"
+    static let toolApprovalPersistKey = "codex/approvals/mcp_tool_call/persist"
+
+    /// The server of the engine's own MCP tool-call approval: a form with no fields and the approval kind marker.
+    /// Message and tool parameters stay untrusted data; only the server name keys a chat grant.
+    static func toolApprovalServer(_ p: JSONValue) -> String? {
+        guard p["mode"].string == "form", p["_meta"][toolApprovalKindKey].string == "mcp_tool_call",
+              let server = p["serverName"].string, !server.isEmpty,
+              p["requestedSchema"]["type"].string == "object", case .object(let properties) = p["requestedSchema"]["properties"],
+              properties.isEmpty, p["requestedSchema"]["required"].array.isEmpty else { return nil }
+        return server
+    }
+    var toolApprovalServer: String? { method == "mcpServer/elicitation/request" ? Self.toolApprovalServer(params) : nil }
 
     private static func validRequestID(_ value: JSONValue) -> Bool {
         switch value {
@@ -87,6 +127,19 @@ struct CodexPendingInteraction: Sendable {
     }
 
     func encode(_ response: CodexInteractionResponse) throws -> JSONValue {
+        if toolApprovalServer != nil {
+            switch response {
+            case .allowOnce: return .object(["action": .string("accept"), "content": .object([:])])
+            case .allowChat where interaction.canAllowChat:
+                // Also let the engine skip asking again for this tool; the client grant covers the server's other tools.
+                let offered = params["_meta"][Self.toolApprovalPersistKey]
+                let session = offered.string == "session" || offered.array.contains(.string("session"))
+                return .object(["action": .string("accept"), "content": .object([:]),
+                                "_meta": .object(session ? [Self.toolApprovalPersistKey: .string("session")] : [:])])
+            case .deny: return .object(["action": .string("decline")])
+            default: throw Self.invalidResponse
+            }
+        }
         switch (interaction.kind, response) {
         case (.approval(let canAllow), .allowOnce) where canAllow:
             if method == "item/permissions/requestApproval" {
@@ -149,24 +202,51 @@ struct CodexPendingInteraction: Sendable {
 
 /// Pure notification decoding; request IDs and answer encoding stay in the client.
 enum CodexEventDecoder {
-    /// A started item as a ledger record: the sandbox decided, the app only observed it.
-    static func capability(_ item: JSONValue, turn: String?) -> AgentCapabilityRecord? {
+    /// Observing an item start does not establish successful execution.
+    static func capability(_ item: JSONValue, turn: String?, completed: Bool = false) -> AgentCapabilityRecord? {
+        var record: AgentCapabilityRecord
         switch item["type"].string {
-        case "commandExecution": return .init(tool: "commandExecution", capability: .shell, target: item["command"].string, decision: .used, turn: turn)
-        case "fileChange": return .init(tool: "fileChange", capability: .writeInProject, target: item["changes"].array.first?["path"].string, decision: .used, turn: turn)
+        case "commandExecution": record = .init(tool: "commandExecution", capability: .shell, target: item["command"].string, decision: .used, turn: turn)
+        case "fileChange": record = .init(tool: "fileChange", capability: .writeInProject, target: item["changes"].array.first?["path"].string, decision: .used, turn: turn)
         case "mcpToolCall":
             let server = item["server"].string ?? ""
-            return .init(tool: server + "." + (item["tool"].string ?? ""), capability: server == "switchboard_browser" ? .browser : .other, decision: .used, turn: turn)
-        case "webSearch": return .init(tool: "webSearch", capability: .network, target: item["query"].string, decision: .used, turn: turn)
+            record = .init(tool: String((server + "." + (item["tool"].string ?? "")).prefix(200)), capability: ["switchboard_browser", "switchboard_user_chrome"].contains(server) ? .browser : .other, decision: .used, turn: turn)
+        case "webSearch": record = .init(tool: "webSearch", capability: .network, target: item["query"].string, decision: .used, turn: turn)
         default: return nil
         }
+        // Native item IDs are scoped by session and turn by the ledger consumer.
+        record.requestID = item["id"].string.map { "item:" + String($0.prefix(195)) }
+        record.source = completed ? "item/completed" : "item/started"
+        record.stage = completed ? .completed : .started
+        if completed {
+            switch item["status"].string {
+            case "failed": record.outcome = .failed
+            case "declined", "cancelled": record.outcome = .cancelled
+            case "completed":
+                if item["type"].string == "commandExecution" {
+                    record.outcome = item["exitCode"].int.map { $0 == 0 ? .succeeded : .failed } ?? .unknown
+                } else if item["type"].string == "mcpToolCall" {
+                    record.outcome = item["error"] != .null ? .failed : (item["result"] != .null ? .succeeded : .unknown)
+                } else { record.outcome = .succeeded }
+            default: record.outcome = .unknown
+            }
+        }
+        return record
     }
     /// An approval request as a ledger record.
     static func capability(request method: String, params p: JSONValue) -> AgentCapabilityRecord? {
         switch method {
         case "item/commandExecution/requestApproval": return .init(tool: "commandExecution", capability: .shell, target: p["command"].string, decision: .asked, turn: p["turnId"].string)
         case "item/fileChange/requestApproval": return .init(tool: "fileChange", capability: .writeOutside, target: p["grantRoot"].string ?? p["changes"].array.first?["path"].string, decision: .asked, turn: p["turnId"].string)
-        case "item/permissions/requestApproval": return .init(tool: "permissions", capability: .other, target: p["reason"].string, decision: .asked, turn: p["turnId"].string)
+        case "item/permissions/requestApproval": return .init(tool: "permissions", capability: .other, decision: .asked, turn: p["turnId"].string)
+        case "item/tool/requestUserInput": return .init(tool: "requestUserInput", capability: .question, decision: .asked, turn: p["turnId"].string)
+        case "mcpServer/elicitation/request":
+            // Elicitation may ask for permission or data. Its message is untrusted and proves neither authority nor capability.
+            if let server = CodexPendingInteraction.toolApprovalServer(p) {
+                return .init(tool: "mcpElicitation", capability: CodexPendingInteraction.chatGrantServers.contains(server) ? .browser : .other,
+                             target: server, decision: .asked, turn: p["turnId"].string)
+            }
+            return .init(tool: "mcpElicitation", capability: .other, decision: .asked, turn: p["turnId"].string)
         default: return nil
         }
     }

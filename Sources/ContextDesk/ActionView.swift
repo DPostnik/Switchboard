@@ -12,6 +12,9 @@ struct ActionView: View {
         VStack(alignment: .leading, spacing: 12) {
             Label { Text(action.title).foregroundStyle(DeskPalette.ink) } icon: { Image(systemName: "exclamationmark.diamond.fill").foregroundStyle(DeskPalette.attention) }
                 .font(.ui(.headline))
+            if let explanation = model.permissionExplanation(for: action) {
+                Text(explanation).font(.ui(.caption)).foregroundStyle(.secondary)
+            }
             switch action.interaction.kind {
             case .questions(let fields):
                 questionFields(fields, onSubmit: { submitAnswers(fields) })
@@ -43,6 +46,11 @@ struct ActionView: View {
                         if action.interaction.canAllowTurn {
                             Button(L10n.text("Разрешить до конца хода", "Allow for this turn")) { submit(.allowTurn) }.buttonStyle(DeskButtonStyle())
                                 .help(L10n.text("Этот и следующие запросы того же инструмента в этом ходе", "This and later requests of the same tool in this turn"))
+                        }
+                        if action.interaction.canAllowChat {
+                            Button(L10n.text("Разрешить в этом чате", "Allow in this chat")) { submit(.allowChat) }.buttonStyle(DeskButtonStyle())
+                                .help(L10n.text("Этот и следующие вызовы инструментов этого браузера в этом чате, пока Switchboard не перезапустится",
+                                                "This and later calls to this browser's tools in this chat until Switchboard restarts"))
                         }
                         Button(L10n.text("Разрешить один раз", "Allow once")) { submit(.allowOnce) }
                             .buttonStyle(DeskButtonStyle(kind: .primary))
