@@ -6,6 +6,7 @@ import { creationKey } from '../protocol/receipts'
 import { agentTitle, newChatModels, newChatRoles } from '../protocol/snapshot'
 import type { RemoteDevice } from '../protocol/types'
 import type { EngineState } from '../sync/engine'
+import { usePhotoAttachments } from './usePhotoAttachments'
 import { useAutosize } from './Composer'
 import { DeliveryNotice } from './Dock'
 import { EmptyState } from './EmptyState'
@@ -40,13 +41,22 @@ export function NewChatForm({ engine, state, device, initialProject, onOpen, onC
   const role = roles.some((value) => value.id === roleChoice) ? roleChoice : defaultRole ?? ''
   const key = project ? creationKey(device.id, project.id) : ''
   const blocked = key ? engine.isBlocked(key) : true
+  const { photos, setPhotos, loadingPhotos, photoError, draggingPhotos, picker, addPhotos, onPaste, clearSent } =
+    usePhotoAttachments(key, Boolean(project && model), () => !key || engine.isBlocked(key))
+  const hasContent = text.trim() !== '' || photos.length > 0
   const tooLong = utf8Length(text) > limits.textBytes
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
-    if (!project || !model || text.trim() === '' || blocked || tooLong) return
-    const command = await engine.perform((owner) => commands.create({ owner, device: device.id, project: project.id }, text, { model, role: role || null }))
+    if (!project || !model || !hasContent || blocked || loadingPhotos || tooLong) return
+    const sentPhotos = photos
+    const command = await engine.perform((owner) => {
+      const value = commands.create({ owner, device: device.id, project: project.id }, text, { model, role: role || null })
+      if (sentPhotos.length) value.photos = sentPhotos
+      return value
+    })
     if (command) {
+      clearSent(sentPhotos)
       setText('')
       onOpen(command.chat)
     }
@@ -64,15 +74,20 @@ export function NewChatForm({ engine, state, device, initialProject, onOpen, onC
     <FormPage title={s('newChatTitle')} subtitle={project?.name} onCancel={onCancel}>
       <EmptyState icon="bubbles" title={s('newChatHeadline')}
         text={project ? t(`Первое сообщение создаст новый чат в папке «${project.name}»`, `Your first message will create a new chat in “${project.name}”`) : undefined} />
-      <form className="dock" onSubmit={submit} onKeyDown={cancelOnEscape(onCancel)}>
+      <form className={'dock' + (draggingPhotos ? ' dragging-photos' : '')} onSubmit={submit} onKeyDown={cancelOnEscape(onCancel)}>
+        {draggingPhotos && <div className="photo-drop-hint" role="status">{s('dropPhotos')}</div>}
+        {photoError && <div role="alert" className="composer-note bad">{s(photoError)}</div>}
+        {photos.length > 0 && <div className="photo-strip">{photos.map(photo => <button type="button" key={photo.id} disabled={blocked || loadingPhotos} aria-label={s('removePhoto')} onClick={() => setPhotos(photos.filter(p => p.id !== photo.id))}><img src={'data:image/jpeg;base64,' + photo.data} alt={s('attachedPhoto')} /></button>)}</div>}
         {models.length === 0 && <div className="composer-note bad">{s('noModels')}</div>}
         {tooLong && <div className="composer-note bad" role="alert">{s('textTooLong')}</div>}
         {key && <DeliveryNotice engine={engine} state={state} keyValue={key} />}
         {blocked && key && state.receipts.blocking(key) && <div className="composer-note">{s('creationPending')}</div>}
         <div className="composer">
           <textarea ref={field} className="composer-input" rows={1} value={text} placeholder={s('firstMessagePlaceholder')} aria-label={s('firstMessage')}
-            onChange={(event) => setText(event.target.value)} onKeyDown={submitOnEnter} autoFocus />
+            onPaste={onPaste} onChange={(event) => setText(event.target.value)} onKeyDown={submitOnEnter} autoFocus />
           <div className="composer-bar">
+            <input ref={picker} type="file" accept="image/*" multiple hidden onChange={event => { void addPhotos(Array.from(event.target.files ?? [])); event.target.value = '' }} />
+            <button type="button" className="chip-button" disabled={blocked || loadingPhotos || photos.length >= 4 || !model} onClick={() => picker.current?.click()}>{s(loadingPhotos ? 'preparingPhotos' : 'attachPhotos')}</button>
             <ChipSelect icon="folder" label={s('project')} value={projectID} onChange={(value) => { setProjectID(value); setModel(''); setRole('') }}>
               {projects.map((value) => <option key={value.id} value={value.id}>{value.name}</option>)}
             </ChipSelect>
@@ -85,7 +100,7 @@ export function NewChatForm({ engine, state, device, initialProject, onOpen, onC
               {models.map((value) => <option key={value.id} value={value.id}>{value.name} · {agentTitle(value)}</option>)}
             </ChipSelect>
             <span className="composer-spacer" />
-            <button type="submit" className="round-button" disabled={!model || text.trim() === '' || blocked || tooLong}
+            <button type="submit" className="round-button" disabled={!model || !hasContent || blocked || loadingPhotos || tooLong}
               aria-label={s('startChat')} title={s('startChat')} aria-busy={sending || undefined}>
               <Icon name="arrowUp" size={15} />
             </button>

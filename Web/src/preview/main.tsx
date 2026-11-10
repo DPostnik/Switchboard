@@ -1,3 +1,4 @@
+import { installPhotoDropGuard } from '../components/photoDropGuard'
 // Dev-only entry for `npm run dev` + `/?preview=1`: the workspace on sample data, with no Supabase client and no network.
 // The dev server swaps it in for `src/main.tsx` (see vite.config.ts); production builds never reference this file.
 import type { SupabaseClient } from '@supabase/supabase-js'
@@ -54,6 +55,8 @@ function PreviewApp() {
       onSignOut={() => window.alert(t('Предпросмотр: выход не выполняется.', 'Preview: signing out does nothing.'))} />
   )
 }
+
+installPhotoDropGuard()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
