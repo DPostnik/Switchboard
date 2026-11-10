@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Preserve task ownership and restart boundaries in verification guidance.
+
 - Distinguish main browser access from isolated agent sessions.
 
 - Add bounded DOM inspection and accurate browser tool effect hints.
