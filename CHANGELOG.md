@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Clear Claude warm ownership when background work wakes.
+
 - Relocate project sessions and archive removed projects.
 
 - Deliver session-scoped generated image previews to native and web chats.

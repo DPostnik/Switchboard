@@ -1275,7 +1275,7 @@ public actor ClaudeIntegration: AgentIntegration {
     /// Starts the turn the CLI began on its own: there is no user message, and it is never resent.
     private func wake(_ id: String) {
         guard let record = sessions[id] else { return }
-        stopWaiting(id)
+        stopWaiting(id); warm[id] = nil
         let turn = UUID().uuidString
         sessions[id]?.active = turn; sessions[id]?.current = []; limitStops[id] = nil
         do { try save(id) } catch { sink.yield(.init(session: reference(id), payload: .diagnostic(error.localizedDescription))) }
@@ -1305,7 +1305,7 @@ public actor ClaudeIntegration: AgentIntegration {
     private func abandonWait(_ id: String) {
         stopSubagents(id)
         guard waiting[id] != nil else { return }
-        stopWaiting(id); warm[id] = nil
+        stopWaiting(id)
         sink.yield(.init(session: reference(id), payload: .diagnostic(L10n.text(
             "Процесс Claude с фоновыми задачами остановлен до их завершения; их результат не получен. Ничего не повторялось.",
             "The Claude process running background tasks stopped before they finished; their result was not received. Nothing was retried."))))
