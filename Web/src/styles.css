@@ -506,3 +506,6 @@ button:disabled { cursor: default; }
 
 .photo-strip { display: flex; gap: 8px; padding: 8px; }
 .photo-strip img { width: 72px; height: 72px; object-fit: cover; border-radius: 6px; }
+
+.dragging-photos { outline: 2px dashed var(--accent, #3974d8); outline-offset: -2px; border-radius: 12px; }
+.photo-drop-hint { padding: 12px; text-align: center; font-weight: 600; pointer-events: none; }

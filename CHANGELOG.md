@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Web chats accept photo drag and drop and clipboard image paste (including Windows Ctrl+V), using the attachment picker’s previews and cloud delivery.
+
 - Add photo attachments to the web composer using the mobile cloud delivery protocol.
 
 - Coding chats gain project-scoped load, build-task and app diagnostics, plus a shared app verification workflow.

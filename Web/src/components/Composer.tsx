@@ -40,6 +40,8 @@ export function Composer({ engine, state, device, chat }: { engine: EngineLike; 
   const [photos, setPhotosState] = useState<RemotePhoto[]>(() => photoDrafts.get(key) ?? [])
   const [loadingPhotos, setLoadingPhotos] = useState(false)
   const [photoError, setPhotoError] = useState(false)
+  const [draggingPhotos, setDraggingPhotos] = useState(false)
+  const dragDepth = useRef(0)
   const choosing = useRef(false)
   const picker = useRef<HTMLInputElement>(null)
   const setPhotos = (value: RemotePhoto[]) => { photoDrafts.set(key, value); setPhotosState(value) }
@@ -61,6 +63,53 @@ export function Composer({ engine, state, device, chat }: { engine: EngineLike; 
     input.current?.focus()
   }, [key])
   useAutosize(input, draft)
+
+  // File drops must not navigate the tab. Only the active writable chat accepts them.
+  useEffect(() => {
+    const isFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes('Files')
+    const accepts = (event: DragEvent) => event.target instanceof Element
+      && Boolean(event.target.closest('.chat')) && chat.supportsPhotos === true
+      && !chat.readOnly && !engine.isBlocked(key) && !choosing.current
+    const enter = (event: DragEvent) => {
+      if (!isFiles(event)) return
+      event.preventDefault()
+      dragDepth.current++
+      if (accepts(event)) setDraggingPhotos(true)
+    }
+    const over = (event: DragEvent) => {
+      if (!isFiles(event)) return
+      event.preventDefault()
+      if (event.dataTransfer) event.dataTransfer.dropEffect = accepts(event) ? 'copy' : 'none'
+      setDraggingPhotos(accepts(event))
+    }
+    const leave = (event: DragEvent) => {
+      if (!isFiles(event)) return
+      dragDepth.current = Math.max(0, dragDepth.current - 1)
+      if (!dragDepth.current) setDraggingPhotos(false)
+    }
+    const drop = (event: DragEvent) => {
+      if (!isFiles(event)) return
+      event.preventDefault()
+      dragDepth.current = 0
+      setDraggingPhotos(false)
+      if (accepts(event)) void addPhotos(Array.from(event.dataTransfer?.files ?? []))
+    }
+    const end = () => { dragDepth.current = 0; setDraggingPhotos(false) }
+    window.addEventListener('dragenter', enter)
+    window.addEventListener('dragover', over)
+    window.addEventListener('dragleave', leave)
+    window.addEventListener('drop', drop)
+    window.addEventListener('dragend', end)
+    window.addEventListener('blur', end)
+    return () => {
+      window.removeEventListener('dragenter', enter)
+      window.removeEventListener('dragover', over)
+      window.removeEventListener('dragleave', leave)
+      window.removeEventListener('drop', drop)
+      window.removeEventListener('dragend', end)
+      window.removeEventListener('blur', end)
+    }
+  })
 
   if (chat.readOnly) return <div className="banner neutral"><Icon name="lock" /><span>{s('readOnly')}</span></div>
 
@@ -106,7 +155,8 @@ export function Composer({ engine, state, device, chat }: { engine: EngineLike; 
   const hint = primary === 'queue' ? s('queueHint') : primary === 'interrupt' ? s('interruptHint') : s('sendHint')
   const sendLabel = primary === 'queue' ? s('queue') : primary === 'interrupt' ? s('interruptAndSend') : s('send')
   return (
-    <div className="composer-area">
+    <div className={"composer-area" + (draggingPhotos ? " dragging-photos" : "")}>
+      {draggingPhotos && <div className="photo-drop-hint" role="status">{s('dropPhotos')}</div>}
       <CommandLine state={state} device={device} chat={chat} />
       {chat.running && !primary && hasText && <div className="composer-note">{s('busyNoQueue')}</div>}
       {tooLong && <div className="composer-note bad" role="alert">{s('textTooLong')}</div>}
@@ -115,6 +165,15 @@ export function Composer({ engine, state, device, chat }: { engine: EngineLike; 
       <div className="composer">
         <textarea ref={input} className="composer-input" value={draft} rows={1}
           placeholder={chat.running && primary ? s('queuePlaceholder') : s('messagePlaceholder')}
+          onPaste={(event) => {
+            // Windows browsers expose copied screenshots/photos as image clipboard items.
+            const images = Array.from(event.clipboardData.items)
+              .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+              .map(item => item.getAsFile()).filter((file): file is File => file !== null)
+            if (!images.length) return
+            event.preventDefault()
+            if (chat.supportsPhotos === true && !chat.readOnly) void addPhotos(images)
+          }}
           onChange={(event) => setDraft(event.target.value)} onKeyDown={onKeyDown} disabled={blocked} aria-label={s('message')} />
         <div className="composer-bar">
           {chat.supportsPhotos === true && <>

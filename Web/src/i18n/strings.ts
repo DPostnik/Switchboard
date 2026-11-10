@@ -2,6 +2,7 @@ import { t } from './index'
 
 /** Static UI strings: [Russian, English]. Parameterized strings use `t(ru, en)` at the call site. */
 export const strings = {
+  dropPhotos: ['Отпусти фото, чтобы прикрепить к сообщению', 'Drop photos to attach them to the message'],
   attachPhotos: ['Прикрепить фото', 'Attach photos'],
   preparingPhotos: ['Подготовка фото…', 'Preparing photos…'],
   removePhoto: ['Убрать фото', 'Remove photo'],
