@@ -7,6 +7,7 @@ export const strings = {
   preparingPhotos: ['Подготовка фото…', 'Preparing photos…'],
   removePhoto: ['Убрать фото', 'Remove photo'],
   attachedPhoto: ['Прикреплённое фото', 'Attached photo'],
+  photoDropHelp: ['Не удалось получить изображение. Сохрани фото на компьютер и перетащи сам файл или нажми «Прикрепить фото».', 'Could not read the image. Save it to your computer and drag the file, or use Attach photos.'],
   photoError: ['Не удалось подготовить фото. Выбери до 4 изображений размером до 40 МБ каждое; после сжатия каждое должно помещаться в 512 КБ.', 'Could not prepare photos. Choose up to 4 images, up to 40 MB each; each must fit within 512 KB after compression.'],
   appName: ['Switchboard', 'Switchboard'],
   languageToggle: ['English', 'Русский'],

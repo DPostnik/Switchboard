@@ -1,8 +1,14 @@
 import type { RemotePhoto } from './types'
 
+/** Unknown Windows file types are accepted by name, then verified by the image decoder. */
+export function isImageFile(file: Pick<File, 'name' | 'type'>): boolean {
+  return file.type.startsWith('image/') || ((!file.type || file.type === 'application/octet-stream')
+    && /\.(jpe?g|png|webp|gif|bmp|avif|heic|heif|tiff?|ico)$/i.test(file.name))
+}
+
 /** Decode locally, resize, and encode the JPEG payload used by the iPhone protocol. */
 export async function preparePhoto(file: File): Promise<RemotePhoto> {
-  if (!file.type.startsWith('image/') || file.size > 40 * 1024 * 1024) throw new Error('image')
+  if (!isImageFile(file) || file.size > 40 * 1024 * 1024) throw new Error('image')
   const url = URL.createObjectURL(file)
   try {
     const image = new Image()

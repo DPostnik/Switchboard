@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type RefObject } from 'react'
+import { isPhotoDrag, readPhotoDrop, photoDropFiles, transferFiles } from '../protocol/photoDrop'
 import { preparePhoto } from '../protocol/photos'
 import type { RemotePhoto } from '../protocol/types'
 import { s } from '../i18n/strings'
@@ -39,23 +40,26 @@ export function Composer({ engine, state, device, chat }: { engine: EngineLike; 
   }
   const [photos, setPhotosState] = useState<RemotePhoto[]>(() => photoDrafts.get(key) ?? [])
   const [loadingPhotos, setLoadingPhotos] = useState(false)
-  const [photoError, setPhotoError] = useState(false)
+  const [photoError, setPhotoError] = useState<'photoError' | 'photoDropHelp' | null>(null)
   const [draggingPhotos, setDraggingPhotos] = useState(false)
   const dragDepth = useRef(0)
+  const fileDragActive = useRef(false)
   const choosing = useRef(false)
   const picker = useRef<HTMLInputElement>(null)
   const setPhotos = (value: RemotePhoto[]) => { photoDrafts.set(key, value); setPhotosState(value) }
-  const addPhotos = async (files: File[]) => {
+  const addPhotos = async (source: File[] | (() => Promise<File[]>)) => {
     if (choosing.current || engine.isBlocked(key)) return
     choosing.current = true
     setLoadingPhotos(true)
-    setPhotoError(false)
+    setPhotoError(null)
     try {
+      const files = typeof source === 'function' ? await source() : source
+      if (!files.length) throw new Error('empty drop')
       if (files.length + photos.length > 4) throw new Error('count')
       const added: RemotePhoto[] = []
       for (const file of files) added.push(await preparePhoto(file))
       setPhotos([...photos, ...added])
-    } catch { setPhotoError(true) }
+    } catch { setPhotoError(typeof source === 'function' ? 'photoDropHelp' : 'photoError') }
     finally { choosing.current = false; setLoadingPhotos(false) }
   }
   const input = useRef<HTMLTextAreaElement>(null)
@@ -66,13 +70,14 @@ export function Composer({ engine, state, device, chat }: { engine: EngineLike; 
 
   // File drops must not navigate the tab. Only the active writable chat accepts them.
   useEffect(() => {
-    const isFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes('Files')
+    const isFiles = (event: DragEvent) => isPhotoDrag(event.dataTransfer) || fileDragActive.current
     const accepts = (event: DragEvent) => event.target instanceof Element
       && Boolean(event.target.closest('.chat')) && chat.supportsPhotos === true
       && !chat.readOnly && !engine.isBlocked(key) && !choosing.current
     const enter = (event: DragEvent) => {
       if (!isFiles(event)) return
       event.preventDefault()
+      fileDragActive.current = true
       dragDepth.current++
       if (accepts(event)) setDraggingPhotos(true)
     }
@@ -85,27 +90,33 @@ export function Composer({ engine, state, device, chat }: { engine: EngineLike; 
     const leave = (event: DragEvent) => {
       if (!isFiles(event)) return
       dragDepth.current = Math.max(0, dragDepth.current - 1)
-      if (!dragDepth.current) setDraggingPhotos(false)
+      if (!dragDepth.current) { fileDragActive.current = false; setDraggingPhotos(false) }
     }
     const drop = (event: DragEvent) => {
       if (!isFiles(event)) return
       event.preventDefault()
+      // Cancel native opening before any descendant can consume or stop the drop.
+      event.stopPropagation()
+      fileDragActive.current = false
       dragDepth.current = 0
       setDraggingPhotos(false)
-      if (accepts(event)) void addPhotos(Array.from(event.dataTransfer?.files ?? []))
+      if (accepts(event) && event.dataTransfer) {
+        const payload = readPhotoDrop(event.dataTransfer)
+        void addPhotos(() => photoDropFiles(payload))
+      }
     }
-    const end = () => { dragDepth.current = 0; setDraggingPhotos(false) }
-    window.addEventListener('dragenter', enter)
-    window.addEventListener('dragover', over)
-    window.addEventListener('dragleave', leave)
-    window.addEventListener('drop', drop)
+    const end = () => { fileDragActive.current = false; dragDepth.current = 0; setDraggingPhotos(false) }
+    window.addEventListener('dragenter', enter, true)
+    window.addEventListener('dragover', over, true)
+    window.addEventListener('dragleave', leave, true)
+    window.addEventListener('drop', drop, true)
     window.addEventListener('dragend', end)
     window.addEventListener('blur', end)
     return () => {
-      window.removeEventListener('dragenter', enter)
-      window.removeEventListener('dragover', over)
-      window.removeEventListener('dragleave', leave)
-      window.removeEventListener('drop', drop)
+      window.removeEventListener('dragenter', enter, true)
+      window.removeEventListener('dragover', over, true)
+      window.removeEventListener('dragleave', leave, true)
+      window.removeEventListener('drop', drop, true)
       window.removeEventListener('dragend', end)
       window.removeEventListener('blur', end)
     }
@@ -160,17 +171,21 @@ export function Composer({ engine, state, device, chat }: { engine: EngineLike; 
       <CommandLine state={state} device={device} chat={chat} />
       {chat.running && !primary && hasText && <div className="composer-note">{s('busyNoQueue')}</div>}
       {tooLong && <div className="composer-note bad" role="alert">{s('textTooLong')}</div>}
-      {photoError && <div role="alert" className="composer-note bad">{s('photoError')}</div>}
+      {photoError && <div role="alert" className="composer-note bad">{s(photoError)}</div>}
       {photos.length > 0 && <div className="photo-strip">{photos.map(photo => <button type="button" key={photo.id} disabled={blocked || loadingPhotos} aria-label={s('removePhoto')} onClick={() => setPhotos(photos.filter(p => p.id !== photo.id))}><img src={'data:image/jpeg;base64,' + photo.data} alt={s('attachedPhoto')} /></button>)}</div>}
       <div className="composer">
         <textarea ref={input} className="composer-input" value={draft} rows={1}
           placeholder={chat.running && primary ? s('queuePlaceholder') : s('messagePlaceholder')}
           onPaste={(event) => {
-            // Windows browsers expose copied screenshots/photos as image clipboard items.
-            const images = Array.from(event.clipboardData.items)
-              .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
-              .map(item => item.getAsFile()).filter((file): file is File => file !== null)
-            if (!images.length) return
+            // Explorer's Copy file may supply FileList or untyped file items.
+            const images = transferFiles(event.clipboardData)
+            if (!images.length) {
+              if (Array.from(event.clipboardData.types).includes('Files')) {
+                event.preventDefault()
+                setPhotoError('photoDropHelp')
+              }
+              return
+            }
             event.preventDefault()
             if (chat.supportsPhotos === true && !chat.readOnly) void addPhotos(images)
           }}
