@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Distinguish main browser access from isolated agent sessions.
+
 - Add bounded DOM inspection and accurate browser tool effect hints.
 
 - Render character tables and provide unwrapped drawing windows.
