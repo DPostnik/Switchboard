@@ -30,6 +30,7 @@ extension CodexClient {
         for task in subagentHistoryTasks.values { task.cancel() }
         subagentHistoryTasks.removeAll()
         for event in subagentTracker.reset() { eventSink.yield(event) }
+        generatedImageBaselines.removeAll()
         for value in interactions.values { audit(value.pending, stage: .resolved, outcome: .unknown) }
         for (key, var record) in capabilityItems {
             record.stage = .completed; record.outcome = .unknown; record.source = "client/reset"
@@ -97,6 +98,7 @@ extension CodexClient {
             }
         }
         if ["client/disconnected", "account/login/completed", "account/updated"].contains(method) { resetInteractions() }
+        publishGeneratedImages(method: method, params: p)
         if let event = CodexEventDecoder.notification(raw) {
             for event in compactions.observe(event) { eventSink.yield(event) }
         }

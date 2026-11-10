@@ -53,11 +53,21 @@ export interface RemoteProject {
   canUseWeb?: boolean | null
 }
 
+/** Bounded previews delivered by the authenticated host, never arbitrary Markdown URLs. */
+export interface RemoteImage {
+  id: string
+  name: string
+  mimeType: string
+  data: string
+}
+
 export interface RemoteMessage {
   id: string
   role: string
   text: string
   truncated?: boolean | null
+  images?: RemoteImage[] | null
+  imageError?: boolean | null
 }
 
 export interface RemoteApproval {
@@ -190,6 +200,8 @@ export interface WebMessage {
   role: string
   text: string
   truncated?: boolean | null
+  images?: RemoteImage[] | null
+  imageError?: boolean | null
 }
 
 /** Realtime invalidation (`changed` broadcast on `remote:<owner>`). */

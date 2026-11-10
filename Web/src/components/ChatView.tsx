@@ -12,6 +12,7 @@ import { DeliveryNotice, Dock } from './Dock'
 import type { EngineLike } from './engineLike'
 import { commandStatusText, formatDate, formatElapsed, formatRelative, statusTone } from './format'
 import { Icon } from './Icon'
+import { MessageImages } from './MessageImages'
 import { copyText, renderMarkdown, type ChatLinkRender } from './markdown'
 import { pendingCreations } from './selectors'
 import { Toolbar } from './Toolbar'
@@ -166,6 +167,7 @@ function OpenChat({ engine, state, device, chat, onOpen }: { engine: EngineLike;
             {messages.length === 0 && !loading && <p className="transcript-note">{s('emptyChat')}</p>}
             {messages.map((message, index) => (
               <Message key={message.id} message={message} links={linkRender}
+                onImageLoad={() => { const element = scroller.current; if (element && atBottom.current) element.scrollTop = element.scrollHeight }}
                 author={message.role !== 'user' && (index === 0 || messages[index - 1].role === 'user') ? author : null} />
             ))}
             {restoreErrors.map((error, index) => <p key={index} className="transcript-note error">{error}</p>)}
@@ -198,7 +200,7 @@ function WorkingRow({ chat }: { chat: RemoteChat }) {
   )
 }
 
-function Message({ message, links = null, author = null }: { message: TranscriptMessage; links?: ChatLinkRender | null; author?: string | null }) {
+function Message({ message, links = null, author = null, onImageLoad }: { message: TranscriptMessage; links?: ChatLinkRender | null; author?: string | null; onImageLoad?: () => void }) {
   const user = message.role === 'user'
   // Link and copy labels change with the restore state and the language; the HTML is rebuilt when they do.
   const labels = links ? collectLabels(message.text, links).join('|') : ''
@@ -221,6 +223,7 @@ function Message({ message, links = null, author = null }: { message: Transcript
         </div>
       )}
       {user ? <div className="bubble">{message.text}</div> : <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} />}
+      <MessageImages images={message.images} imageError={message.imageError} onLoad={onImageLoad} />
       {message.truncated && <div className="message-note">{s('messageTruncated')}</div>}
       <div className="message-tools">
         <button type="button" className="icon-button small" onClick={copy} aria-label={copied ? s('copied') : s('copyMessage')} title={copied ? s('copied') : s('copyMessage')}>

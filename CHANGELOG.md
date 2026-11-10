@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Deliver session-scoped generated image previews to native and web chats.
+
 - Preserve task ownership and restart boundaries in verification guidance.
 
 - Distinguish main browser access from isolated agent sessions.

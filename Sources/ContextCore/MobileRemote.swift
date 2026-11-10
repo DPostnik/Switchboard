@@ -231,6 +231,16 @@ extension RemoteChat {
             : L10n.text("\(seconds) с", "\(seconds)s")
     }
 }
+/// A bounded generated-image preview. Contains bytes, never a local path or remote URL.
+public struct RemoteMessageImage: Codable, Sendable, Hashable, Identifiable {
+    public var id: String
+    public var name: String
+    public var mimeType: String
+    public var data: String
+    public init(id: String, name: String, mimeType: String, data: String) {
+        self.id = id; self.name = name; self.mimeType = mimeType; self.data = data
+    }
+}
 public struct RemoteMessage: Codable, Identifiable, Sendable, Equatable {
     /// Phone history keeps at most this many characters per message.
     public static let textLimit = 2000
@@ -239,6 +249,8 @@ public struct RemoteMessage: Codable, Identifiable, Sendable, Equatable {
     public var text: String
     /// Set when the Mac cut the message at `textLimit`; absent on older hosts.
     public var truncated: Bool?
+    public var images: [RemoteMessageImage]?
+    public var imageError: Bool?
     public init(id: String, role: String, text: String) { self.id = id; self.role = role; self.text = text }
     /// Clips the full message text to the phone limit and records whether anything was cut.
     public init(id: String, role: String, fullText: String) {
@@ -469,7 +481,7 @@ public enum WebChats {
     public static func chunks(_ messages: [RemoteWebMessage]) -> [[RemoteWebMessage]] {
         var result: [[RemoteWebMessage]] = [], current: [RemoteWebMessage] = [], bytes = 0
         for message in messages {
-            let size = message.text.utf8.count + message.id.utf8.count + 64
+            let size = (try? JSONEncoder().encode(message).count) ?? chunkBytes
             if !current.isEmpty, bytes + size > chunkBytes { result.append(current); current = []; bytes = 0 }
             current.append(message); bytes += size
         }
@@ -489,6 +501,8 @@ public struct RemoteWebMessage: Codable, Sendable, Hashable {
     public var role: String
     public var text: String
     public var truncated: Bool?
+    public var images: [RemoteMessageImage]?
+    public var imageError: Bool?
     public init(id: String, seq: Int, role: String, fullText: String) {
         self.id = id; self.seq = seq; self.role = role
         if fullText.count > Self.textLimit { text = RemoteMessage.clip(fullText, limit: Self.textLimit); truncated = true }
@@ -1007,6 +1021,12 @@ public actor RemoteAPI {
         do {
             return try JSONDecoder().decode(Int.self, from: await request("rest/v1/rpc/remote_web_version", method: "POST", body: Data("{}".utf8))) == 1
         } catch RemoteFailure.request(404) { return false }
+    }
+    public func supportsWebImages() async throws -> Bool {
+        do {
+            _ = try await request("rest/v1/remote_web_messages?select=images,imageError&limit=0")
+            return true
+        } catch RemoteFailure.request(400) { return false }
     }
     /// Mac side: upserts a web chat and `messages`; with `keep`, the cloud drops the chat's other messages.
     public func putWebChat(device: String, chat: String, active: Date, messages: [RemoteWebMessage], keep: [String]?) async throws {

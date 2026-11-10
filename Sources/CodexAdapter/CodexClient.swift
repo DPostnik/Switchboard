@@ -27,6 +27,8 @@ public actor CodexClient {
     var reasoning = CodexReasoningStream()
     var subagentTracker = CodexSubagentTracker()
     var subagentHistoryTasks: [String: Task<Void, Never>] = [:]
+    var generatedImagesHome: URL?
+    var generatedImageBaselines: [AgentSessionReference: Set<String>] = [:]
 
     public init() {
         let transport = CodexConnection()
@@ -43,6 +45,8 @@ public actor CodexClient {
                       diagnosticsResources: URL? = nil, browserResources: URL? = nil, browserRoot: URL = BrowserConfiguration.directory,
                       userChromeEnabled: Bool = false) async throws {
         self.launch = (executable, home, extraArguments)
+        generatedImagesHome = home.appendingPathComponent("generated_images", isDirectory: true)
+        generatedImageBaselines.removeAll()
         diagnosticScopes.removeAll()
         self.diagnosticsResources = diagnosticsResources
         self.browserResources = browserResources
@@ -271,7 +275,17 @@ public actor CodexClient {
         _ = try await transport.request("thread/delete", params: .object(["threadId": .string(try nativeID(session))]))
     }
     public func history(_ session: AgentSessionReference) async throws -> [CodexHistoryTurn] {
-        try await read(session)["turns"].array.map(CodexHistoryTurn.init)
+        let turns = try await read(session)["turns"].array
+        let images = generatedImages(session)
+        return turns.enumerated().map { index, raw in
+            let turn = CodexHistoryTurn(raw)
+            guard let start = raw["startedAt"].int, let end = raw["completedAt"].int else { return turn }
+            let next = index + 1 < turns.count ? turns[index + 1]["startedAt"].int : nil
+            let upper = min(Double(end) + 1, next.map(Double.init) ?? .infinity)
+            let attachments = images.filter { $0.modified.timeIntervalSince1970 >= Double(start) && $0.modified.timeIntervalSince1970 < upper }
+                .map { generatedImageItem($0.url, turn: turn.id) }
+            return turn.replacingItems(turn.items + attachments)
+        }
     }
     public func summarySource(_ session: AgentSessionReference) async throws -> SummarySource {
         try await CodexDecoding.summarySource(thread: read(session))

@@ -124,7 +124,8 @@ export class RemoteAPI {
     const page = 1000
     const rows: WebMessage[] = []
     for (let from = 0; from < 100_000; from += page) {
-      const result = await this.client.from('remote_web_messages').select('id,seq,role,text,truncated')
+      // Optional attachment fields are absent on older hosts/schemas.
+      const result = await this.client.from('remote_web_messages').select('*')
         .eq('device', device).eq('chat', chat).order('seq', { ascending: true }).range(from, from + page - 1).abortSignal(this.signal())
       const batch = check(result as Result<WebMessage[]>) ?? []
       rows.push(...batch)

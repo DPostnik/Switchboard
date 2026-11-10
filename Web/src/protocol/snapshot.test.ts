@@ -102,6 +102,15 @@ describe('times', () => {
 })
 
 describe('transcript merge', () => {
+  it('keeps delivered images when full history replaces snapshot text and when live text advances', () => {
+    const image = { id: 'photo', name: 'result.jpg', mimeType: 'image/jpeg', data: 'aW1hZ2U=' }
+    const full = [{ id: 'm', seq: 1, role: 'assistant', text: 'full answer', images: [image] }]
+    expect(mergeTranscript(full, [{ id: 'm', role: 'assistant', text: 'full' }])[0].images).toEqual([image])
+    expect(mergeTranscript(full, [{ id: 'm', role: 'assistant', text: 'full answer and more' }])[0].images).toEqual([image])
+    expect(mergeTranscript([{ ...full[0], images: undefined }], [{ id: 'm', role: 'assistant', text: 'full', images: [image], imageError: true }])[0])
+      .toMatchObject({ images: [image], imageError: true })
+  })
+
   it('uses full texts and appends newer snapshot messages', () => {
     const full = [{ id: 'm2', seq: 2, role: 'assistant', text: 'full answer' }, { id: 'm1', seq: 1, role: 'user', text: 'question' }]
     const snapshot = [{ id: 'm2', role: 'assistant', text: 'full…', truncated: true }, { id: 'm3', role: 'assistant', text: 'live' }]

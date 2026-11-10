@@ -166,6 +166,10 @@ export const strings = {
   searchTooLong: ['Запрос длиннее 2000 символов. Сократи его.', 'The request is longer than 2,000 characters. Shorten it.'],
   noSearchProjects: ['Ни один проект не поддерживает поиск по архиву. Обнови Switchboard на Mac.', 'No project supports archive search. Update Switchboard on the Mac.'],
   cancel: ['Отмена', 'Cancel'],
+  loadingImage: ['Загружаем изображение…', 'Loading image…'],
+  imageUnavailable: ['Не удалось показать изображение. Проверь файл в приложении на Mac.', 'Could not display the image. Check the file in the Mac app.'],
+  openImage: ['Открыть изображение', 'Open image'],
+  downloadPreview: ['Скачать превью', 'Download preview'],
 } as const satisfies Record<string, readonly [string, string]>
 
 export type StringKey = keyof typeof strings

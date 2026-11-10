@@ -54,6 +54,7 @@ with tempfile.TemporaryDirectory(prefix='context-remote-db-', dir='/tmp') as dir
         assert sql("""select public.valid_remote_options('{"model":"m","role":"reader"}');""") == 'f'
         sql((root/'supabase/migrations/202611050001_remote_interactions.sql').read_text())
         sql((root/'supabase/migrations/202611060001_remote_web.sql').read_text())
+        sql((root/'supabase/migrations/202611100001_remote_web_images.sql').read_text())
         assert sql("""select public.valid_remote_options('{"model":"m","role":"reader","addOns":["mail","userChrome"]}'),
             public.valid_remote_options('{"model":"m","access":null,"role":null,"addOns":null}'),
             public.valid_remote_options('{"model":"m","role":""}'), public.valid_remote_options('{"model":"m","role":5}'),
@@ -309,6 +310,17 @@ with tempfile.TemporaryDirectory(prefix='context-remote-db-', dir='/tmp') as dir
         sql(owner + put('web:a', [{'id': 'm3', 'seq': 2, 'role': 'assistant', 'text': 'next'}], "array['m2','m3']"))
         assert sql(owner + "select string_agg(id, ',' order by seq) from public.remote_web_messages;").endswith('m2,m3')
         assert int(sql("select count(*) from realtime.messages where payload->>'entity' = 'web';")) == signals + 1
+        preview = {'id': 'generated.png', 'name': 'preview.jpg', 'mimeType': 'image/jpeg', 'data': '/9j/AA=='}
+        image_message = {'id': 'm3', 'seq': 2, 'role': 'assistant', 'text': 'next', 'images': [preview], 'imageError': True}
+        sql(owner + put('web:a', [image_message]))
+        assert sql(owner + '''select images->0->>'data', "imageError" from public.remote_web_messages where id='m3';''').endswith('/9j/AA==|t')
+        rejects(owner + put('web:a', [{**image_message, 'images': [preview] * 5}]))
+        rejects(owner + put('web:a', [{**image_message, 'images': [{**preview, 'data': 'A' * 530000}]}]))
+        rejects(other + put('web:a', [image_message]))
+        assert sql(other + 'select count(images) from public.remote_web_messages;').endswith('0')
+        # A normal update removes stale previews and errors instead of retaining the old payload.
+        sql(owner + put('web:a', [{'id': 'm3', 'seq': 2, 'role': 'assistant', 'text': 'next'}]))
+        assert sql(owner + '''select images is null, "imageError" is null from public.remote_web_messages where id='m3';''').endswith('t|t')
         rejects(other + put('web:b', []))
         assert sql(other + 'select count(*) from public.remote_web_messages;').endswith('0')
         rejects(owner + f"insert into public.remote_web_chats(device,chat) values ('{device}','web:direct');")

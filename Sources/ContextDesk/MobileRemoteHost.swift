@@ -45,6 +45,8 @@ import IOKit.ps
     private var interactionsReady = false
     /// The cloud schema carries web chats (`WebChats`); checked on every subscription.
     private var webReady = false
+    private var webImagesReady = false
+    private let imagePreviews = RemoteGeneratedImagePreviews()
     /// Web chat ID -> full text of messages streamed while the chat is not open on the desktop.
     private var webLive: [String: [(id: String, role: String, text: String)]] = [:]
     /// Web chat ID -> what this subscription uploaded: message ID -> order number and content hash, and the last activity.
@@ -156,6 +158,7 @@ import IOKit.ps
                 self.filesReady = (try? await client.supportsFiles()) ?? false
                 self.interactionsReady = (try? await client.supportsInteractions()) ?? false
                 self.webReady = (try? await client.supportsWeb()) ?? false
+                self.webImagesReady = (try? await client.supportsWebImages()) ?? false
                 // A new subscription uploads web chats in full again and removes what the cloud should no longer hold.
                 self.webPublished = [:]
                 self.webCloud = self.webReady ? Set(try await client.webChats(device: self.device)) : []
@@ -206,6 +209,24 @@ import IOKit.ps
                 snapshot.chats[index].messages = Array(messages.suffix(20))
             }
         }
+        // Snapshots remain bounded even when several chats contain generated images.
+        var imageBudget = 512 * 1024
+        for index in snapshot.chats.indices {
+            let session = model.state.chats.first { $0.id == snapshot.chats[index].id }?.nativeSession?.nativeID
+            for messageIndex in snapshot.chats[index].messages.indices.reversed() {
+                let message = snapshot.chats[index].messages[messageIndex]
+                guard message.role == "assistant" else { continue }
+                let previews = await imagePreviews.previews(text: message.text, session: session)
+                let bytes = previews.images.reduce(0) { $0 + $1.data.utf8.count }
+                if !previews.images.isEmpty, bytes <= imageBudget {
+                    snapshot.chats[index].messages[messageIndex].images = previews.images
+                    imageBudget -= bytes
+                } else if !previews.images.isEmpty {
+                    snapshot.chats[index].messages[messageIndex].imageError = true
+                }
+                if previews.failed { snapshot.chats[index].messages[messageIndex].imageError = true }
+            }
+        }
         for index in snapshot.projects.indices {
             snapshot.projects[index].canReadFiles = filesReady ? true : nil
             snapshot.projects[index].canUseWeb = webReady ? true : nil
@@ -245,7 +266,18 @@ import IOKit.ps
             list = Array(list.suffix(WebChats.messageLimit))
             let previous = webPublished[id]
             let seqs = WebChats.sequence(list.map(\.id), previous: previous?.messages.mapValues(\.seq) ?? [:])
-            let messages = zip(list, seqs).map { RemoteWebMessage(id: $0.id, seq: $1, role: $0.role, fullText: $0.text) }
+            var messages = zip(list, seqs).map { RemoteWebMessage(id: $0.id, seq: $1, role: $0.role, fullText: $0.text) }
+            for messageIndex in messages.indices where messages[messageIndex].role == "assistant" {
+                let previews = await imagePreviews.previews(text: messages[messageIndex].text, session: chat.nativeSession?.nativeID)
+                if webImagesReady {
+                    messages[messageIndex].images = previews.images.isEmpty ? nil : previews.images
+                    messages[messageIndex].imageError = previews.failed ? true : nil
+                } else if !previews.images.isEmpty || previews.failed {
+                    messages[messageIndex].text = RemoteMessage.clip(messages[messageIndex].text + "\n\n" + L10n.text(
+                        "Для показа изображения в браузере обновите облачную схему Switchboard (web images).",
+                        "To show this image in the browser, update the Switchboard cloud schema (web images)."), limit: RemoteWebMessage.textLimit)
+                }
+            }
             snapshot.chats[index].webMessages = messages.count
             let current = Dictionary(messages.map { ($0.id, (seq: $0.seq, hash: $0.hashValue)) }, uniquingKeysWith: { first, _ in first })
             let changed = messages.filter { previous?.messages[$0.id]?.hash != $0.hashValue }
@@ -478,7 +510,7 @@ struct MobileRemoteSettings: View {
             }.disabled(host.enabled || host.transitioning)
             Text(L10n.text("Если Связка ключей на Mac запрашивает доступ для Switchboard, выберите «Разрешать всегда», чтобы сохранить разрешение. После обновления приложения macOS может запросить его снова.", "If Keychain on your Mac asks to allow Switchboard access, choose Always Allow to save permission. macOS may ask again after an app update."))
                 .font(.ui(.caption)).foregroundStyle(.secondary)
-            Text(L10n.text("Выбранные проекты: названия, последние сообщения и запросы подтверждения передаются в Supabase. Фото с телефона удаляются из облака примерно через час после обработки команды, а с Mac — через час после окончания работы чата. Очистка на Mac выполняется, пока приложение открыто. Вложения из истории Mac и учётные данные агентов не передаются. Облачная копия хранится до удаления ниже.", "Selected projects: names, recent messages and approval requests are sent to Supabase. Phone photos are removed from the cloud about an hour after the command is processed, and from your Mac an hour after the chat becomes idle. Mac cleanup runs while the app is open. Attachments from Mac history and agent credentials are excluded. The cloud copy remains until deleted below."))
+            Text(L10n.text("Выбранные проекты: названия, последние сообщения и запросы подтверждения передаются в Supabase. Фото с телефона удаляются из облака примерно через час после обработки команды, а с Mac — через час после окончания работы чата. Очистка на Mac выполняется, пока приложение открыто. Созданные агентом изображения из опубликованных чатов передаются как уменьшенные копии. Другие вложения из истории Mac и учётные данные агентов не передаются. Облачная копия хранится до удаления ниже.", "Selected projects: names, recent messages and approval requests are sent to Supabase. Phone photos are removed from the cloud about an hour after the command is processed, and from your Mac an hour after the chat becomes idle. Mac cleanup runs while the app is open. Agent-generated images in published chats are shared as reduced previews. Other attachments from Mac history and agent credentials are excluded. The cloud copy remains until deleted below."))
                 .font(.ui(.caption)).foregroundStyle(.secondary)
             Text(L10n.text("Чаты, начатые из веб-клиента или возвращённые в него, передаются целиком: до 100 000 символов на сообщение, последние 500 сообщений. Из облака они удаляются через 15 дней без активности, на Mac остаются.",
                            "Chats started from the web client or brought back to it are sent in full: up to 100,000 characters per message, the latest 500 messages. They leave the cloud after 15 days without activity and stay on your Mac."))

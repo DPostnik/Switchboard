@@ -1,3 +1,9 @@
+.message-image { margin: 16px 0; max-width: 520px; }
+.message-image img { display: block; max-width: 100%; max-height: 640px; width: auto; height: auto; border-radius: 12px; }
+.message-image figcaption { margin-top: 6px; font-size: var(--fs-caption); }
+.message-image a { color: var(--accent-deep); }
+.message-image a:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+
 /* Switchboard web client, drawn after the Mac app (Sources/ContextTranscript/DeskPalette.swift, DeskView.swift,
    NativeTranscript.swift, TranscriptMarkdown.swift). Light values are the Mac palette; the Mac app forces light mode,
    so the dark values are the same sage hues for dark surfaces. Text greys are a step darker than the Mac's `muted`

@@ -1,6 +1,6 @@
 // Transcript of a web chat: full text from `remote_web_messages`, completed by the snapshot's
 // clipped messages that the Mac has not written to the table yet (live streamed text).
-import type { RemoteMessage, WebMessage } from './types'
+import type { RemoteImage, RemoteMessage, WebMessage } from './types'
 
 export interface TranscriptMessage {
   id: string
@@ -10,6 +10,8 @@ export interface TranscriptMessage {
   truncated: boolean
   /** Full text from the web message table. */
   full: boolean
+  images?: RemoteImage[] | null
+  imageError?: boolean | null
 }
 
 /** Sorts by `seq` and drops duplicate IDs (the later row wins). */
@@ -22,14 +24,20 @@ export function normalizeWebMessages(rows: WebMessage[]): WebMessage[] {
 export function mergeTranscript(full: WebMessage[] | null | undefined, snapshot: RemoteMessage[]): TranscriptMessage[] {
   const fromSnapshot = (message: RemoteMessage): TranscriptMessage => ({
     id: message.id, role: message.role, text: message.text, truncated: message.truncated === true, full: false,
+    ...(message.images ? { images: message.images } : {}),
+    ...(message.imageError ? { imageError: true } : {}),
   })
   if (!full || full.length === 0) return snapshot.map(fromSnapshot)
   const latest = new Map(snapshot.map((message) => [message.id, message]))
   const result: TranscriptMessage[] = normalizeWebMessages(full).map((row) => {
     const live = latest.get(row.id)
     // Streaming may run ahead of the table: a complete, longer snapshot text wins.
-    if (live && live.truncated !== true && live.text.length > row.text.length) return fromSnapshot(live)
-    return { id: row.id, role: row.role, text: row.text, truncated: row.truncated === true, full: true }
+    if (live && live.truncated !== true && live.text.length > row.text.length) return fromSnapshot({ ...row, ...live,
+      images: live.images ?? row.images, imageError: live.imageError ?? row.imageError })
+    const images = live?.images ?? row.images
+    const imageError = live?.imageError ?? row.imageError
+    return { id: row.id, role: row.role, text: row.text, truncated: row.truncated === true, full: true,
+      ...(images ? { images } : {}), ...(imageError ? { imageError: true } : {}) }
   })
   const known = new Set(result.map((message) => message.id))
   for (const message of snapshot) if (!known.has(message.id)) result.push(fromSnapshot(message))
