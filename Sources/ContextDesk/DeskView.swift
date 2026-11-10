@@ -215,7 +215,7 @@ struct DeskView: View {
     }
     /// Everything that waits for the user: waiting chats, unresolved important messages and notifications.
     private var needsYouCount: Int {
-        model.attentionChats.count + model.openAttentionCount + model.notices.count + model.pullRequests.openAlerts.count
+        model.needsYouCount
     }
     /// The one place for what needs the user; it opens the "Needs you" page. Amber while anything waits.
     private var needsYouRow: some View {

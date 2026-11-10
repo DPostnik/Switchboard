@@ -59,6 +59,17 @@ import Testing
     #expect(model.attentionChats.map(\.chat.id) == [second.id, first.id])
     #expect(model.attentionChats.map(\.attention) == [.failed, .finishedUnread])
     #expect(model.attentionDetail(one) == "Done. The badge works.")
+    // Each completed chat has a notice too, but appears and counts only once.
+    #expect(model.notices.count == 2)
+    #expect(model.attentionNotices.isEmpty)
+    #expect(model.needsYouCount == 2)
+    model.notices.append(DeskNotice(threadID: "other", title: "Standalone", detail: ""))
+    #expect(model.attentionNotices.map(\.threadID) == ["other"])
+    #expect(model.needsYouCount == 3)
+    // Replayed completion must not add another notification or badge entry.
+    await finish(first, turn: "t1", answer: "Done.", failed: false)
+    #expect(model.notices.count == 3)
+    #expect(model.needsYouCount == 3)
     // A successful next turn clears the failure; a read result leaves the list.
     await finish(second, turn: "t3", answer: "Fixed now.", failed: false)
     #expect(model.state.chats.first { $0.id == second.id }?.lastTurnFailed == nil)

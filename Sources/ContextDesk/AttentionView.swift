@@ -8,7 +8,7 @@ struct AttentionView: View {
     @ObservedObject var model: DeskModel
     @State private var showingResolved = false
     var body: some View {
-        let waiting = model.attentionChats, open = model.attention.open, resolved = model.attention.resolved, notices = model.notices
+        let waiting = model.attentionChats, open = model.attention.open, resolved = model.attention.resolved, notices = model.attentionNotices
         let pullRequestAlerts = model.pullRequests.openAlerts
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
