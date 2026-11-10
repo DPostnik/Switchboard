@@ -376,7 +376,13 @@ func schedulerRecoveryPreservesNextOccurrenceWithoutReplaying(activeStatus: JobR
     // dup models the shared open file description retained briefly by a forked child.
     let suffix = "/" + root.lastPathComponent + "/jobs.json.lock"
     var duplicate: Int32 = -1
-    for fd: Int32 in 0..<1024 {
+    let stride = MemoryLayout<proc_fdinfo>.stride
+    let size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, nil, 0)
+    #expect(size > 0)
+    var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(size) / stride + 16)
+    let filled = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, &fds, Int32(fds.count * stride))
+    for entry in fds.prefix(max(0, Int(filled) / stride)) {
+        let fd = entry.proc_fd
         var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
         let result = path.withUnsafeMutableBytes { fcntl(fd, F_GETPATH, $0.baseAddress!) }
         if result == 0 && String(cString: path).hasSuffix(suffix) {
