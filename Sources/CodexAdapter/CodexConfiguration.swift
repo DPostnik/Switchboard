@@ -70,5 +70,7 @@ enum CodexOptimizerConfiguration {
 }
 
 extension RequestRoute {
+    // Input and resume on 0.167 check the provider selected at app-server launch.
+    var launchArguments: [String] { ["-c", "model_provider=" + String(reflecting: providerID)] }
     public var providerID: String { self == .direct ? "openai" : "contextdesk_" + rawValue }
 }

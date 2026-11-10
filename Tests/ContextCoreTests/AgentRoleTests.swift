@@ -101,9 +101,11 @@ private func settings(_ args: [String]) throws -> JSONValue {
     #expect(AgentPermissionSupport.codexProjectPolicy.approximations(preset(AgentRoleID.reader).profile) == [.shell, .connectors, .scratch])
     var offline = developer; offline.network = false
     #expect(AgentPermissionSupport.claudeRestrictedFiles.approximations(offline) == [.network])
-    #expect(AgentPermissionSupport.codexProjectPolicy.approximations(.unrestricted) == [.browser])
+    // Codex now enforces My Chrome with app-issued, revocable extension capabilities.
+    #expect(AgentPermissionSupport.codexProjectPolicy.enforced.contains(.userChrome))
+    #expect(AgentPermissionSupport.codexProjectPolicy.approximations(.unrestricted).isEmpty)
     // Audit mode is judged by what actually runs.
-    #expect(AgentPermissionSupport.codexProjectPolicy.approximations(preset(AgentRoleID.routineOperator).profile) == [.browser])
+    #expect(AgentPermissionSupport.codexProjectPolicy.approximations(preset(AgentRoleID.routineOperator).profile).isEmpty)
     var prompting = AgentPermissionProfile.unrestricted; prompting.approvals = .ask
     #expect(!AgentPermissionSupport.codexProjectPolicy.accepts(.profile(prompting, root: "/x")))
     #expect(!AgentPermissionSupport.externalPolicyOnly.accepts(.profile(developer, root: "/x")))

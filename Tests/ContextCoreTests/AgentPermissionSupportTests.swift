@@ -5,7 +5,8 @@ import CodexAdapter
 import ClaudeAdapter
 
 // Stage B: permission support is described by enforced rules, not engine names. The Codex, Claude and external presets
-// must answer exactly as the per-engine cases did; the reference below is the code they replaced.
+// preserve the legacy results except Codex My Chrome, now enforced by the extension coordinator.
+// Keep the legacy reference intact so the intentional difference remains explicit.
 
 private enum LegacySupport { case codexProjectPolicy, externalPolicyOnly, claudeRestrictedFiles }
 
@@ -76,7 +77,12 @@ private var profiles: [AgentPermissionProfile] {
     for (support, legacy) in presets {
         #expect(support.accepts(.externalPolicyDenyPrompts) == legacyAccepts(legacy, .externalPolicyDenyPrompts))
         for profile in all {
-            #expect(support.approximations(profile) == legacyApproximations(legacy, profile), "\(legacy) \(profile)")
+            var expected = legacyApproximations(legacy, profile)
+            if case .codexProjectPolicy = legacy {
+                // Extension capabilities enforce My Chrome at execution, including revocation.
+                expected.removeAll { $0 == .browser }
+            }
+            #expect(support.approximations(profile) == expected, "\(legacy) \(profile)")
             let intent = AgentPermissionIntent.profile(profile, root: "/project")
             #expect(support.accepts(intent) == legacyAccepts(legacy, intent), "\(legacy) \(profile)")
         }

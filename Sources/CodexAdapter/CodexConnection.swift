@@ -1,4 +1,5 @@
 import Foundation
+import os
 import ContextCore
 
 /// One process and one ordered JSONL stream. Never retries model turns.
@@ -23,9 +24,13 @@ import ContextCore
     private let maximumLineBytes: Int
     private var sequence = 0
     private var generation = UUID()
-    private(set) var accountEpoch = UUID()
+    // All provider processes for one account invalidate the same dispatch context.
+    private let revision: OSAllocatedUnfairLock<UUID>
+    private let preservesAccountRevision: Bool
+    var accountEpoch: UUID { revision.withLock { $0 } }
+    func sibling(preservingAccountRevision: Bool = false) -> CodexConnection { CodexConnection(revision: revision, preservesAccountRevision: preservingAccountRevision) }
     var isRunning: Bool { process?.isRunning == true }
-    private struct PendingRequest { let token: UUID; let thread: String?; let turn: String? }
+    private struct PendingRequest { let epoch: UUID; let token: UUID; let thread: String?; let turn: String? }
     private var approvalRequests: [JSONValue: PendingRequest] = [:]
     private var seenApprovalIDs = Set<JSONValue>()
     private var pending: [String: CheckedContinuation<JSONValue, any Error>] = [:]
@@ -36,6 +41,10 @@ import ContextCore
     private(set) var activeHome: URL?
 
     public init(maximumLineBytes: Int = 32 * 1024 * 1024) {
+        self.init(maximumLineBytes: maximumLineBytes, revision: OSAllocatedUnfairLock(initialState: UUID()))
+    }
+    private init(maximumLineBytes: Int = 32 * 1024 * 1024, revision: OSAllocatedUnfairLock<UUID>, preservesAccountRevision: Bool = false) {
+        self.revision = revision; self.preservesAccountRevision = preservesAccountRevision
         self.maximumLineBytes = maximumLineBytes; buffer = JSONLineBuffer(maximumLineBytes: maximumLineBytes)
         let scoped = AsyncStream<CodexWireEvent>.makeStream()
         scopedEvents = scoped.stream; scopedSink = scoped.continuation
@@ -46,21 +55,23 @@ import ContextCore
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true,
                                                attributes: [.posixPermissions: 0o700])
         let child = Process(), stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
-        let token = UUID(); generation = token; accountEpoch = UUID()
+        let token = UUID(); generation = token
+        if !preservesAccountRevision { revision.withLock { $0 = UUID() } }
         // Pin the managed pointer for this process. Other launchers may dispatch by their symlink name.
         let managed = Locations.agentsHome.appendingPathComponent("codex/bin/codex").standardizedFileURL
         let binary = executable.standardizedFileURL == managed ? executable.resolvingSymlinksInPath() : executable
         verifiedInstallVersion = CodexVerifiedInstall.version(of: binary, selected: executable)
         child.executableURL = binary
+        // A thread's writer lock belongs to one process. With no unload delay, `CodexClient.release` hands it to another at once.
         child.arguments = ["app-server", "--listen", "stdio://", "-c", "cli_auth_credentials_store=\"file\"",
-                           "-c", "analytics.enabled=false"] + extraArguments
+                           "-c", "analytics.enabled=false", "-c", "thread_unload_delay_secs=0"] + extraArguments
         var environment = ProcessInfo.processInfo.environment
         environment["CODEX_HOME"] = home.path
         // Account login belongs to this app, even when started from a configured shell.
         for key in ["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE"] {
             environment.removeValue(forKey: key)
         }
-        // One app-server serves every Codex chat, so only the instance label applies (swept at quit and next launch).
+        // An app-server serves multiple chats, so only the instance label applies (swept at quit and next launch).
         environment.merge(ProcessLabels.environment()) { _, new in new }
         child.environment = environment
         child.currentDirectoryURL = home
@@ -113,10 +124,11 @@ import ContextCore
         }
     }
 
-    func invalidateAccount() { accountEpoch = UUID(); approvalRequests.removeAll() }
+    func invalidateAccount() { revision.withLock { $0 = UUID() }; approvalRequests.removeAll() }
     func isCurrent(_ token: UUID) -> Bool { token == generation }
     func answer(id: JSONValue, result: JSONValue, generation token: UUID, requestToken: UUID) throws {
-        guard token == generation, approvalRequests[id]?.token == requestToken else { throw CodexPendingInteraction.invalidResponse }
+        if let expected = CodexDispatchContext.epoch, expected != accountEpoch { throw CodexDispatchRejection.stale }
+        guard token == generation, approvalRequests[id]?.epoch == accountEpoch, approvalRequests[id]?.token == requestToken else { throw CodexPendingInteraction.invalidResponse }
         approvalRequests[id] = nil
         try answer(id: id, result: result)
     }
@@ -133,10 +145,12 @@ import ContextCore
             let id = value["id"]
             if seenApprovalIDs.insert(id).inserted {
                 let token = UUID(); requestToken = token
-                approvalRequests[id] = PendingRequest(token: token, thread: p["threadId"].string, turn: p["turnId"].string)
+                approvalRequests[id] = PendingRequest(epoch: accountEpoch, token: token, thread: p["threadId"].string, turn: p["turnId"].string)
             } else { approvalRequests[id] = nil }
         } else if ["account/updated", "account/login/completed", "client/disconnected"].contains(method) {
-            accountEpoch = UUID()
+            // Every app-server announces `account/updated` right after `initialize`. An isolated worker serves the
+            // primary process's account, so its start or exit must not invalidate sends that are in flight.
+            if !preservesAccountRevision { revision.withLock { $0 = UUID() } }
             approvalRequests.removeAll()
         } else if method == "serverRequest/resolved" {
             let id = p["requestId"]
@@ -159,7 +173,10 @@ import ContextCore
     private func send(_ value: JSONValue) throws {
         guard let input else { throw ClientFailure(L10n.text("Соединение закрыто", "Connection closed")) }
         var bytes = try JSONEncoder().encode(value); bytes.append(10)
-        try input.write(contentsOf: bytes)
+        try revision.withLock { [bytes] epoch in
+            if let expected = CodexDispatchContext.epoch, expected != epoch { throw CodexDispatchRejection.stale }
+            try input.write(contentsOf: bytes)
+        }
     }
     private func ingest(_ data: Data, token: UUID) {
         guard token == generation else { return }
@@ -196,7 +213,8 @@ import ContextCore
     }
     public func stop() {
         let child = process
-        generation = UUID(); accountEpoch = UUID()
+        generation = UUID()
+        if !preservesAccountRevision { revision.withLock { $0 = UUID() } }
         cleanUp()
         if child?.isRunning == true { child?.terminate() }
     }

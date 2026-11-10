@@ -55,7 +55,8 @@ enum CodexProtocolSurface {
     static let requests: Set<String> = [
         "initialize", "account/read", "account/login/start", "account/logout", "model/list", "account/rateLimits/read",
         "skills/extraRoots/set", "thread/start", "thread/resume", "turn/start", "turn/interrupt", "thread/name/set",
-        "thread/archive", "thread/unarchive", "thread/delete", "thread/read", "config/read", "mcpServerStatus/list"
+        "thread/archive", "thread/unarchive", "thread/delete", "thread/read", "config/read", "mcpServerStatus/list",
+        "thread/unsubscribe", "thread/loaded/list"
     ]
     /// Root -> field paths the decoders read. Roots: `response:<request>`, `notification:<method>`,
     /// `serverRequest:<method>` (params) and `item:<thread item type>`; `*` steps into a map value or array element.
@@ -75,6 +76,8 @@ enum CodexProtocolSurface {
                                  "thread.turns.*.startedAt", "thread.turns.*.completedAt", "thread.turns.*.durationMs"],
         "response:config/read": ["config", "config.mcp_servers"],
         "response:mcpServerStatus/list": ["data", "nextCursor"],
+        "response:thread/unsubscribe": ["status"],
+        "response:thread/loaded/list": ["data"],
         "notification:account/login/completed": ["success", "error"],
         "notification:error": ["error.message"],
         "notification:thread/tokenUsage/updated": ["threadId", "turnId", "tokenUsage.total.inputTokens", "tokenUsage.total.cachedInputTokens",

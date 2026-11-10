@@ -13,6 +13,7 @@ private func commandFixture() throws -> (URL, URL) {
     import json, os, pathlib, sys
     root = pathlib.Path(os.environ['CODEX_HOME'])
     calls = []
+    chrome_enabled = False
     for line in sys.stdin:
         m = json.loads(line)
         if 'id' not in m: continue
@@ -26,6 +27,11 @@ private func commandFixture() throws -> (URL, URL) {
             if method == 'thread/resume' and (root/'lose-resume').exists():
                 with (root/'resume-dispatches').open('a') as capture: capture.write('sent\n')
                 sys.exit(0)
+            if method in ('thread/start', 'thread/resume'):
+                chrome_enabled = p.get('config', {}).get('mcp_servers.switchboard_user_chrome', {}).get('enabled', False)
+            if method == 'mcpServerStatus/list':
+                result = {'data': ([{'name': 'switchboard_user_chrome', 'tools': {'status': {'name': 'status'}}}]
+                                   if chrome_enabled and not (root/'missing-chrome-tools').exists() else []), 'nextCursor': None}
             if method == 'turn/start': result = {'turn': {'id': 'native-turn'}}
             if method == 'account/read': result = {'account': {'planType': 'fixture-plan'}}
             if method == 'account/login/start':
@@ -240,4 +246,64 @@ private func commandFixture() throws -> (URL, URL) {
     #expect(finalCalls.count == calls.count + 1)
     #expect(finalCalls.last?["method"].string == "turn/start")
     await client.stop()
+}
+
+@Test func userChromePermissionRevocationOverridesSavedThreadBeforeSend() async throws {
+    let (root, executable) = try commandFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let script = root.appendingPathComponent("UserChromeRuntime/server.py")
+    try FileManager.default.createDirectory(at: script.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data().write(to: script)
+    let grant = AgentUserChromeGrant(chatID: "app-chat", profileID: UUID().uuidString,
+                                     stateDirectory: root, capabilityFile: root.appendingPathComponent("grant"))
+    let wire = CodexConnection()
+    // Use a dedicated transport so the fixture captures the exact thread configuration.
+    let captured = CodexClient(transport: wire)
+    try await captured.start(executable: executable, home: root, diagnosticsResources: root, browserRoot: root, userChromeEnabled: true)
+    var profile = AgentRoleCatalog.preset(AgentRoleID.fullOperator).profile
+    let session = try await captured.createSession(projectPath: root.path, permissions: profile, model: "", route: .direct, userChromeGrant: grant)
+    profile.browser = .app
+    _ = try await captured.send("continue", to: session, projectPath: root.path, permissions: profile, model: "", effort: "")
+    let calls = try await wire.request("test/calls").array
+    let start = try #require(calls.first { $0["method"].string == "thread/start" })
+    let resume = try #require(calls.first { $0["method"].string == "thread/resume" })
+    #expect(start["params"]["config"]["mcp_servers.switchboard_user_chrome"]["enabled"] == .bool(true))
+    #expect(resume["params"]["config"]["mcp_servers.switchboard_user_chrome"]["enabled"] == .bool(false))
+    #expect(!resume["params"]["developerInstructions"].string!.contains("tools control the user's regular"))
+    #expect(calls.firstIndex(of: resume)! < calls.firstIndex { $0["method"].string == "turn/start" }!)
+    await captured.stop()
+}
+
+
+@Test func userChromeGrantRotationAndColdResumeRequireDiscoveredTools() async throws {
+    let (root, executable) = try commandFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let script = root.appendingPathComponent("UserChromeRuntime/server.py")
+    try FileManager.default.createDirectory(at: script.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data().write(to: script)
+    let grant = AgentUserChromeGrant(chatID: "app-chat", profileID: UUID().uuidString,
+                                     stateDirectory: root, capabilityFile: root.appendingPathComponent("grant"))
+    var profile = AgentRoleCatalog.preset("operator").profile
+    profile.browser = .appAndUserChrome
+    let wire = CodexConnection(), client = CodexClient(transport: wire)
+    try await client.start(executable: executable, home: root, diagnosticsResources: root, userChromeEnabled: true)
+    let session = try await client.createSession(projectPath: root.path, permissions: profile, model: "", route: .direct, userChromeGrant: grant)
+    let rotated = AgentUserChromeGrant(chatID: grant.chatID, profileID: grant.profileID, stateDirectory: root,
+                                       capabilityFile: root.appendingPathComponent("rotated-grant"))
+    _ = try await client.send("rotated grant", to: session, projectPath: root.path, permissions: profile,
+                              model: "", effort: "", userChromeGrant: rotated)
+    let calls = try await wire.request("test/calls").array
+    #expect(calls.suffix(3).map { $0["method"].string } == ["thread/resume", "mcpServerStatus/list", "turn/start"])
+    #expect(calls.first { $0["method"].string == "thread/start" }?["params"]["config"]["mcp_servers.switchboard_user_chrome"]["enabled"] == .bool(true))
+    await client.stop()
+    let cold = CodexClient(transport: wire)
+    try await cold.start(executable: executable, home: root, diagnosticsResources: root, userChromeEnabled: true)
+    try Data().write(to: root.appendingPathComponent("missing-chrome-tools"))
+    await #expect(throws: ClientFailure.self) {
+        try await cold.resume(session, projectPath: root.path, permissions: profile, route: .direct, userChromeGrant: grant)
+    }
+    let coldCalls = try await wire.request("test/calls").array
+    #expect(coldCalls.last?["method"].string == "mcpServerStatus/list")
+    #expect(!coldCalls.contains { $0["method"].string == "turn/start" })
+    await cold.stop()
 }

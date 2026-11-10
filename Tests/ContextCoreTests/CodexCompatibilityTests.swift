@@ -164,7 +164,7 @@ private func liveCodexExecutable() throws -> URL {
     do {
         let executable = try liveCodexExecutable()
         let home = root.appendingPathComponent("codex")
-        try await client.start(executable: executable, home: home, extraArguments: overrides, browserResources: resources, browserRoot: browserRoot)
+        try await client.start(executable: executable, home: home, extraArguments: overrides + RequestRoute(rawValue: "browser_fixture").launchArguments, browserResources: resources, browserRoot: browserRoot)
         let first = try await client.createSession(projectPath: root.path, access: .standard, model: "", route: RequestRoute(rawValue: "browser_fixture"))
         let second = try await client.createSession(projectPath: root.path, access: .standard, model: "", route: RequestRoute(rawValue: "browser_fixture"))
         let a = try BrowserEnvironmentStore.environment(session: first.nativeID, root: browserRoot)
@@ -189,7 +189,7 @@ private func liveCodexExecutable() throws -> URL {
         #expect(completed)
         #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("endpoint-called").path))
         await client.stop()
-        try await client.start(executable: executable, home: home, extraArguments: overrides, browserResources: resources, browserRoot: browserRoot)
+        try await client.start(executable: executable, home: home, extraArguments: overrides + RequestRoute(rawValue: "browser_fixture").launchArguments, browserResources: resources, browserRoot: browserRoot)
         try await client.resume(first, projectPath: root.path, access: .standard, route: RequestRoute(rawValue: "browser_fixture"))
         let profiles = BrowserProfileStore(root: browserRoot)
         try profiles.rename(session: first, name: "Live routing fixture")
@@ -205,11 +205,30 @@ private func liveCodexExecutable() throws -> URL {
         let leases = try log.split(separator: "\n").map { try JSONDecoder().decode([String: String].self, from: Data($0.utf8))["lease"] }
         #expect(leases.count == 4 && leases[0] == leases[2] && leases[0] != leases[3])
         await client.stop()
-        try await client.start(executable: executable, home: home, extraArguments: overrides)
+        try await client.start(executable: executable, home: home, extraArguments: overrides + RequestRoute(rawValue: "browser_fixture").launchArguments)
         try await client.resume(first, projectPath: root.path, access: .standard, route: RequestRoute(rawValue: "browser_fixture"))
         _ = try await client.createSession(projectPath: root.path, access: .standard, model: "", route: RequestRoute(rawValue: "browser_fixture"))
         #expect(try String(contentsOf: browserRoot.appendingPathComponent("launches.jsonl"), encoding: .utf8) == log)
         await client.stop()
+
+        // Use the production entry point with both routes live. Resume the existing
+        // plugin chat, create a direct chat, then send only to the loopback provider.
+        let app = AgentClient(integration: CodexIntegration())
+        do {
+            _ = try await app.start(.init(executable: executable, home: home, optimizers: [
+                .init(id: "browser_fixture", endpoint: URL(string: "http://127.0.0.1:\(port)")!)
+            ]))
+            try await app.resume(first, projectPath: root.path, access: .standard, route: RequestRoute(rawValue: "browser_fixture"))
+            let direct = try await app.createSession(projectPath: root.path, access: .standard, model: "", route: .direct)
+            #expect(direct != first)
+            let turn = try await app.send("Local routing check after reconnect", to: first, projectPath: root.path,
+                                          access: .standard, model: "gpt-6-astra", effort: "low")
+            #expect(turn?.isEmpty == false)
+            await app.stop()
+        } catch {
+            await app.stop()
+            throw error
+        }
     } catch {
         await client.stop()
         throw error

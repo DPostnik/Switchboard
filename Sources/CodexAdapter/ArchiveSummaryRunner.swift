@@ -80,7 +80,7 @@ public actor ArchiveSummaryRunner {
             try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true,
                                                     attributes: [.posixPermissions: 0o700])
             try await connection.start(executable: executable, home: home,
-                extraArguments: providerArguments + Self.isolationArguments)
+                extraArguments: providerArguments + route.launchArguments + Self.isolationArguments)
             let agent = await connection.serverUserAgent ?? ""
             guard CodexProtocolCompatibility.engine(userAgent: agent, verifiedInstall: await connection.verifiedInstallVersion) != nil else {
                 let supported = CodexProtocolCompatibility.supportedVersions.joined(separator: ", ")

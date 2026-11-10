@@ -1,5 +1,17 @@
 import Foundation
 
+/// App-issued authority for one chat and one paired Chrome profile. No secret travels in argv.
+public struct AgentUserChromeGrant: Sendable, Equatable {
+    public let chatID: String
+    public let profileID: String
+    public let stateDirectory: URL
+    public let capabilityFile: URL
+    public init(chatID: String, profileID: String, stateDirectory: URL, capabilityFile: URL) {
+        self.chatID = chatID; self.profileID = profileID
+        self.stateDirectory = stateDirectory; self.capabilityFile = capabilityFile
+    }
+}
+
 public struct AgentExecutionRequest: Sendable {
     /// App-generated correlation ID; it is NOT permission to replay a request.
     public let id: UUID
@@ -14,6 +26,7 @@ public struct AgentExecutionRequest: Sendable {
     public let browserProfile: AgentBrowserProfile?
     /// Command line of the app's read-only chat directory MCP server; nil unless the user opted this chat in.
     public let chatDirectory: [String]?
+    public let userChromeGrant: AgentUserChromeGrant?
 
     public enum Kind: Sendable {
         case interactive, scheduled
@@ -21,11 +34,11 @@ public struct AgentExecutionRequest: Sendable {
     }
     public init(id: UUID = UUID(), conversation: ConversationID, session: AgentSessionReference? = nil,
                 kind: Kind, prompt: String, projectPath: String, permissions: AgentPermissionIntent,
-                model: AgentModelSelection, route: AgentRoute, browserProfile: AgentBrowserProfile? = nil, chatDirectory: [String]? = nil) {
+                model: AgentModelSelection, route: AgentRoute, browserProfile: AgentBrowserProfile? = nil, chatDirectory: [String]? = nil, userChromeGrant: AgentUserChromeGrant? = nil) {
         self.id = id; self.conversation = conversation; self.session = session; self.kind = kind
         self.prompt = prompt; self.projectPath = projectPath; self.permissions = permissions
         self.model = model; self.route = route
-        self.browserProfile = browserProfile; self.chatDirectory = chatDirectory
+        self.browserProfile = browserProfile; self.chatDirectory = chatDirectory; self.userChromeGrant = userChromeGrant
     }
 }
 
@@ -221,4 +234,5 @@ extension AgentIntegration {
     public func reduceHistory(_ session: AgentSessionReference, context: AgentContext) async -> AgentResult<AgentHistoryReduction?> {
         .rejected(.unsupported(.history))
     }
+
 }

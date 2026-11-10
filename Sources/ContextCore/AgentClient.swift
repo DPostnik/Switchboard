@@ -71,33 +71,33 @@ public actor AgentClient {
     private func request(prompt: String, session: AgentSessionReference?, projectPath: String, permissions profile: AgentPermissionProfile,
                          model: String, effort: String = "", advisor: String? = nil, route: RequestRoute, kind: AgentExecutionRequest.Kind = .interactive,
                          conversation: ConversationID = ConversationID(), context suppliedContext: AgentContext? = nil,
-                         browserProfile: AgentBrowserProfile? = nil, chatDirectory: [String]? = nil) async throws -> AgentExecutionRequest {
+                         browserProfile: AgentBrowserProfile? = nil, chatDirectory: [String]? = nil, userChromeGrant: AgentUserChromeGrant? = nil) async throws -> AgentExecutionRequest {
         let context: AgentContext
         if let suppliedContext { context = suppliedContext } else { context = try await descriptor().context }
         return AgentExecutionRequest(conversation: conversation, session: session, kind: kind, prompt: prompt, projectPath: projectPath,
             permissions: .profile(profile, root: projectPath),
             model: .init(context: context, model: model, effort: effort, advisor: advisor), route: route.agentRoute, browserProfile: browserProfile,
-            chatDirectory: chatDirectory)
+            chatDirectory: chatDirectory, userChromeGrant: userChromeGrant)
     }
     public func createSession(projectPath: String, permissions: AgentPermissionProfile, model: String, route: RequestRoute,
                               context: AgentContext? = nil, browserProfile: AgentBrowserProfile? = nil,
-                              kind: AgentExecutionRequest.Kind = .interactive) async throws -> AgentSessionReference {
-        let request = try await request(prompt: "", session: nil, projectPath: projectPath, permissions: permissions, model: model, route: route, kind: kind, context: context, browserProfile: browserProfile)
+                              kind: AgentExecutionRequest.Kind = .interactive, userChromeGrant: AgentUserChromeGrant? = nil) async throws -> AgentSessionReference {
+        let request = try await request(prompt: "", session: nil, projectPath: projectPath, permissions: permissions, model: model, route: route, kind: kind, context: context, browserProfile: browserProfile, userChromeGrant: userChromeGrant)
         let session = try await integration.prepare(request).value(); sessionRoutes[session] = route; sessionContexts[session] = request.model.context; return session
     }
     public func resume(_ session: AgentSessionReference, projectPath: String, permissions: AgentPermissionProfile, route: RequestRoute,
-                       kind: AgentExecutionRequest.Kind = .interactive) async throws {
-        let request = try await request(prompt: "", session: session, projectPath: projectPath, permissions: permissions, model: "", route: route, kind: kind)
+                       kind: AgentExecutionRequest.Kind = .interactive, userChromeGrant: AgentUserChromeGrant? = nil) async throws {
+        let request = try await request(prompt: "", session: session, projectPath: projectPath, permissions: permissions, model: "", route: route, kind: kind, userChromeGrant: userChromeGrant)
         _ = try await integration.prepare(request).value(); sessionRoutes[session] = route; sessionContexts[session] = request.model.context
     }
     public func send(_ text: String, to session: AgentSessionReference, projectPath: String, permissions: AgentPermissionProfile,
                      model: String, effort: String, advisor: String? = nil, kind: AgentExecutionRequest.Kind = .interactive,
-                     conversation: ConversationID = ConversationID(), chatDirectory: [String]? = nil) async throws -> String? {
+                     conversation: ConversationID = ConversationID(), chatDirectory: [String]? = nil, userChromeGrant: AgentUserChromeGrant? = nil) async throws -> String? {
         guard let route = sessionRoutes[session], let context = sessionContexts[session] else {
             throw AgentOperationFailure(rejection: .staleContext, failure: nil)
         }
         let request = try await request(prompt: text, session: session, projectPath: projectPath, permissions: permissions, model: model,
-            effort: effort, advisor: advisor, route: route, kind: kind, conversation: conversation, context: context, chatDirectory: chatDirectory)
+            effort: effort, advisor: advisor, route: route, kind: kind, conversation: conversation, context: context, chatDirectory: chatDirectory, userChromeGrant: userChromeGrant)
         return try await integration.submit(request).value().turnID
     }
     // Legacy entry points: the old access modes stand for the editor and operator roles.
@@ -144,6 +144,7 @@ public actor AgentClient {
     public func rename(_ session: AgentSessionReference, title: String) async throws { try await integration.rename(session, title: title, context: descriptor().context).value() }
     public func setArchived(_ archived: Bool, session: AgentSessionReference) async throws { try await integration.setArchived(archived, session: session, context: descriptor().context).value() }
     public func delete(_ session: AgentSessionReference) async throws { try await integration.delete(session, context: descriptor().context).value() }
+
 }
 extension RequestRoute {
     public var agentRoute: AgentRoute { self == .direct ? .direct : .optimizer(id: rawValue) }

@@ -202,3 +202,19 @@ private func withEventFixture(_ body: (CodexClient, CodexConnection, EventLog) a
         await #expect(throws: ClientFailure.self) { try await client.answer(pending.id, session: pending.session, response: .allowOnce) }
     }
 }
+
+@Test func isolatedWorkerAccountAnnouncementKeepsTheSharedAccountRevision() async throws {
+    try await withEventFixture { client, wire, _ in
+        // Real app-servers send `account/updated` right after `initialize`; a Chrome worker's start must not stale a send.
+        let worker = await wire.sibling(preservingAccountRevision: true)
+        let home = try #require(await wire.activeHome)
+        try await worker.start(executable: home.appendingPathComponent("engine.py"), home: home)
+        defer { Task { await worker.stop() } }
+        let epoch = await wire.accountEpoch
+        _ = try await worker.request("test/emit", params: .object(["method": .string("account/updated"), "params": .object([:])]))
+        _ = try await CodexDispatchContext.$epoch.withValue(epoch) { try await wire.request("test/answers") }
+        #expect(await wire.accountEpoch == epoch)
+        _ = try await wire.request("test/emit", params: .object(["method": .string("account/updated"), "params": .object([:])]))
+        #expect(await wire.accountEpoch != epoch)
+    }
+}

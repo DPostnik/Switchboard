@@ -4,6 +4,10 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Isolate Codex Chrome-worker approval resets and disconnects, and preserve background children after their parent turn completes.
+
+- Route Codex sessions through their owning provider or isolated Chrome process and preserve scoped browser access.
+
 - Show Codex subagents with readable names, live steps, tool results, reports and individual stop controls.
 
 - Support photo attachments, paste and drag and drop in the first message of a new web chat; prevent file navigation across all web screens.

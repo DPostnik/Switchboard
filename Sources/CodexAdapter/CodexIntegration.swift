@@ -11,7 +11,21 @@ public actor CodexIntegration: AgentIntegration {
     public nonisolated let events: AsyncStream<AgentEvent>
     private let sink: AsyncStream<AgentEvent>.Continuation
     private let client: CodexClient
+    private var providerClients: [AgentRoute: CodexClient] = [:]
+    private var providerObservers: [AgentRoute: Task<Void, Never>] = [:]
     private var observer: Task<Void, Never>?
+    private struct ChromeScope: Equatable {
+        let grant: AgentUserChromeGrant?
+        let project: String
+        let permissions: AgentPermissionProfile
+        let route: AgentRoute
+        let scheduled: Bool
+    }
+    private var chromeWorkers: [AgentSessionReference: CodexClient] = [:]
+    private var chromeObservers: [AgentSessionReference: Task<Void, Never>] = [:]
+    private var chromeScopes: [AgentSessionReference: ChromeScope] = [:]
+    private var chromeSessions = Set<AgentSessionReference>()
+    private var chromeInteractions: [AgentSessionReference: Set<UUID>] = [:]
     private var routes: Set<AgentRoute> = [.direct]
     private var browserProfilesEnabled = false
     private var providerArguments: [String] = []
@@ -30,7 +44,7 @@ public actor CodexIntegration: AgentIntegration {
         self.client = client; self.userSkills = userSkills
         let pair = AsyncStream<AgentEvent>.makeStream(); events = pair.stream; sink = pair.continuation
     }
-    deinit { observer?.cancel(); sink.finish() }
+    deinit { for task in chromeObservers.values { task.cancel() }; observer?.cancel(); for task in providerObservers.values { task.cancel() }; sink.finish() }
 
     private func listen() {
         guard observer == nil else { return }
@@ -38,9 +52,26 @@ public actor CodexIntegration: AgentIntegration {
             for await event in client.events { await self?.receive(event) }
         }
     }
+    private func receive(_ event: AgentEvent, from worker: CodexClient, route: AgentRoute) async {
+        guard providerClients[route] === worker else { return }
+        await receive(event)
+    }
+
+    private func worker(for route: AgentRoute) throws -> CodexClient {
+        if route == .direct { return client }
+        guard let worker = providerClients[route] else { throw IntegrationRejection(.routeUnavailable) }
+        return worker
+    }
+
+    private func worker(for session: AgentSessionReference) throws -> CodexClient {
+        if let worker = chromeWorkers[session] { return worker }
+        return try worker(for: sessionRoutes[session]?.0 ?? .direct)
+    }
+
     private func receive(_ event: AgentEvent) async {
         switch event.payload {
         case .accountChanged, .disconnected:
+            await stopChromeWorkers()
             interactionContexts.removeAll(); turnContexts.removeAll(); finishedTurns.removeAll()
             for runner in generations.values { await runner.stop() }
             if case .success(let value) = await descriptor() { sink.yield(.init(session: nil, payload: .descriptor(value))) }
@@ -69,9 +100,34 @@ public actor CodexIntegration: AgentIntegration {
             await disconnect()
             let arguments = try configuration.optimizers.flatMap { try CodexOptimizerConfiguration.arguments(id: $0.id, endpoint: $0.endpoint) }
             _ = try BrowserConfiguration.arguments(enabled: configuration.browserEnabled, resources: configuration.resources)
-            try await client.start(executable: configuration.executable ?? Locations.codexExecutable(), home: configuration.home,
-                                   extraArguments: arguments,
-                                   diagnosticsResources: configuration.resources, browserResources: configuration.browserEnabled ? configuration.resources : nil)
+            let executable = try configuration.executable ?? Locations.codexExecutable()
+            try await client.start(executable: executable, home: configuration.home,
+                                   extraArguments: RequestRoute.direct.launchArguments,
+                                   diagnosticsResources: configuration.resources, browserResources: configuration.browserEnabled ? configuration.resources : nil,
+                                   userChromeEnabled: configuration.userChromeEnabled)
+            let primary = await descriptor()
+            guard case .success = primary else { await disconnect(); return primary }
+            // Each provider has immutable process-level selection and the same app-owned account home.
+            for optimizer in configuration.optimizers {
+                let route = AgentRoute.optimizer(id: optimizer.id)
+                let worker = await CodexClient(transport: client.transport.sibling())
+                providerClients[route] = worker
+                let selection = RequestRoute(rawValue: optimizer.id)
+                let flags = try CodexOptimizerConfiguration.arguments(id: optimizer.id, endpoint: optimizer.endpoint)
+                try await worker.start(executable: executable, home: configuration.home,
+                    extraArguments: flags + selection.launchArguments,
+                    diagnosticsResources: configuration.resources, browserResources: configuration.browserEnabled ? configuration.resources : nil,
+                                   userChromeEnabled: configuration.userChromeEnabled)
+                guard await worker.transport.serverUserAgent == client.transport.serverUserAgent else {
+                    throw IntegrationRejection(.incompatibleContract)
+                }
+                providerObservers[route] = Task { [weak self] in
+                    for await event in worker.events {
+                        guard !Task.isCancelled else { return }
+                        await self?.receive(event, from: worker, route: route)
+                    }
+                }
+            }
             providerArguments = arguments
             browserProfilesEnabled = configuration.browserEnabled
             routes = Set([.direct] + configuration.optimizers.map { .optimizer(id: $0.id) })
@@ -100,9 +156,24 @@ public actor CodexIntegration: AgentIntegration {
     public func disconnect() async {
         interactionContexts.removeAll(); turnContexts.removeAll(); finishedTurns.removeAll()
         for runner in generations.values { await runner.stop() }
+        for task in providerObservers.values { task.cancel() }
+        providerObservers.removeAll()
+        let workers = providerClients.values
+        providerClients.removeAll()
+        for worker in workers { await worker.stop() }
+        await stopChromeWorkers()
+        chromeSessions.removeAll()
         await client.stop()
         routes = [.direct]; providerArguments = []; sessionRoutes.removeAll(); knownModels = []
         browserProfilesEnabled = false
+    }
+    private func stopChromeWorkers() async {
+        let workers = Array(chromeWorkers.values)
+        for session in chromeWorkers.keys { sink.yield(.init(session: session, payload: .subagents([]))) }
+        for session in Array(chromeInteractions.keys) { resolveChromeInteractions(session) }
+        for task in chromeObservers.values { task.cancel() }
+        chromeObservers.removeAll(); chromeScopes.removeAll(); chromeWorkers.removeAll(); chromeInteractions.removeAll()
+        for worker in workers { await worker.stop() }
     }
     private func current() async throws -> AgentDescriptor {
         try await descriptor().value()
@@ -145,6 +216,7 @@ public actor CodexIntegration: AgentIntegration {
         case .signOut:
             // Invalidate before logout dispatch, even if no account event is returned.
             await client.transport.invalidateAccount()
+            await stopChromeWorkers()
             let result: AgentResult<AgentAuthenticationStep> = await perform(verifyAfter: false) {
                 try await self.client.signOut(); return .complete
             }
@@ -166,6 +238,8 @@ public actor CodexIntegration: AgentIntegration {
         let roots = tools.workflowDirectories + (user.map { tools.workflowDirectories.contains($0) ? [] : [$0] } ?? [])
         return await perform(context) {
             try await self.client.registerWorkflows(at: roots)
+            for worker in self.providerClients.values { try await worker.registerWorkflows(at: roots) }
+            for worker in self.chromeWorkers.values { try await worker.registerWorkflows(at: roots) }
         }
     }
     private func access(_ permission: AgentPermissionIntent) throws -> AgentPermissionProfile {
@@ -185,19 +259,106 @@ public actor CodexIntegration: AgentIntegration {
         let descriptor = try await current()
         if let reason = descriptor.validate(request) { throw IntegrationRejection(reason) }
     }
+    private func chromeScope(_ request: AgentExecutionRequest) throws -> ChromeScope {
+        ChromeScope(grant: request.userChromeGrant, project: request.projectPath, permissions: try access(request.permissions),
+                    route: request.route, scheduled: request.kind == .scheduled)
+    }
+    private func bindChromeWorker(_ worker: CodexClient, session: AgentSessionReference, scope: ChromeScope) async {
+        let old = chromeWorkers[session]
+        resolveChromeInteractions(session)
+        chromeObservers.removeValue(forKey: session)?.cancel()
+        chromeWorkers[session] = worker; chromeScopes[session] = scope; chromeSessions.insert(session)
+        chromeObservers[session] = Task { [weak self] in
+            for await event in worker.events { await self?.receiveChrome(event, session: session, worker: worker) }
+        }
+        if let old {
+            // The old process owns its background children. Dropping its observer must not leave
+            // their last running snapshot in the UI after the authority scope is replaced.
+            sink.yield(.init(session: session, payload: .subagents([])))
+            await old.stop()
+        }
+    }
+    /// A dedicated process is a session resource, not the connection itself. Its resets cannot
+    /// invalidate approvals or running turns belonging to other workers on the same account.
+    private func resolveChromeInteractions(_ session: AgentSessionReference) {
+        for id in chromeInteractions.removeValue(forKey: session) ?? [] {
+            interactionContexts[id] = nil
+            sink.yield(.init(session: session, payload: .resolved(id)))
+        }
+    }
+    private func receiveChrome(_ event: AgentEvent, session: AgentSessionReference, worker: CodexClient) async {
+        guard chromeWorkers[session] === worker else { return }
+        switch event.payload {
+        case .accountChanged:
+            // Only the primary process reports changes to the shared account.
+            return
+        case .interactionsReset:
+            resolveChromeInteractions(session)
+            return
+        case .interaction(let interaction):
+            chromeInteractions[session, default: []].insert(interaction.id)
+        case .resolved(let id):
+            chromeInteractions[session]?.remove(id)
+        case .disconnected:
+            // No replay: an interrupted worker cannot establish whether its last action completed.
+            chromeWorkers[session] = nil; chromeScopes[session] = nil
+            chromeObservers.removeValue(forKey: session)?.cancel()
+            resolveChromeInteractions(session)
+            let message = L10n.text("Процесс этого чата отключился. Результат действия неизвестен; повторной отправки не было.",
+                                    "This chat's process disconnected. The action outcome is unknown; nothing was resent.")
+            for turn in Array((turnContexts[session] ?? [:]).keys) where finishedTurns[session]?.contains(turn) != true {
+                await receive(.init(session: session, payload: .completed(.init(id: turn, status: .uncertain,
+                    hasError: true, error: message,
+                    history: .init(id: turn, items: [], startedAt: nil, completedAt: Date(), duration: nil)))))
+            }
+            sink.yield(.init(session: session, payload: .diagnostic(message)))
+            await worker.stop()
+            return
+        default: break
+        }
+        await receive(event)
+        // Keep the owner after the parent completes: background children and their stop/history
+        // operations still belong to this process. Scope changes and disconnect release it.
+    }
+    private func refreshChromeWorker(_ request: AgentExecutionRequest, session: AgentSessionReference) async throws {
+        let scope = try chromeScope(request)
+        guard request.userChromeGrant != nil || chromeSessions.contains(session) else { return }
+        guard chromeScopes[session] != scope else { return }
+        let fresh = try await worker(for: request.route).isolatedSibling()
+        do {
+            // The process that loaded the thread holds its writer lock; the cold worker cannot resume it until it is released.
+            try await (chromeWorkers[session] ?? worker(for: request.route)).release(session)
+            try await fresh.resume(session, projectPath: request.projectPath, permissions: scope.permissions,
+                                   route: route(request.route), scheduled: scope.scheduled, userChromeGrant: request.userChromeGrant)
+        } catch { await fresh.stop(); throw error }
+        await bindChromeWorker(fresh, session: session, scope: scope)
+    }
     public func prepare(_ request: AgentExecutionRequest) async -> AgentResult<AgentSessionReference> {
         do {
             try await validate(request)
             return await perform(request.model.context, session: request.session) {
                 let access = try self.access(request.permissions), route = try self.route(request.route)
                 if let session = request.session {
-                    try await self.client.resume(session, projectPath: request.projectPath, permissions: access, route: route,
-                                                 scheduled: request.kind == .scheduled)
+                    if request.userChromeGrant != nil || self.chromeSessions.contains(session) {
+                        try await self.refreshChromeWorker(request, session: session)
+                    } else {
+                        try await self.worker(for: request.route).resume(session, projectPath: request.projectPath, permissions: access, route: route,
+                                                     scheduled: request.kind == .scheduled, userChromeGrant: nil)
+                    }
                     self.sessionRoutes[session] = (request.route, request.model.context)
                     return session
                 }
-                let session = try await self.client.createSession(projectPath: request.projectPath, permissions: access, model: request.model.model, route: route,
-                                                                  browserProfile: request.browserProfile, scheduled: request.kind == .scheduled)
+                let chosen = try self.worker(for: request.route)
+                let dedicated = request.userChromeGrant != nil
+                let worker: CodexClient
+                if dedicated { worker = try await chosen.isolatedSibling() } else { worker = chosen }
+                let session: AgentSessionReference
+                do {
+                    session = try await worker.createSession(projectPath: request.projectPath, permissions: access, model: request.model.model, route: route,
+                                                             browserProfile: request.browserProfile, scheduled: request.kind == .scheduled,
+                                                             userChromeGrant: request.userChromeGrant)
+                } catch { if dedicated { await worker.stop() }; throw error }
+                if dedicated { await self.bindChromeWorker(worker, session: session, scope: try self.chromeScope(request)) }
                 self.sessionRoutes[session] = (request.route, request.model.context)
                 return session
             }
@@ -215,8 +376,9 @@ public actor CodexIntegration: AgentIntegration {
                     }
                     session = existing
                 } else { session = try await self.prepare(request).value() }
-                let turn = try await self.client.send(request.prompt, to: session, projectPath: request.projectPath,
-                    permissions: self.access(request.permissions), model: request.model.model, effort: request.model.effort ?? "")
+                try await self.refreshChromeWorker(request, session: session)
+                let turn = try await self.worker(for: session).send(request.prompt, to: session, projectPath: request.projectPath,
+                    permissions: self.access(request.permissions), model: request.model.model, effort: request.model.effort ?? "", userChromeGrant: request.userChromeGrant)
                 guard let turn, !turn.isEmpty else { throw ClientFailure(L10n.text("Не получен ID запуска", "No turn ID received")) }
                 self.turnContexts[session, default: [:]][turn] = request.model.context
                 // The turn's model and effort as the session's settings; no request is made for them.
@@ -232,40 +394,46 @@ public actor CodexIntegration: AgentIntegration {
         guard turnContexts[session]?[turn] == execution.context else { return .rejected(.unknownRequest) }
         if finishedTurns[session]?.contains(turn) == true { return .success(.alreadyFinished) }
         return await perform(execution.context, session: session) {
-            try await self.client.interrupt(session, turn: turn); return .requested
+            try await self.worker(for: session).interrupt(session, turn: turn); return .requested
         }
     }
     public func stopTasks(_ task: String?, session: AgentSessionReference, context: AgentContext) async -> AgentResult<Void> {
         await perform(context, session: session) {
-            try await self.client.stopSubagents(task, session: session)
+            try await self.worker(for: session).stopSubagents(task, session: session)
         }
     }
     public func answer(_ id: UUID, session: AgentSessionReference, context: AgentContext, response: AgentInteractionResponse) async -> AgentResult<Void> {
         guard interactionContexts[id] == context else { return .rejected(.unknownRequest) }
         // The native client consumes valid answers before writing; invalid input remains editable.
-        return await perform(context, session: session) { try await self.client.answer(id, session: session, response: response) }
+        return await perform(context, session: session) { try await self.worker(for: session).answer(id, session: session, response: response) }
     }
-    public func rejectInteraction(_ id: UUID) async { interactionContexts[id] = nil; await client.rejectInteraction(id) }
+    public func rejectInteraction(_ id: UUID) async {
+        interactionContexts[id] = nil
+        await client.rejectInteraction(id)
+        for worker in providerClients.values { await worker.rejectInteraction(id) }
+        for worker in chromeWorkers.values { await worker.rejectInteraction(id) }
+    }
     public func history(_ session: AgentSessionReference, context: AgentContext) async -> AgentResult<[AgentHistoryTurn]> {
-        await perform(context, session: session) { try await self.client.history(session) }
+        await perform(context, session: session) { try await self.worker(for: session).history(session) }
     }
     public func summarySource(_ session: AgentSessionReference, context: AgentContext) async -> AgentResult<AgentSummarySource> {
         await perform(context, session: session) {
-            let source = try await self.client.summarySource(session)
+            let source = try await self.worker(for: session).summarySource(session)
             return AgentSummarySource(digest: source.digest, fragments: source.chunks.flatMap(\.fragments).map {
                 AgentSummaryFragment(reference: $0.reference, kind: $0.kind, text: $0.text)
             }, turnDates: source.turnDates, omittedDetails: source.omittedDetails)
         }
     }
     public func rename(_ session: AgentSessionReference, title: String, context: AgentContext) async -> AgentResult<Void> {
-        await perform(context, session: session) { try await self.client.rename(session, title: title) }
+        await perform(context, session: session) { try await self.worker(for: session).rename(session, title: title) }
     }
     public func setArchived(_ archived: Bool, session: AgentSessionReference, context: AgentContext) async -> AgentResult<Void> {
-        await perform(context, session: session) { try await self.client.setArchived(archived, session: session) }
+        await perform(context, session: session) { try await self.worker(for: session).setArchived(archived, session: session) }
     }
     public func delete(_ session: AgentSessionReference, context: AgentContext) async -> AgentResult<Void> {
-        await perform(context, session: session) { try await self.client.delete(session) }
+        await perform(context, session: session) { try await self.worker(for: session).delete(session) }
     }
+
     public func generate(_ request: AgentGenerationRequest, environment: AgentGenerationEnvironment,
                          willStart: @escaping @Sendable () async throws -> Void) async -> AgentResult<AgentGenerationOutput> {
         let runner = ArchiveSummaryRunner()
@@ -345,8 +513,8 @@ public actor CodexIntegration: AgentIntegration {
 
 extension AgentPermissionSupport {
     /// Codex runs role profiles through its sandbox and approval policy. It has no shell-off mode, command text
-    /// inspection, per-connector control, writable folder inside a read-only sandbox or path to the user's Chrome.
-    public static let codexProjectPolicy = Self(roleProfiles: true, enforced: [.sandboxedShell, .networkOffWithShell, .promptsWithoutSandbox])
+    /// inspection, per-connector control, writable folder inside a read-only sandbox or writable folder exceptions beyond its sandbox.
+    public static let codexProjectPolicy = Self(roleProfiles: true, enforced: [.sandboxedShell, .networkOffWithShell, .promptsWithoutSandbox, .userChrome])
 }
 
 private struct IntegrationRejection: LocalizedError {
