@@ -256,10 +256,12 @@ private func withEventFixture(_ body: (CodexClient, CodexConnection, EventLog) a
 }
 
 private func toolApproval(server: String, id: JSONValue, persist: JSONValue = .array([.string("session"), .string("always")])) -> JSONValue {
+    // Literal wire keys from Codex rust-v0.167.0, protocol/src/mcp_approval_meta.rs
+    // and core/src/mcp_tool_call.rs. Never reuse the adapter's constants here.
     request("mcpServer/elicitation/request", id: id, extra: [
         "mode": .string("form"), "serverName": .string(server), "message": .string("Allow \(server) to run tool input?"),
         "requestedSchema": .object(["type": .string("object"), "properties": .object([:])]),
-        "_meta": .object([CodexPendingInteraction.toolApprovalKindKey: .string("mcp_tool_call"), CodexPendingInteraction.toolApprovalPersistKey: persist])])
+        "_meta": .object(["codex_approval_kind": .string("mcp_tool_call"), "persist": persist])])
 }
 
 @Test func browserToolApprovalsOfferAChatGrantOnlyForAppOwnedServers() throws {
@@ -267,7 +269,7 @@ private func toolApproval(server: String, id: JSONValue, persist: JSONValue = .a
     guard case .approval(true) = chrome.interaction.kind else { Issue.record("Expected an approval"); return }
     #expect(chrome.interaction.canAllowChat && chrome.toolApprovalServer == "switchboard_user_chrome")
     #expect(try chrome.encode(.allowOnce) == .object(["action": .string("accept"), "content": .object([:])]))
-    #expect(try chrome.encode(.allowChat)["_meta"][CodexPendingInteraction.toolApprovalPersistKey] == .string("session"))
+    #expect(try chrome.encode(.allowChat)["_meta"] == .object(["persist": .string("session")]))
     #expect(try chrome.encode(.deny) == .object(["action": .string("decline")]))
     #expect(throws: ClientFailure.self) { try chrome.encode(.answers([:])) }
     let alwaysOnly = try #require(CodexPendingInteraction.parse(toolApproval(server: "switchboard_browser", id: .number(2), persist: .string("always"))))
@@ -281,6 +283,29 @@ private func toolApproval(server: String, id: JSONValue, persist: JSONValue = .a
     let form = try #require(CodexPendingInteraction.parse(.object(plain)))
     guard case .form = form.interaction.kind else { Issue.record("Expected a form"); return }
     #expect(!form.interaction.canAllowChat && form.toolApprovalServer == nil)
+}
+
+@Test func browserChatGrantRejectsUnrecognizedMarkersAndMalformedSchemas() throws {
+    let original = toolApproval(server: "switchboard_browser", id: .number(8))
+    for meta: JSONValue in [
+        .object(["codex/approvals/mcp_tool_call/kind": .string("mcp_tool_call")]),
+        .object(["codex_approval_kind": .string("browser_auth")]),
+        .object(["codex_approval_kind": .bool(true)]), .null
+    ] {
+        var raw = original.object, params = original["params"].object
+        params["_meta"] = meta; raw["params"] = .object(params)
+        let pending = try #require(CodexPendingInteraction.parse(.object(raw)))
+        #expect(!pending.interaction.canAllowChat && pending.toolApprovalServer == nil)
+        #expect(throws: ClientFailure.self) { try pending.encode(.allowChat) }
+    }
+    for required: JSONValue in [.string("unexpected"), .array([.string("missing")]), .bool(false)] {
+        var raw = original.object, params = original["params"].object
+        var schema = params["requestedSchema"]!.object
+        schema["required"] = required; params["requestedSchema"] = .object(schema)
+        raw["params"] = .object(params)
+        let pending = try #require(CodexPendingInteraction.parse(.object(raw)))
+        #expect(!pending.interaction.canAllowChat && pending.toolApprovalServer == nil)
+    }
 }
 
 @Test func chatGrantAnswersLaterCallsOfTheSameServerInTheSameChatUntilReset() async throws {

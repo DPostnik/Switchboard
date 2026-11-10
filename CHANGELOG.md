@@ -4,6 +4,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Recognize Codex browser tool approvals and offer chat-scoped consent using the correct protocol metadata.
 - Count distinct approval prompts, clarify permission outcomes, and revoke failed browser chat grants.
 
 - Share conservative project command matching across providers and explain unsupported Codex command exemptions without broadening file access.

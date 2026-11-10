@@ -104,8 +104,10 @@ struct CodexPendingInteraction: Sendable {
 
     /// App-owned browser servers whose tool calls the user may allow for the rest of a chat.
     static let chatGrantServers: Set<String> = ["switchboard_browser", UserChromeConfiguration.server]
-    static let toolApprovalKindKey = "codex/approvals/mcp_tool_call/kind"
-    static let toolApprovalPersistKey = "codex/approvals/mcp_tool_call/persist"
+    // Codex 0.167: protocol/src/mcp_approval_meta.rs. These are wire keys,
+    // not namespaced client settings; fixtures must not derive them from here.
+    static let toolApprovalKindKey = "codex_approval_kind"
+    static let toolApprovalPersistKey = "persist"
 
     /// The server of the engine's own MCP tool-call approval: a form with no fields and the approval kind marker.
     /// Message and tool parameters stay untrusted data; only the server name keys a chat grant.
@@ -113,7 +115,8 @@ struct CodexPendingInteraction: Sendable {
         guard p["mode"].string == "form", p["_meta"][toolApprovalKindKey].string == "mcp_tool_call",
               let server = p["serverName"].string, !server.isEmpty,
               p["requestedSchema"]["type"].string == "object", case .object(let properties) = p["requestedSchema"]["properties"],
-              properties.isEmpty, p["requestedSchema"]["required"].array.isEmpty else { return nil }
+              properties.isEmpty,
+              p["requestedSchema"]["required"] == .null || p["requestedSchema"]["required"] == .array([]) else { return nil }
         return server
     }
     var toolApprovalServer: String? { method == "mcpServer/elicitation/request" ? Self.toolApprovalServer(params) : nil }
