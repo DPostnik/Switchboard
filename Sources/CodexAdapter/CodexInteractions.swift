@@ -16,6 +16,9 @@ extension CodexClient {
     }
     func resetInteractions() {
         interactionEpoch = UUID()
+        for task in subagentHistoryTasks.values { task.cancel() }
+        subagentHistoryTasks.removeAll()
+        for event in subagentTracker.reset() { eventSink.yield(event) }
         interactions.removeAll()
         eventSink.yield(.init(session: nil, payload: .interactionsReset))
     }
@@ -54,6 +57,10 @@ extension CodexClient {
         }
         if let event = CodexEventDecoder.commandResult(raw) { eventSink.yield(event) }
         if let event = reasoning.receive(raw, at: Date()) { eventSink.yield(event) }
+        if let event = subagentTracker.receive(raw) {
+            eventSink.yield(event)
+            if let parent = event.session?.nativeID { watchSubagentHistory(parent: parent) }
+        }
         if method == "item/started", let native = p["threadId"].string, !native.isEmpty,
            let record = CodexEventDecoder.capability(p["item"], turn: p["turnId"].string) {
             eventSink.yield(.init(session: .init(connection: .originalCodex, nativeID: native), payload: .capability(record)))

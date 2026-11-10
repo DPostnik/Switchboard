@@ -19,6 +19,8 @@ public actor CodexClient {
     var interactions: [UUID: (pending: CodexPendingInteraction, generation: UUID, token: UUID)] = [:]
     var compactions = CodexCompactionMeter()
     var reasoning = CodexReasoningStream()
+    var subagentTracker = CodexSubagentTracker()
+    var subagentHistoryTasks: [String: Task<Void, Never>] = [:]
 
     public init() {
         let transport = CodexConnection()
@@ -41,7 +43,7 @@ public actor CodexClient {
         try await transport.start(executable: executable, home: home, extraArguments: extraArguments)
     }
     public func stop() async { resetInteractions(); await transport.stop() }
-    deinit { eventTask?.cancel(); eventSink.finish() }
+    deinit { for task in subagentHistoryTasks.values { task.cancel() }; eventTask?.cancel(); eventSink.finish() }
 
     public func account() async throws -> CodexAccount {
         let result = try await transport.request("account/read", params: .object(["refreshToken": .bool(false)]))
@@ -158,6 +160,33 @@ public actor CodexClient {
         _ = try await transport.request("turn/interrupt", params: .object([
             "threadId": .string(try nativeID(session)), "turnId": .string(turn)
         ]))
+    }
+    /// Stops only children observed under this parent on this exact connection. No uncertain retries.
+    public func stopSubagents(_ task: String?, session: AgentSessionReference) async throws {
+        let parent = try nativeID(session)
+        let running = subagentTracker.runningIDs(parent: parent)
+        if let task, !running.contains(task) {
+            throw ClientFailure(L10n.text("Этот подагент больше не работает в данном чате.", "This sub-agent is no longer running in this chat."))
+        }
+        for child in running where task == nil || task == child {
+            let result = try await transport.request("thread/read", params: .object([
+                "threadId": .string(child), "includeTurns": .bool(true)
+            ]))
+            let turn = try CodexSubagentTracker.interruptTarget(result, child: child)
+            guard let turn else {
+                for event in subagentTracker.history(result, child: child) { eventSink.yield(event) }
+                if subagentTracker.runningIDs(parent: parent).contains(child) {
+                    throw ClientFailure(L10n.text("У подагента пока нет активного хода для остановки.", "The sub-agent has no active turn to stop yet."))
+                }
+                continue
+            }
+            do {
+                _ = try await transport.request("turn/interrupt", params: .object([
+                    "threadId": .string(child), "turnId": .string(turn)
+                ]))
+            }
+            if let event = subagentTracker.stopped(child, parent: parent) { eventSink.yield(event) }
+        }
     }
     public func rename(_ session: AgentSessionReference, title: String) async throws {
         _ = try await transport.request("thread/name/set", params: .object([

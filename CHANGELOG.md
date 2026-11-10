@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Show Codex subagents with readable names, live steps, tool results, reports and individual stop controls.
+
 - Support photo attachments, paste and drag and drop in the first message of a new web chat; prevent file navigation across all web screens.
 
 - Prevent web photo drops from opening the image; accept file-item and image-URL drops and Windows copied photo files without an image MIME type.

@@ -235,6 +235,11 @@ public actor CodexIntegration: AgentIntegration {
             try await self.client.interrupt(session, turn: turn); return .requested
         }
     }
+    public func stopTasks(_ task: String?, session: AgentSessionReference, context: AgentContext) async -> AgentResult<Void> {
+        await perform(context, session: session) {
+            try await self.client.stopSubagents(task, session: session)
+        }
+    }
     public func answer(_ id: UUID, session: AgentSessionReference, context: AgentContext, response: AgentInteractionResponse) async -> AgentResult<Void> {
         guard interactionContexts[id] == context else { return .rejected(.unknownRequest) }
         // The native client consumes valid answers before writing; invalid input remains editable.
