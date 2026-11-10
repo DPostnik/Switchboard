@@ -93,7 +93,7 @@ enum CodexProtocolSurface {
         "notification:item/reasoning/textDelta": ["threadId", "turnId", "itemId", "delta", "contentIndex"],
         "notification:serverRequest/resolved": ["threadId", "requestId"],
         "notification:account/updated": [], "notification:account/rateLimits/updated": [],
-        "serverRequest:item/commandExecution/requestApproval": ["threadId", "turnId", "kind", "availableDecisions", "command", "reason"],
+        "serverRequest:item/commandExecution/requestApproval": ["threadId", "turnId", "kind", "availableDecisions", "command", "cwd", "reason"],
         "serverRequest:item/fileChange/requestApproval": ["threadId", "turnId", "grantRoot", "reason"],
         "serverRequest:item/permissions/requestApproval": ["threadId", "turnId", "reason", "permissions.network.enabled",
                                                            "permissions.fileSystem.read", "permissions.fileSystem.write"],

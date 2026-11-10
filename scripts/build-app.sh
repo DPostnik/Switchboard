@@ -41,6 +41,14 @@ cp UserChromeRuntime/server.py "$app/Contents/Resources/UserChromeRuntime/"
 cp UserChromeExtension/{manifest.json,worker.js,controller.js,page.js,popup.html,popup.js,popup.css} "$app/Contents/Resources/UserChromeExtension/"
 cp -R UserChromeExtension/_locales "$app/Contents/Resources/UserChromeExtension/"
 cp -R Skills "$app/Contents/Resources/Skills"
+# MCP servers run under /usr/bin/python3; a source it cannot read breaks every chat at startup.
+# Run each entry script: Python 3.9's file reader rejects some long non-ASCII lines that py_compile accepts.
+for script in ChatDirectoryRuntime/server.py BrowserRuntime/server.py BrowserRuntime/broker.py UserChromeRuntime/server.py; do
+  if ! /usr/bin/python3 -B "$app/Contents/Resources/$script" --help </dev/null >/dev/null; then
+    echo "error: /usr/bin/python3 cannot start $script" >&2
+    exit 1
+  fi
+done
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

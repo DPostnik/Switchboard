@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Check bundled Python entry points and record command approval cwd coverage.
+
 - Clear Claude warm ownership when background work wakes.
 
 - Relocate project sessions and archive removed projects.
