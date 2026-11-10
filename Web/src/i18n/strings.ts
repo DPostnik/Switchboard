@@ -2,6 +2,11 @@ import { t } from './index'
 
 /** Static UI strings: [Russian, English]. Parameterized strings use `t(ru, en)` at the call site. */
 export const strings = {
+  attachPhotos: ['Прикрепить фото', 'Attach photos'],
+  preparingPhotos: ['Подготовка фото…', 'Preparing photos…'],
+  removePhoto: ['Убрать фото', 'Remove photo'],
+  attachedPhoto: ['Прикреплённое фото', 'Attached photo'],
+  photoError: ['Не удалось подготовить фото. Выбери до 4 изображений размером до 40 МБ каждое; после сжатия каждое должно помещаться в 512 КБ.', 'Could not prepare photos. Choose up to 4 images, up to 40 MB each; each must fit within 512 KB after compression.'],
   appName: ['Switchboard', 'Switchboard'],
   languageToggle: ['English', 'Русский'],
   languageToggleHint: ['Switch to English', 'Переключить на русский'],

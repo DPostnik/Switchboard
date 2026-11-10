@@ -136,7 +136,7 @@ const chats: RemoteChat[] = [
     approvals: [], settings: settings('claude-sonnet', 'reader'), web: true, webMessages: 2,
   },
   {
-    id: 'web:99999999-9999-4999-8999-999999999999', project: wiki, title: 'Sync layer: deltas, receipts and retention', running: false,
+    id: 'web:99999999-9999-4999-8999-999999999999', project: wiki, title: 'Sync layer: deltas, receipts and retention', running: false, supportsPhotos: true,
     messages: [
       { id: 'l1', role: 'user', text: 'Explain how the web client keeps in sync with the Mac, with the code and a table of the cloud tables.' },
       { id: 'l2', role: 'assistant', text: longAnswer },

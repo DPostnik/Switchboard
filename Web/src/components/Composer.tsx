@@ -1,4 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type RefObject } from 'react'
+import { preparePhoto } from '../protocol/photos'
+import type { RemotePhoto } from '../protocol/types'
 import { s } from '../i18n/strings'
 import { commands, limits, utf8Length } from '../protocol/commands'
 import { chatKey } from '../protocol/receipts'
@@ -12,6 +14,8 @@ import { latestOwnCommand } from './selectors'
 
 /** Drafts survive switching chats within the tab. */
 const drafts = new Map<string, string>()
+
+const photoDrafts = new Map<string, RemotePhoto[]>()
 
 type Action = 'send' | 'queue' | 'interrupt'
 
@@ -33,6 +37,25 @@ export function Composer({ engine, state, device, chat }: { engine: EngineLike; 
     drafts.set(key, value)
     setDraftState(value)
   }
+  const [photos, setPhotosState] = useState<RemotePhoto[]>(() => photoDrafts.get(key) ?? [])
+  const [loadingPhotos, setLoadingPhotos] = useState(false)
+  const [photoError, setPhotoError] = useState(false)
+  const choosing = useRef(false)
+  const picker = useRef<HTMLInputElement>(null)
+  const setPhotos = (value: RemotePhoto[]) => { photoDrafts.set(key, value); setPhotosState(value) }
+  const addPhotos = async (files: File[]) => {
+    if (choosing.current || engine.isBlocked(key)) return
+    choosing.current = true
+    setLoadingPhotos(true)
+    setPhotoError(false)
+    try {
+      if (files.length + photos.length > 4) throw new Error('count')
+      const added: RemotePhoto[] = []
+      for (const file of files) added.push(await preparePhoto(file))
+      setPhotos([...photos, ...added])
+    } catch { setPhotoError(true) }
+    finally { choosing.current = false; setLoadingPhotos(false) }
+  }
   const input = useRef<HTMLTextAreaElement>(null)
   useEffect(() => {
     input.current?.focus()
@@ -43,7 +66,7 @@ export function Composer({ engine, state, device, chat }: { engine: EngineLike; 
 
   const blocked = engine.isBlocked(key)
   const sending = state.inFlight.has(key)
-  const hasText = draft.trim() !== ''
+  const hasText = draft.trim() !== '' || photos.length > 0
   const tooLong = utf8Length(draft) > limits.textBytes
   const canQueue = chat.running && chat.canQueue === true
   const canInterrupt = chat.running && chat.canInterrupt === true && Boolean(chat.turn)
@@ -54,14 +77,21 @@ export function Composer({ engine, state, device, chat }: { engine: EngineLike; 
 
   const submit = async (action: Action) => {
     const text = draft
-    if (blocked || text.trim() === '' || tooLong) return
+    if (blocked || loadingPhotos || !hasText || tooLong) return
+    const sentPhotos = photos
     const command = await engine.perform(() => {
+      const build = () => {
       switch (action) {
         case 'queue': return commands.queue(base, chat.id, text)
         case 'interrupt': return commands.interrupt(base, chat.id, chat.turn ?? '', text)
         default: return commands.send(base, chat.id, text, chat.turn)
       }
+      }
+      const value = build()
+      if (sentPhotos.length) value.photos = sentPhotos
+      return value
     })
+    if (command && photoDrafts.get(key) === sentPhotos) setPhotos([])
     // The draft clears only after the queue holds the command, and only if unchanged meanwhile.
     if (command && (drafts.get(key) ?? '') === text) setDraft('')
   }
@@ -80,15 +110,21 @@ export function Composer({ engine, state, device, chat }: { engine: EngineLike; 
       <CommandLine state={state} device={device} chat={chat} />
       {chat.running && !primary && hasText && <div className="composer-note">{s('busyNoQueue')}</div>}
       {tooLong && <div className="composer-note bad" role="alert">{s('textTooLong')}</div>}
+      {photoError && <div role="alert" className="composer-note bad">{s('photoError')}</div>}
+      {photos.length > 0 && <div className="photo-strip">{photos.map(photo => <button type="button" key={photo.id} disabled={blocked || loadingPhotos} aria-label={s('removePhoto')} onClick={() => setPhotos(photos.filter(p => p.id !== photo.id))}><img src={'data:image/jpeg;base64,' + photo.data} alt={s('attachedPhoto')} /></button>)}</div>}
       <div className="composer">
         <textarea ref={input} className="composer-input" value={draft} rows={1}
           placeholder={chat.running && primary ? s('queuePlaceholder') : s('messagePlaceholder')}
           onChange={(event) => setDraft(event.target.value)} onKeyDown={onKeyDown} disabled={blocked} aria-label={s('message')} />
         <div className="composer-bar">
+          {chat.supportsPhotos === true && <>
+            <input ref={picker} type="file" accept="image/*" multiple hidden onChange={event => { void addPhotos(Array.from(event.target.files ?? [])); event.target.value = '' }} />
+            <button type="button" className="chip-button" disabled={blocked || loadingPhotos || photos.length >= 4} onClick={() => picker.current?.click()}>{s(loadingPhotos ? 'preparingPhotos' : 'attachPhotos')}</button>
+          </>}
           <ChatChips device={device} chat={chat} />
           <span className="composer-spacer" />
           {canInterrupt && canQueue && hasText && (
-            <button type="button" className="chip-button" onClick={() => void submit('interrupt')} disabled={blocked || tooLong}>
+            <button type="button" className="chip-button" onClick={() => void submit('interrupt')} disabled={blocked || loadingPhotos || tooLong}>
               <Icon name="interrupt" size={13} />
               <span>{s('interruptAndSend')}</span>
             </button>
@@ -98,7 +134,7 @@ export function Composer({ engine, state, device, chat }: { engine: EngineLike; 
               <Icon name="stop" size={11} />
             </button>
           ) : (
-            <button type="button" className="round-button" onClick={() => primary && void submit(primary)} disabled={blocked || !hasText || tooLong || !primary}
+            <button type="button" className="round-button" onClick={() => primary && void submit(primary)} disabled={blocked || loadingPhotos || !hasText || tooLong || !primary}
               aria-label={sendLabel} title={hint} aria-busy={sending || undefined}>
               <Icon name="arrowUp" size={15} />
             </button>

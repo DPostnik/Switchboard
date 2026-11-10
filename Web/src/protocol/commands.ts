@@ -143,9 +143,16 @@ export function validateCommand(command: RemoteCommand): void {
   if (utf8Length(text) > limits.textBytes) fail('text too long')
   if (!kinds.has(kind)) fail('kind')
   if (command.status !== 'pending') fail('status')
-  if (messageKinds.has(kind) && text.trim() === '') fail('empty message')
+  if (messageKinds.has(kind) && text.trim() === '' && !command.photos?.length) fail('empty message')
   if (['allow', 'deny', 'answer'].includes(kind) && !isUUID(approval)) fail('approval')
   if (turn != null && utf8Length(turn) > limits.turnBytes) fail('turn')
+  const photos = command.photos ?? []
+  if (photos.length > 4 || (photos.length > 0 && !messageKinds.has(kind)) || new Set(photos.map(p => p.id)).size !== photos.length) fail('photos')
+  for (const photo of photos) {
+    if (!isUUID(photo.id) || !/^[A-Za-z0-9+/]+={0,2}$/.test(photo.data) || photo.data.length % 4 !== 0 || photo.data.length > 699052) fail('photo')
+    const bytes = atob(photo.data)
+    if (bytes.length > 524288 || !bytes.startsWith('\xff\xd8\xff')) fail('photo')
+  }
   if (kind === 'answer') {
     if (!answers || text !== '' || turn != null || settings != null) fail('answer')
     const entries = Object.entries(answers)
@@ -187,7 +194,7 @@ export function validateCommand(command: RemoteCommand): void {
 /** The row inserted into `remote_commands`: null and absent fields are omitted. */
 export function commandRow(command: RemoteCommand): Record<string, unknown> {
   const row: Record<string, unknown> = {}
-  for (const key of ['id', 'owner', 'device', 'project', 'chat', 'kind', 'text', 'approval', 'turn', 'status', 'settings', 'answers'] as const) {
+  for (const key of ['id', 'owner', 'device', 'project', 'chat', 'kind', 'text', 'approval', 'turn', 'status', 'settings', 'answers', 'photos'] as const) {
     const value = command[key]
     if (value !== null && value !== undefined) row[key] = value
   }

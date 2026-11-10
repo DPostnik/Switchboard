@@ -173,3 +173,20 @@ describe('answers mirror RemoteInteraction.validate(answers:)', () => {
     expect(() => validateAnswers({ ...questions, kind: 'link' }, {})).toThrow(InvalidCommandError)
   })
 })
+
+describe('photo delivery', () => {
+  const photo = { id: approval, data: btoa('\xff\xd8\xff\xd9') }
+  it('preserves photo payloads in cloud rows, including photo-only messages', () => {
+    for (const command of [commands.send(base, 'web:x', ''), commands.queue(base, 'web:x', ''), commands.interrupt(base, 'web:x', 'turn', '')]) {
+      command.photos = [photo]
+      validateCommand(command)
+      expect(commandRow(command).photos).toEqual([photo])
+    }
+  })
+  it('rejects malformed, oversized, duplicate and non-message attachments', () => {
+    for (const photos of [[{ ...photo, data: 'broken' }], [{ ...photo, data: btoa('x'.repeat(524289)) }], [photo, photo]]) {
+      invalid({ ...commands.send(base, 'c', 'hi'), photos })
+    }
+    invalid({ ...commands.stop(base, 'c'), photos: [photo] })
+  })
+})

@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Add photo attachments to the web composer using the mobile cloud delivery protocol.
+
 - Coding chats gain project-scoped load, build-task and app diagnostics, plus a shared app verification workflow.
 
 ### Changed

@@ -165,7 +165,10 @@ export interface RemoteSettingsChange {
   expectedProjectAccess?: RemoteAccessMode | null
 }
 
+export interface RemotePhoto { id: string; data: string }
+
 export interface RemoteCommand {
+  photos?: RemotePhoto[] | null
   id: string
   owner: string
   device: string

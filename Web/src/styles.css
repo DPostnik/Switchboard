@@ -503,3 +503,6 @@ button:disabled { cursor: default; }
   .bubble { max-width: 88%; }
   .empty-state { padding: 24px 16px; }
 }
+
+.photo-strip { display: flex; gap: 8px; padding: 8px; }
+.photo-strip img { width: 72px; height: 72px; object-fit: cover; border-radius: 6px; }
