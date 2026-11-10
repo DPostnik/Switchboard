@@ -1889,11 +1889,12 @@ struct SettingsView: View {
                 }
             }
             Section(L10n.text("Мой Chrome", "My Chrome")) {
-                Toggle(L10n.text("Разрешить чатам Claude управлять моим Chrome", "Let Claude chats control my Chrome"),
+                Toggle(L10n.text("Разрешить агентам управлять моим Chrome", "Let agents control my Chrome"),
                        isOn: Binding(get: { model.state.userChromeEnabled != false }, set: { model.selectUserChromeEnabled($0) }))
-                Text(L10n.text("Чаты Claude с полным доступом получают инструменты расширения Claude in Chrome: агент открывает свои вкладки в твоём обычном Chrome с твоими входами на сайты и может загружать файлы. Нужны расширение Claude in Chrome, вход в нём в тот же аккаунт Claude, что и в Switchboard, и открытый Chrome. Пока агент работает, Chrome показывает полосу об отладке. Запланированные задачи и чаты Codex этот путь не используют.", "Full-access Claude chats get the Claude in Chrome extension tools: the agent opens its own tabs in your regular Chrome with your site sign-ins and can upload files. Requires the Claude in Chrome extension signed in to the same Claude account as Switchboard, and Chrome running. While the agent works, Chrome shows a debugging bar. Scheduled tasks and Codex chats do not use this path."))
-                    .font(.ui(.callout)).foregroundStyle(.secondary)
-                Text(L10n.text("Применяется переподключением Claude сразу после переключения, если ни один чат Claude не выполняет задачу. Иначе переключи настройку ещё раз, когда задачи завершатся.", "Applied by reconnecting Claude right after the switch, if no Claude chat is running a task. Otherwise switch it again once those tasks finish."))
+                UserChromeSetupView(enabled: model.state.userChromeEnabled != false)
+                Text(L10n.text("Claude продолжает использовать расширение Claude in Chrome со своим аккаунтом Claude.", "Claude continues to use the Claude in Chrome extension with its Claude account."))
+                    .font(.ui(.caption)).foregroundStyle(.secondary)
+                Text(L10n.text("Codex переподключится автоматически, когда приложение освободится. Claude переподключается сразу, если его чаты свободны; иначе переключи настройку после завершения задач.", "Codex reconnects automatically once the app is idle. Claude reconnects immediately if its chats are idle; otherwise switch the setting after tasks finish."))
                     .font(.ui(.caption)).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped)

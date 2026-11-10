@@ -1,0 +1,56 @@
+{
+  "extensionName": {
+    "message": "Switchboard for Chrome"
+  },
+  "extensionDescription": {
+    "message": "Connect selected Chrome tabs to Switchboard through a local native helper."
+  },
+  "pairInstructions": {
+    "message": "Enter this code in Switchboard to pair this Chrome profile."
+  },
+  "profileName": {
+    "message": "Profile name"
+  },
+  "profileIdentity": {
+    "message": "Profile ID"
+  },
+  "save": {
+    "message": "Save"
+  },
+  "pageDisclosure": {
+    "message": "Selected page content is sent to the model in your Switchboard chat."
+  },
+  "stop": {
+    "message": "Stop all chats"
+  },
+  "reconnect": {
+    "message": "Connect"
+  },
+  "stopNotice": {
+    "message": "Stop cancels queued actions and detaches Switchboard. It cannot undo completed website actions. Your tabs stay open."
+  },
+  "connectionError": {
+    "message": "Connection unavailable. Check Chrome setup in Switchboard."
+  },
+  "operationTimedOut": {
+    "message": "Chrome did not finish an action. Resolve any open page dialog, then click Connect. The action will not be retried."
+  },
+  "paired": {
+    "message": "Connected to Switchboard"
+  },
+  "pairRequired": {
+    "message": "Pair this Chrome profile"
+  },
+  "disconnected": {
+    "message": "Switchboard is disconnected"
+  },
+  "lease": {
+    "message": "Chat $1 · Tab $2"
+  },
+  "outcomeUnknown": {
+    "message": "This action ID was already dispatched. Observe the page before continuing."
+  },
+  "frameInputUnsupported": {
+    "message": "Input in this frame is not supported. Ask the user to interact with it."
+  }
+}

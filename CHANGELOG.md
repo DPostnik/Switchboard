@@ -4,6 +4,16 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Select leased Chrome tabs for pointer and key input, focus text fields, and let observed JavaScript dialogs yield the command queue without replaying input.
+
+- Let Codex chats control regular Google Chrome through a paired Switchboard extension, with per-chat tab ownership and the My Chrome permission.
+
+- Simplify regular Chrome setup with connection status, one connect action and technical IDs hidden in details.
+
+- Recreate expired Chrome tab groups before opening a new tab, without retrying browser mutations.
+
+- Keep regular-Chrome control responsive to transport failures, preserve other tabs on detach, and prevent replay after a stalled operation.
+
 - Isolate Codex Chrome-worker approval resets and disconnects, and preserve background children after their parent turn completes.
 
 - Route Codex sessions through their owning provider or isolated Chrome process and preserve scoped browser access.

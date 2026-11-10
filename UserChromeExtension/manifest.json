@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "__MSG_extensionName__",
+  "description": "__MSG_extensionDescription__",
+  "version": "1.0.0",
+  "default_locale": "en",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAl7tnWzsGE6zDEiWitTcZRyYNHBXVaW/XUflShq2cWbuPg8nJ9lvuwqXsfdZKxr97LV1e7OiBEySIWlUvDEvN3w0cjIkQZ7tQLOVTGksU8wBzky8xz8RSEG6WwsJjmdvtWNx/B0leA/IxRITOlq2bAEbhzYSrDfLgSf6ByR4mqJwUC8jB6sA5xavMnO1A/xYw0zKwD2zVwnd/uycQut+nN4m0SRH2U/H+nAPCKEiyMJOHboiS+QILhyfj2tn3eiHDTjrJ0h/RNU1oQE17x4yMuD/HaWACUOgBv8vduZIeojnhxpXSCKJ9DOmnEHy6XTzzSukmlb8rsFRujW7y4p3MewIDAQAB",
+  "permissions": ["nativeMessaging", "debugger", "tabs", "storage", "tabGroups", "alarms"],
+  "background": {"service_worker": "worker.js", "type": "module"},
+  "action": {"default_popup": "popup.html", "default_title": "Switchboard"},
+  "incognito": "not_allowed"
+}

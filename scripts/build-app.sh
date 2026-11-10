@@ -36,6 +36,10 @@ mkdir -p "$app/Contents/Resources/ChatDirectoryRuntime"
 cp ChatDirectoryRuntime/server.py "$app/Contents/Resources/ChatDirectoryRuntime/"
 mkdir -p "$app/Contents/Resources/BrowserRuntime"
 cp BrowserRuntime/{server.py,broker.py,transport.py,chrome_host.py,profiles.py,cdp.py,page_input.py,install.py,cards.js,page_read.js,page_tree.js,runtime.lock.json,README.md} "$app/Contents/Resources/BrowserRuntime/"
+mkdir -p "$app/Contents/Resources/UserChromeRuntime" "$app/Contents/Resources/UserChromeExtension"
+cp UserChromeRuntime/server.py "$app/Contents/Resources/UserChromeRuntime/"
+cp UserChromeExtension/{manifest.json,worker.js,controller.js,page.js,popup.html,popup.js,popup.css} "$app/Contents/Resources/UserChromeExtension/"
+cp -R UserChromeExtension/_locales "$app/Contents/Resources/UserChromeExtension/"
 cp -R Skills "$app/Contents/Resources/Skills"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

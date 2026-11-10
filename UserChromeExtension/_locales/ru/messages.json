@@ -1,0 +1,56 @@
+{
+  "extensionName": {
+    "message": "Switchboard для Chrome"
+  },
+  "extensionDescription": {
+    "message": "Подключайте выбранные вкладки Chrome к Switchboard через локальный компонент."
+  },
+  "pairInstructions": {
+    "message": "Введите этот код в Switchboard для подключения этого профиля Chrome."
+  },
+  "profileName": {
+    "message": "Название профиля"
+  },
+  "profileIdentity": {
+    "message": "ID профиля"
+  },
+  "save": {
+    "message": "Сохранить"
+  },
+  "pageDisclosure": {
+    "message": "Содержимое выбранных страниц передаётся модели в вашем чате Switchboard."
+  },
+  "stop": {
+    "message": "Остановить все чаты"
+  },
+  "reconnect": {
+    "message": "Подключить"
+  },
+  "stopNotice": {
+    "message": "Остановка отменяет ожидающие действия и отключает Switchboard. Выполненные действия на сайтах не отменяются. Ваши вкладки остаются открытыми."
+  },
+  "connectionError": {
+    "message": "Соединение недоступно. Проверьте настройку Chrome в Switchboard."
+  },
+  "operationTimedOut": {
+    "message": "Chrome не завершил действие. Закройте диалог на странице, если он открыт, затем нажмите «Подключить». Действие не будет отправлено повторно."
+  },
+  "paired": {
+    "message": "Подключено к Switchboard"
+  },
+  "pairRequired": {
+    "message": "Подключите этот профиль Chrome"
+  },
+  "disconnected": {
+    "message": "Switchboard отключён"
+  },
+  "lease": {
+    "message": "Чат $1 · Вкладка $2"
+  },
+  "outcomeUnknown": {
+    "message": "Действие с этим ID уже отправлено. Проверьте страницу перед продолжением."
+  },
+  "frameInputUnsupported": {
+    "message": "Ввод в этом фрейме не поддерживается. Попросите пользователя выполнить действие."
+  }
+}

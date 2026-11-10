@@ -648,6 +648,11 @@ private struct ChatRunState: Equatable {
     /// their own chats); a shared engine picks it up at its next reconnect.
     func selectUserChromeEnabled(_ enabled: Bool) {
         state.userChromeEnabled = enabled; persist()
+        Task {
+            do { try await UserChromeControl.shared.setEnabled(enabled) }
+            catch { self.error = error.localizedDescription }
+        }
+        BrowserSettingApply.shared.schedule(model: self)
         for id in agentIDs where !traits(id).contains(.sharedEngine) && agentState(id).connected { Task { await connect(id) } }
     }
     private func stopPlugins() async {
@@ -1207,9 +1212,14 @@ private struct ChatRunState: Equatable {
             try await store.saveHandoff(handoff)
             let current = state.projects.first { $0.id == project.id } ?? project
             let resolvedRole = roleCatalog.role(role) ?? current.chatRole(roleCatalog)
-            let session = try await client.createSession(projectPath: project.path, permissions: resolvedRole.profile(for: current),
-                                                             model: selectedModel, route: route, context: descriptor.context)
+            let reservedID = UUID().uuidString
+            let permissions = resolvedRole.profile(for: current, addOns: Self.projectAddOns(current))
+            let chromeGrant = try await UserChromeControl.shared.grant(chat: reservedID, projectRoot: project.path,
+                allowed: state.userChromeEnabled != false && permissions.effective.browser == .appAndUserChrome)
+            let session = try await client.createSession(projectPath: project.path, permissions: permissions,
+                                                             model: selectedModel, route: route, context: descriptor.context, userChromeGrant: chromeGrant)
             var chat = Chat(session: session, projectID: project.id, title: title ?? String(handoff.goal.prefix(100)), model: selectedModel)
+            chat.id = reservedID
             chat.route = route; chat.handoffOrigin = handoff.origin; chat.effort = effort
             chat.roleID = roleCatalog.role(role)?.id; chat.accessMode = roleCatalog.role(role)?.legacyAccessMode; chat.inheritsProjectAccess = role == nil
             guard !state.chats.contains(where: { $0.nativeSession == session }) else { throw ConversationIdentity.invalidStorage }
@@ -1442,6 +1452,7 @@ private struct ChatRunState: Equatable {
         if addOns.contains(addOn) { addOns.remove(addOn) } else { addOns.insert(addOn) }
         if let index = state.chats.firstIndex(where: { $0.id == chatID }) {
             state.chats[index].roleAddOns = RoleAddOn.allCases.filter(addOns.contains).map(\.rawValue)
+            revokeUserChromeIfNeeded(state.chats[index])
             persist()
         } else if chatID == nil, let projectID, state.projects.contains(where: { $0.id == projectID }) {
             newChatAddOns[projectID] = addOns
@@ -1478,9 +1489,19 @@ private struct ChatRunState: Equatable {
             state.chats[index].roleID = id
             state.chats[index].inheritsProjectAccess = id == nil
             state.chats[index].accessMode = roleCatalog.role(id)?.legacyAccessMode
+            revokeUserChromeIfNeeded(state.chats[index])
             persist()
         } else if chatID == nil, let projectID, state.projects.contains(where: { $0.id == projectID }) {
             newChatRoles[projectID] = id
+        }
+    }
+    private func revokeUserChromeIfNeeded(_ chat: Chat) {
+        guard let project = state.projects.first(where: { $0.id == chat.projectID }) else { return }
+        let permissions = chat.resolvedRole(in: project, catalog: roleCatalog).profile(for: project, addOns: chat.resolvedAddOns(in: project))
+        guard permissions.effective.browser != .appAndUserChrome else { return }
+        Task {
+            do { try await UserChromeControl.shared.revoke(chat: chat.id) }
+            catch { self.error = error.localizedDescription }
         }
     }
     func selectAccessMode(_ mode: AccessMode?) { selectRole(mode?.legacyRoleID) }
@@ -1538,6 +1559,7 @@ private struct ChatRunState: Equatable {
         if let extraRoots { state.projects[index].extraRoots = extraRoots.filter { $0.path.hasPrefix("/") } }
         if let cookieSites { state.projects[index].cookieSites = cookieSites.map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty } }
         if let mcpServers { state.projects[index].mcpServers = mcpServers.isEmpty ? nil : mcpServers }
+        for chat in state.chats where chat.projectID == id { revokeUserChromeIfNeeded(chat) }
         persist()
     }
     /// The project's own model and effort for new chats, by agent ID; empty choices follow the app default.
@@ -2000,6 +2022,9 @@ private struct ChatRunState: Equatable {
                 guard let runtime = pluginRuntimes[route.rawValue], routeIsAvailable(route) else { throw ClientFailure(routeMessage(route)) }
                 applyPluginStatus(try await runtime.status(), for: route.rawValue)
             }
+            let reservedChatID = threadID ?? UUID().uuidString
+            let userChromeGrant = try await UserChromeControl.shared.grant(chat: reservedChatID, projectRoot: workingDirectory,
+                allowed: state.userChromeEnabled != false && scheduledRun == nil && access.effective.browser == .appAndUserChrome)
             var id = threadID
             if id == nil {
                 // Browser profiles belong to the folder they were made in, so a worktree chat starts with its own.
@@ -2007,13 +2032,14 @@ private struct ChatRunState: Equatable {
                     ? newChatBrowserProfiles[project.id].map { AgentBrowserProfile(id: $0) } : nil
                 let session = try await client.createSession(projectPath: workingDirectory, permissions: access,
                                                                  model: selectedModel, route: route, browserProfile: browserProfile,
-                                                                 kind: scheduledRun == nil ? .interactive : .scheduled)
+                                                                 kind: scheduledRun == nil ? .interactive : .scheduled, userChromeGrant: userChromeGrant)
                 if let browserProfile, newChatBrowserProfiles[project.id] == browserProfile.id {
                     newChatBrowserProfiles.removeValue(forKey: project.id)
                 }
                 let nativeCreated = session.nativeID
                 guard ConversationIdentity.appID(for: nativeCreated, in: state, connection: session.connection) == nil else { throw ConversationIdentity.invalidStorage }
                 var chat = Chat(session: session, projectID: project.id, title: ChatTitle.placeholder(), model: selectedModel)
+                chat.id = reservedChatID
                 chat.effort = selectedEffort
                 chat.worktree = newWorktree
                 if let newWorktree { consumeNewChatWorktree(newWorktree, project: project.id) }
@@ -2050,7 +2076,7 @@ private struct ChatRunState: Equatable {
             guard let id else { throw ClientFailure(L10n.text("Не выбран разговор", "No conversation selected")) }
             if !loadedThreads.contains(id) {
                 try await client.resume(sessionForChat(id), projectPath: workingDirectory, permissions: access, route: route,
-                                        kind: scheduledRun == nil ? .interactive : .scheduled)
+                                        kind: scheduledRun == nil ? .interactive : .scheduled, userChromeGrant: userChromeGrant)
                 loadedThreads.insert(id)
             }
             if let scheduledRun {
@@ -2083,7 +2109,7 @@ private struct ChatRunState: Equatable {
                                                           permissions: access, model: selectedModel, effort: selectedEffort,
                                                           advisor: modelCatalog(threadID.flatMap { connectionOfChat($0) } ?? newConnection)?.advisor(state.claudeAdvisor, selectedModel),
                                                           kind: scheduledRun == nil ? .interactive : .scheduled, conversation: ConversationID(id),
-                                                          chatDirectory: chatDirectoryArguments(for: id))
+                                                          chatDirectory: chatDirectoryArguments(for: id), userChromeGrant: userChromeGrant)
             if threadID == nil && scheduledRun == nil {
                 generateChatTitle(id, firstMessage: text, model: selectedModel, route: route)
             }
@@ -2608,8 +2634,11 @@ private struct ChatRunState: Equatable {
         let role = explicitRole ?? project.chatRole(roleCatalog)
         let explicitAddOns = try remoteAddOns(options, allowed: remoteAllowedAddOns(project: project))
         // Persist the stable app ID before sending. Native identity never comes from the phone.
-        let session = try await client.createSession(projectPath: project.path, permissions: role.profile(for: project, addOns: explicitAddOns ?? Self.projectAddOns(project)),
-                                                     model: model, route: route)
+        let permissions = role.profile(for: project, addOns: explicitAddOns ?? Self.projectAddOns(project))
+        let chromeGrant = try await UserChromeControl.shared.grant(chat: command.chat, projectRoot: project.path,
+            allowed: state.userChromeEnabled != false && permissions.effective.browser == .appAndUserChrome)
+        let session = try await client.createSession(projectPath: project.path, permissions: permissions,
+                                                     model: model, route: route, userChromeGrant: chromeGrant)
         guard !state.chats.contains(where: { $0.id == command.chat }),
               ConversationIdentity.appID(for: session.nativeID, in: state, connection: session.connection) == nil else { throw RemoteFailure.invalidCommand }
         var chat = Chat(session: session, projectID: project.id, title: ChatTitle.placeholder(), model: model)
@@ -2664,6 +2693,7 @@ private struct ChatRunState: Equatable {
                 }
                 throw error
             }
+            if let updated = state.chats.first(where: { $0.id == chat.id }) { revokeUserChromeIfNeeded(updated) }
             return "submitted"
         case "send":
             guard !isBusy(threadID: chat.id), runs[chat.id]?.sending != true,
