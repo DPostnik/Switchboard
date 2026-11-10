@@ -250,6 +250,17 @@ final class TableBox: NSObject {
     }
 
     private mutating func renderCode(_ code: MarkdownCode, into result: NSMutableAttributedString, indent: CGFloat, tail: CGFloat) {
+        // A table drawn with characters reads as a native table; its original text is one click away.
+        // Both views take the same keys and copy indices, so later blocks keep theirs when the view switches.
+        var tableKey: String?
+        if let table = code.drawnTable {
+            let key = nextKey("g")
+            guard view.expandedBlocks.contains(key) else {
+                renderTable(table, into: result, indent: indent, tail: tail, sourceKey: key)
+                return
+            }
+            tableKey = key
+        }
         let key = nextKey("c")
         let index = copyIndex; copyIndex += 1
         let start = result.length
@@ -260,12 +271,47 @@ final class TableBox: NSObject {
         let collapsible = !view.isDocument && lines.count > Self.codeCollapseThreshold
         let expanded = view.expandedBlocks.contains(key)
         let shown = collapsible && !expanded ? Array(lines.prefix(Self.codeCollapsedLines)) : lines
-        let numbered = lines.count >= Self.lineNumberThreshold && !code.isDiff
+        let numbered = lines.count >= Self.lineNumberThreshold && !code.isDiff && !code.isDrawing
+        let bodyIndent = indent + pad + (numbered ? Self.gutter : 0)
+
+        // Drawings are not wrapped: the type shrinks to the column width, down to a readable minimum.
+        // A drawing wider than that wraps like other code and offers its own window.
+        var bodyFont = mono, wrapping = NSLineBreakMode.byCharWrapping, tooWide = false
+        if code.isDrawing {
+            let available = width - 10 - bodyIndent + (tail - pad) - 2
+            let needed = shown.map { ($0 as NSString).size(withAttributes: [.font: mono]).width }.max() ?? 0
+            if needed > available, available > 0 {
+                let size = (mono.pointSize * available / needed * 4).rounded(.down) / 4
+                if size >= Self.drawingMinimumFontSize {
+                    bodyFont = NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+                } else {
+                    bodyFont = NSFont.monospacedSystemFont(ofSize: Self.drawingMinimumFontSize, weight: .regular)
+                    tooWide = true
+                }
+            }
+            if !tooWide { wrapping = .byClipping }
+        }
 
         // Header: language on the left, copy on the right.
         let header = NSMutableAttributedString(string: code.language ?? L10n.text("код", "code"), attributes: [
             .font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: DeskPalette.ns.muted
         ])
+        let headerLink: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: DeskPalette.ns.accentDeep]
+        if let tableKey {
+            header.append(NSAttributedString(string: "   ", attributes: [.font: NSFont.systemFont(ofSize: 11)]))
+            header.append(NSAttributedString(string: L10n.text("Показать таблицей", "Show as table"), attributes: headerLink.merging([
+                .link: "contextdesk-toggle:" + tableKey,
+                .toolTip: L10n.text("Показать эти данные настоящей таблицей", "Show this data as a real table")
+            ]) { $1 }))
+        }
+        if tooWide {
+            header.append(NSAttributedString(string: "   ", attributes: [.font: NSFont.systemFont(ofSize: 11)]))
+            header.append(NSAttributedString(string: L10n.text("Открыть без переноса", "Open unwrapped"), attributes: headerLink.merging([
+                .link: "contextdesk-code-open", .blockCopy: code.text,
+                .toolTip: L10n.text("Рисунок шире колонки: открыть его в отдельном окне без переноса строк",
+                                    "The drawing is wider than the column: open it in a separate window without line wrapping")
+            ]) { $1 }))
+        }
         header.append(NSAttributedString(string: "\t", attributes: [.font: NSFont.systemFont(ofSize: 11)]))
         let copyText = code.copyText
         let feedback = view.copyFeedback.flatMap { $0.id == item.id && $0.block == index ? $0.succeeded : nil }
@@ -283,7 +329,7 @@ final class TableBox: NSObject {
 
         // Body: highlighted, optionally numbered, diff lines tinted.
         let text = shown.joined(separator: "\n")
-        let codeText = NSMutableAttributedString(string: text, attributes: [.font: mono, .foregroundColor: NSColor.labelColor])
+        let codeText = NSMutableAttributedString(string: text, attributes: [.font: bodyFont, .foregroundColor: NSColor.labelColor])
         if code.isDiff {
             var location = 0
             for line in shown {
@@ -319,9 +365,9 @@ final class TableBox: NSObject {
             }
         }
         if codeText.length == 0 { codeText.append(NSAttributedString(string: " ", attributes: [.font: mono])) }
-        let bodyIndent = indent + pad + (numbered ? Self.gutter : 0)
         append(codeText, to: result, style: paragraph(bodyIndent, tail - pad) {
-            $0.lineSpacing = 2; $0.lineBreakMode = .byCharWrapping
+            // Box drawing joins line to line only without extra leading.
+            $0.lineSpacing = code.isDrawing ? 0 : 2; $0.lineBreakMode = wrapping
         }, after: collapsible ? 4 : 0)
 
         if collapsible {
@@ -460,8 +506,11 @@ final class TableBox: NSObject {
     }
 
     static let tableRowLimit = 100
+    static let drawingMinimumFontSize: CGFloat = 8.5
 
-    private mutating func renderTable(_ table: MarkdownTable, into result: NSMutableAttributedString, indent: CGFloat, tail: CGFloat) {
+    /// `sourceKey`: the table was drawn in a code block, and this toggle shows that text again.
+    private mutating func renderTable(_ table: MarkdownTable, into result: NSMutableAttributedString, indent: CGFloat, tail: CGFloat,
+                                      sourceKey: String? = nil) {
         let tableKey = nextKey("t")
         let index = copyIndex; copyIndex += 1
         let feedback = view.copyFeedback.flatMap { $0.id == item.id && $0.block == index ? $0.succeeded : nil }
@@ -480,6 +529,10 @@ final class TableBox: NSObject {
             toolbar.append(part)
         }
         do {
+            if let sourceKey {
+                action("text.alignleft", L10n.text("Как текст", "As text"), "contextdesk-toggle:" + sourceKey,
+                       tooltip: L10n.text("Показать исходный текст таблицы, как его написал агент", "Show the table's original text as the agent wrote it"))
+            }
             action("doc.on.doc", "Markdown", "contextdesk-table:md", tooltip: L10n.text("Скопировать таблицу в Markdown", "Copy the table as Markdown"))
             action("tablecells", "TSV", "contextdesk-table:tsv",
                    tooltip: L10n.text("Скопировать для Numbers и Excel (значения через табуляцию)", "Copy for Numbers and Excel (tab-separated values)"))

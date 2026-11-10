@@ -97,6 +97,106 @@ public struct MarkdownTable: Equatable, Sendable {
         }.joined(separator: "\n")
     }
 
+    // MARK: Drawn tables
+
+    /// A table drawn with characters that fills a whole code block: box drawing (`┌─┬─┐`, sqlite `.mode box`),
+    /// ASCII grids (`+---+`, MySQL, sqlite `.mode table`), psql output and dash-ruled columns (sqlite `.mode column`).
+    /// Diagrams, text around the grid and ragged rows return nil, so the block stays monospaced text.
+    public static func drawn(_ text: String) -> MarkdownTable? {
+        var lines = text.components(separatedBy: "\n").map { line -> String in
+            var line = line
+            while let last = line.last, last.isWhitespace { line.removeLast() }
+            return line
+        }
+        while lines.first?.isEmpty == true { lines.removeFirst() }
+        while lines.last?.isEmpty == true { lines.removeLast() }
+        // psql prints a row count after the table.
+        if let last = lines.last, last.range(of: #"^\s*\(\d+ rows?\)$"#, options: .regularExpression) != nil {
+            lines.removeLast()
+            while lines.last?.isEmpty == true { lines.removeLast() }
+        }
+        guard lines.count >= 3 else { return nil }
+        let rows = grid(lines) ?? psql(lines) ?? ruled(lines)
+        guard let rows, rows.count >= 2, let width = rows.first?.count, width >= 2,
+              rows.allSatisfy({ $0.count == width }) else { return nil }
+        let escaped = rows.map { $0.map { $0.replacingOccurrences(of: "|", with: "\\|") } }
+        return MarkdownTable(rows: escaped, alignments: Array(repeating: .left, count: width))
+    }
+
+    private static let verticals: Set<Character> = ["│", "┃", "║", "|"]
+    private static let rules: Set<Character> = Set("─━═-=+:┌┐└┘├┤┬┴┼╭╮╯╰┏┓┗┛┣┫┳┻╋╔╗╚╝╠╣╦╩╬╒╕╘╛╞╡╤╧╪╓╖╙╜╟╢╥╨╫┍┑┕┙┝┥┯┷┿┎┒┖┚┠┨┰┸╂")
+
+    /// Bordered grid: every line is a rule or a row framed by vertical bars. Rows between two rules
+    /// are one record whose wrapped lines join; without rules between them every line is a record.
+    /// Rules are unbroken, so boxes standing side by side in a diagram do not pass for a table.
+    private static func grid(_ lines: [String]) -> [[String]]? {
+        var segments: [[[String]]] = [], current: [[String]] = [], ruleCount = 0
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard let first = trimmed.first, let last = trimmed.last else { return nil }
+            if trimmed.allSatisfy({ rules.contains($0) }), trimmed.contains(where: { "─━═-=".contains($0) }) {
+                // ASCII rules are framed by corners; a bare dash line is not a grid.
+                if first == "-" || first == "=" { return nil }
+                ruleCount += 1
+                if !current.isEmpty { segments.append(current); current = [] }
+                continue
+            }
+            guard verticals.contains(first), verticals.contains(last), trimmed.count >= 2 else { return nil }
+            current.append(trimmed.dropFirst().dropLast().split(separator: first == "|" ? "|" : first, omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespaces) })
+        }
+        if !current.isEmpty { segments.append(current) }
+        guard ruleCount >= 2, let header = segments.first else { return nil }
+        let body = segments.dropFirst()
+        if segments.count == 1 { return header }
+        var rows = [merge(header)]
+        if body.count == 1 { rows += body[body.startIndex] } else { rows += body.map(merge) }
+        return rows
+    }
+
+    /// Joins the wrapped lines of one record cell by cell.
+    private static func merge(_ lines: [[String]]) -> [String] {
+        guard let width = lines.first?.count, lines.allSatisfy({ $0.count == width }) else { return lines.first ?? [] }
+        return (0..<width).map { column in lines.map { $0[column] }.filter { !$0.isEmpty }.joined(separator: " ") }
+    }
+
+    /// psql aligned output: a header, a `----+----` rule and rows split by bars.
+    private static func psql(_ lines: [String]) -> [[String]]? {
+        guard lines[1].trimmingCharacters(in: .whitespaces).range(of: #"^-+(\+-+)+$"#, options: .regularExpression) != nil else { return nil }
+        let rows = ([lines[0]] + lines.dropFirst(2)).map {
+            $0.split(separator: "|", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }
+        }
+        return rows
+    }
+
+    /// Columns under a dash ruler (`--  -----`): each cell is the text under its run of dashes.
+    private static func ruled(_ lines: [String]) -> [[String]]? {
+        let ruler = Array(lines[1])
+        guard ruler.allSatisfy({ $0 == "-" || $0 == " " }), ruler.first == "-" else { return nil }
+        var spans: [Range<Int>] = [], start: Int?
+        for (index, character) in ruler.enumerated() {
+            if character == "-", start == nil { start = index }
+            if character == " ", let begin = start { spans.append(begin..<index); start = nil }
+        }
+        if let start { spans.append(start..<ruler.count) }
+        guard spans.count >= 2 else { return nil }
+        // A cell reaches to the start of the next column, so values longer than the ruler stay whole.
+        var rows: [[String]] = []
+        for line in [lines[0]] + lines.dropFirst(2) {
+            let characters = Array(line)
+            var row: [String] = []
+            for (index, span) in spans.enumerated() {
+                let end = index + 1 < spans.count ? spans[index + 1].lowerBound : characters.count
+                guard span.lowerBound <= characters.count else { row.append(""); continue }
+                if span.lowerBound > 0, span.lowerBound < characters.count, characters[span.lowerBound - 1] != " " { return nil }
+                row.append(String(characters[span.lowerBound..<max(span.lowerBound, min(end, characters.count))])
+                    .trimmingCharacters(in: .whitespaces))
+            }
+            rows.append(row)
+        }
+        return rows
+    }
+
     private static func cells(_ line: String) -> [String]? {
         guard !line.hasPrefix("    "), !line.hasPrefix("\t") else { return nil }
         let characters = Array(line.trimmingCharacters(in: .whitespaces))

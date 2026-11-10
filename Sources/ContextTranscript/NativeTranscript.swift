@@ -1723,6 +1723,13 @@ public struct NativeTranscript: NSViewRepresentable {
             showCopyFeedback(id: previous[index].id, succeeded: pasteboard.setString(body, forType: .string), block: block)
             return true
         }
+        if value == "contextdesk-code-open" {
+            if let storage = transcript.textStorage, charIndex >= 0, charIndex < storage.length,
+               let text = storage.attribute(.blockCopy, at: charIndex, effectiveRange: nil) as? String {
+                TranscriptTextWindow.show(text, relativeTo: window)
+            }
+            return true
+        }
         if value.hasPrefix(Self.detailLinkPrefix) { handleDetailLink(value); return true }
         if value.hasPrefix("contextdesk-anchor:") {
             scroll(toAnchor: String(value.dropFirst("contextdesk-anchor:".count)))

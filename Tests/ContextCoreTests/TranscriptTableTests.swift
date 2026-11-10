@@ -74,6 +74,78 @@ import ContextTranscript
     #expect(!view.transcript.string.contains("Задача"))
 }
 
+@Test func drawnTablesParseBoxAsciiPsqlAndRuledColumns() {
+    let box = """
+    ┌────┬──────────┬───────┐
+    │ id │ name     │ total │
+    ├────┼──────────┼───────┤
+    │ 1  │ Alice    │ 120   │
+    │ 2  │ Bob      │ 75    │
+    └────┴──────────┴───────┘
+    """
+    #expect(MarkdownTable.drawn(box)?.rows == [["id", "name", "total"], ["1", "Alice", "120"], ["2", "Bob", "75"]])
+    let wrapped = "╭───────┬─────────╮\n│ ключ  │ значение│\n├───────┼─────────┤\n│ a     │ первая  │\n│       │ строка  │\n├───────┼─────────┤\n│ b     │ x|y     │\n╰───────┴─────────╯"
+    #expect(MarkdownTable.drawn(wrapped)?.rows == [["ключ", "значение"], ["a", "первая строка"], ["b", "x\\|y"]])
+    let ascii = "+----+-------+\n| id | name  |\n+----+-------+\n|  1 | Alice |\n+----+-------+\n1 row in set"
+    #expect(MarkdownTable.drawn(ascii) == nil)
+    #expect(MarkdownTable.drawn(String(ascii.dropLast("\n1 row in set".count)))?.rows == [["id", "name"], ["1", "Alice"]])
+    let psql = " id | name  | city\n----+-------+------\n  1 | Alice | Oslo\n  2 | Bob   |\n(2 rows)\n"
+    #expect(MarkdownTable.drawn(psql)?.rows == [["id", "name", "city"], ["1", "Alice", "Oslo"], ["2", "Bob", ""]])
+    let ruled = "id  name         city\n--  -----------  ----\n1   Alice Smith  Oslo\n2   Bob          Rome"
+    #expect(MarkdownTable.drawn(ruled)?.rows == [["id", "name", "city"], ["1", "Alice Smith", "Oslo"], ["2", "Bob", "Rome"]])
+    // Diagrams, text around a grid and Markdown source stay code.
+    let diagram = """
+     ┌─────────────┐     ┌──────────────┐
+     │ providers   │ ──► │ imports      │
+     └─────────────┘     └──────────────┘
+    """
+    let captioned = "Контейнер:\n" + box
+    let annotated = box.replacingOccurrences(of: "│ 75    │", with: "│ 75    │  ← max")
+    for text in [diagram, captioned, annotated, "a\n---\nb", "-- comment\nselect 1;\n-- end"] {
+        #expect(MarkdownTable.drawn(text) == nil)
+    }
+    #expect(MarkdownCode(language: "markdown", text: box).drawnTable == nil)
+    #expect(MarkdownCode(language: nil, text: box, closed: false).drawnTable == nil)
+    #expect(MarkdownCode(language: nil, text: diagram).isDrawing)
+    #expect(MarkdownCode(language: "sql", text: "select 1;").isDrawing == false)
+}
+
+@Test @MainActor func drawnTableBlocksRenderAsTablesAndDrawingsDoNotWrap() throws {
+    let view = TranscriptScrollView()
+    view.frame = NSRect(x: 0, y: 0, width: 760, height: 650)
+    let box = "┌────┬──────────┐\n│ id │ name     │\n├────┼──────────┤\n│ 1  │ Alice    │\n└────┴──────────┘"
+    view.update(items: [TranscriptItem(id: "drawn", kind: "assistant", text: "```\n" + box + "\n```\n\nAfter")], conversationID: "drawn", followOutput: false)
+    #expect(!view.transcript.string.contains("┌"))
+    #expect(view.transcript.string.contains("Alice"))
+    let storage = try #require(view.transcript.textStorage)
+    let toggle = (storage.string as NSString).range(of: L10n.text("Как текст", "As text")).location
+    #expect(toggle != NSNotFound)
+    _ = view.textView(view.transcript, clickedOnLink: "contextdesk-toggle:drawn#g0", at: toggle)
+    #expect(view.transcript.string.contains("┌────┬"))
+    #expect(view.transcript.string.contains(L10n.text("Показать таблицей", "Show as table")))
+
+    // A diagram keeps one line per source line in a narrow column: the type shrinks instead of wrapping.
+    let diagram = " ┌──────────────────────────┐        ┌──────────────────────────┐\n │ OrdersModule             │ ─────► │ InvoicesModule           │\n └──────────────────────────┘        └──────────────────────────┘"
+    view.frame.size.width = 480
+    view.layoutSubtreeIfNeeded()
+    view.update(items: [TranscriptItem(id: "diagram", kind: "assistant", text: "```\n" + diagram + "\n```")], conversationID: "diagram", followOutput: false)
+    view.layoutSubtreeIfNeeded()
+    let manager = try #require(view.transcript.layoutManager)
+    let container = try #require(view.transcript.textContainer)
+    manager.ensureLayout(for: container)
+    let text = view.transcript.string as NSString
+    for line in diagram.components(separatedBy: "\n") {
+        let range = text.range(of: line)
+        #expect(range.location != NSNotFound)
+        let glyphs = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        var fragments = 0
+        manager.enumerateLineFragments(forGlyphRange: glyphs) { _, _, _, _, _ in fragments += 1 }
+        #expect(fragments == 1)
+    }
+    let font = try #require(view.transcript.textStorage?.attribute(.font, at: text.range(of: "OrdersModule").location, effectiveRange: nil) as? NSFont)
+    #expect(font.pointSize < 12 && font.pointSize >= 8.5)
+}
+
 @Test @MainActor func nativeWideTableRemainsInsideNarrowViewport() throws {
     let view = TranscriptScrollView()
     view.frame = NSRect(x: 0, y: 0, width: 360, height: 550)

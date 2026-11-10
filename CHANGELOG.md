@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Render character tables and provide unwrapped drawing windows.
+
 - Show native project verification status.
 
 - Count waiting chats once on the Needs you page and badge.

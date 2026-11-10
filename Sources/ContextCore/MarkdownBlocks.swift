@@ -48,6 +48,19 @@ public struct MarkdownCode: Equatable, Sendable {
     public var isShell: Bool { ["sh", "bash", "zsh", "shell", "console", "terminal", "fish"].contains(language?.lowercased() ?? "") }
     public var isDiff: Bool { ["diff", "patch"].contains(language?.lowercased() ?? "") }
 
+    /// Box drawing or an ASCII grid: wrapped lines would break the picture, so such blocks are not wrapped.
+    public var isDrawing: Bool {
+        guard !isDiff else { return false }
+        return text.unicodeScalars.contains { (0x2500...0x257F).contains($0.value) }
+            || text.range(of: #"(?m)^\s*\+[-=+]{3,}\+\s*$"#, options: .regularExpression) != nil
+    }
+
+    /// The table a whole block draws with characters (`┌─┬─┐`, `+---+`, psql output); Markdown source stays code.
+    public var drawnTable: MarkdownTable? {
+        guard closed, !isDiff, !["markdown", "md"].contains(language?.lowercased() ?? "") else { return nil }
+        return MarkdownTable.drawn(text)
+    }
+
     /// Text placed on the pasteboard. Shell transcripts copy only their commands,
     /// without prompts or printed output; other code is copied verbatim.
     public var copyText: String {
