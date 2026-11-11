@@ -195,8 +195,9 @@ import ContextCore
     """#.utf8).write(to: executable)
     try installFixtureExecutable(at: executable)
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: folder)
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: AppStore(file: folder.appendingPathComponent("state.sqlite")), summaryExecutable: executable, summaryHome: folder)
+    let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: folder)
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient), store: AppStore(file: folder.appendingPathComponent("state.sqlite")), summaryExecutable: executable, summaryHome: folder)
     let project = Project(path: folder.path)
     model.state.projects = [project]
     model.state.chats = [Chat(id: "remote-chat", projectID: project.id, title: "Remote", model: "")]

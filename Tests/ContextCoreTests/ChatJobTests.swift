@@ -67,8 +67,8 @@ import ContextCore
     let executable = folder.appendingPathComponent("engine.py")
     try Data(#"""
     #!\#(fixturePython)
-    import sys, json
-    requests = []
+    import sys, json, os, pathlib
+    calls = pathlib.Path(os.environ['CODEX_HOME']) / 'calls.jsonl'
     turns = 0
     for line in sys.stdin:
         m = json.loads(line)
@@ -78,15 +78,20 @@ import ContextCore
         if method == 'turn/start':
             turns += 1
             result = {'turn': {'id': 'v' + str(turns)}}
-        if method == 'test/requests': result = requests
-        else: requests.append(m)
+        if method == 'test/requests':
+            result = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+        else:
+            with calls.open('a') as log: log.write(json.dumps(m) + '\n')
         print(json.dumps({'id': m['id'], 'result': result}), flush=True)
     """#.utf8).write(to: executable)
     try installFixtureExecutable(at: executable)
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: folder)
+    let client = CodexClient(transport: connection)
+    try await client.start(executable: executable, home: folder)
+    let integration = CodexIntegration(client: client)
+    defer { Task { await integration.disconnect() } }
     let store = AppStore(file: folder.appendingPathComponent("state.sqlite"))
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, summaryExecutable: executable, summaryHome: folder)
+    let model = DeskModel(connection: integration, store: store, summaryExecutable: executable, summaryHome: folder)
     model.state.defaultRoute = .direct
     let project = Project(path: folder.path)
     model.state.projects = [project]; model.projectID = project.id; model.chatID = "t"
@@ -107,7 +112,7 @@ import ContextCore
 
     let requests = try await connection.request("test/requests").array
     let sent = requests.filter { $0["method"].string == "turn/start" }.map { $0["params"]["input"].array.compactMap { $0["text"].string }.joined() }
-    #expect(sent.count == 3)
+    try #require(sent.count == 3)
     #expect(sent[0].hasPrefix("First\n\n[Switchboard: ") && sent[0].contains("tests pass") && ChatJobNote.stripped(sent[0]) == "First")
     #expect(sent[1] == "Second")
     #expect(sent[2].hasPrefix("Third\n\n[Switchboard: ") && ChatJobNote.stripped(sent[2]) == "Third")

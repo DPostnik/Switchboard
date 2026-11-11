@@ -36,6 +36,10 @@ mkdir -p "$app/Contents/Resources/ChatDirectoryRuntime"
 cp ChatDirectoryRuntime/server.py "$app/Contents/Resources/ChatDirectoryRuntime/"
 mkdir -p "$app/Contents/Resources/BrowserRuntime"
 cp BrowserRuntime/{server.py,broker.py,transport.py,chrome_host.py,profiles.py,cdp.py,page_input.py,install.py,cards.js,page_read.js,page_tree.js,runtime.lock.json,README.md} "$app/Contents/Resources/BrowserRuntime/"
+mkdir -p "$app/Contents/Resources/SandboxRuntime"
+cp SandboxRuntime/{mcp_host.py,mcp_relay.py,README.md} "$app/Contents/Resources/SandboxRuntime/"
+# The pinned nono helper (checksum, arm64 and vendor signature verified; the app verifies again before each use).
+python3 scripts/prepare-nono.py "$app/Contents/Helpers" --resources "$app/Contents/Resources/NonoRuntime"
 mkdir -p "$app/Contents/Resources/UserChromeRuntime" "$app/Contents/Resources/UserChromeExtension"
 cp UserChromeRuntime/server.py "$app/Contents/Resources/UserChromeRuntime/"
 cp UserChromeExtension/{manifest.json,worker.js,controller.js,page.js,popup.html,popup.js,popup.css} "$app/Contents/Resources/UserChromeExtension/"
@@ -43,7 +47,7 @@ cp -R UserChromeExtension/_locales "$app/Contents/Resources/UserChromeExtension/
 cp -R Skills "$app/Contents/Resources/Skills"
 # MCP servers run under /usr/bin/python3; a source it cannot read breaks every chat at startup.
 # Run each entry script: Python 3.9's file reader rejects some long non-ASCII lines that py_compile accepts.
-for script in ChatDirectoryRuntime/server.py BrowserRuntime/server.py BrowserRuntime/broker.py UserChromeRuntime/server.py; do
+for script in ChatDirectoryRuntime/server.py BrowserRuntime/server.py BrowserRuntime/broker.py UserChromeRuntime/server.py SandboxRuntime/mcp_host.py; do
   if ! /usr/bin/python3 -B "$app/Contents/Resources/$script" --help </dev/null >/dev/null; then
     echo "error: /usr/bin/python3 cannot start $script" >&2
     exit 1

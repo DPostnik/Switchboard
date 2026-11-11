@@ -141,7 +141,12 @@ private let codexLimitError = #"{"message":"You've hit your usage limit. Upgrade
     try Data(#"""
     #!\#(fixturePython)
     import sys, json
-    requests = []
+    import os, pathlib
+    calls = pathlib.Path(os.environ['CODEX_HOME']) / 'calls.jsonl'
+    def record(m):
+        with calls.open('a') as log: log.write(json.dumps(m) + '\n')
+    def recorded():
+        return [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
     turns = 0
     for line in sys.stdin:
         m = json.loads(line)
@@ -154,15 +159,16 @@ private let codexLimitError = #"{"message":"You've hit your usage limit. Upgrade
         if method == 'account/rateLimits/read':
             result = {'rateLimits': {'limitId': 'codex', 'primary': {'usedPercent': 100, 'windowDurationMins': 300, 'resetsAt': 4102444800},
                       'secondary': {'usedPercent': 41, 'windowDurationMins': 10080, 'resetsAt': 4103000000}, 'planType': 'plus'}}
-        if method == 'test/requests': result = requests
-        else: requests.append(m)
+        if method == 'test/requests': result = recorded()
+        else: record(m)
         print(json.dumps({'id': m['id'], 'result': result}), flush=True)
     """#.utf8).write(to: executable)
     try installFixtureExecutable(at: executable)
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: folder)
+    let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: folder)
     let store = AppStore(file: folder.appendingPathComponent("state.sqlite"))
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, summaryExecutable: executable, summaryHome: folder)
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient), store: store, summaryExecutable: executable, summaryHome: folder)
     model.state.defaultRoute = .direct
     let project = Project(path: folder.path)
     model.state.projects = [project]

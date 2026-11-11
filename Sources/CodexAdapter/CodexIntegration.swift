@@ -27,6 +27,9 @@ public actor CodexIntegration: AgentIntegration {
     private var chromeInteractions: [AgentSessionReference: Set<UUID>] = [:]
     private var routes: Set<AgentRoute> = [.direct]
     private var browserProfilesEnabled = false
+    private var resources: URL?
+    /// Reasons already logged for running a worker natively instead of under the external boundary.
+    private var loggedBoundaryReasons = Set<String>()
     private var providerArguments: [String] = []
     private var dispatched = Set<UUID>()
     private var turnContexts: [AgentSessionReference: [String: AgentContext]] = [:]
@@ -129,6 +132,7 @@ public actor CodexIntegration: AgentIntegration {
             }
             providerArguments = arguments
             browserProfilesEnabled = configuration.browserEnabled
+            resources = configuration.resources
             routes = Set([.direct] + configuration.optimizers.map { .optimizer(id: $0.id) })
             let result = await descriptor()
             if case .success(let value) = result { sink.yield(.init(session: nil, payload: .descriptor(value))) }
@@ -318,11 +322,31 @@ public actor CodexIntegration: AgentIntegration {
         // Keep the owner after the parent completes: background children and their stop/history
         // operations still belong to this process. Scope changes and disconnect release it.
     }
+    /// The external boundary for a worker, or nil (native sandbox and prompts) with the reason logged once.
+    private func boundary(project: String, permissions: AgentPermissionProfile, route: AgentRoute) async throws -> ExternalSandboxLaunch? {
+        let base = try worker(for: route)
+        guard let launch = await base.launchInfo else { return nil }
+        let helper = ExternalSandboxHelper.bundled()
+        let input = ExternalSandboxPlanner.Input(project: project, profile: permissions, providerHome: launch.home, providerExecutable: launch.executable,
+                                                 resources: resources, workflowDirectories: await base.registeredWorkflowDirectories)
+        switch ExternalSandboxPlanner.plan(input, helper: helper) {
+        case .success(let plan):
+            guard case .success(let verified) = helper else { return nil }
+            return ExternalSandboxLaunch(plan: plan, helper: verified)
+        case .failure(let reason):
+            let text = reason.description(language: .english)
+            if loggedBoundaryReasons.insert(text).inserted {
+                ExternalSandboxLog.logger.notice("Native Codex sandbox for \(project, privacy: .public): \(text, privacy: .public)")
+            }
+            return nil
+        }
+    }
     private func refreshChromeWorker(_ request: AgentExecutionRequest, session: AgentSessionReference) async throws {
         let scope = try chromeScope(request)
         guard chromeScopes[session] != scope else { return }
         let fresh = try await worker(for: request.route).isolatedSibling(
-            permissionArguments: scope.permissions.codexProcessArguments(projectPath: scope.project))
+            permissionArguments: scope.permissions.codexProcessArguments(projectPath: scope.project),
+            boundary: boundary(project: scope.project, permissions: scope.permissions, route: request.route))
         do {
             // The process that loaded the thread holds its writer lock; the cold worker cannot resume it until it is released.
             try await (chromeWorkers[session] ?? worker(for: request.route)).release(session)
@@ -343,7 +367,8 @@ public actor CodexIntegration: AgentIntegration {
                 }
                 let chosen = try self.worker(for: request.route)
                 let worker = try await chosen.isolatedSibling(
-                    permissionArguments: access.codexProcessArguments(projectPath: request.projectPath))
+                    permissionArguments: access.codexProcessArguments(projectPath: request.projectPath),
+                    boundary: self.boundary(project: request.projectPath, permissions: access, route: request.route))
                 let session: AgentSessionReference
                 do {
                     session = try await worker.createSession(projectPath: request.projectPath, permissions: access, model: request.model.model, route: route,

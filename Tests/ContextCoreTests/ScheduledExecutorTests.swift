@@ -147,9 +147,10 @@ private func makeRequest(_ runner: any AgentScheduledExecutor, root: URL) async 
     script = script.replacingOccurrences(of: "import sys,json,pathlib", with: "import sys,json,pathlib,os\nos.chdir(" + String(decoding: try encoder.encode(root.path), as: UTF8.self) + ")")
     try Data(script.utf8).write(to: native)
     try installFixtureExecutable(at: native)
-    let transport = CodexConnection(); try await transport.start(executable: native, home: root)
+    let transport = CodexConnection(); let fixtureClient = CodexClient(transport: transport)
+    try await fixtureClient.start(executable: native, home: root)
     let store = JobStore(file: root.appendingPathComponent("jobs.json"))
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: transport)), store: AppStore(file: root.appendingPathComponent("state.sqlite")), jobStore: store)
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient), store: AppStore(file: root.appendingPathComponent("state.sqlite")), jobStore: store)
     model.jobExecutorFactories[.claude] = { _, _, _, _ in ClaudeJobRunner(executable: claude) }
     var project = Project(path: root.path); project.accessMode = .fullAccess
     model.state.projects = [project]; model.schedulerReady = true; model.connected = true; model.authenticated = true

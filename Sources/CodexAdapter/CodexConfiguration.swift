@@ -33,10 +33,16 @@ extension AgentPermissionProfile {
     }
     /// An unattended run never waits: actions outside the sandbox are refused by the engine instead of asked.
     var codexApprovalPolicy: String { effective.approvals == .ask ? "on-request" : "never" }
-    public var codexThreadParameters: [String: JSONValue] {
-        ["approvalPolicy": .string(codexApprovalPolicy), "sandbox": .string(codexSandbox)]
+    public var codexThreadParameters: [String: JSONValue] { codexThreadParameters(external: false) }
+    /// Under the external boundary the OS enforces the roots: nothing is asked, an action outside them fails.
+    public func codexThreadParameters(external: Bool) -> [String: JSONValue] {
+        ["approvalPolicy": .string(external ? "never" : codexApprovalPolicy), "sandbox": .string(codexSandbox)]
     }
-    public func codexTurnParameters(projectPath: String) -> [String: JSONValue] {
+    public func codexTurnParameters(projectPath: String, external: Bool = false) -> [String: JSONValue] {
+        if external {
+            return ["approvalPolicy": .string("never"),
+                    "sandboxPolicy": .object(["type": .string("externalSandbox"), "networkAccess": .string(effective.network ? "enabled" : "restricted")])]
+        }
         let policy: JSONValue
         switch effective.filesystem {
         case .readOnly: policy = .object(["type": .string("readOnly")])

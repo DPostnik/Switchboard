@@ -27,10 +27,11 @@ import Testing
     try Data(#"""
     #!\#(fixturePython)
     import json, sys
-    received = []
+    import os, pathlib
+    calls = pathlib.Path(os.environ['CODEX_HOME']) / 'calls.jsonl'
     for line in sys.stdin:
         request = json.loads(line)
-        received.append(request)
+        with calls.open('a') as log: log.write(json.dumps(request) + '\n')
         if 'method' not in request or 'id' not in request: continue
         method = request['method']
         result = {}
@@ -38,13 +39,14 @@ import Testing
         if method == 'thread/start': result = {'thread':{'id':'created-native'}}
         if method == 'turn/start': result = {'turn':{'id':'remote-turn'}}
         if method == 'test/emit': print(json.dumps(request['params']), flush=True)
-        if method == 'test/received': result = received[:-1]
+        if method == 'test/received': result = [json.loads(line) for line in calls.read_text().splitlines()][:-1]
         print(json.dumps({'id':request['id'], 'result':result}), flush=True)
     """#.utf8).write(to: executable)
     try installFixtureExecutable(at: executable)
     let wire = CodexConnection()
-    try await wire.start(executable: executable, home: folder)
-    let integration = CodexIntegration(client: CodexClient(transport: wire))
+    let fixtureClient = CodexClient(transport: wire)
+    try await fixtureClient.start(executable: executable, home: folder)
+    let integration = CodexIntegration(client: fixtureClient)
     let store = AppStore(file: folder.appendingPathComponent("state.sqlite"))
     let model = DeskModel(connection: integration, store: store, summaryExecutable: executable, summaryHome: folder)
     var project = Project(path: folder.path)

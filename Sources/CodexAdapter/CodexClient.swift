@@ -17,6 +17,12 @@ public actor CodexClient {
     private var browserResources: URL?
     private var userChromeEnabled = false
     private var launch: (executable: URL, home: URL, arguments: [String])?
+    /// The external boundary this worker runs under, with the host serving its app-owned MCP servers outside it.
+    private var boundary: ExternalSandboxLaunch?
+    private var boundaryHost: ExternalSandboxHost?
+    var launchInfo: (executable: URL, home: URL)? { launch.map { ($0.executable, $0.home) } }
+    var runsUnderExternalBoundary: Bool { boundary != nil }
+    var registeredWorkflowDirectories: [URL] { workflowDirectories }
     private var workflowDirectories: [URL] = []
     private var browserRoot = BrowserConfiguration.directory
     var interactions: [UUID: (pending: CodexPendingInteraction, generation: UUID, token: UUID)] = [:]
@@ -43,8 +49,17 @@ public actor CodexClient {
 
     public func start(executable: URL, home: URL, extraArguments: [String] = [],
                       diagnosticsResources: URL? = nil, browserResources: URL? = nil, browserRoot: URL = BrowserConfiguration.directory,
-                      userChromeEnabled: Bool = false) async throws {
+                      userChromeEnabled: Bool = false, boundary: ExternalSandboxLaunch? = nil) async throws {
         self.launch = (executable, home, extraArguments)
+        self.boundary = boundary
+        if let boundary {
+            // The boundary never starts without its host: an app-owned server the sandbox cannot reach would fail the thread.
+            guard let diagnosticsResources else { throw ClientFailure(L10n.text("Компонент SandboxRuntime отсутствует в сборке.", "The SandboxRuntime component is missing from this build.")) }
+            try boundary.plan.materialize()
+            let host = ExternalSandboxHost(plan: boundary.plan, resources: diagnosticsResources)
+            do { try await host.start() } catch { boundary.plan.removeWorkerFolder(); throw error }
+            boundaryHost = host
+        }
         generatedImagesHome = home.appendingPathComponent("generated_images", isDirectory: true)
         generatedImageBaselines.removeAll()
         diagnosticScopes.removeAll()
@@ -53,15 +68,23 @@ public actor CodexClient {
         self.browserRoot = browserRoot
         self.userChromeEnabled = userChromeEnabled
         observeEvents()
-        try await transport.start(executable: executable, home: home, extraArguments: extraArguments)
+        do { try await transport.start(executable: executable, home: home, extraArguments: extraArguments, boundary: boundary) }
+        catch { await stopBoundary(); throw error }
+        if let boundary {
+            ExternalSandboxLog.logger.notice("External boundary active: worker \(boundary.plan.workerID, privacy: .public) project \(boundary.plan.project, privacy: .public) readOnly \(boundary.plan.readOnlyProject, privacy: .public) mediated \(boundary.plan.commands.map(\.name).joined(separator: ","), privacy: .public)")
+        }
+    }
+    private func stopBoundary() async {
+        await boundaryHost?.stop(); boundaryHost = nil
+        boundary?.plan.removeWorkerFolder()
     }
     /// A cold worker applies thread MCP overrides without changing other chats or the account epoch.
-    func isolatedSibling(permissionArguments: [String] = []) async throws -> CodexClient {
+    func isolatedSibling(permissionArguments: [String] = [], boundary: ExternalSandboxLaunch? = nil) async throws -> CodexClient {
         guard let launch else { throw ClientFailure(L10n.text("Codex не подключён", "Codex is not connected")) }
         let worker = CodexClient(transport: await transport.sibling(preservingAccountRevision: true))
         try await worker.start(executable: launch.executable, home: launch.home, extraArguments: launch.arguments + permissionArguments,
                                diagnosticsResources: diagnosticsResources, browserResources: browserResources,
-                               browserRoot: browserRoot, userChromeEnabled: userChromeEnabled)
+                               browserRoot: browserRoot, userChromeEnabled: userChromeEnabled, boundary: boundary)
         let expectedAgent = await transport.serverUserAgent
         guard await worker.transport.serverUserAgent == expectedAgent else {
             await worker.stop()
@@ -72,7 +95,7 @@ public actor CodexClient {
         } catch { await worker.stop(); throw error }
         return worker
     }
-    public func stop() async { resetInteractions(); await transport.stop() }
+    public func stop() async { resetInteractions(); await transport.stop(); await stopBoundary() }
     deinit { for task in subagentHistoryTasks.values { task.cancel() }; eventTask?.cancel(); eventSink.finish() }
 
     public func account() async throws -> CodexAccount {
@@ -104,7 +127,7 @@ public actor CodexClient {
 
     public func createSession(projectPath: String, permissions: AgentPermissionProfile, model: String, route: RequestRoute,
                               browserProfile: AgentBrowserProfile? = nil, scheduled: Bool = false, userChromeGrant: AgentUserChromeGrant? = nil) async throws -> AgentSessionReference {
-        var params = permissions.codexThreadParameters
+        var params = permissions.codexThreadParameters(external: boundary != nil)
         let profiles = BrowserProfileStore(root: browserRoot)
         guard browserProfile == nil || browserResources != nil else { throw BrowserProfileError.scope }
         let grant = browserResources == nil ? nil : try profiles.prepareNew(project: projectPath, connection: .originalCodex, selection: browserProfile) { environment in
@@ -114,6 +137,7 @@ public actor CodexClient {
                                                                                                                      policy: BrowserLaunchPolicy(permissions, scheduled: scheduled)))
         params["config"] = diagnosticsConfiguration(params["config"] ?? .object([:]), project: projectPath, permissions: permissions)
         params["config"] = try userChromeConfiguration(params["config"] ?? .object([:]), permissions: permissions, scheduled: scheduled, grant: userChromeGrant)
+        params["config"] = try relayed(params["config"] ?? .object([:]))
         params["cwd"] = .string(projectPath)
         params["modelProvider"] = .string(route.providerID)
         params["developerInstructions"] = .string(AgentAutonomy.instructions() + (UserChromeConfiguration.allowed(enabled: userChromeEnabled, permissions: permissions, scheduled: scheduled, grant: userChromeGrant) ? "\n" + UserChromeConfiguration.instructions : ""))
@@ -131,7 +155,7 @@ public actor CodexClient {
     }
     public func resume(_ session: AgentSessionReference, projectPath: String, permissions: AgentPermissionProfile, route: RequestRoute,
                        scheduled: Bool = false, userChromeGrant: AgentUserChromeGrant? = nil) async throws {
-        var params = permissions.codexThreadParameters
+        var params = permissions.codexThreadParameters(external: boundary != nil)
         let id = try nativeID(session)
         let profiles = BrowserProfileStore(root: browserRoot)
         let grant = browserResources == nil ? nil : try profiles.prepare(session: session, project: projectPath)
@@ -140,6 +164,7 @@ public actor CodexClient {
         params["threadId"] = .string(id)
         params["config"] = diagnosticsConfiguration(params["config"] ?? .object([:]), project: projectPath, permissions: permissions)
         params["config"] = try userChromeConfiguration(params["config"] ?? .object([:]), permissions: permissions, scheduled: scheduled, grant: userChromeGrant)
+        params["config"] = try relayed(params["config"] ?? .object([:]))
         params["cwd"] = .string(projectPath)
         params["modelProvider"] = .string(route.providerID)
         params["developerInstructions"] = .string(AgentAutonomy.instructions() + (UserChromeConfiguration.allowed(enabled: userChromeEnabled, permissions: permissions, scheduled: scheduled, grant: userChromeGrant) ? "\n" + UserChromeConfiguration.instructions : ""))
@@ -164,6 +189,30 @@ public actor CodexClient {
         }
         throw ClientFailure(L10n.text("Codex не освободил чат: в нём ещё идёт ход. Отправь сообщение после его завершения.",
                                      "Codex did not release the chat: a turn is still running. Send the message after it finishes."))
+    }
+    /// Under the boundary, app-owned servers (`mcp_servers.switchboard_*`) run outside it: the host gets their real
+    /// commands through the spec file and the sandboxed process launches the relay instead. Project servers stay inside.
+    @_spi(NativeProtocol) public func relayedForTesting(_ config: JSONValue, boundary: ExternalSandboxLaunch) throws -> JSONValue {
+        self.boundary = boundary
+        defer { self.boundary = nil }
+        return try relayed(config)
+    }
+    func relayed(_ config: JSONValue) throws -> JSONValue {
+        guard let boundary else { return config }
+        var result = config.object, servers: [String: ExternalSandboxServer] = [:]
+        for (key, value) in result where key.hasPrefix("mcp_servers.switchboard_") {
+            var entry = value.object
+            guard entry["enabled"] == .bool(true), let command = entry["command"]?.string, command.hasPrefix("/") else { continue }
+            let name = String(key.dropFirst("mcp_servers.".count))
+            var environment: [String: String] = [:]
+            for (variable, item) in entry["env"]?.object ?? [:] { if let text = item.string { environment[variable] = text } }
+            servers[name] = ExternalSandboxServer(command: command, arguments: entry["args"]?.array.compactMap(\.string) ?? [], environment: environment)
+            let relay = boundary.plan.relayCommand(for: name)
+            entry["command"] = .string(relay.command); entry["args"] = .array(relay.arguments.map(JSONValue.string)); entry["env"] = nil
+            result[key] = .object(entry)
+        }
+        try boundary.plan.writeServers(servers)
+        return .object(result)
     }
     private func userChromeConfiguration(_ base: JSONValue, permissions: AgentPermissionProfile, scheduled: Bool, grant: AgentUserChromeGrant?) throws -> JSONValue {
         var config = base.object
@@ -215,7 +264,7 @@ public actor CodexClient {
             "threadId": .string(try nativeID(session)),
             "input": .array([.object(["type": .string("text"), "text": .string(text), "text_elements": .array([])])])
         ]
-        params.merge(permissions.codexTurnParameters(projectPath: projectPath)) { _, new in new }
+        params.merge(permissions.codexTurnParameters(projectPath: projectPath, external: boundary != nil)) { _, new in new }
         if !model.isEmpty { params["model"] = .string(model) }
         if !effort.isEmpty { params["effort"] = .string(effort) }
         return try await transport.request("turn/start", params: .object(params), timeout: 60)["turn"]["id"].string

@@ -13,7 +13,12 @@ import ContextCore
     try Data(#"""
     #!\#(fixturePython)
     import sys, json
-    requests = []
+    import os, pathlib
+    calls = pathlib.Path(os.environ['CODEX_HOME']) / 'calls.jsonl'
+    def record(m):
+        with calls.open('a') as log: log.write(json.dumps(m) + '\n')
+    def recorded():
+        return [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
     turns = 0
     for line in sys.stdin:
         m = json.loads(line)
@@ -23,15 +28,16 @@ import ContextCore
         if method == 'turn/start':
             turns += 1
             result = {'turn': {'id': 'v' + str(turns)}}
-        if method == 'test/requests': result = requests
-        else: requests.append(m)
+        if method == 'test/requests': result = recorded()
+        else: record(m)
         print(json.dumps({'id': m['id'], 'result': result}), flush=True)
     """#.utf8).write(to: executable)
     try installFixtureExecutable(at: executable)
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: folder)
+    let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: folder)
     let store = AppStore(file: folder.appendingPathComponent("state.sqlite"))
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, summaryExecutable: executable, summaryHome: folder)
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient), store: store, summaryExecutable: executable, summaryHome: folder)
     model.state.defaultRoute = .direct
     let project = Project(path: folder.path)
     model.state.projects = [project]; model.projectID = project.id; model.chatID = "t"
@@ -72,7 +78,7 @@ import ContextCore
     // Only the message that interrupted the turn tells the agent to finish the interrupted task; the transcript hides the note.
     requests = try await connection.request("test/requests").array
     let sent = requests.filter { $0["method"].string == "turn/start" }.map { $0["params"]["input"].array.compactMap { $0["text"].string }.joined() }
-    #expect(sent.count == 3)
+    try #require(sent.count == 3)
     #expect(sent[0] == "First" && sent[2] == "Second")
     #expect(sent[1].hasPrefix("Third\n\n[Switchboard: ") && InterruptedTurnNote.stripped(sent[1]) == "Third")
     #expect(TranscriptItem(id: "u", kind: "user", text: sent[1]).text == "Third")
@@ -86,7 +92,7 @@ import ContextCore
     try await store.save(model.state)
     let restored = try await store.load()
     #expect(restored.queuedMessages == model.state.queuedMessages)
-    #expect(DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, summaryExecutable: executable, summaryHome: folder).queuePaused)
+    #expect(DeskModel(connection: CodexIntegration(client: fixtureClient), store: store, summaryExecutable: executable, summaryHome: folder).queuePaused)
     await model.sendQueuedMessageNow(try #require(model.visibleQueue.first?.id))
     for _ in 0..<100 {
         if model.busy && !model.sending { break }
@@ -110,7 +116,13 @@ private func parallelChatFixture() throws -> (URL, URL) {
     try Data(#"""
     #!\#(fixturePython)
     import sys, json, threading
-    requests, counts = [], {}
+    import os, pathlib
+    calls = pathlib.Path(os.environ['CODEX_HOME']) / 'calls.jsonl'
+    def record(m):
+        with calls.open('a') as log: log.write(json.dumps(m) + '\n')
+    def recorded():
+        return [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+    counts = {}
     lock = threading.Lock()
     def emit(m, result):
         with lock:
@@ -120,8 +132,8 @@ private func parallelChatFixture() throws -> (URL, URL) {
         if 'id' not in m: continue
         method = m['method']
         result = {'userAgent': 'codex/0.158.0-alpha.2.1 fixture'}
-        if method == 'test/requests': result = list(requests)
-        else: requests.append(m)
+        if method == 'test/requests': result = recorded()
+        else: record(m)
         if method == 'thread/start': result = {'thread': {'id': 'new-thread'}}
         if method in ['thread/archive', 'thread/unarchive']:
             if m['params']['threadId'] == 'failed-archive':
@@ -154,8 +166,9 @@ private func parallelChatFixture() throws -> (URL, URL) {
     let (folder, executable) = try parallelChatFixture()
     defer { try? FileManager.default.removeItem(at: folder) }
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: folder)
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: AppStore(file: folder.appendingPathComponent("state.sqlite")),
+    let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: folder)
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient), store: AppStore(file: folder.appendingPathComponent("state.sqlite")),
                           summaryExecutable: executable, summaryHome: folder)
     let a = Project(path: folder.appendingPathComponent("a").path)
     let b = Project(path: folder.appendingPathComponent("b").path)
@@ -195,7 +208,11 @@ private func parallelChatFixture() throws -> (URL, URL) {
     #expect(model.isBusy(threadID: "b"))
     let requests = try await connection.request("test/requests").array
     #expect(requests.filter { $0["method"].string == "turn/interrupt" }.map { $0["params"]["threadId"].string } == ["a"])
-    #expect(requests.filter { $0["method"].string == "turn/start" }.map { $0["params"]["threadId"].string } == ["a", "b", "b"])
+    let starts = requests.filter { $0["method"].string == "turn/start" }
+    // Independent workers may reach turn/start in either order; each chat keeps its own order.
+    #expect(starts.compactMap { $0["params"]["threadId"].string }.sorted() == ["a", "b", "b"])
+    #expect(starts.filter { $0["params"]["threadId"].string == "b" }
+        .map { $0["params"]["input"].array.first?["text"].string } == ["B first", "B queued"])
 
     // Clicking the same project leaves its existing chat and preserves a new draft.
     model.selectProject(b.id)
@@ -222,8 +239,9 @@ private func parallelChatFixture() throws -> (URL, URL) {
     let (folder, executable) = try parallelChatFixture()
     defer { try? FileManager.default.removeItem(at: folder) }
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: folder)
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: AppStore(file: folder.appendingPathComponent("state.sqlite")),
+    let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: folder)
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient), store: AppStore(file: folder.appendingPathComponent("state.sqlite")),
                           summaryExecutable: executable, summaryHome: folder)
     let project = Project(path: folder.path)
     model.state.projects = [project]; model.projectID = project.id
@@ -251,9 +269,10 @@ private func parallelChatFixture() throws -> (URL, URL) {
     let (folder, executable) = try parallelChatFixture()
     defer { try? FileManager.default.removeItem(at: folder) }
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: folder)
+    let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: folder)
     let store = AppStore(file: folder.appendingPathComponent("state.sqlite"))
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, summaryExecutable: executable, summaryHome: folder)
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient), store: store, summaryExecutable: executable, summaryHome: folder)
     let project = Project(path: folder.path)
     model.state.projects = [project]; model.projectID = project.id
     model.state.defaultRoute = .direct; model.connected = true; model.authenticated = true
@@ -315,9 +334,10 @@ private func parallelChatFixture() throws -> (URL, URL) {
     let (folder, executable) = try parallelChatFixture()
     defer { try? FileManager.default.removeItem(at: folder) }
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: folder)
+    let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: folder)
     let store = AppStore(file: folder.appendingPathComponent("state.sqlite"))
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, summaryExecutable: executable, summaryHome: folder)
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient), store: store, summaryExecutable: executable, summaryHome: folder)
     let project = Project(path: folder.path)
     model.state.projects = [project]; model.projectID = project.id
     model.state.defaultRoute = .direct; model.connected = true; model.authenticated = true
@@ -384,9 +404,10 @@ private func parallelChatFixture() throws -> (URL, URL) {
     let (folder, executable) = try parallelChatFixture()
     defer { try? FileManager.default.removeItem(at: folder) }
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: folder)
+    let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: folder)
     let store = AppStore(file: folder.appendingPathComponent("state.sqlite"))
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, summaryExecutable: executable, summaryHome: folder)
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient), store: store, summaryExecutable: executable, summaryHome: folder)
     let project = Project(path: folder.path)
     model.state.projects = [project]; model.projectID = project.id
     model.state.defaultRoute = .direct; model.connected = true; model.authenticated = true
@@ -418,34 +439,40 @@ private func parallelChatFixture() throws -> (URL, URL) {
     try Data(#"""
     #!\#(fixturePython)
     import sys, json, time
-    requests = []
+    import os, pathlib
+    calls = pathlib.Path(os.environ['CODEX_HOME']) / 'calls.jsonl'
+    def record(m):
+        with calls.open('a') as log: log.write(json.dumps(m) + '\n')
+    def recorded():
+        return [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
     turns = 0
-    fail_next = False
+    failure = pathlib.Path(os.environ['CODEX_HOME']) / 'fail-next'
     for line in sys.stdin:
         m = json.loads(line)
         if 'id' not in m: continue
         method = m['method']
         result = {'userAgent': 'codex/0.158.0-alpha.2.1 fixture'}
         if method == 'test/fail':
-            fail_next = True
+            failure.touch()
         elif method == 'turn/start':
-            requests.append(m)
-            if fail_next:
-                fail_next = False
+            record(m)
+            if failure.exists():
+                failure.unlink()
                 time.sleep(0.4)  # the app quits under this send
                 print(json.dumps({'id': m['id'], 'error': {'code': -32000, 'message': 'connection closed'}}), flush=True)
                 continue
             turns += 1
             result = {'turn': {'id': 'v' + str(turns)}}
-        if method == 'test/requests': result = requests
-        elif method != 'turn/start': requests.append(m)
+        if method == 'test/requests': result = recorded()
+        elif method != 'turn/start': record(m)
         print(json.dumps({'id': m['id'], 'result': result}), flush=True)
     """#.utf8).write(to: executable)
     try installFixtureExecutable(at: executable)
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: folder)
+    let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: folder)
     let store = AppStore(file: folder.appendingPathComponent("state.sqlite"))
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, summaryExecutable: executable, summaryHome: folder)
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient), store: store, summaryExecutable: executable, summaryHome: folder)
     model.state.defaultRoute = .direct
     let project = Project(path: folder.path)
     model.state.projects = [project]; model.projectID = project.id; model.chatID = "t"
@@ -487,7 +514,7 @@ private func parallelChatFixture() throws -> (URL, URL) {
     #expect(try await store.load().queuedMessages?.map(\.text) == ["In flight", "Typed during the quit"])
 
     // The next launch releases the held messages of connected chats; the queue then drains in order.
-    let relaunched = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, summaryExecutable: executable, summaryHome: folder)
+    let relaunched = DeskModel(connection: CodexIntegration(client: fixtureClient), store: store, summaryExecutable: executable, summaryHome: folder)
     relaunched.state = try await store.load()
     relaunched.projectID = project.id; relaunched.chatID = "t"
     relaunched.connected = true; relaunched.authenticated = true
@@ -512,7 +539,7 @@ private func parallelChatFixture() throws -> (URL, URL) {
     var offline = try await store.load()
     offline.queuedMessages = [QueuedMessage(id: "held", threadID: "t", projectID: project.id, text: "Later", model: "", effort: "")]
     offline.queuedMessages?[0].heldForRestart = true
-    let disconnected = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, summaryExecutable: executable, summaryHome: folder)
+    let disconnected = DeskModel(connection: CodexIntegration(client: fixtureClient), store: store, summaryExecutable: executable, summaryHome: folder)
     disconnected.state = offline
     disconnected.projectID = project.id; disconnected.chatID = "t"
     disconnected.releaseQueueHeldForRestart()
@@ -546,9 +573,9 @@ private func parallelChatFixture() throws -> (URL, URL) {
     #expect(queue.movingQueued("q2", toChatPosition: 0)?.map(\.id) == ["q2", "q1"])
 }
 
-@MainActor private func queueModel(_ folder: URL, _ executable: URL, _ connection: CodexConnection, chats: [String] = ["t"]) -> (DeskModel, AppStore) {
+@MainActor private func queueModel(_ folder: URL, _ executable: URL, _ fixtureClient: CodexClient, chats: [String] = ["t"]) -> (DeskModel, AppStore) {
     let store = AppStore(file: folder.appendingPathComponent("state.sqlite"))
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, summaryExecutable: executable, summaryHome: folder)
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient), store: store, summaryExecutable: executable, summaryHome: folder)
     let project = Project(path: folder.path)
     model.state.projects = [project]; model.projectID = project.id; model.chatID = chats[0]
     model.state.chats = chats.map { Chat(id: $0, projectID: project.id, title: $0, model: "") }
@@ -572,8 +599,9 @@ private func parallelChatFixture() throws -> (URL, URL) {
     let (folder, executable) = try parallelChatFixture()
     defer { try? FileManager.default.removeItem(at: folder) }
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: folder)
-    let (model, store) = queueModel(folder, executable, connection, chats: ["t", "o"])
+    let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: folder)
+    let (model, store) = queueModel(folder, executable, fixtureClient, chats: ["t", "o"])
     model.draft = "First"; await model.send()
     for text in ["Second", "Third", "Fourth"] { model.draft = text; await model.send() }
     let projectID = try #require(model.state.projects.first?.id)
@@ -620,8 +648,9 @@ private func parallelChatFixture() throws -> (URL, URL) {
     let (folder, executable) = try parallelChatFixture()
     defer { try? FileManager.default.removeItem(at: folder) }
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: folder)
-    let (model, _) = queueModel(folder, executable, connection)
+    let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: folder)
+    let (model, _) = queueModel(folder, executable, fixtureClient)
     model.draft = "First"; await model.send()
     for text in ["A", "B", "C"] { model.draft = text; await model.send() }
     let ids = model.visibleQueue.map(\.id)
@@ -665,8 +694,9 @@ private func parallelChatFixture() throws -> (URL, URL) {
     let (folder, executable) = try parallelChatFixture()
     defer { try? FileManager.default.removeItem(at: folder) }
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: folder)
-    let (model, store) = queueModel(folder, executable, connection)
+    let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: folder)
+    let (model, store) = queueModel(folder, executable, fixtureClient)
     model.draft = "First"; await model.send()
     model.draft = "Next"; await model.send()
 

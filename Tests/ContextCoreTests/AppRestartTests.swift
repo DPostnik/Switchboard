@@ -121,8 +121,8 @@ import ContextCore
     let executable = folder.appendingPathComponent("engine.py")
     try Data(#"""
     #!\#(fixturePython)
-    import sys, json
-    requests = []
+    import sys, json, os, pathlib
+    calls = pathlib.Path(os.environ['CODEX_HOME']) / 'calls.jsonl'
     turns = 0
     for line in sys.stdin:
         m = json.loads(line)
@@ -132,14 +132,19 @@ import ContextCore
         if method == 'turn/start':
             turns += 1
             result = {'turn': {'id': 'v' + str(turns)}}
-        if method == 'test/requests': result = requests
-        else: requests.append(m)
+        if method == 'test/requests':
+            result = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+        else:
+            with calls.open('a') as log: log.write(json.dumps(m) + '\n')
         print(json.dumps({'id': m['id'], 'result': result}), flush=True)
     """#.utf8).write(to: executable)
     try installFixtureExecutable(at: executable)
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: folder)
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)),
+    let client = CodexClient(transport: connection)
+    try await client.start(executable: executable, home: folder)
+    let integration = CodexIntegration(client: client)
+    defer { Task { await integration.disconnect() } }
+    let model = DeskModel(connection: integration,
                           store: AppStore(file: folder.appendingPathComponent("state.sqlite")), summaryExecutable: executable, summaryHome: folder)
     model.state.defaultRoute = .direct
     let project = Project(path: folder.path)

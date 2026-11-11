@@ -190,7 +190,12 @@ func schedulerRecoveryPreservesNextOccurrenceWithoutReplaying(activeStatus: JobR
     try Data(#"""
     #!\#(fixturePython)
     import sys, json
-    requests = []
+    import os, pathlib
+    calls = pathlib.Path(os.environ['CODEX_HOME']) / 'calls.jsonl'
+    def record(m):
+        with calls.open('a') as log: log.write(json.dumps(m) + '\n')
+    def recorded():
+        return [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
     for line in sys.stdin:
         m=json.loads(line)
         if 'id' not in m: continue
@@ -198,14 +203,15 @@ func schedulerRecoveryPreservesNextOccurrenceWithoutReplaying(activeStatus: JobR
         result={'userAgent':'codex/0.158.0-alpha.2.1 fixture'}
         if method=='thread/start': result={'thread':{'id':'scheduled-thread'}}
         if method=='turn/start': result={'turn':{'id':'scheduled-turn'}}
-        if method=='test/requests': result=requests
-        else: requests.append(m)
+        if method=='test/requests': result=recorded()
+        else: record(m)
         print(json.dumps({'id':m['id'],'result':result}),flush=True)
     """#.utf8).write(to: executable)
     try installFixtureExecutable(at: executable)
-    let connection = CodexConnection(); try await connection.start(executable: executable, home: root)
+    let connection = CodexConnection(); let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: root)
     let store = JobStore(file: root.appendingPathComponent("jobs.json"))
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: AppStore(file: root.appendingPathComponent("state.sqlite")), jobStore: store)
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient), store: AppStore(file: root.appendingPathComponent("state.sqlite")), jobStore: store)
     let project = Project(path: root.path); model.state.projects = [project]; model.projectID = project.id
     model.chatID = "visible-chat"; model.draft = "Keep my draft"; model.connected = true; model.authenticated = true
     model.schedulerReady = true
@@ -280,23 +286,26 @@ func schedulerRecoveryPreservesNextOccurrenceWithoutReplaying(activeStatus: JobR
     try Data(#"""
     #!\#(fixturePython)
     import sys,json
-    starts=0
+    import os, pathlib
+    counter = pathlib.Path(os.environ['CODEX_HOME']) / 'starts'
+    def starts(): return int(counter.read_text()) if counter.exists() else 0
     for line in sys.stdin:
         m=json.loads(line)
         if 'id' not in m: continue
         method=m['method']; result={'userAgent':'codex/0.158.0-alpha.2.1 fixture'}
-        if method=='thread/start': result={'thread':{'id':'uncertain-thread-'+str(starts)}}
+        if method=='thread/start': result={'thread':{'id':'uncertain-thread-'+str(starts())}}
         if method=='turn/start':
-            starts+=1
+            counter.write_text(str(starts() + 1))
             # A malformed acknowledgement leaves delivery unconfirmed.
             result={'userAgent':'codex/0.158.0-alpha.2.1 fixture'}
-        if method=='test/count': result={'starts':starts}
+        if method=='test/count': result={'starts':starts()}
         print(json.dumps({'id':m['id'],'result':result}),flush=True)
     """#.utf8).write(to: executable)
     try installFixtureExecutable(at: executable)
-    let connection = CodexConnection(); try await connection.start(executable: executable, home: root)
+    let connection = CodexConnection(); let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: root)
     let store = JobStore(file: root.appendingPathComponent("jobs.json"))
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: AppStore(file: root.appendingPathComponent("state.sqlite")), jobStore: store)
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient), store: AppStore(file: root.appendingPathComponent("state.sqlite")), jobStore: store)
     let project = Project(path: root.path); model.state.projects = [project]; model.connected = true; model.authenticated = true; model.schedulerReady = true
     var job = jobFixture(); job.projectID = project.id
     #expect(await model.saveJob(job))

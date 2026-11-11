@@ -146,13 +146,16 @@ private actor RoutineExecutorFixture: AgentScheduledExecutor {
     try Data(#"""
     #!\#(fixturePython)
     import json,sys
-    calls=[]
+    import os, pathlib
+    log = pathlib.Path(os.environ['CODEX_HOME']) / 'calls.jsonl'
     for line in sys.stdin:
         m=json.loads(line)
         if 'id' not in m: continue
         method=m['method']; p=m.get('params',{}); result={}
-        if method=='test/calls': result=calls
-        else: calls.append({'method':method,'params':p})
+        if method=='test/calls':
+            result=[json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        else:
+            with log.open('a') as stream: stream.write(json.dumps({'method':method,'params':p,'pid':os.getpid()})+'\n')
         if method=='initialize': result={'userAgent':'codex/0.158.0-alpha.2.1 fixture'}
         if method=='thread/start': result={'thread':{'id':'new-native'}}
         if method=='thread/read': result={'thread':{'id':p['threadId'],'turns':[]}}
@@ -183,7 +186,11 @@ private actor RoutineExecutorFixture: AgentScheduledExecutor {
     #expect(model.state.queuedMessages?.map(\.id) == ["pending"] && model.pending.map(\.id) == [approval.id])
     #expect(model.currentAction == nil)
     let calls = try await wire.request("test/calls").array
-    #expect(calls.compactMap { $0["method"].string } == ["initialize", "thread/start", "thread/read"])
+    #expect(calls.filter { $0["method"].string == "initialize" }.count == 2)
+    let chatCalls = calls.filter { $0["method"].string != "initialize" }
+    #expect(chatCalls.compactMap { $0["method"].string } == ["thread/start", "thread/read"])
+    #expect(Set(chatCalls.compactMap { $0["pid"].int }).count == 1)
+    #expect(chatCalls.first?["pid"].int != calls.first?["pid"].int)
     #expect(calls.first(where: { $0["method"].string == "thread/start" })?["params"]["threadId"].string == nil)
     model.draft = ""; await model.restoreHandoffDraft()
     #expect(model.draft.contains("source-revision"))

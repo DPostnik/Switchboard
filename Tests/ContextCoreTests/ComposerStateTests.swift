@@ -97,9 +97,10 @@ import ContextCore
     """#.utf8).write(to: executable)
     try installFixtureExecutable(at: executable)
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: folder)
+    let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: folder)
     let store = AppStore(file: folder.appendingPathComponent("state.sqlite"))
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store,
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient), store: store,
                           pluginDirectory: folder.appendingPathComponent("plugins"), summaryResources: nil,
                           summaryExecutable: executable, summaryHome: folder,
                           jobStore: JobStore(file: folder.appendingPathComponent("jobs.json")))

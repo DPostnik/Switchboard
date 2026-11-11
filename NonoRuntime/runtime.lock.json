@@ -1,0 +1,10 @@
+{
+  "version": "0.81.0",
+  "platform": "aarch64-apple-darwin",
+  "url": "https://github.com/nolabs-ai/nono/releases/download/v0.81.0/nono-v0.81.0-aarch64-apple-darwin.tar.gz",
+  "archive_sha256": "728b1deefbf6390c9b74fc982efbded1e1c4b37b99dcdefa2e07266dfef4d9e9",
+  "binary_sha256": "b1135f21cf81ae3c8ae3b035dbbeea70072595b54f6138afad7a5402c7cedcb1",
+  "identifier": "ai.nolabs.nono",
+  "team_identifier": "54DFBSV5GX",
+  "license": "Apache-2.0"
+}

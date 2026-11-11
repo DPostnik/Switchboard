@@ -136,13 +136,14 @@ import ContextTranscript
     """#.utf8).write(to: executable)
     try installFixtureExecutable(at: executable)
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: folder)
+    let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: folder)
     let store = AppStore(file: folder.appendingPathComponent("state.sqlite"))
     var tracker = ResponseTokenTracker(baseline: .zero)
     tracker.observe(TokenCounters(input: 500, cached: 200, output: 50))
     try await store.saveTiming(threadID: "thread", turnID: "turn", timing:
         ResponseTiming(startedAt: Date(timeIntervalSince1970: 1), completedAt: Date(timeIntervalSince1970: 2), tokens: tracker.result))
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, pluginDirectory: folder.appendingPathComponent("plugins"))
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient), store: store, pluginDirectory: folder.appendingPathComponent("plugins"))
     let project = Project(path: folder.path)
     let chat = Chat(id: "thread", projectID: project.id, title: "History", model: "")
     model.state.projects = [project]; model.state.chats = [chat]

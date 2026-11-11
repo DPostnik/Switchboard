@@ -4,6 +4,10 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Allow Swift compiler macros to run inside the external command sandbox while keeping its OS boundary enforced.
+
+- Run Codex chats with a shell inside an external OS boundary (the bundled nono helper): the project, its declared folders and preset caches work without command approvals, everything else is denied; signing, GitHub and git commands get the Keychain through the broker; app browser and diagnostics stay outside the boundary.
+
 - Resume long Codex chats whose full history exceeds the message size limit.
 
 - Skip an oversized Codex message with a chat notice instead of disconnecting the chat's process.

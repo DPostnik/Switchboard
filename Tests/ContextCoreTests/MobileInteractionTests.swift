@@ -165,33 +165,39 @@ private func interaction(_ kind: AgentInteraction.Kind) -> AgentInteraction {
     try Data(#"""
     #!\#(fixturePython)
     import json, sys
-    requests = []
+    import os, pathlib
+    calls = pathlib.Path(os.environ['CODEX_HOME']) / 'calls.jsonl'
+    def record(m):
+        with calls.open('a') as log: log.write(json.dumps(m) + '\n')
+    def recorded():
+        return [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
     turns = 0
-    refuse_interrupt = False
+    refusal = pathlib.Path(os.environ['CODEX_HOME']) / 'refuse-interrupt'
     for line in sys.stdin:
         m = json.loads(line)
         if 'method' not in m:
-            requests.append(m); continue
+            record(m); continue
         if 'id' not in m: continue
         method = m['method']
         result = {'userAgent': 'codex/0.158.0-alpha.2.1 fixture'}
-        if method == 'test/refuseInterrupt': refuse_interrupt = True
-        if method == 'turn/interrupt' and refuse_interrupt:
-            requests.append(m)
+        if method == 'test/refuseInterrupt': refusal.touch()
+        if method == 'turn/interrupt' and refusal.exists():
+            record(m)
             print(json.dumps({'id': m['id'], 'error': {'code': -32603, 'message': 'fixture refuses'}}), flush=True)
             continue
         if method == 'turn/start':
             turns += 1
             result = {'turn': {'id': 'v' + str(turns)}}
         if method == 'test/emit': print(json.dumps(m['params']), flush=True)
-        if method == 'test/requests': result = requests
-        else: requests.append(m)
+        if method == 'test/requests': result = recorded()
+        else: record(m)
         print(json.dumps({'id': m['id'], 'result': result}), flush=True)
     """#.utf8).write(to: executable)
     try installFixtureExecutable(at: executable)
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: folder)
-    let integration = CodexIntegration(client: CodexClient(transport: connection))
+    let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: folder)
+    let integration = CodexIntegration(client: fixtureClient)
     let store = AppStore(file: folder.appendingPathComponent("state.sqlite"))
     let model = DeskModel(connection: integration, store: store, summaryExecutable: executable, summaryHome: folder)
     model.state.defaultRoute = .direct

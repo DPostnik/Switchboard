@@ -17,6 +17,10 @@ import ContextCore
     nonisolated let scopedEvents: AsyncStream<CodexWireEvent>
     private let scopedSink: AsyncStream<CodexWireEvent>.Continuation
     private var process: Process?
+    /// Process group of a worker under the external boundary; revocation signals the whole group.
+    private var boundaryGroup: Int32?
+    /// Last diagnostics of a boundary launch; logged when the process ends, so a refused grant is visible in the app log.
+    private let boundaryDiagnostics = OSAllocatedUnfairLock<Data>(initialState: Data())
     private var input: FileHandle?
     private var outputPipe: Pipe?
     private var errorPipe: Pipe?
@@ -52,7 +56,7 @@ import ContextCore
         scopedEvents = scoped.stream; scopedSink = scoped.continuation
     }
 
-    public func start(executable: URL, home: URL, extraArguments: [String] = []) async throws {
+    public func start(executable: URL, home: URL, extraArguments: [String] = [], boundary: ExternalSandboxLaunch? = nil) async throws {
         guard process == nil else { return }
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true,
                                                attributes: [.posixPermissions: 0o700])
@@ -63,12 +67,19 @@ import ContextCore
         let managed = Locations.agentsHome.appendingPathComponent("codex/bin/codex").standardizedFileURL
         let binary = executable.standardizedFileURL == managed ? executable.resolvingSymlinksInPath() : executable
         verifiedInstallVersion = CodexVerifiedInstall.version(of: binary, selected: executable)
-        child.executableURL = binary
         // A thread's writer lock belongs to one process. With no unload delay, `CodexClient.release` hands it to another at once.
-        child.arguments = ["app-server", "--listen", "stdio://", "-c", "cli_auth_credentials_store=\"file\"",
-                           "-c", "analytics.enabled=false", "-c", "thread_unload_delay_secs=0"] + extraArguments
+        let serverArguments = ["app-server", "--listen", "stdio://", "-c", "cli_auth_credentials_store=\"file\"",
+                               "-c", "analytics.enabled=false", "-c", "thread_unload_delay_secs=0"] + extraArguments
+        if let boundary {
+            // The whole tree (launcher, helper, Codex, its tools) forms one process group under the external boundary.
+            let launch = boundary.command(provider: binary, arguments: serverArguments)
+            child.executableURL = launch.executable; child.arguments = launch.arguments
+        } else {
+            child.executableURL = binary; child.arguments = serverArguments
+        }
         var environment = ProcessInfo.processInfo.environment
         environment["CODEX_HOME"] = home.path
+        if let boundary { environment.merge(boundary.plan.environment) { _, new in new } }
         // Account login belongs to this app, even when started from a configured shell.
         for key in ["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE"] {
             environment.removeValue(forKey: key)
@@ -84,8 +95,15 @@ import ContextCore
             if data.isEmpty { chunks.continuation.finish() }
             else { chunks.continuation.yield(data) }
         }
-        // Drain diagnostics without storing prompts, credentials or raw server logs.
-        stderr.fileHandleForReading.readabilityHandler = { h in _ = h.availableData }
+        // Drain diagnostics without storing prompts, credentials or raw server logs. Under the boundary the helper's
+        // own refusals arrive here, so a bounded tail is kept for the termination log line.
+        let diagnostics = boundaryDiagnostics
+        boundaryDiagnostics.withLock { $0 = Data() }
+        stderr.fileHandleForReading.readabilityHandler = { h in
+            let data = h.availableData
+            guard boundary != nil, !data.isEmpty else { return }
+            diagnostics.withLock { tail in tail.append(data); if tail.count > 4096 { tail = tail.suffix(4096) } }
+        }
         child.terminationHandler = { [weak self] child in
             Task { await self?.terminated(token: token, status: child.terminationStatus) }
         }
@@ -95,6 +113,7 @@ import ContextCore
             throw error
         }
         activeHome = home.standardizedFileURL
+        boundaryGroup = boundary == nil ? nil : child.processIdentifier
         process = child; input = stdin.fileHandleForWriting; outputPipe = stdout; errorPipe = stderr
         reader = Task { [weak self] in
             for await data in chunks.stream { await self?.ingest(data, token: token) }
@@ -229,15 +248,22 @@ import ContextCore
     }
     private func terminated(token: UUID, status: Int32) {
         guard generation == token else { return }
+        if boundaryGroup != nil {
+            let tail = boundaryDiagnostics.withLock { String(decoding: $0, as: UTF8.self) }.trimmingCharacters(in: .whitespacesAndNewlines)
+            ExternalSandboxLog.logger.error("Boundary worker ended with status \(status, privacy: .public): \(tail.isEmpty ? "no diagnostics" : tail, privacy: .public)")
+        }
         cleanUp()
         emit(.object(["method": .string("client/disconnected"), "params": .object(["status": .number(Double(status))])]))
     }
     public func stop() {
-        let child = process
+        let child = process, group = boundaryGroup
         generation = UUID()
         if !preservesAccountRevision { revision.withLock { $0 = UUID() } }
         cleanUp()
-        if child?.isRunning == true { child?.terminate() }
+        if let group {
+            // Revocation ends the helper, Codex and every tool process it started, not only the launcher.
+            ProcessGroupTerminator.terminate(group: group)
+        } else if child?.isRunning == true { child?.terminate() }
     }
     private func cleanUp() {
         approvalRequests.removeAll(); seenApprovalIDs.removeAll()
@@ -249,7 +275,7 @@ import ContextCore
         let waiting = pending.values; pending.removeAll()
         for c in waiting { c.resume(throwing: ClientFailure(L10n.text("Соединение с Codex закрыто", "The connection to Codex is closed"))) }
         activeHome = nil; lastThreadID = nil
-        process = nil; outputPipe = nil; errorPipe = nil
+        process = nil; outputPipe = nil; errorPipe = nil; boundaryGroup = nil
     }
 }
 

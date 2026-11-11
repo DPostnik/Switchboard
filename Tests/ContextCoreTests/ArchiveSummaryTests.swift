@@ -180,9 +180,10 @@ func summaryRunnerRoutesAndFailsClosed(mode: String, version: String) async thro
     let home = root.appendingPathComponent("codex")
     let executable = try fixture(home)
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: home)
+    let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: home)
     let store = AppStore(file: root.appendingPathComponent("metadata.sqlite"))
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, pluginDirectory: root.appendingPathComponent("plugins"),
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient), store: store, pluginDirectory: root.appendingPathComponent("plugins"),
                           summaryResources: skills, summaryExecutable: executable, summaryHome: home)
     let project = Project(path: root.path)
     model.state.projects = [project]
@@ -227,9 +228,10 @@ func summaryRunnerRoutesAndFailsClosed(mode: String, version: String) async thro
     let home = root.appendingPathComponent("codex")
     let executable = try fixture(home)
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: home)
+    let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: home)
     let store = AppStore(file: root.appendingPathComponent("metadata.sqlite"))
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, pluginDirectory: root.appendingPathComponent("plugins"),
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient), store: store, pluginDirectory: root.appendingPathComponent("plugins"),
                           summaryResources: skills, summaryExecutable: executable, summaryHome: home)
     let project = Project(path: root.path)
     model.state.projects = [project]
@@ -269,7 +271,8 @@ func summaryRunnerRoutesAndFailsClosed(mode: String, version: String) async thro
     defer { try? FileManager.default.removeItem(at: root) }
     let home = root.appendingPathComponent("codex"), executable = try fixture(root.appendingPathComponent("codex"))
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: home)
+    let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: home)
     let store = AppStore(file: root.appendingPathComponent("metadata.sqlite"))
     let project = Project(path: root.path)
     var chat = Chat(id: "source", projectID: project.id, title: "Report", model: "fixture-model")
@@ -277,7 +280,7 @@ func summaryRunnerRoutesAndFailsClosed(mode: String, version: String) async thro
     var state = SavedState(); state.projects = [project]; state.chats = [chat]
     var record = ArchiveSummaryRecord(threadID: chat.id, projectID: project.id); record.status = .generating
     try await store.saveArchivingChat(state, summary: record)
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, pluginDirectory: root.appendingPathComponent("plugins"),
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient), store: store, pluginDirectory: root.appendingPathComponent("plugins"),
                           summaryResources: skills, summaryExecutable: executable, summaryHome: home)
     model.state = try await store.load(); model.connected = true; model.authenticated = true
     await model.restoreSummaryQueue()
@@ -365,9 +368,10 @@ func chatTitleRunnerPreservesRouteAndIsolation(mode: String) async throws {
     defer { try? FileManager.default.removeItem(at: root) }
     let executable = try fixture(root)
     let connection = CodexConnection()
-    try await connection.start(executable: executable, home: root)
+    let fixtureClient = CodexClient(transport: connection)
+    try await fixtureClient.start(executable: executable, home: root)
     let file = root.appendingPathComponent("state.sqlite"), store = AppStore(file: root.appendingPathComponent("state.sqlite"))
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: connection)), store: store, pluginDirectory: root.appendingPathComponent("plugins"),
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient), store: store, pluginDirectory: root.appendingPathComponent("plugins"),
                           summaryExecutable: executable, summaryHome: root)
     let project = Project(path: root.path)
     model.state.projects = [project]

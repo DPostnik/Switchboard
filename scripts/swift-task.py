@@ -141,6 +141,8 @@ def main():
         execute = lambda command: run_logged(command, verbose, log)
     else:
         execute = run
+    # Compiler macro plugins also create a sandbox, independently of SwiftPM.
+    macro_flags = ['-Xfrontend', '-disable-sandbox'] if os.environ.get('SWITCHBOARD_EXTERNAL_SANDBOX') == '1' else []
     compiler = capture(['xcrun', '--find', 'swiftc'])
     swift = capture(['xcrun', '--find', 'swift'])
     developer = Path(capture(['xcode-select', '-p']))
@@ -165,7 +167,7 @@ def main():
             if candidate in seen:
                 continue
             seen.add(candidate)
-            result = subprocess.run([compiler, '-sdk', str(candidate), '-target', target, '-typecheck', str(probe)], capture_output=True, text=True)
+            result = subprocess.run([compiler, '-sdk', str(candidate), '-target', target, '-typecheck'] + macro_flags + [str(probe)], capture_output=True, text=True)
             if result.returncode == 0:
                 sdk = candidate
                 break
@@ -195,9 +197,9 @@ def main():
         testing_layouts[0],
     )
     has_testing_framework = (frameworks / 'Testing.framework').is_dir()
-    test_flags = []
+    test_flags = list(macro_flags)
     if has_testing_framework:
-        test_flags = ['-F', str(frameworks), '-Xlinker', '-rpath', '-Xlinker', str(frameworks), '-Xlinker', '-rpath', '-Xlinker', str(testing_libraries)]
+        test_flags += ['-F', str(frameworks), '-Xlinker', '-rpath', '-Xlinker', str(frameworks), '-Xlinker', '-rpath', '-Xlinker', str(testing_libraries)]
     macros = Path(compiler).parent.parent / 'lib/swift/host/plugins/testing'
     if macros.is_dir():
         test_flags += ['-plugin-path', str(macros)]
@@ -211,6 +213,9 @@ def main():
                 raise RuntimeError('Swift Testing framework/macros are incompatible with this toolchain. Tests did not run. Install a matching Command Line Tools or Xcode release; see guides/building.md and .build/local-build/testing-probe-error.log.')
     # Agents never read the index store; it is rewritten on every compile. Opt in with SWITCHBOARD_INDEX_STORE=1.
     index_flags = [] if os.environ.get('SWITCHBOARD_INDEX_STORE') == '1' else ['--disable-index-store']
+    # Under Switchboard's external boundary (nono) SwiftPM cannot start its own nested sandbox for manifests and plugins.
+    if os.environ.get('SWITCHBOARD_EXTERNAL_SANDBOX') == '1':
+        index_flags = index_flags + ['--disable-sandbox'] + [arg for flag in macro_flags for arg in ('-Xswiftc', flag)]
     if not direct:
         # A source/build/test failure must fail, never trigger a fallback or reuse an old binary.
         if args.task == 'build':
@@ -239,7 +244,7 @@ def main():
         # Rebuild all modules in an empty directory so compiler/SDK changes cannot reuse stale objects.
         with tempfile.TemporaryDirectory(prefix='compile-', dir=OUT) as tmp:
             work = Path(tmp)
-            base = [compiler, '-sdk', sdk, '-swift-version', '6', '-target', target, '-parse-as-library', '-I', work, '-I', ROOT / 'Sources/CSQLite', '-L', work]
+            base = [compiler] + macro_flags + ['-sdk', sdk, '-swift-version', '6', '-target', target, '-parse-as-library', '-I', work, '-I', ROOT / 'Sources/CSQLite', '-L', work]
             base += ['-Onone', '-enable-testing'] if args.task == 'test' else ['-O']
             modules = [('AgentContract', 'Sources/AgentContract'), ('FringeProtocol', 'Sources/FringeProtocol'), ('TOMLDecoder', '.build/checkouts/TOMLDecoder/Sources/TOMLDecoder'), ('ContextCore', 'Sources/ContextCore'), ('CodexAdapter', 'Sources/CodexAdapter'), ('ClaudeAdapter', 'Sources/ClaudeAdapter'), ('ContextTranscript', 'Sources/ContextTranscript')]
             if args.task == 'test':

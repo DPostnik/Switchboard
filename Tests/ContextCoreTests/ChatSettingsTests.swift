@@ -63,7 +63,13 @@ import ContextCore
     try Data(#"""
     #!\#(fixturePython)
     import sys,json
-    requests=[]
+    import os, pathlib
+    calls = pathlib.Path(os.environ['CODEX_HOME']) / 'calls.jsonl'
+    counter = pathlib.Path(os.environ['CODEX_HOME']) / 'sessions'
+    def record(m):
+        with calls.open('a') as log: log.write(json.dumps(m) + '\n')
+    def recorded():
+        return [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
     sessions=0
     for line in sys.stdin:
         m=json.loads(line)
@@ -71,17 +77,19 @@ import ContextCore
         method=m['method']; result={'userAgent':'codex/0.158.0-alpha.2.1 fixture'}
         if method=='turn/start': result={'turn':{'id':'turn-'+m['params']['threadId']}}
         if method=='thread/start':
-            sessions+=1
+            sessions = (int(counter.read_text()) if counter.exists() else 0) + 1
+            counter.write_text(str(sessions))
             result={'thread':{'id':'created-'+str(sessions)}}
         if method=='model/list': result={'data':[{'id':'unrelated-default','model':'unrelated-default','displayName':'Fixture','isDefault':True,'defaultReasoningEffort':'medium','supportedReasoningEfforts':[]}]}
-        if method=='test/requests': result=requests
-        else: requests.append(m)
+        if method=='test/requests': result=recorded()
+        else: record(m)
         print(json.dumps({'id':m['id'],'result':result}),flush=True)
     """#.utf8).write(to: executable)
     try installFixtureExecutable(at: executable)
     let wire = CodexConnection()
-    try await wire.start(executable: executable, home: folder)
-    let model = DeskModel(connection: CodexIntegration(client: CodexClient(transport: wire)),
+    let fixtureClient = CodexClient(transport: wire)
+    try await fixtureClient.start(executable: executable, home: folder)
+    let model = DeskModel(connection: CodexIntegration(client: fixtureClient),
                           store: AppStore(file: folder.appendingPathComponent("state.sqlite")), summaryResources: nil,
                           summaryExecutable: executable, summaryHome: folder,
                           jobStore: JobStore(file: folder.appendingPathComponent("jobs.json")))
@@ -99,7 +107,7 @@ import ContextCore
     }
     let requests = try await wire.request("test/requests").array
     let turns = requests.filter { $0["method"].string == "turn/start" }.map { $0["params"] }
-    #expect(turns.count == 2)
+    try #require(turns.count == 2)
     #expect(turns[0]["model"].string == "model-a" && turns[0]["effort"].string == "high")
     #expect(turns[0]["approvalPolicy"].string == "never")
     #expect(turns[1]["model"].string == "model-b" && turns[1]["effort"].string == "low")
