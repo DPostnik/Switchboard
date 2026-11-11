@@ -143,6 +143,8 @@ public actor CodexClient {
         params["cwd"] = .string(projectPath)
         params["modelProvider"] = .string(route.providerID)
         params["developerInstructions"] = .string(AgentAutonomy.instructions() + (UserChromeConfiguration.allowed(enabled: userChromeEnabled, permissions: permissions, scheduled: scheduled, grant: userChromeGrant) ? "\n" + UserChromeConfiguration.instructions : ""))
+        // The reply is not read. Without turns it stays small: a long chat's full history can exceed the line limit.
+        params["excludeTurns"] = .bool(true)
         _ = try await transport.request("thread/resume", params: .object(params))
         try await verifyUserChromeDiscovery(session: session, permissions: permissions, scheduled: scheduled, grant: userChromeGrant)
         if let grant { try profiles.acknowledge(grant, session: session) }

@@ -161,6 +161,8 @@ private func commandFixture() throws -> (URL, URL) {
     try await resumed.resume(session, projectPath: root.path, access: .standard, route: .direct)
     let resumeCalls = try await resumedWire.request("test/calls").array
     #expect(resumeCalls.first { $0["method"].string == "thread/resume" }?["params"]["config"] == config)
+    // A long chat's full history in the reply can exceed the transport's line limit.
+    #expect(resumeCalls.first { $0["method"].string == "thread/resume" }?["params"]["excludeTurns"] == .bool(true))
     await resumed.stop()
     // Disabled setting must explicitly override configuration saved by Codex.
     let disabledWire = CodexConnection(), disabled: CodexClient
