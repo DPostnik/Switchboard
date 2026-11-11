@@ -343,9 +343,14 @@ public actor CodexClient {
     }
     private func read(_ session: AgentSessionReference) async throws -> JSONValue {
         let id = try nativeID(session)
-        let result = try await transport.request("thread/read", params: .object([
-            "threadId": .string(id), "includeTurns": .bool(true)
-        ]))
+        let result: JSONValue
+        do {
+            result = try await transport.request("thread/read", params: .object([
+                "threadId": .string(id), "includeTurns": .bool(true)
+            ]))
+        } catch is CodexReplyTooLarge {
+            return try await readPaged(id)
+        }
         guard result["thread"]["id"].string == id else {
             throw ClientFailure(L10n.text("Получена история другого чата", "Received history for a different chat"))
         }
@@ -353,6 +358,51 @@ public actor CodexClient {
             throw ClientFailure(L10n.text("История чата недоступна", "Conversation history is unavailable"))
         }
         return result["thread"]
+    }
+    /// A history over the transport's line limit (large tool results) is read in pages of turns, then items.
+    /// An item that alone exceeds the limit ends its turn's items there: the rest of that turn is left out.
+    private func readPaged(_ id: String) async throws -> JSONValue {
+        let metadata = try await transport.request("thread/read", params: .object([
+            "threadId": .string(id), "includeTurns": .bool(false)
+        ]))
+        guard metadata["thread"]["id"].string == id else {
+            throw ClientFailure(L10n.text("Получена история другого чата", "Received history for a different chat"))
+        }
+        var turns: [JSONValue] = [], cursor: String?
+        repeat {
+            var params: [String: JSONValue] = ["threadId": .string(id), "limit": .number(50), "sortDirection": .string("asc"),
+                                               "itemsView": .string("notLoaded")]
+            if let cursor { params["cursor"] = .string(cursor) }
+            let page = try await transport.request("thread/turns/list", params: .object(params))
+            turns += page["data"].array
+            cursor = page["nextCursor"].string
+        } while cursor != nil
+        var loaded: [JSONValue] = []
+        for turn in turns {
+            guard let turnID = turn["id"].string else { continue }
+            var fields = turn.object
+            fields["items"] = .array(try await readItems(thread: id, turn: turnID))
+            loaded.append(.object(fields))
+        }
+        var thread = metadata["thread"].object
+        thread["turns"] = .array(loaded)
+        return .object(thread)
+    }
+    private func readItems(thread: String, turn: String) async throws -> [JSONValue] {
+        var items: [JSONValue] = [], cursor: String?, limit = 10
+        while true {
+            var params: [String: JSONValue] = ["threadId": .string(thread), "turnId": .string(turn), "limit": .number(Double(limit)),
+                                               "sortDirection": .string("asc")]
+            if let cursor { params["cursor"] = .string(cursor) }
+            let page: JSONValue
+            do { page = try await transport.request("thread/items/list", params: .object(params)) } catch is CodexReplyTooLarge {
+                guard limit > 1 else { return items }
+                limit = 1; continue
+            }
+            items += page["data"].array.map { $0["item"] }
+            guard let next = page["nextCursor"].string else { return items }
+            cursor = next
+        }
     }
     private func nativeID(_ session: AgentSessionReference) throws -> String {
         guard session.connection == .originalCodex, !session.nativeID.isEmpty else { throw ConversationIdentity.unavailable }

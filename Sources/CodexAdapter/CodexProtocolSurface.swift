@@ -56,7 +56,7 @@ enum CodexProtocolSurface {
         "initialize", "account/read", "account/login/start", "account/logout", "model/list", "account/rateLimits/read",
         "skills/extraRoots/set", "thread/start", "thread/resume", "turn/start", "turn/interrupt", "thread/name/set",
         "thread/archive", "thread/unarchive", "thread/delete", "thread/read", "config/read", "mcpServerStatus/list",
-        "thread/unsubscribe", "thread/loaded/list"
+        "thread/unsubscribe", "thread/loaded/list", "thread/turns/list", "thread/items/list"
     ]
     /// Root -> field paths the decoders read. Roots: `response:<request>`, `notification:<method>`,
     /// `serverRequest:<method>` (params) and `item:<thread item type>`; `*` steps into a map value or array element.
@@ -74,6 +74,9 @@ enum CodexProtocolSurface {
         "response:turn/start": ["turn.id"],
         "response:thread/read": ["thread.id", "thread.turns.*.id", "thread.turns.*.status", "thread.turns.*.items",
                                  "thread.turns.*.startedAt", "thread.turns.*.completedAt", "thread.turns.*.durationMs"],
+        "response:thread/turns/list": ["data.*.id", "data.*.status", "data.*.startedAt", "data.*.completedAt", "data.*.durationMs",
+                                       "nextCursor"],
+        "response:thread/items/list": ["data.*.item", "nextCursor"],
         "response:config/read": ["config", "config.mcp_servers"],
         "response:mcpServerStatus/list": ["data", "nextCursor"],
         "response:thread/unsubscribe": ["status"],

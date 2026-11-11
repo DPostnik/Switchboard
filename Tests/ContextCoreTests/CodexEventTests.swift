@@ -235,7 +235,7 @@ private func withEventFixture(_ body: (CodexClient, CodexConnection, EventLog) a
         #expect(!events.contains { if case .disconnected = $0.payload { return true }; return false })
         // An oversized reply fails its request at once instead of waiting for the timeout.
         let started = ContinuousClock.now
-        await #expect(throws: ClientFailure.self) { _ = try await wire.request("test/oversized-reply") }
+        await #expect(throws: CodexReplyTooLarge.self) { _ = try await wire.request("test/oversized-reply") }
         #expect(started.duration(to: .now) < .seconds(10))
         #expect(await wire.isRunning)
         try await client.answer(pending.id, session: pending.session, response: .allowOnce)

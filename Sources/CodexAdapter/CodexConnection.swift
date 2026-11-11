@@ -2,6 +2,12 @@ import Foundation
 import os
 import ContextCore
 
+/// A reply over the line limit. The request is not retried; a reader may fetch the same data in smaller pages.
+struct CodexReplyTooLarge: LocalizedError, Sendable {
+    let message: String
+    var errorDescription: String? { message }
+}
+
 /// One process and one ordered JSONL stream. Never retries model turns.
 @_spi(NativeProtocol) public actor CodexConnection {
     /// Diagnostic/isolated-runner view. A connection has exactly one event consumer.
@@ -225,8 +231,8 @@ import ContextCore
         let limit = ByteCountFormatter.string(fromByteCount: Int64(maximumLineBytes), countStyle: .file)
         if head.method == nil, let id = head.id?.string, let c = pending.removeValue(forKey: id) {
             timeouts.removeValue(forKey: id)?.cancel()
-            c.resume(throwing: ClientFailure(L10n.text("Ответ Codex (\(size)) больше лимита \(limit) и пропущен; запрос не повторён.",
-                                                       "The Codex reply (\(size)) exceeds the \(limit) limit and was skipped; the request was not retried.")))
+            c.resume(throwing: CodexReplyTooLarge(message: L10n.text("Ответ Codex (\(size)) больше лимита \(limit) и пропущен; запрос не повторён.",
+                                                                    "The Codex reply (\(size)) exceeds the \(limit) limit and was skipped; the request was not retried.")))
             return
         }
         if head.method != nil, let id = head.id {

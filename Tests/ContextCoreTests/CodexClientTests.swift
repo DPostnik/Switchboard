@@ -43,6 +43,17 @@ private func commandFixture() throws -> (URL, URL) {
             if method == 'thread/read':
                 result = {'thread': {'id': p['threadId'], 'turns': []}}
                 if (root/'history').exists(): result = json.loads((root/'history').read_text())
+                if (root/'paged').exists():
+                    result = {'thread': {'id': p['threadId']}}
+                    if p.get('includeTurns'): result['pad'] = 'x' * 5000
+            if method == 'thread/turns/list':
+                result = ({'data': [{'id': 't1', 'status': 'completed'}], 'nextCursor': 'next'} if 'cursor' not in p
+                          else {'data': [{'id': 't2', 'status': 'completed'}], 'nextCursor': None})
+            if method == 'thread/items/list':
+                message = lambda i: {'turnId': p['turnId'], 'item': {'type': 'agentMessage', 'id': i, 'text': i}}
+                if p['turnId'] == 't1': result = {'data': [message('a1'), message('a2')], 'nextCursor': None}
+                elif p['limit'] > 1 or p.get('cursor') == 'b2': result = {'data': [], 'pad': 'x' * 5000}
+                else: result = {'data': [message('b1')], 'nextCursor': 'b2'}
         print(json.dumps({'id': m['id'], 'result': result}), flush=True)
     """#.utf8).write(to: executable)
     try installFixtureExecutable(at: executable)
@@ -131,6 +142,22 @@ private func commandFixture() throws -> (URL, URL) {
         await #expect(throws: ClientFailure.self) { try await client.history(session) }
         await #expect(throws: ClientFailure.self) { try await client.summarySource(session) }
     }
+    await client.stop()
+}
+
+@Test func historyOverTheLineLimitIsReadInPagesWithoutTheOversizedItem() async throws {
+    let (root, executable) = try commandFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try Data().write(to: root.appendingPathComponent("paged"))
+    let wire = CodexConnection(maximumLineBytes: 4096), client = CodexClient(transport: wire)
+    try await client.start(executable: executable, home: root)
+    let session = AgentSessionReference(connection: .originalCodex, nativeID: "long")
+    let turns = try await client.history(session)
+    #expect(turns.map(\.id) == ["t1", "t2"])
+    #expect(turns.map { $0.items.map(\.text) } == [["a1", "a2"], ["b1"]])
+    // The second turn's page of ten was too large, so it was read item by item until one item alone exceeded the limit.
+    let calls = try await wire.request("test/calls").array.filter { $0["method"].string == "thread/items/list" }
+    #expect(calls.map { $0["params"]["limit"].int } == [10, 10, 1, 1])
     await client.stop()
 }
 
