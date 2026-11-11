@@ -49,8 +49,11 @@ struct ActionView: View {
                         }
                         if action.interaction.canAllowChat {
                             Button(L10n.text("Разрешить в этом чате", "Allow in this chat")) { submit(.allowChat) }.buttonStyle(DeskButtonStyle())
-                                .help(L10n.text("Этот и следующие вызовы инструментов этого браузера в этом чате, пока Switchboard не перезапустится",
-                                                "This and later calls to this browser's tools in this chat until Switchboard restarts"))
+                                .help(action.interaction.command != nil
+                                      ? L10n.text("Разрешить эту команду на текущую сессию Codex. Границы повторного разрешения определяет Codex; постоянное правило проекта не создаётся.",
+                                                  "Allow this command for the current Codex session. Codex controls reuse of the approval; no permanent project rule is created.")
+                                      : L10n.text("Этот и следующие вызовы инструментов этого браузера в этом чате, пока Switchboard не перезапустится",
+                                                  "This and later calls to this browser's tools in this chat until Switchboard restarts"))
                         }
                         Button(L10n.text("Разрешить один раз", "Allow once")) { submit(.allowOnce) }
                             .buttonStyle(DeskButtonStyle(kind: .primary))

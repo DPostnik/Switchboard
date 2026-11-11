@@ -58,6 +58,10 @@ struct CodexPendingInteraction: Sendable {
             let decisions = p["availableDecisions"]
             guard decisions == .null || decisions.array.contains(.string("decline")) || decisions.array.contains(.string("cancel")) else { return nil }
             kind = .approval(canAllow: decisions == .null || decisions.array.contains(.string("accept")))
+            // Native session approval is an explicit user choice, not a client-side command allowlist.
+            // Codex 0.167 omits availableDecisions: its protocol supports session acceptance by default.
+            // An explicit decision list remains authoritative.
+            canAllowChat = decisions == .null || (decisions.array.contains(.string("accept")) && decisions.array.contains(.string("acceptForSession")))
         case "item/fileChange/requestApproval":
             guard p["turnId"].string != nil else { return nil }
             // grantRoot can grant writes for the session, not just once.
@@ -144,6 +148,8 @@ struct CodexPendingInteraction: Sendable {
             }
         }
         switch (interaction.kind, response) {
+        case (.approval, .allowChat) where method == "item/commandExecution/requestApproval" && interaction.canAllowChat:
+            return .object(["decision": .string("acceptForSession")])
         case (.approval(let canAllow), .allowOnce) where canAllow:
             if method == "item/permissions/requestApproval" {
                 return .object(["permissions": params["permissions"], "scope": .string("turn")])

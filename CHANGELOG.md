@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Offer native session approval for Codex commands when supported by the engine.
+
 - Load the history of a Codex chat that exceeds the message size limit in pages instead of showing an error.
 
 - Allow Swift compiler macros to run inside the external command sandbox while keeping its OS boundary enforced.

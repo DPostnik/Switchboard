@@ -32,6 +32,30 @@ private func request(_ method: String = "item/commandExecution/requestApproval",
     #expect(typed.interaction.command == longCommand && typed.interaction.workingDirectory == "/workspace")
 }
 
+@Test func commandSessionApprovalPreservesNativeDefaultsAndRestrictions() throws {
+    let offered = try #require(CodexPendingInteraction.parse(request(extra: [
+        "availableDecisions": .array([.string("accept"), .string("acceptForSession"), .string("decline")])
+    ])))
+    #expect(offered.interaction.canAllowChat)
+    #expect(offered.toolApprovalServer == nil)
+    #expect(try offered.encode(.allowChat) == .object(["decision": .string("acceptForSession")]))
+    #expect(try offered.encode(.allowOnce) == .object(["decision": .string("accept")]))
+    let legacy = try #require(CodexPendingInteraction.parse(request()))
+    #expect(legacy.interaction.canAllowChat)
+    #expect(try legacy.encode(.allowChat) == .object(["decision": .string("acceptForSession")]))
+    for decisions: JSONValue in [.array([.string("accept"), .string("decline")]),
+                                  .array([.string("acceptForSession"), .string("cancel")])] {
+        let pending = try #require(CodexPendingInteraction.parse(request(extra: ["availableDecisions": decisions])))
+        #expect(!pending.interaction.canAllowChat)
+        #expect(throws: ClientFailure.self) { try pending.encode(.allowChat) }
+    }
+    let file = try #require(CodexPendingInteraction.parse(request("item/fileChange/requestApproval", extra: [
+        "availableDecisions": .array([.string("accept"), .string("acceptForSession"), .string("decline")])
+    ])))
+    #expect(!file.interaction.canAllowChat)
+    #expect(throws: ClientFailure.self) { try file.encode(.allowChat) }
+}
+
 @Test func typedQuestionsAndFormsValidateAnswersWithoutDroppingSchemaRestrictions() throws {
     let question: JSONValue = .object(["id": .string("secret"), "question": .string("Input"), "isSecret": .bool(true)])
     let questions = try #require(CodexPendingInteraction.parse(request("item/tool/requestUserInput", extra: ["questions": .array([question])])))

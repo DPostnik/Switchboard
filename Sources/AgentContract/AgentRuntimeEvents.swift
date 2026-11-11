@@ -115,8 +115,8 @@ public struct AgentInteraction: Identifiable, Sendable {
     public let details: String
     /// True when `.allowTurn` is accepted: the agent then allows repeats of the same tool for the rest of this turn.
     public let canAllowTurn: Bool
-    /// True when `.allowChat` is accepted: the adapter then allows later calls to the same app-owned tool server
-    /// in this chat until its connection resets or the app restarts.
+    /// True when `.allowChat` is accepted: browser grants cover the same app-owned server until reset;
+    /// command approvals use the provider's explicitly offered session decision, enforced by that provider.
     public let canAllowChat: Bool
     public let origin: Origin
     /// Bounded protocol identifier for audit correlation. Presentation text and answers never belong in the audit.
@@ -174,7 +174,7 @@ public struct AgentInteraction: Identifiable, Sendable {
 
 public enum AgentInteractionResponse: Sendable {
     /// `allowTurn` allows this request and every later request of the same tool until the turn ends.
-    /// `allowChat` allows this request and later calls to the same tool server in this chat (see `canAllowChat`).
+    /// `allowChat` accepts the offered session scope (see `canAllowChat`); it never creates a global rule.
     case allowOnce, allowTurn, allowChat, deny, answers([String: String]), completed
 }
 

@@ -374,8 +374,11 @@ private struct NotchActionCard: View {
                         if action.interaction.canAllowChat {
                             Button(L10n.text("В этом чате", "In this chat")) { submit(.allowChat) }
                                 .buttonStyle(NotchButtonStyle(prominent: false))
-                                .help(L10n.text("Разрешить этот и следующие вызовы инструментов этого браузера в этом чате, пока Switchboard не перезапустится",
-                                                "Allow this and later calls to this browser's tools in this chat until Switchboard restarts"))
+                                .help(action.interaction.command != nil
+                                      ? L10n.text("Разрешить эту команду на текущую сессию Codex. Постоянное правило проекта не создаётся.",
+                                                  "Allow this command for the current Codex session. No permanent project rule is created.")
+                                      : L10n.text("Разрешить этот и следующие вызовы инструментов этого браузера в этом чате, пока Switchboard не перезапустится",
+                                                  "Allow this and later calls to this browser's tools in this chat until Switchboard restarts"))
                         }
                         Button(L10n.text("Разрешить один раз", "Allow once")) { submit(.allowOnce) }
                             .buttonStyle(NotchButtonStyle(prominent: true))

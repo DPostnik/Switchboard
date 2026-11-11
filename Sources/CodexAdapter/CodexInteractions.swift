@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let approvalLog = Logger(subsystem: "local.daniil.switchboard", category: "approvalProtocol")
 import AgentContract
 import ContextCore
 
@@ -64,6 +67,12 @@ extension CodexClient {
                 try? await transport.rejectUnknown(id: raw["id"], generation: wire.generation)
                 eventSink.yield(.init(session: nil, payload: .diagnostic(L10n.text("Движок запросил неподдерживаемое или некорректное действие: \(method)", "The engine requested an unsupported or invalid action: \(method)"))))
                 return
+            }
+            if pending.method == "item/commandExecution/requestApproval" {
+                let choices = pending.params["availableDecisions"]
+                let supplied = choices != .null
+                let sessionOffered = choices.array.contains(.string("acceptForSession"))
+                approvalLog.notice("Command approval: choicesSupplied=\(supplied, privacy: .public) sessionOffered=\(sessionOffered, privacy: .public) canAllowChat=\(pending.interaction.canAllowChat, privacy: .public)")
             }
             if pending.interaction.canAllowChat, let server = pending.toolApprovalServer,
                chatToolGrants.contains(.init(session: pending.interaction.session, server: server)) {
@@ -134,6 +143,11 @@ extension CodexClient {
     public func answer(_ id: UUID, session: AgentSessionReference, response: CodexInteractionResponse) async throws {
         guard let value = interactions[id], value.pending.interaction.session == session else { throw CodexPendingInteraction.invalidResponse }
         let encoded = try value.pending.encode(response)
+        if value.pending.method == "item/commandExecution/requestApproval" {
+            let sessionSelected: Bool
+            if case .allowChat = response { sessionSelected = true } else { sessionSelected = false }
+            approvalLog.notice("Command approval response: sessionSelected=\(sessionSelected, privacy: .public)")
+        }
         // Consume before awaiting the transport: repeated clicks and ambiguous sends never replay.
         interactions[id] = nil
         if case .allowChat = response, let server = value.pending.toolApprovalServer {
