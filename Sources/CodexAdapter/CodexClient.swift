@@ -56,10 +56,10 @@ public actor CodexClient {
         try await transport.start(executable: executable, home: home, extraArguments: extraArguments)
     }
     /// A cold worker applies thread MCP overrides without changing other chats or the account epoch.
-    func isolatedSibling() async throws -> CodexClient {
+    func isolatedSibling(permissionArguments: [String] = []) async throws -> CodexClient {
         guard let launch else { throw ClientFailure(L10n.text("Codex не подключён", "Codex is not connected")) }
         let worker = CodexClient(transport: await transport.sibling(preservingAccountRevision: true))
-        try await worker.start(executable: launch.executable, home: launch.home, extraArguments: launch.arguments,
+        try await worker.start(executable: launch.executable, home: launch.home, extraArguments: launch.arguments + permissionArguments,
                                diagnosticsResources: diagnosticsResources, browserResources: browserResources,
                                browserRoot: browserRoot, userChromeEnabled: userChromeEnabled)
         let expectedAgent = await transport.serverUserAgent

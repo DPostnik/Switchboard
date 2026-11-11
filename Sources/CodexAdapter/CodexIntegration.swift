@@ -24,7 +24,6 @@ public actor CodexIntegration: AgentIntegration {
     private var chromeWorkers: [AgentSessionReference: CodexClient] = [:]
     private var chromeObservers: [AgentSessionReference: Task<Void, Never>] = [:]
     private var chromeScopes: [AgentSessionReference: ChromeScope] = [:]
-    private var chromeSessions = Set<AgentSessionReference>()
     private var chromeInteractions: [AgentSessionReference: Set<UUID>] = [:]
     private var routes: Set<AgentRoute> = [.direct]
     private var browserProfilesEnabled = false
@@ -162,7 +161,6 @@ public actor CodexIntegration: AgentIntegration {
         providerClients.removeAll()
         for worker in workers { await worker.stop() }
         await stopChromeWorkers()
-        chromeSessions.removeAll()
         await client.stop()
         routes = [.direct]; providerArguments = []; sessionRoutes.removeAll(); knownModels = []
         browserProfilesEnabled = false
@@ -267,7 +265,7 @@ public actor CodexIntegration: AgentIntegration {
         let old = chromeWorkers[session]
         resolveChromeInteractions(session)
         chromeObservers.removeValue(forKey: session)?.cancel()
-        chromeWorkers[session] = worker; chromeScopes[session] = scope; chromeSessions.insert(session)
+        chromeWorkers[session] = worker; chromeScopes[session] = scope
         chromeObservers[session] = Task { [weak self] in
             for await event in worker.events { await self?.receiveChrome(event, session: session, worker: worker) }
         }
@@ -322,9 +320,9 @@ public actor CodexIntegration: AgentIntegration {
     }
     private func refreshChromeWorker(_ request: AgentExecutionRequest, session: AgentSessionReference) async throws {
         let scope = try chromeScope(request)
-        guard request.userChromeGrant != nil || chromeSessions.contains(session) else { return }
         guard chromeScopes[session] != scope else { return }
-        let fresh = try await worker(for: request.route).isolatedSibling()
+        let fresh = try await worker(for: request.route).isolatedSibling(
+            permissionArguments: scope.permissions.codexProcessArguments(projectPath: scope.project))
         do {
             // The process that loaded the thread holds its writer lock; the cold worker cannot resume it until it is released.
             try await (chromeWorkers[session] ?? worker(for: request.route)).release(session)
@@ -339,26 +337,20 @@ public actor CodexIntegration: AgentIntegration {
             return await perform(request.model.context, session: request.session) {
                 let access = try self.access(request.permissions), route = try self.route(request.route)
                 if let session = request.session {
-                    if request.userChromeGrant != nil || self.chromeSessions.contains(session) {
-                        try await self.refreshChromeWorker(request, session: session)
-                    } else {
-                        try await self.worker(for: request.route).resume(session, projectPath: request.projectPath, permissions: access, route: route,
-                                                     scheduled: request.kind == .scheduled, userChromeGrant: nil)
-                    }
+                    try await self.refreshChromeWorker(request, session: session)
                     self.sessionRoutes[session] = (request.route, request.model.context)
                     return session
                 }
                 let chosen = try self.worker(for: request.route)
-                let dedicated = request.userChromeGrant != nil
-                let worker: CodexClient
-                if dedicated { worker = try await chosen.isolatedSibling() } else { worker = chosen }
+                let worker = try await chosen.isolatedSibling(
+                    permissionArguments: access.codexProcessArguments(projectPath: request.projectPath))
                 let session: AgentSessionReference
                 do {
                     session = try await worker.createSession(projectPath: request.projectPath, permissions: access, model: request.model.model, route: route,
                                                              browserProfile: request.browserProfile, scheduled: request.kind == .scheduled,
                                                              userChromeGrant: request.userChromeGrant)
-                } catch { if dedicated { await worker.stop() }; throw error }
-                if dedicated { await self.bindChromeWorker(worker, session: session, scope: try self.chromeScope(request)) }
+                } catch { await worker.stop(); throw error }
+                await self.bindChromeWorker(worker, session: session, scope: try self.chromeScope(request))
                 self.sessionRoutes[session] = (request.route, request.model.context)
                 return session
             }

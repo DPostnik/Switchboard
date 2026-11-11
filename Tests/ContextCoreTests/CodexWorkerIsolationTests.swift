@@ -59,11 +59,43 @@ private func workerFixture() throws -> (URL, URL) {
             r={'thread':{'id':tid,'turns':[{'id':'child-turn','status':'inProgress','items':[]}] if tid=='child' else []}}
         if method=='turn/interrupt' and tid not in loaded:
             print(json.dumps({'id':m['id'],'error':{'code':-32600,'message':'wrong worker'}}),flush=True);continue
-        with (root/'calls.jsonl').open('a') as f:f.write(json.dumps({'method':method,'thread':tid,'pid':os.getpid()})+'\n')
+        with (root/'calls.jsonl').open('a') as f:f.write(json.dumps({'method':method,'thread':tid,'pid':os.getpid(),'args':sys.argv[1:],'params':p})+'\n')
         print(json.dumps({'id':m['id'],'result':r}),flush=True)
     """#.utf8).write(to: executable)
     try installFixtureExecutable(at: executable)
     return (root, executable)
+}
+
+@Test func roleChangeResumesSameSessionInNewProcessWithCurrentTrust() async throws {
+    let (root, executable) = try workerFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let app = AgentClient(integration: CodexIntegration())
+    let log = WorkerEventLog()
+    let observer = Task { for await event in app.events { await log.append(event) } }
+    defer { observer.cancel() }
+    _ = try await app.start(.init(executable: executable, home: root))
+    let developer = AgentRoleCatalog.preset(AgentRoleID.developer).profile
+    let reader = AgentRoleCatalog.preset(AgentRoleID.reader).profile
+    let session = try await app.createSession(projectPath: root.path, permissions: developer, model: "", route: .direct)
+    _ = try await app.send("children", to: session, projectPath: root.path, permissions: developer, model: "", effort: "")
+    _ = try await log.wait { if case .completed = $0.payload { return $0.session == session }; return false }
+    _ = try await app.send("children", to: session, projectPath: root.path, permissions: reader, model: "", effort: "")
+    _ = try await app.send("children", to: session, projectPath: root.path, permissions: developer, model: "", effort: "")
+    let calls = try String(contentsOf: root.appendingPathComponent("calls.jsonl"), encoding: .utf8)
+        .split(separator: "\n").map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+    let turns = calls.filter { $0["method"].string == "turn/start" }
+    #expect(turns.count == 3)
+    #expect(Set(turns.compactMap { $0["pid"].int }).count == 3)
+    #expect(turns.allSatisfy { $0["thread"].string == session.nativeID })
+    #expect(calls.filter { $0["method"].string == "thread/start" }.count == 1)
+    let key = String(decoding: try JSONEncoder().encode(root.resolvingSymlinksInPath().path), as: UTF8.self)
+        .replacingOccurrences(of: "\\/", with: "/")
+    for (turn, trust) in zip(turns, ["trusted", "untrusted", "trusted"]) {
+        #expect(turn["args"].array.contains(.string("projects={\(key)={trust_level=\"\(trust)\"}}")))
+    }
+    #expect(turns[1]["params"]["sandboxPolicy"]["type"].string == "readOnly")
+    #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("config.toml").path))
+    await app.stop()
 }
 
 @Test(arguments: ["reset", "crash"])

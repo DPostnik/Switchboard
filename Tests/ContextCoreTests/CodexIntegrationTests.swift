@@ -11,8 +11,9 @@ private func contractFixture(version: String = "0.159.0", disconnect: Bool = fal
     let executable = root.appendingPathComponent("engine.py")
     let script = #"""
     #!\#(fixturePython)
-    import json,sys
+    import json,sys,os,pathlib
     calls=[]
+    journal=pathlib.Path(os.environ['CODEX_HOME'])/'contract-calls.jsonl'
     for line in sys.stdin:
         m=json.loads(line)
         if 'id' not in m: continue
@@ -28,8 +29,10 @@ private func contractFixture(version: String = "0.159.0", disconnect: Bool = fal
             print(json.dumps({'method':'account/updated','params':{}}),flush=True)
         if method=='CHANGE_DURING' and method not in calls:
             print(json.dumps({'method':'account/updated','params':{}}),flush=True)
-        if method=='test/calls': result=calls
-        else: calls.append(method)
+        if method=='test/calls': result=[json.loads(line) for line in journal.read_text().splitlines()] if journal.exists() else []
+        else:
+            calls.append(method)
+            with journal.open('a') as f:f.write(json.dumps(method)+'\n')
         print(json.dumps({'id':m['id'],'result':result}),flush=True)
     """#.replacingOccurrences(of: "VERSION", with: version).replacingOccurrences(of: "DISCONNECT", with: disconnect ? "True" : "False").replacingOccurrences(of: "CHANGE_DURING", with: changeDuring)
     try Data(script.utf8).write(to: executable)

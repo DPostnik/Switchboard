@@ -8,6 +8,22 @@ import AgentContract
 /// Never write project command exemptions into its shared app home: they would leak between projects and roles.
 /// Shell-only preset paths also stay distinct from file-tool roots. Both gaps are declared by permission support.
 extension AgentPermissionProfile {
+    /// Project rules are loaded before the thread starts. A read-only/editor role must not
+    /// inherit a project's outside-sandbox allow rules. Keep this override process-local;
+    /// never rewrite shared home trust while other role processes are running.
+    func codexProcessArguments(projectPath: String) throws -> [String] {
+        let project = URL(fileURLWithPath: projectPath).standardizedFileURL.resolvingSymlinksInPath().path
+        let profile = effective
+        let trusted = profile.filesystem == .unrestricted || (profile.shell == .on && {
+            if case .project = profile.filesystem { return true }; return false
+        }())
+        // The override parser treats quotes in dotted key segments literally. An inline
+        // TOML table encodes the path as a key, including spaces and periods, correctly.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        let key = String(decoding: try encoder.encode(project), as: UTF8.self)
+        return ["-c", "projects={\(key)={trust_level=\"\(trusted ? "trusted" : "untrusted")\"}}"]
+    }
     var codexSandbox: String {
         switch effective.filesystem {
         case .readOnly: return "read-only"
