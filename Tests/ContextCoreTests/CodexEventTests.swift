@@ -111,6 +111,9 @@ private func withEventFixture(_ body: (CodexClient, CodexConnection, EventLog) a
         if 'id' not in m: continue
         result = {}
         if m['method'] == 'test/oversized': print('x' * 5000, flush=True)
+        if m['method'] == 'test/oversized-reply':
+            print(json.dumps({'id':m['id'], 'result':'x' * 5000}), flush=True)
+            continue
         if m['method'] == 'test/emit': print(json.dumps(m['params']), flush=True)
         if m['method'] == 'test/answers': result = answers
         print(json.dumps({'id':m['id'], 'result':result}), flush=True)
@@ -216,19 +219,27 @@ private func withEventFixture(_ body: (CodexClient, CodexConnection, EventLog) a
     }
 }
 
-@Test func oversizedWireEventDisconnectsAndInvalidatesInteractionWithoutReplay() async throws {
+@Test func oversizedWireEventIsSkippedWithAChatNoticeAndTheProcessKeepsRunning() async throws {
     try await withEventFixture { client, wire, log in
         _ = try await wire.request("test/emit", params: request())
         let pending = try await log.interaction(count: 1)
-        do { _ = try await wire.request("test/oversized") } catch { /* transport closes pending RPCs */ }
+        // The oversized line precedes this request's own reply, which still arrives.
+        _ = try await wire.request("test/oversized")
         for _ in 0..<1000 {
-            if await log.values.contains(where: { if case .disconnected = $0.payload { return true }; return false }) { break }
+            if await log.values.contains(where: { if case .diagnostic = $0.payload { return true }; return false }) { break }
             try await Task.sleep(for: .milliseconds(10))
         }
         let events = await log.values
-        #expect(events.contains { if case .diagnostic = $0.payload { return true }; return false })
-        #expect(events.contains { if case .disconnected = $0.payload { return true }; return false })
-        await #expect(throws: ClientFailure.self) { try await client.answer(pending.id, session: pending.session, response: .allowOnce) }
+        let notice = events.first { if case .diagnostic = $0.payload { return true }; return false }
+        #expect(notice?.session?.nativeID == "t")
+        #expect(!events.contains { if case .disconnected = $0.payload { return true }; return false })
+        // An oversized reply fails its request at once instead of waiting for the timeout.
+        let started = ContinuousClock.now
+        await #expect(throws: ClientFailure.self) { _ = try await wire.request("test/oversized-reply") }
+        #expect(started.duration(to: .now) < .seconds(10))
+        #expect(await wire.isRunning)
+        try await client.answer(pending.id, session: pending.session, response: .allowOnce)
+        #expect(try await wire.request("test/answers").array.count == 1)
     }
 }
 

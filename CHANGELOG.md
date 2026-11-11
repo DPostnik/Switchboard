@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Skip an oversized Codex message with a chat notice instead of disconnecting the chat's process.
+
 - Resume Codex chats in isolated processes when their role permissions change.
 
 - Check bundled Python entry points and record command approval cwd coverage.

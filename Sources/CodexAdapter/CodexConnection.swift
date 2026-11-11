@@ -36,6 +36,8 @@ import ContextCore
     private var pending: [String: CheckedContinuation<JSONValue, any Error>] = [:]
     private var timeouts: [String: Task<Void, Never>] = [:]
     private var reader: Task<Void, Never>?
+    /// Routes a notice about a skipped message whose head names no thread; a dedicated worker serves one chat.
+    private var lastThreadID: String?
     public private(set) var serverUserAgent: String?
     private(set) var verifiedInstallVersion: String?
     private(set) var activeHome: URL?
@@ -138,6 +140,7 @@ import ContextCore
     }
     private func emit(_ value: JSONValue) {
         let method = value["method"].string ?? "", p = value["params"]
+        if let thread = p["threadId"].string, !thread.isEmpty { lastThreadID = thread }
         // Names only; the message itself is delivered unchanged.
         CodexProtocolSurface.record(value, userAgent: serverUserAgent)
         var requestToken: UUID?
@@ -180,14 +183,12 @@ import ContextCore
     }
     private func ingest(_ data: Data, token: UUID) {
         guard token == generation else { return }
-        let lines: [Data]
-        do { lines = try buffer.append(data) } catch {
-            stop()
-            emit(.object(["method": .string("client/error"), "params": .object(["message": .string(L10n.text("Ответ движка превышает допустимый размер", "The engine response exceeds the size limit"))])]))
-            emit(.object(["method": .string("client/disconnected"), "params": .object([:])]))
-            return
-        }
-        for line in lines {
+        for entry in buffer.append(data) {
+            let line: Data
+            switch entry {
+            case .complete(let complete): line = complete
+            case .oversized(let head, let bytes): skipOversized(OversizedLineHead(head), bytes: bytes); continue
+            }
             guard !line.isEmpty else { continue }
             guard let message = try? JSONDecoder().decode(JSONValue.self, from: Data(line)) else { continue }
             if message["method"].string != nil { emit(message); continue }
@@ -197,6 +198,26 @@ import ContextCore
                 c.resume(throwing: ClientFailure(message["error"]["message"].string ?? L10n.text("Ошибка протокола", "Protocol error")))
             } else { c.resume(returning: message["result"]) }
         }
+    }
+    /// One message over the limit (for example a large tool result) is skipped; the process and its turn keep
+    /// running. A reply the app waits for fails at once, a server request is declined, and the chat gets a notice.
+    private func skipOversized(_ head: OversizedLineHead, bytes: Int) {
+        let size = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+        let limit = ByteCountFormatter.string(fromByteCount: Int64(maximumLineBytes), countStyle: .file)
+        if head.method == nil, let id = head.id?.string, let c = pending.removeValue(forKey: id) {
+            timeouts.removeValue(forKey: id)?.cancel()
+            c.resume(throwing: ClientFailure(L10n.text("Ответ Codex (\(size)) больше лимита \(limit) и пропущен; запрос не повторён.",
+                                                       "The Codex reply (\(size)) exceeds the \(limit) limit and was skipped; the request was not retried.")))
+            return
+        }
+        if head.method != nil, let id = head.id {
+            try? send(.object(["id": id, "error": .object(["code": .number(-32600), "message": .string("Request exceeds the client size limit")])]))
+        }
+        var params: [String: JSONValue] = ["message": .string(L10n.text(
+            "Codex прислал сообщение размером \(size), больше лимита \(limit). Switchboard пропустил его, ход продолжается; результат этого шага может не показаться в чате.",
+            "Codex sent a \(size) message, over the \(limit) limit. Switchboard skipped it and the turn continues; the result of this step may be missing from the chat."))]
+        if let thread = head.threadID ?? lastThreadID { params["threadId"] = .string(thread) }
+        emit(.object(["method": .string("client/error"), "params": .object(params)]))
     }
     private func expired(_ id: String, method: String) {
         timeouts.removeValue(forKey: id)
@@ -227,7 +248,7 @@ import ContextCore
         for task in timeouts.values { task.cancel() }; timeouts.removeAll()
         let waiting = pending.values; pending.removeAll()
         for c in waiting { c.resume(throwing: ClientFailure(L10n.text("Соединение с Codex закрыто", "The connection to Codex is closed"))) }
-        activeHome = nil
+        activeHome = nil; lastThreadID = nil
         process = nil; outputPipe = nil; errorPipe = nil
     }
 }
