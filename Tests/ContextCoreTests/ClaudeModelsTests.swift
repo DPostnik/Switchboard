@@ -17,11 +17,11 @@ import Testing
 
 @Test func claudeCatalogOffersTheCurrentLineup() {
     let current = Set(ClaudeModel.current.map(\.id))
-    #expect(current == ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-haiku-4-5"])
+    #expect(current == ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-2"])
     #expect(ClaudeModel.previous.allSatisfy { !$0.isCurrent })
     #expect(ClaudeModel.current.count + ClaudeModel.previous.count == ClaudeModel.catalog.count)
     #expect(ClaudeModel.entry(for: "claude-opus-5-5")?.reasoning == .always)
-    #expect(ClaudeModel.entry(for: "claude-haiku-4-5")?.reasoning == .extended)
+    #expect(ClaudeModel.entry(for: "claude-haiku-4-5") == nil)
     #expect(ClaudeModel.entry(for: "claude-opus-5")?.reasoning == .adaptive)
 }
 
@@ -45,9 +45,9 @@ import Testing
 @Test func claudeRuntimeConnectsPinnedAndSameBranchVersionsOnly() {
     #expect(ClaudeRuntime.verifiedVersions == [ClaudeRuntime.pinnedVersion])
     #expect(ClaudeRuntime.branch == "2.1")
-    #expect(ClaudeRuntime.engine(versionOutput: "2.1.292 (Claude Code)\n") == AgentEngineVersion(version: "2.1.292", verified: true))
-    #expect(ClaudeRuntime.engine(versionOutput: "2.1.316 (Claude Code)") == AgentEngineVersion(version: "2.1.316", verified: false, nearestVerified: "2.1.292"))
-    for output in ["2.2.0 (Claude Code)", "3.0.0 (Claude Code)", "2.1.292", "2.1.292 (Other)", "(Claude Code)", "2.1.x (Claude Code)", ""] {
+    #expect(ClaudeRuntime.engine(versionOutput: "2.1.322 (Claude Code)\n") == AgentEngineVersion(version: "2.1.322", verified: true))
+    #expect(ClaudeRuntime.engine(versionOutput: "2.1.316 (Claude Code)") == AgentEngineVersion(version: "2.1.316", verified: false, nearestVerified: "2.1.322"))
+    for output in ["2.2.0 (Claude Code)", "3.0.0 (Claude Code)", "2.1.322", "2.1.322 (Other)", "(Claude Code)", "2.1.x (Claude Code)", ""] {
         #expect(ClaudeRuntime.engine(versionOutput: output) == nil, "\(output)")
     }
 }
@@ -63,9 +63,9 @@ import Testing
 
 /// The pinned CLI rejects a model its own catalog does not describe, so a model above the pin
 /// must not be selectable. Both 5.5 entries were absent from 2.1.260 and are present in the
-/// pinned 2.1.292, where `claude-opus-5-5` was run end to end.
+/// pinned 2.1.322, where `claude-opus-5-5` was run end to end.
 @Test func claudeCatalogGatesModelsAgainstThePinnedRuntime() {
-    #expect(ClaudeRuntime.pinnedVersion == "2.1.292")
+    #expect(ClaudeRuntime.pinnedVersion == "2.1.322")
     for id in ["claude-opus-5-5", "claude-sonnet-5-5"] {
         let entry = ClaudeModel.entry(for: id)
         #expect(entry?.isSupported(by: "2.1.260") == false)

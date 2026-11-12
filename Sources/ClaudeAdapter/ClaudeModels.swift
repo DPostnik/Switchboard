@@ -9,12 +9,12 @@ import ContextCore
 /// Connection follows `AgentVersionPolicy` (user decision 2026-11-02): the pinned build connects normally,
 /// another 2.1.x build connects as unverified with a warning and drift diagnostics, anything else is rejected.
 public enum ClaudeRuntime {
-    public static let pinnedVersion = "2.1.292"
+    public static let pinnedVersion = "2.1.322"
     public static let verifiedVersions = [pinnedVersion]
     /// The pinned build's major.minor, e.g. "2.1"; other versions on this branch connect as unverified.
     public static var branch: String { pinnedVersion.split(separator: ".").prefix(2).joined(separator: ".") }
 
-    /// The engine for `claude --version` output ("2.1.292 (Claude Code)"); nil when the policy rejects it.
+    /// The engine for `claude --version` output ("2.1.322 (Claude Code)"); nil when the policy rejects it.
     public static func engine(versionOutput: String) -> AgentEngineVersion? {
         let text = versionOutput.trimmingCharacters(in: .whitespacesAndNewlines), suffix = " (Claude Code)"
         guard text.hasSuffix(suffix) else { return nil }
@@ -136,8 +136,8 @@ public struct ClaudeModel: Hashable, Sendable, Identifiable {
     public static let catalog: [ClaudeModel] = [
         .init(id: "claude-opus-5-5", name: "Opus 5.5", reasoning: .always, isCurrent: true, minimumCLI: "2.1.280"),
         .init(id: "claude-sonnet-5-5", name: "Sonnet 5.5", reasoning: .always, isCurrent: true, minimumCLI: "2.1.292"),
-        .init(id: "claude-fable-5-1", name: "Fable 5.1", reasoning: .always, isCurrent: true, minimumCLI: "2.1.260"),
-        .init(id: "claude-haiku-4-5", name: "Haiku 4.5", reasoning: .extended, isCurrent: true, minimumCLI: "2.1.260"),
+        .init(id: "claude-fable-5-2", name: "Fable 5.2", reasoning: .always, isCurrent: true, minimumCLI: "2.1.321"),
+        .init(id: "claude-fable-5-1", name: "Fable 5.1", reasoning: .always, isCurrent: false, minimumCLI: "2.1.260"),
         .init(id: "claude-fable-5", name: "Fable 5", reasoning: .always, isCurrent: false, minimumCLI: "2.1.260"),
         .init(id: "claude-opus-5", name: "Opus 5", reasoning: .adaptive, isCurrent: false, minimumCLI: "2.1.260"),
         .init(id: "claude-sonnet-5", name: "Sonnet 5", reasoning: .adaptive, isCurrent: false, minimumCLI: "2.1.260"),

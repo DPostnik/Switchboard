@@ -5,7 +5,7 @@ import Foundation
 import Testing
 
 /// Version policy at connect: the pinned build is verified, another 2.1.x connects as unverified, others are rejected.
-@Test(arguments: [("2.1.292", true as Bool?), ("2.1.316", false), ("2.2.0", nil), ("0.0.0", nil)])
+@Test(arguments: [("2.1.322", true as Bool?), ("2.1.316", false), ("2.2.0", nil), ("0.0.0", nil)])
 func claudeAdapterAppliesTheVersionPolicyAtConnect(version: String, verified: Bool?) async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -36,7 +36,7 @@ func claudeAdapterAppliesTheVersionPolicyAtConnect(version: String, verified: Bo
 /// Explicit opt-in (`SWITCHBOARD_CLAUDE_COMPATIBILITY_LIVE=1`, run by scripts/compat-check.py for a newly installed
 /// version): the installed CLI in a fresh, signed-out `CLAUDE_CONFIG_DIR` answers `--version` and a stream-json
 /// `initialize`, the same handshake the usage probe uses. No user message is sent, so there is no model request;
-/// no tools, settings, MCP servers or sessions are loaded or persisted. Verified 2026-11-02 on 2.1.292: about 0.3 s,
+/// no tools, settings, MCP servers or sessions are loaded or persisted. Verified 2026-11-02 on 2.1.322: about 0.3 s,
 /// no sign-in or network needed.
 @Test func installedClaudeHandshakeWithoutInference() async throws {
     guard ProcessInfo.processInfo.environment["SWITCHBOARD_CLAUDE_COMPATIBILITY_LIVE"] == "1" else { return }

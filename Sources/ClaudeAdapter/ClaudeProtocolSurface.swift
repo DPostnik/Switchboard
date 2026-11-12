@@ -18,7 +18,7 @@ enum ClaudeProtocolSurface {
         "api_retry", "background_tasks_changed", "commands_changed", "compact_boundary", "control_request_progress",
         "elicitation_complete", "files_persisted", "hook_progress", "hook_response", "hook_started", "informational", "init",
         "local_command_output", "memory_recall", "mirror_error", "model_refusal_fallback", "model_refusal_no_fallback",
-        "notification", "permission_denied", "plugin_install", "session_state_changed", "status", "task_notification",
+        "notification", "permission_denied", "plugin_install", "session_state_changed", "session_writes_lost", "status", "task_notification",
         "task_progress", "task_started", "task_updated", "thinking_tokens", "worker_shutting_down"
     ]
     static let streamEvents: Set<String> = [
