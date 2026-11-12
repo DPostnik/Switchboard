@@ -18,8 +18,14 @@ actor ClaudeWire {
     private var ended = false
     /// Chat label of the launched process; its leftovers are swept when the stream closes.
     private var chatLabel: String?
+    /// Under the external boundary the launcher leads one process group (helper, CLI, its tools and sub-agents), and
+    /// teardown signals the whole group. `cleanup` stops the relay host and removes the worker folder once the stream ends.
+    private var processGroup = false
+    private var cleanup: (@Sendable () async -> Void)?
     init() { let stream = AsyncStream<JSONValue>.makeStream(); frames = stream.stream; sink = stream.continuation }
-    func start(executable: URL, arguments: [String], environment: [String: String], cwd: URL) throws {
+    /// `firstLine` is written to stdin before any protocol frame (the boundary's token launcher reads it); it is not kept.
+    func start(executable: URL, arguments: [String], environment: [String: String], cwd: URL, firstLine: Data? = nil,
+               processGroup: Bool = false, cleanup: (@Sendable () async -> Void)? = nil) throws {
         let child = Process(), input = Pipe(), output = Pipe(), errors = Pipe()
         child.executableURL = executable; child.arguments = arguments; child.environment = environment
         child.currentDirectoryURL = cwd; child.standardInput = input; child.standardOutput = output; child.standardError = errors
@@ -37,6 +43,11 @@ actor ClaudeWire {
         }
         chatLabel = label
         process = child; stdin = input; stdout = output; stderr = errors
+        self.processGroup = processGroup; self.cleanup = cleanup
+        if let firstLine {
+            do { try input.fileHandleForWriting.write(contentsOf: firstLine + Data([10])) }
+            catch { close(); throw error }
+        }
         reader = Task { [weak self] in
             for await data in chunks.stream { await self?.ingest(data) }
             await self?.closed()
@@ -86,10 +97,22 @@ actor ClaudeWire {
     }
     func close() {
         if let process, process.isRunning {
-            process.terminate()
-            Task { try? await Task.sleep(for: .seconds(1)); if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
+            if processGroup {
+                // Revocation ends the helper, the CLI and every tool and sub-agent it started, not only the launcher.
+                ProcessGroupTerminator.terminate(group: process.processIdentifier)
+            } else {
+                process.terminate()
+                Task { try? await Task.sleep(for: .seconds(1)); if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
+            }
         }
         closed()
+    }
+    /// `close`, then wait until the launcher exited (up to the group's SIGKILL grace), so the replaced process holds no
+    /// rights when its successor starts.
+    func closeAndWait() async {
+        close()
+        guard let process else { return }
+        for _ in 0..<40 where process.isRunning { try? await Task.sleep(for: .milliseconds(100)) }
     }
     private func closed() {
         guard !ended else { return }; ended = true
@@ -98,6 +121,12 @@ actor ClaudeWire {
         try? stdin?.fileHandleForWriting.close()
         sink.yield(.object(["type": .string("transport_closed")])); sink.finish()
         if let chatLabel { ProcessSweeper.shared.end(chat: chatLabel); self.chatLabel = nil }
+        if let cleanup {
+            self.cleanup = nil
+            // A launcher that ended on its own may leave members of its group (a background sub-agent's command).
+            if processGroup, let process { ProcessGroupTerminator.terminate(group: process.processIdentifier) }
+            Task { await cleanup() }
+        }
     }
     private static var closedError: ClientFailure {
         ClientFailure(L10n.text("Соединение Claude закрыто. Запрос не повторён.", "Claude connection closed. The request was not retried."))

@@ -191,6 +191,7 @@ private func sha256(_ data: Data) -> String {
     let entry = servers["switchboard_browser"] as! [String: Any]
     #expect(entry["command"] as? String == "/usr/bin/python3" && entry["args"] as? [String] == ["-I", "/app/server.py"])
     #expect((entry["env"] as? [String: String])?["LANG"] == "ru")
+    #expect(entry["cwd"] as? String == plan.project)
 }
 
 @Test func plannerGrantsTheFoldersForEveryProjectToCodex() throws {
@@ -212,4 +213,97 @@ private func sha256(_ data: Data) -> String {
     // The Codex turn's own writable roots carry the writable shared folder too.
     let policy = try #require(profile.codexTurnParameters(projectPath: project.path)["sandboxPolicy"])
     #expect(policy["writableRoots"].array.contains(.string(shared.path)) && !policy["writableRoots"].array.contains(.string(notes.path)))
+}
+
+private func claudeInput(_ root: URL, project: Project, workerID: String) -> ExternalSandboxPlanner.Input {
+    var input = ExternalSandboxPlanner.Input(project: project.path, profile: AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: project),
+                                             providerHome: root.appendingPathComponent("codex-home"), providerExecutable: root.appendingPathComponent("codex"),
+                                             resources: root.appendingPathComponent("resources"), workerID: workerID, home: root.appendingPathComponent("home"))
+    input.settingsFile = true; input.mediateProcessList = true; input.commandInventory = true
+    return input
+}
+
+@Test func plannerOmitsCommandPoliciesWithoutMediatedCommands() throws {
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    let project = Project(path: root.appendingPathComponent("project").path)
+    let input = ExternalSandboxPlanner.Input(project: project.path, profile: AgentRoleCatalog.preset(AgentRoleID.reader).profile(for: project),
+                                             providerHome: root.appendingPathComponent("codex-home"), providerExecutable: root.appendingPathComponent("codex"),
+                                             resources: root.appendingPathComponent("resources"), workerID: "noexec", home: root.appendingPathComponent("home"))
+    let plan = try ExternalSandboxPlanner.plan(input, helper: .success(helper)).get()
+    // nono 0.81.0 refuses `executable_dirs` without a mediated command (B1 probe): the whole section is left out.
+    #expect(plan.commands.isEmpty && plan.policyDocument()["command_policies"] == nil)
+    // A plan with a mediated command keeps it.
+    var developer = input; developer.profile = AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: project); developer.mediateProcessList = true
+    let mediated = try ExternalSandboxPlanner.plan(developer, helper: .success(helper)).get()
+    #expect(mediated.policyDocument()["command_policies"] != nil)
+}
+
+@Test func claudePlanGrantsSettingsFileInboxAndMediatesPgrepWithStableAuthority() throws {
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    let project = Project(path: root.appendingPathComponent("project").path)
+    let inbox = root.appendingPathComponent("inbox"), attachments = root.appendingPathComponent("dropped")
+    for folder in [inbox, attachments] { try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) }
+    var input = claudeInput(root, project: project, workerID: "c1")
+    input.extraWrites = [inbox.path]; input.extraReads = [attachments.path, root.appendingPathComponent("missing").path]
+    let plan = try ExternalSandboxPlanner.plan(input, helper: .success(helper)).get()
+    #expect(plan.grants.contains(.init(.readFile, plan.settingsFile.path)))
+    #expect(plan.grants.contains(.init(.allow, inbox.resolvingSymlinksInPath().path)))
+    #expect(plan.grants.contains(.init(.read, attachments.resolvingSymlinksInPath().path)))
+    #expect(!plan.grants.contains { $0.path.hasSuffix("/missing") })
+    #expect(plan.grants.contains(.init(.allow, root.appendingPathComponent("codex-home").resolvingSymlinksInPath().path)))
+    let pgrep = try #require(plan.commands.first { $0.name == "pgrep" })
+    #expect(pgrep.executable == "/usr/bin/pgrep" && !pgrep.keychain && !pgrep.network)
+    // The settings file is outside every writable grant.
+    #expect(!plan.grants.contains { $0.mode == .allow && plan.settingsFile.path.hasPrefix($0.path + "/") })
+    // Equal rights give equal authority whatever the worker; a changed setting changes it.
+    var same = claudeInput(root, project: project, workerID: "c2"); same.extraWrites = [inbox.path]; same.extraReads = [attachments.path]
+    let other = try ExternalSandboxPlanner.plan(same, helper: .success(helper)).get()
+    #expect(other.authority == plan.authority && other.worker != plan.worker)
+    #expect(!plan.authority.contains { $0.contains(plan.worker.path) })
+    var narrower = claudeInput(root, project: project, workerID: "c3"); narrower.extraReads = [attachments.path]
+    #expect(try ExternalSandboxPlanner.plan(narrower, helper: .success(helper)).get().authority != plan.authority)
+    // Codex inputs keep their behavior: no pgrep, no settings file.
+    let codex = try ExternalSandboxPlanner.plan(.init(project: project.path, profile: input.profile, providerHome: input.providerHome,
+                                                      providerExecutable: input.providerExecutable, resources: input.resources, workerID: "x1", home: input.home),
+                                                helper: .success(helper)).get()
+    #expect(!codex.commands.contains { $0.name == "pgrep" } && !codex.grants.contains { $0.path == codex.settingsFile.path })
+}
+
+@Test func commandInventoryRefusesTrustedCommandsTheBoundaryCannotRun() throws {
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    let home = root.appendingPathComponent("home")
+    let projectPath = root.appendingPathComponent("project").resolvingSymlinksInPath().path
+    let grants: [ExternalSandboxPlan.Grant] = [.init(.allow, projectPath), .init(.unixSocket, "/private/tmp/x.sock")]
+    func check(_ trusted: [String], mediated: Set<String> = []) -> String? {
+        ExternalSandboxPlanner.unrunnableTrustedCommand(trusted, mediated: mediated, grants: grants, home: home)
+    }
+    // The app's base entries never make a project ineligible, although `ps` cannot run under nono.
+    #expect(check(AccessPresetCatalog.baseUnsandboxed) == nil)
+    #expect(check(["zsh scripts/test.sh", "zsh scripts/build-app.sh", "swift build", "xcodebuild"]) == nil)
+    #expect(check(["gh", "git push"], mediated: ["gh", "git"]) == nil)
+    #expect(check(["python3 \(projectPath)/tools/x.py", "cat /dev/null", "/usr/bin/env true"]) == nil)
+    // Negative: unrunnable heads (also by absolute path), unmediated Keychain tools, paths outside every grant.
+    #expect(check(["/usr/bin/log show --last 1m"]) == "/usr/bin/log show --last 1m")
+    #expect(check(["launchctl load x.plist"]) == "launchctl load x.plist")
+    #expect(check(["security find-identity"]) == "security find-identity")
+    #expect(check(["security find-identity"], mediated: ["security"]) == nil)
+    #expect(check(["cp job.plist ~/Library/LaunchAgents/"]) == "cp job.plist ~/Library/LaunchAgents/")
+    #expect(check(["cat '/private/var/root/x'"]) == "cat '/private/var/root/x'")
+    #expect(check(["tee /private/tmp/x.sock"]) == "tee /private/tmp/x.sock")
+    #expect(check(["osascript -e x"]) == "osascript -e x" && check(["pkill -f x"]) == "pkill -f x" && check(["sudo true"]) == "sudo true")
+    // In the planner: Claude refuses the boundary with the command named; the Codex input is unchanged (user decision pending).
+    var project = Project(path: root.appendingPathComponent("project").path)
+    project.sandboxCommands = ["zsh scripts/test.sh", "/usr/bin/log show"]
+    let input = claudeInput(root, project: project, workerID: "inv1")
+    #expect(ExternalSandboxPlanner.plan(input, helper: .success(helper)) == .failure(.trustedCommandOutside("/usr/bin/log show")))
+    var codex = input; codex.commandInventory = false; codex.mediateProcessList = false; codex.settingsFile = false
+    #expect((try? ExternalSandboxPlanner.plan(codex, helper: .success(helper)).get()) != nil)
+    let reason = ExternalSandboxPlanner.Ineligible.trustedCommandOutside("/usr/bin/log show")
+    #expect(reason.description(language: .english).contains("`/usr/bin/log show`") && reason.description(language: .russian).contains("`/usr/bin/log show`"))
 }

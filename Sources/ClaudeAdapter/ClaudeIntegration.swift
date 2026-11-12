@@ -73,6 +73,8 @@ public actor ClaudeIntegration: AgentIntegration {
         let toolUseID: String?
         /// Ledger reason the app asked; carried to the record of the user's answer.
         var reason: String? = nil
+        /// The session's process epoch when the request arrived (`sessionEpochs`).
+        var wireEpoch: UUID? = nil
     }
     private var interactions: [UUID: Interaction] = [:]
     /// Session -> tools the user allowed for the rest of the named turn ("allow for this turn"). Cleared when the turn ends.
@@ -106,12 +108,24 @@ public actor ClaudeIntegration: AgentIntegration {
     private var wireGrants: [String: BrowserProfileGrant] = [:]
     /// The user's own skill folder (`~/.claude/skills` in the app), loaded read-only next to the profile's (`ClaudeSkills`).
     private let userSkills: URL?
+    /// The external boundary for chat launches (`ClaudeBoundary.swift`); nil keeps every chat on the CLI sandbox.
+    private let boundaryRuntime: ClaudeBoundaryRuntime?
+    /// App bundle resources (`SandboxRuntime` for the relay), also without the browser.
+    private var resources: URL?
+    private struct BoundaryState { let expiresAt: Date; let temporary: String }
+    /// Session -> its live CLI runs under the boundary: the token's expiry and the worker's temporary folder.
+    private var boundaries: [String: BoundaryState] = [:]
+    /// Session -> the fallback reason last shown in the chat; the notice repeats only when the reason changes.
+    private var fallbackNotices: [String: String] = [:]
+    private var loggedFallbacks = Set<String>()
+    /// Session -> epoch of its live CLI. A replaced process invalidates only this session's pending interactions.
+    private var sessionEpochs: [String: UUID] = [:]
     public init(browserRoot: URL = BrowserEnvironmentStore.directory, backgroundWaitLimit: Duration = .seconds(3600),
                 backgroundSettleDelay: Duration = .seconds(30), warmTimeout: Duration = .seconds(600), saveDelay: Duration = .seconds(10),
-                userSkills: URL? = nil) {
+                userSkills: URL? = nil, boundary: ClaudeBoundaryRuntime? = nil) {
         let stream = AsyncStream<AgentEvent>.makeStream(); events = stream.stream; sink = stream.continuation
         self.browserRoot = browserRoot; self.backgroundWaitLimit = backgroundWaitLimit; self.backgroundSettleDelay = backgroundSettleDelay
-        self.warmTimeout = warmTimeout; self.saveDelay = saveDelay; self.userSkills = userSkills
+        self.warmTimeout = warmTimeout; self.saveDelay = saveDelay; self.userSkills = userSkills; self.boundaryRuntime = boundary
     }
     public func optimizerEnvironment(home: URL) -> AgentResult<[String: String]> { .rejected(.routeUnavailable) }
     public func connect(_ configuration: AgentConnectionConfiguration) async -> AgentResult<AgentDescriptor> {
@@ -134,6 +148,7 @@ public actor ClaudeIntegration: AgentIntegration {
             if !engine.verified { CompatibilityDrift.shared.noteUnverified(.claudeCode, version: engine.version) }
             home = configuration.home; executable = binary; self.engine = engine
             browserResources = configuration.browserEnabled ? configuration.resources : nil
+            resources = configuration.resources
             userChrome = configuration.userChromeEnabled
             context = .init(connection: .appClaude, accountRevision: UUID())
             _ = await account()
@@ -161,6 +176,7 @@ public actor ClaudeIntegration: AgentIntegration {
         for id in tasks.keys { sink.yield(.init(session: reference(id), payload: .backgroundTasks([]))) }
         subagents.removeAll(); tasks.removeAll()
         home = nil; executable = nil; engine = nil; signedIn = false; accountIdentity = nil; browserResources = nil; userChrome = false; wireGrants.removeAll()
+        resources = nil; boundaries.removeAll(); sessionEpochs.removeAll()
         context = .init(connection: .appClaude, accountRevision: UUID())
     }
     public func account() async -> AgentResult<AgentAccountInfo> {
@@ -287,10 +303,22 @@ public actor ClaudeIntegration: AgentIntegration {
             let projectServers = ProjectMCPServers.approved(projectPath: record.cwd, approvals: profile.mcpServers)
             // Also read at every turn: a skill folder created or removed since the last launch changes it.
             let skills = try ClaudeSkills.pluginRoot(home: home, user: userSkills)?.path
-            let launch = try Self.arguments(id: id, resumed: true, permissions: profile, model: request.model.model, effort: request.model.effort,
+            // Recompiled at every turn: a changed project setting changes the plan's authority and so replaces the process.
+            let boundaryDecision = boundaryPlan(profile: profile, cwd: record.cwd, skills: skills, scheduled: scheduled)
+            var boundary: ClaudeBoundaryLaunch? = if case .success(let value) = boundaryDecision { value } else { nil }
+            /// The launch identity: the CLI arguments and, under the boundary, the plan's authority.
+            func identity(_ arguments: [String], _ boundary: ClaudeBoundaryLaunch?) -> [String] {
+                arguments + (boundary.map { ["--external-boundary"] + $0.plan.authority } ?? [])
+            }
+            let launch = identity(try Self.arguments(id: id, resumed: true, permissions: profile, model: request.model.model, effort: request.model.effort,
                                             advisor: request.model.advisor, chatDirectory: request.chatDirectory, scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                             projectAgents: ProjectAgents.argument(projectPath: record.cwd), projectServers: projectServers,
-                                            home: home, userChrome: userChrome, skills: skills, cwd: record.cwd)
+                                            home: home, userChrome: userChrome, skills: skills, cwd: record.cwd, boundary: boundary != nil), boundary)
+            // A worker's token cannot be refreshed inside the boundary: before it expires, the next turn starts a new process.
+            if let current = wires[id], let state = boundaries[id], state.expiresAt.timeIntervalSinceNow <= ClaudeBoundaryToken.minimumLifetime {
+                wires.removeValue(forKey: id); abandonWait(id); await current.closeAndWait()
+                guard wires[id] == nil else { return .rejected(.staleContext) }
+            }
             // A scheduled turn's CLI still running background tasks (sub-agents) takes the user's message instead of
             // restarting, which would end them: the attended approval rules are applied to the live process first.
             // `--chrome` cannot be added live, so that CLI stays without the user's Chrome until it is replaced.
@@ -298,10 +326,10 @@ public actor ClaudeIntegration: AgentIntegration {
             var selection = (model: request.model.model, effort: request.model.effort, advisor: request.model.advisor)
             if let current = wires[id], !scheduled, !(backgroundTasks[id] ?? []).isEmpty {
                 func variant(scheduled: Bool, userChrome: Bool, model: String? = nil, effort: String?? = nil, advisor: String?? = nil) throws -> [String] {
-                    try Self.arguments(id: id, resumed: true, permissions: profile, model: model ?? request.model.model, effort: effort ?? request.model.effort,
+                    identity(try Self.arguments(id: id, resumed: true, permissions: profile, model: model ?? request.model.model, effort: effort ?? request.model.effort,
                                        advisor: advisor ?? request.model.advisor, chatDirectory: request.chatDirectory, scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                        projectAgents: ProjectAgents.argument(projectPath: record.cwd), projectServers: projectServers,
-                                       home: home, userChrome: userChrome, skills: skills, cwd: record.cwd)
+                                       home: home, userChrome: userChrome, skills: skills, cwd: record.cwd, boundary: boundary != nil), boundary)
                 }
                 let live = try variant(scheduled: false, userChrome: false)
                 if scheduledWires.contains(id), wireArguments[id] == (try variant(scheduled: true, userChrome: userChrome)) {
@@ -337,7 +365,10 @@ public actor ClaudeIntegration: AgentIntegration {
             // A CLI kept for background tasks was started with its own model, permissions and approval rules
             // (scheduled turns have none); a different launch stops it and resumes in a fresh one.
             if !adopted, let current = wires[id], scheduledWires.contains(id) != scheduled || wireArguments[id] != launch {
-                wires.removeValue(forKey: id); abandonWait(id); await current.close()
+                wires.removeValue(forKey: id); abandonWait(id)
+                // Revocation: the old process group has ended before the new rights are claimed (invariant 10).
+                if boundaries[id] != nil { await current.closeAndWait() } else { await current.close() }
+                guard wires[id] == nil else { return .rejected(.staleContext) }
             }
             warm[id] = nil
             let wire: ClaudeWire
@@ -353,12 +384,22 @@ public actor ClaudeIntegration: AgentIntegration {
                     BrowserEnvironmentStore.serverArguments(resources: resources, root: browserRoot, environment: $0.environment, grant: $0,
                                                             policy: BrowserLaunchPolicy(profile, scheduled: scheduled))
                 } }
+                // The token is read only for a process that starts now; a missing or expiring one keeps this launch native.
+                var fallback: ClaudeBoundaryFallback? = if case .failure(let reason) = boundaryDecision { reason } else { nil }
+                var token: ClaudeAccessToken?
+                if boundary != nil, let runtime = boundaryRuntime {
+                    switch runtime.tokens.token(home: home) {
+                    case .success(let value): token = value
+                    case .failure(let failure): fallback = .token(failure); boundary = nil
+                    }
+                }
                 let arguments = try Self.arguments(id: id, resumed: record.sent, permissions: profile,
                                                    model: request.model.model, effort: request.model.effort, advisor: request.model.advisor,
                                                    chatDirectory: request.chatDirectory, scheduled: scheduled,
                                                    projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                                    projectAgents: ProjectAgents.argument(projectPath: record.cwd), browserServer: server,
-                                                   projectServers: projectServers, home: home, userChrome: userChrome, skills: skills, cwd: record.cwd)
+                                                   projectServers: projectServers, home: home, userChrome: userChrome, skills: skills, cwd: record.cwd,
+                                                   boundary: boundary != nil)
                 var environment = ClaudeProfile.environment(home: home).merging(Self.sessionEnvironment) { _, new in new }
                 // Every descendant of this CLI (also after `setsid`) carries the chat label for the orphan sweeper.
                 environment.merge(ProcessLabels.environment(chat: id)) { _, new in new }
@@ -369,8 +410,21 @@ public actor ClaudeIntegration: AgentIntegration {
                 if policy.connectors { environment.merge(Self.connectorEnvironment) { _, new in new } }
                 // Skill plugins replace `--safe-mode`, which also kept CLAUDE.md files out.
                 if skills != nil { environment["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1" }
-                try await wire.start(executable: executable, arguments: arguments, environment: environment, cwd: URL(fileURLWithPath: record.cwd))
-                wires[id] = wire; wireArguments[id] = launch; backgroundTasks[id] = []; stopWaiting(id)
+                if let boundary, let token, let resources {
+                    try await startBoundary(wire, boundary: boundary, token: token, executable: executable, arguments: arguments,
+                                            environment: environment, cwd: record.cwd, resources: resources)
+                    boundaries[id] = BoundaryState(expiresAt: token.expiresAt, temporary: boundary.plan.temporary.path)
+                    wireArguments[id] = launch
+                } else {
+                    try await wire.start(executable: executable, arguments: arguments, environment: environment, cwd: URL(fileURLWithPath: record.cwd))
+                    boundaries[id] = nil
+                    // A token fallback started a native process for a boundary launch; its identity never matches, so the next
+                    // turn tries the boundary again with a fresh token.
+                    if case .token = fallback { wireArguments[id] = ["--token-fallback"] } else { wireArguments[id] = launch }
+                }
+                noteFallback(fallback, session: id, project: record.cwd)
+                sessionEpochs[id] = UUID()
+                wires[id] = wire; backgroundTasks[id] = []; stopWaiting(id)
                 if scheduled { scheduledWires.insert(id) } else { scheduledWires.remove(id) }
                 if let grant { wireGrants[id] = grant; try profiles.acknowledge(grant, session: reference(id)) }
                 seenRequests[id] = []
@@ -455,8 +509,8 @@ public actor ClaudeIntegration: AgentIntegration {
     static func arguments(id: String, resumed: Bool, permissions requested: AgentPermissionProfile, model: String, effort: String?, advisor: String? = nil, chatDirectory: [String]? = nil, scheduled: Bool = false,
                           projectInstructions: String? = nil, projectAgents: String? = nil, browserServer: [String]? = nil,
                           projectServers: [String: JSONValue] = [:], home: URL? = nil, userChrome: Bool = false, skills: String? = nil,
-                          cwd: String? = nil) throws -> [String] {
-        let policy = ClaudeLaunchPolicy(requested, scheduled: scheduled, userChromeEnabled: userChrome)
+                          cwd: String? = nil, boundary: Bool = false) throws -> [String] {
+        let policy = ClaudeLaunchPolicy(requested, scheduled: scheduled, userChromeEnabled: userChrome, boundary: boundary)
         // Only roles with connectors load the account's claude.ai connectors such as Gmail.
         let connectors = policy.connectors
         let chrome = policy.userChrome
@@ -512,8 +566,8 @@ public actor ClaudeIntegration: AgentIntegration {
         // `--setting-sources ""` also skips the user's and the project's CLAUDE.md, so both come in here; project rules last.
         // Only roles with subagents get the delegation guidance; it would be noise elsewhere.
         let delegation = policy.delegation ? delegationInstructions() : nil
-        let proposals = policy.sandbox != nil ? settingsProposalInstructions() : nil
-        let sandboxRules = policy.sandbox != nil
+        let proposals = policy.sandbox != nil || policy.boundary ? settingsProposalInstructions() : nil
+        let sandboxRules = policy.boundary ? boundaryCommandInstructions() : policy.sandbox != nil
             ? sandboxCommandInstructions(trusted: AgentCommandPolicy(policy.profile).trustedPrefixes.map(\.command)) : nil
         args += ["--append-system-prompt", ([AgentAutonomy.instructions(), delegation, chrome ? userChromeInstructions() : nil, sandboxRules, proposals,
                                              home.flatMap { ClaudeProfile.instructions(home: $0) },
@@ -667,7 +721,8 @@ public actor ClaudeIntegration: AgentIntegration {
     }
     public func answer(_ id: UUID, session: AgentSessionReference, context: AgentContext, response: AgentInteractionResponse) async -> AgentResult<Void> {
         guard context == self.context, session.connection == .appClaude, let interaction = interactions[id], interaction.session == session.nativeID,
-              interaction.epoch == context.accountRevision, let wire = wires[interaction.session] else { return .rejected(.unknownRequest) }
+              interaction.epoch == context.accountRevision, interaction.wireEpoch == sessionEpochs[interaction.session],
+              let wire = wires[interaction.session] else { return .rejected(.unknownRequest) }
         var result: JSONValue
         switch response {
         case .deny: result = .object(["behavior": .string("deny"), "message": .string(L10n.text("Отклонено пользователем", "Denied by user"))])
@@ -883,7 +938,58 @@ public actor ClaudeIntegration: AgentIntegration {
     private func policy(_ id: String) -> ClaudeLaunchPolicy {
         let record = sessions[id]
         let profile = record?.profile ?? AgentRoleCatalog.preset((record?.access ?? .standard).legacyRoleID).profile
-        return ClaudeLaunchPolicy(profile, scheduled: scheduledWires.contains(id), userChromeEnabled: userChrome)
+        return ClaudeLaunchPolicy(profile, scheduled: scheduledWires.contains(id), userChromeEnabled: userChrome, boundary: boundaries[id] != nil)
+    }
+    /// The external boundary for a launch of this profile, or why it stays on the CLI sandbox; nil without a boundary runtime.
+    /// Compiles the plan only; the token is read when a process actually starts.
+    private func boundaryPlan(profile: AgentPermissionProfile, cwd: String, skills: String?, scheduled: Bool) -> Result<ClaudeBoundaryLaunch, ClaudeBoundaryFallback>? {
+        guard let runtime = boundaryRuntime, let home, let executable else { return nil }
+        if let reason = ExternalSandboxPlanner.eligibility(profile) { return .failure(.planner(reason)) }
+        if ClaudeLaunchPolicy(profile, scheduled: scheduled, userChromeEnabled: userChrome).userChrome { return .failure(.userChrome) }
+        let helper = runtime.helper()
+        try? FileManager.default.createDirectory(at: SettingsProposalInbox.directory, withIntermediateDirectories: true)
+        var input = ExternalSandboxPlanner.Input(project: cwd, profile: profile, providerHome: home, providerExecutable: executable,
+                                                 resources: resources, home: runtime.home)
+        // Attachments and skill scripts (the plugin folder and its link targets) read-only; the proposal inbox writable,
+        // so "one refusal, one request" works inside the boundary.
+        input.extraReads = Self.sandboxReads(home: nil, skills: skills).filter { !$0.hasPrefix(home.path + "/") }
+        input.extraWrites = [SettingsProposalInbox.directory.path]
+        input.settingsFile = true; input.mediateProcessList = true; input.commandInventory = true
+        switch ExternalSandboxPlanner.plan(input, helper: helper) {
+        case .success(let plan):
+            guard case .success(let verified) = helper else { return .failure(.planner(.helper(.missing(executable.path)))) }
+            return .success(ClaudeBoundaryLaunch(launch: ExternalSandboxLaunch(plan: plan, helper: verified)))
+        case .failure(let reason): return .failure(.planner(reason))
+        }
+    }
+    /// Starts the relay host, writes the worker's settings and server spec, then the CLI under nono with the token on stdin.
+    private func startBoundary(_ wire: ClaudeWire, boundary: ClaudeBoundaryLaunch, token: ClaudeAccessToken, executable: URL,
+                               arguments: [String], environment: [String: String], cwd: String, resources: URL) async throws {
+        let plan = boundary.plan
+        try plan.materialize()
+        let host = ExternalSandboxHost(plan: plan, resources: resources)
+        do { try await host.start() } catch { plan.removeWorkerFolder(); throw error }
+        do {
+            let rewritten = try boundary.rewrite(arguments, appServers: ["switchboard_browser", ChatDirectory.serverName])
+            // The real binary: nono resolves grants on canonical paths, and the versions folder is the one granted.
+            let command = boundary.command(claude: boundaryRuntime?.binary(executable) ?? executable.resolvingSymlinksInPath(), arguments: rewritten)
+            try await wire.start(executable: command.executable, arguments: command.arguments, environment: boundary.environment(base: environment),
+                                 cwd: URL(fileURLWithPath: cwd), firstLine: Data(token.value.utf8), processGroup: true,
+                                 cleanup: { await host.stop(); plan.removeWorkerFolder() })
+        } catch { await host.stop(); plan.removeWorkerFolder(); throw error }
+        ExternalSandboxLog.logger.notice("External boundary active (Claude): worker \(plan.workerID, privacy: .public) project \(plan.project, privacy: .public) readOnly \(plan.readOnlyProject, privacy: .public) mediated \(plan.commands.map(\.name).joined(separator: ","), privacy: .public)")
+    }
+    /// Logs a native launch once per reason (`externalSandbox`) and shows the chat notice when the reason changes.
+    /// Role-defined native paths (unrestricted, no network) are logged only.
+    private func noteFallback(_ fallback: ClaudeBoundaryFallback?, session id: String, project: String) {
+        guard let fallback else { fallbackNotices[id] = nil; return }
+        let english = fallback.description(language: .english)
+        if loggedFallbacks.insert(project + "\n" + english).inserted {
+            ExternalSandboxLog.logger.notice("Native Claude sandbox for \(project, privacy: .public): \(english, privacy: .public)")
+        }
+        guard !fallback.isExpected, fallbackNotices[id] != english else { return }
+        fallbackNotices[id] = english
+        sink.yield(.init(session: reference(id), payload: .diagnostic(fallback.notice())))
     }
     /// In audit mode the engine runs unrestricted; this is the policy the role would have enforced, for "would deny" records.
     private func auditPolicy(_ id: String, scheduled: Bool? = nil) -> ClaudeLaunchPolicy? {
@@ -975,6 +1081,14 @@ public actor ClaudeIntegration: AgentIntegration {
         guard let requestID = value["request_id"].string else { await wire.close(); return }
         guard seenRequests[id, default: []].insert(requestID).inserted else { await wire.close(); return }
         let request = value["request"], input = request["input"], name = request["tool_name"].string ?? ""
+        // `CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH` lets the CLI ask its host for a token. The app has no refresh path: it refuses,
+        // and the worker is replaced with a fresh token at the next turn boundary (B1 never saw this request).
+        if request["subtype"].string == "oauth_token_refresh", boundaries[id] != nil {
+            try? await wire.send(.object(["type": .string("control_response"), "response": .object([
+                "subtype": .string("error"), "request_id": .string(requestID),
+                "error": .string("Switchboard renews the sign-in by restarting this process at the next turn")])]))
+            return
+        }
         guard request["subtype"].string == "can_use_tool" else { await wire.close(); return }
         let policy = policy(id), profile = policy.profile, cwd = sessions[id]?.cwd ?? "/"
         let turn = sessions[id]?.active
@@ -1022,24 +1136,33 @@ public actor ClaudeIntegration: AgentIntegration {
             if profile.filesystem != .unrestricted, let path = input["file_path"].string ?? input["path"].string {
                 let roots = writing ? policy.writableRoots : policy.readableRoots
                 let inProject = Self.isWithinProject(path, cwd: cwd)
-                // With a command sandbox, temporary folders are open to the file tools as they are to commands.
-                let temporary = policy.sandbox != nil && profile.filesystem != .readOnly
-                    && ClaudeLaunchPolicy.temporaryRoots.contains { Self.isWithinProject(path, cwd: $0) }
+                // With a command sandbox, temporary folders are open to the file tools as they are to commands; under the
+                // boundary only the worker's own temporary folder is.
+                let temporaryRoots = policy.boundary ? [boundaries[id]?.temporary].compactMap { $0 } : ClaudeLaunchPolicy.temporaryRoots
+                let temporary = (policy.sandbox != nil || policy.boundary) && profile.filesystem != .readOnly
+                    && temporaryRoots.contains { Self.isWithinProject(path, cwd: $0) }
                 var inside = inProject || roots.contains { Self.isWithinProject(path, cwd: $0) } || (!writing && ClaudeLaunchPolicy.isAttachment(path)) || temporary
                 if writing, profile.filesystem == .readOnly {
                     inside = profile.scratch.map { Self.isWithinProject(path, cwd: cwd + "/" + $0) } ?? false
                 }
                 guard inside else {
+                    // Under the boundary a path outside it fails, also in attended chats; the text names the standard route.
+                    if policy.boundary { await deny(Self.outsideBoundaryRefusal(path), reason: "outsideBoundary"); return }
                     if attended && !policy.restricted { askReason = "outsideRoots"; break } else { await deny(outside, reason: "outsideRoots"); return }
                 }
                 // Silent inside the role when the role says so; the editor role still asks like the old standard mode.
                 let onlyTemporary = temporary && !inProject && !roots.contains { Self.isWithinProject(path, cwd: $0) }
-                if profile.projectWrites == .silent || !writing { await allow(onlyTemporary ? "sandboxed" : "roleAllows"); return }
+                if profile.projectWrites == .silent || !writing {
+                    await allow(policy.boundary ? "boundary" : onlyTemporary ? "sandboxed" : "roleAllows"); return
+                }
                 askReason = "roleAsksWrites"
                 guard attended else { await deny(outside, reason: "unattended"); return }
             } else if !attended, profile.filesystem != .unrestricted { await deny(outside, reason: "unattended"); return }
         case "Bash":
             guard profile.shell == .on || profile.filesystem == .unrestricted else { await deny(outside, reason: "shellOff"); return }
+            // Under the boundary the OS holds the whole process tree; the hook already applied the deny, network and ask lists.
+            // `dangerouslyDisableSandbox` changes nothing there, so it is not a question either.
+            if policy.boundary { await allow("boundary"); return }
             if policy.sandbox != nil {
                 // Without `excludedCommands` the CLI sandboxes every Bash command unless the call sets
                 // `dangerouslyDisableSandbox` (2.1.292 `shouldUseSandbox`): the input field is the CLI's own decision.
@@ -1113,7 +1236,7 @@ public actor ClaudeIntegration: AgentIntegration {
         // The grant key of a command outside the sandbox never matches a tool name, so it cannot widen later requests.
         interactions[token] = .init(session: id, requestID: requestID, tool: unsandboxed ? Self.unsandboxedGrant : name, turn: turn, input: input,
                                     questions: questions, epoch: context.accountRevision, toolUseID: toolUseID,
-                                    reason: questions == nil ? askReason : nil)
+                                    reason: questions == nil ? askReason : nil, wireEpoch: sessionEpochs[id])
         updateCall(toolUseID, session: id, status: .awaitingApproval)
         let reason = unsandboxed ? L10n.text("Bash вне песочницы: команда получит доступ ко всему Mac", "Bash outside the sandbox: the command gets access to the whole Mac") : name
         sink.yield(.init(session: reference(id), payload: .interaction(.init(id: token, session: reference(id), turn: turn,

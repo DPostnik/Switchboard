@@ -40,6 +40,17 @@ class HostTests(unittest.TestCase):
         self.assertEqual(result.stdout, 'HELLO\nWORLD\n')
         self.assertEqual(result.returncode, 0)
 
+    def test_server_starts_in_its_declared_folder(self):
+        folder = self.root / 'project'
+        folder.mkdir()
+        printer = self.root / 'cwd.py'
+        printer.write_text('import os\nprint(os.getcwd(), flush=True)\n')
+        self.spec.write_text(json.dumps({'servers': {
+            'here': {'command': PYTHON, 'args': ['-I', str(printer)], 'cwd': str(folder)},
+            'gone': {'command': PYTHON, 'args': ['-I', str(printer)], 'cwd': str(self.root / 'missing')}}}))
+        self.assertEqual(os.path.realpath(self.relay('here', '').stdout.strip()), os.path.realpath(folder))
+        self.assertEqual(self.relay('gone', '').stdout, '')
+
     def test_unknown_server_closes(self):
         result = self.relay('missing', 'hello\n')
         self.assertEqual(result.stdout, '')

@@ -47,12 +47,16 @@ struct ClaudeLaunchPolicy: Equatable {
     let audit: Bool
     /// The OS sandbox for Bash (Seatbelt); nil runs commands unconfined.
     let sandbox: AgentPermissionProfile.CommandSandbox?
+    /// The CLI runs under the external boundary (nono): the OS holds the role's folders for the whole process tree, so
+    /// the CLI's own sandbox is off (invariant 8), Bash runs without a question and the hook keeps the role's lists.
+    let boundary: Bool
 
-    init(_ requested: AgentPermissionProfile, scheduled: Bool, userChromeEnabled: Bool) {
+    init(_ requested: AgentPermissionProfile, scheduled: Bool, userChromeEnabled: Bool, boundary: Bool = false) {
         let profile = requested.effective
         self.profile = profile; self.scheduled = scheduled; self.audit = requested.audit
         let unrestricted = profile.filesystem == .unrestricted
-        sandbox = !unrestricted && profile.shell == .on ? profile.commandSandbox : nil
+        self.boundary = boundary && !unrestricted
+        sandbox = !unrestricted && profile.shell == .on && !self.boundary ? profile.commandSandbox : nil
         self.tools = Self.toolList(profile)
         if unrestricted && profile.approvals == .never { permissionMode = "bypassPermissions" }
         else if profile.projectWrites == .silent, profile.filesystem != .readOnly { permissionMode = "acceptEdits" }
@@ -134,6 +138,8 @@ struct ClaudeLaunchPolicy: Equatable {
     /// No `excludedCommands`: Claude Code (2.1.292 `shouldUseSandbox`) then sandboxes every Bash command unless the
     /// call sets `dangerouslyDisableSandbox`, so that input field alone is the CLI's own sandbox decision.
     func sandboxSettings(cwd: String?, extraReads: [String] = [], extraWrites: [String] = []) -> JSONValue? {
+        // A nested Seatbelt under nono cannot start; the outer boundary stays (invariant 8, B1 probe check 5).
+        if boundary { return .object(["enabled": .bool(false)]) }
         guard let sandbox else { return nil }
         func unique(_ values: [String]) -> [String] { var seen = Set<String>(); return values.filter { !$0.isEmpty && seen.insert($0).inserted } }
         let write = unique([cwd].compactMap { $0 } + sandbox.write + ["/private/tmp"] + extraWrites)

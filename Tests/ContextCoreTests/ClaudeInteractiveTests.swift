@@ -2186,3 +2186,282 @@ func claudeCompactBoundaryBecomesADividerWithItsSizes(prompt: String) async thro
     #expect(ClaudeIntegration.transcriptFolder("/Users/a/my.project_ü") == "-Users-a-my-project--")
     await adapter.disconnect()
 }
+
+// MARK: - External boundary (phase B2)
+
+/// A fake token source; the token is a fixture string, never a real sign-in.
+private final class FixtureTokens: ClaudeTokenSource, @unchecked Sendable {
+    private let lock = NSLock()
+    private var next: Result<ClaudeAccessToken, ClaudeTokenFailure>
+    private(set) var reads = 0
+    init(_ next: Result<ClaudeAccessToken, ClaudeTokenFailure>) { self.next = next }
+    func set(_ value: Result<ClaudeAccessToken, ClaudeTokenFailure>) { lock.withLock { next = value } }
+    var readCount: Int { lock.withLock { reads } }
+    func token(home: URL) -> Result<ClaudeAccessToken, ClaudeTokenFailure> { lock.withLock { reads += 1; return next } }
+}
+
+private struct BoundaryFixture {
+    let root: URL, home: URL, binary: URL, resources: URL, runtime: ClaudeBoundaryRuntime, tokens: FixtureTokens, token: String
+    func launches() -> [JSONValue] {
+        ((try? String(contentsOf: home.appendingPathComponent("boundary-launches"), encoding: .utf8)) ?? "")
+            .split(separator: "\n").compactMap { try? JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+    }
+    func helperArguments() -> [[String]] {
+        ((try? String(contentsOf: home.appendingPathComponent("nono-args"), encoding: .utf8)) ?? "")
+            .split(separator: "\n").compactMap { try? JSONDecoder().decode([String].self, from: Data($0.utf8)) }
+    }
+    func answers() -> [JSONValue] {
+        ((try? String(contentsOf: home.appendingPathComponent("answers"), encoding: .utf8)) ?? "")
+            .split(separator: "\n").compactMap { try? JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+    }
+}
+
+/// The real launch chain with two fakes: a nono stand-in that records its arguments and execs what follows `--`, and a
+/// CLI that reports what it received on fd 3, in argv and in its environment. The zsh token launcher and the setsid
+/// launcher are the app's own.
+private func boundaryFixture(token: Result<ClaudeAccessToken, ClaudeTokenFailure>? = nil) throws -> BoundaryFixture {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let home = root.appendingPathComponent("home"), resources = root.appendingPathComponent("resources")
+    try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+    let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    try FileManager.default.copyItem(at: repository.appendingPathComponent("SandboxRuntime"), to: resources.appendingPathComponent("SandboxRuntime"))
+    let nono = root.appendingPathComponent("nono")
+    try Data(#"""
+    #!\#(fixturePython)
+    import os,sys,json,pathlib
+    a=sys.argv; i=a.index('--')
+    profile=a[a.index('--profile')+1]
+    with (pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])/'nono-args').open('a') as f: f.write(json.dumps(a[1:i]+['policy-exists='+str(os.path.exists(profile))])+'\n')
+    os.execv(a[i+1], a[i+1:])
+    """#.utf8).write(to: nono)
+    try installFixtureExecutable(at: nono)
+    let binary = root.appendingPathComponent("claude.py")
+    try Data(#"""
+    #!\#(fixturePython)
+    import sys,os,json,pathlib
+    home=pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])
+    if '--version' in sys.argv: print('2.1.292 (Claude Code)'); sys.exit(0)
+    if sys.argv[1:3]==['auth','status']:
+        print(json.dumps({'loggedIn':True,'apiProvider':'firstParty','authMethod':'oauth','email':'fixture'})); sys.exit(0)
+    a=sys.argv
+    try: token=os.read(3,4096).decode().strip()
+    except OSError: token=None
+    raw=a[a.index('--settings')+1]
+    settings=json.loads(open(raw).read()) if raw.startswith('/') else json.loads(raw)
+    launch={'fd_token':token,'argv':a,'token_in_env':bool(token) and any(token in v for v in os.environ.values()),
+        'token_in_argv':bool(token) and any(token in x for x in a),'settings_path':raw if raw.startswith('/') else None,'settings':settings,
+        'mcp':json.loads(a[a.index('--mcp-config')+1]),'pid':os.getpid(),'pgid':os.getpgid(0),
+        'env':{k:v for k,v in os.environ.items() if k.startswith(('CLAUDE_CODE','SWITCHBOARD_EXTERNAL','TMPDIR','SSL_CERT'))},
+        'prompt':a[a.index('--append-system-prompt')+1]}
+    with (home/'boundary-launches').open('a') as f: f.write(json.dumps(launch)+'\n')
+    sid=a[a.index('--resume' if '--resume' in a else '--session-id')+1]
+    def out(v): print(json.dumps(v),flush=True)
+    def result(): out({'type':'result','session_id':sid,'is_error':False,'usage':{'input_tokens':1,'output_tokens':1}})
+    out({'type':'system','subtype':'init','session_id':sid,'model':'claude-test'})
+    n=0
+    for line in sys.stdin:
+        v=json.loads(line)
+        if v['type']=='control_request':
+            out({'type':'control_response','response':{'subtype':'success','request_id':v['request_id'],'response':{}}})
+        elif v['type']=='control_response':
+            with (home/'answers').open('a') as f: f.write(json.dumps(v['response'])+'\n')
+            result()
+        elif v['type']=='user':
+            p=v['message']['content']; n+=1
+            if p.startswith('tool:'):
+                name,inp=p[5:].split(' ',1)
+                out({'type':'control_request','request_id':'r%d-%d'%(os.getpid(),n),'request':{'subtype':'can_use_tool','tool_name':name,'input':json.loads(inp)}})
+            elif p=='refresh':
+                out({'type':'control_request','request_id':'t%d-%d'%(os.getpid(),n),'request':{'subtype':'oauth_token_refresh'}})
+            else: result()
+    """#.utf8).write(to: binary)
+    try installFixtureExecutable(at: binary)
+    let value = "sk-ant-oat01-fixture-" + UUID().uuidString
+    let tokens = FixtureTokens(token ?? .success(.init(value: value, expiresAt: Date().addingTimeInterval(8 * 3600))))
+    let helper = ExternalSandboxHelper(executable: nono, version: "0.81.0")
+    let userHome = root.appendingPathComponent("user-home")
+    try FileManager.default.createDirectory(at: userHome, withIntermediateDirectories: true)
+    return BoundaryFixture(root: root, home: home, binary: binary, resources: resources,
+                           // The fixture launcher dispatches on its link name, so the link itself is executed.
+                           runtime: ClaudeBoundaryRuntime(helper: { .success(helper) }, tokens: tokens, home: userHome, binary: { $0 }),
+                           tokens: tokens, token: value)
+}
+
+private func boundaryDeveloper(_ root: URL, sharedRoots: [AgentPermissionProfile.Root] = []) -> AgentPermissionProfile {
+    AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: Project(path: root.path), sharedRoots: sharedRoots)
+}
+
+@Test func claudeBoundaryHandsTheTokenOnlyOnFd3AndAnswersByTheBoundary() async throws {
+    let fixture = try boundaryFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let adapter = ClaudeIntegration(boundary: fixture.runtime), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: fixture.binary, home: fixture.home, resources: fixture.resources)).value()
+    let developer = boundaryDeveloper(fixture.root)
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: fixture.root, role: developer)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: fixture.root, session: session, prompt: "hello", role: developer)).value()
+    try await waitFor { await events.completionCount() == 1 }
+    let launch = try #require(fixture.launches().first)
+    // The token reached the CLI on fd 3 only: not in argv, not in its environment.
+    #expect(launch["fd_token"].string == fixture.token)
+    #expect(launch["token_in_env"] == .bool(false) && launch["token_in_argv"] == .bool(false))
+    #expect(launch["env"]["CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR"].string == "3" && launch["env"]["CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH"].string == "1")
+    #expect(launch["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == .null && launch["env"]["SWITCHBOARD_EXTERNAL_SANDBOX"].string == "1")
+    #expect(launch["env"]["SSL_CERT_FILE"].string == "/etc/ssl/cert.pem")
+    // One process group: the CLI is the launcher itself after the exec chain, so revocation signals all of it.
+    #expect(launch["pid"] == launch["pgid"])
+    // Settings come from the worker's read-only file: the CLI sandbox is off, Bash is allowed, nothing secret in it.
+    let settingsPath = try #require(launch["settings_path"].string)
+    #expect(settingsPath.hasSuffix("/settings.json") && launch["settings"]["sandbox"] == .object(["enabled": .bool(false)]))
+    #expect(launch["settings"]["permissions"]["allow"].array.contains(.string("Bash")))
+    #expect(launch["prompt"].string?.contains("dangerouslyDisableSandbox") == true && launch["prompt"].string?.contains(fixture.token) == false)
+    let helper = try #require(fixture.helperArguments().first)
+    #expect(helper.contains("policy-exists=True") && !helper.contains("--allow-cwd") && !helper.joined().contains(fixture.token))
+    let readFile = helper.indices.filter { helper[$0] == "--read-file" }.map { helper[$0 + 1] }
+    #expect(readFile.contains(settingsPath))
+    #expect(launch["argv"].array.first?.string?.hasPrefix(fixture.binary.path) == true)
+
+    // Bash under the boundary: allowed without a question, also with the CLI-sandbox flag; the ledger says `boundary`.
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: fixture.root, session: session,
+        prompt: #"tool:Bash {"command":"zsh scripts/test.sh","dangerouslyDisableSandbox":true}"#, role: developer)).value()
+    try await waitFor { await events.completionCount() == 2 }
+    // A file outside the boundary is refused in an attended chat, with the standard route named; no prompt.
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: fixture.root, session: session,
+        prompt: #"tool:Write {"file_path":"/outside-project/file","content":"x"}"#, role: developer)).value()
+    try await waitFor { await events.completionCount() == 3 }
+    #expect(await events.interaction() == nil)
+    let records = await events.capabilities()
+    #expect(records.contains { $0.tool == "Bash" && $0.decision == .allowed && $0.reason == "boundary" })
+    #expect(records.contains { $0.tool == "Write" && $0.decision == .denied && $0.reason == "outsideBoundary" })
+    let answers = fixture.answers()
+    #expect(answers.first?["response"]["behavior"].string == "allow")
+    let refusal = try #require(answers.dropFirst().first?["response"]["message"].string)
+    #expect(refusal == ClaudeIntegration.outsideBoundaryRefusal("/outside-project/file"))
+    #expect(ClaudeIntegration.outsideBoundaryRefusal("/x", language: .english).contains("settings proposal")
+            && ClaudeIntegration.outsideBoundaryRefusal("/x", language: .russian).contains("предложение настроек"))
+
+    // The CLI asks for a token refresh: refused without closing the process; the warm process takes the next turn.
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: fixture.root, session: session, prompt: "refresh", role: developer)).value()
+    try await waitFor { await events.completionCount() == 4 }
+    #expect(fixture.answers().last?["subtype"].string == "error")
+    #expect(fixture.launches().count == 1 && fixture.tokens.readCount == 1)
+    // The secret never reaches the chat, the transcript or the ledger.
+    let texts = await events.items().map(\.text) + events.diagnostics() + events.capabilities(includeLifecycle: true).compactMap(\.target)
+    #expect(!texts.contains { $0.contains(fixture.token) })
+    await adapter.disconnect()
+}
+
+@Test func claudeBoundaryFallsBackWithOneNoticeWhenTheTokenIsMissing() async throws {
+    let fixture = try boundaryFixture(token: .failure(.missing))
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let adapter = ClaudeIntegration(boundary: fixture.runtime), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: fixture.binary, home: fixture.home, resources: fixture.resources)).value()
+    let developer = boundaryDeveloper(fixture.root)
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: fixture.root, role: developer)).value()
+    for turn in 1...2 {
+        _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: fixture.root, session: session, role: developer)).value()
+        try await waitFor { await events.completionCount() == turn }
+    }
+    // Native CLI sandbox with prompts: no helper, no fd 3, the CLI's own sandbox on.
+    #expect(fixture.helperArguments().isEmpty)
+    let launch = try #require(fixture.launches().first)
+    #expect(launch["fd_token"] == .null && launch["settings_path"] == .null && launch["settings"]["sandbox"]["enabled"] == .bool(true))
+    #expect(launch["env"]["CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR"] == .null)
+    // Each launch tries the boundary again with a fresh read; the notice is shown once for the same reason.
+    #expect(fixture.launches().count == 2 && fixture.tokens.readCount == 2)
+    let notices = await events.diagnostics().filter { $0 == ClaudeBoundaryFallback.token(.missing).notice() }
+    #expect(notices.count == 1)
+    #expect(ClaudeBoundaryFallback.token(.missing).notice(language: .english).hasPrefix("External boundary unavailable:")
+            && ClaudeBoundaryFallback.token(.missing).notice(language: .russian).hasPrefix("Внешняя граница недоступна:"))
+    // Role-defined native paths are not announced in the chat.
+    #expect(ClaudeBoundaryFallback.planner(.unrestricted).isExpected && ClaudeBoundaryFallback.planner(.networkOff).isExpected)
+    #expect(!ClaudeBoundaryFallback.planner(.trustedCommandOutside("/usr/bin/log show")).isExpected)
+    await adapter.disconnect()
+}
+
+@Test func claudeBoundaryReplacesTheProcessGroupAtATurnBoundaryOnRevocationAndExpiry() async throws {
+    let fixture = try boundaryFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let adapter = ClaudeIntegration(boundary: fixture.runtime), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: fixture.binary, home: fixture.home, resources: fixture.resources)).value()
+    let developer = boundaryDeveloper(fixture.root)
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: fixture.root, role: developer)).value()
+    func send(_ role: AgentPermissionProfile, _ count: Int) async throws {
+        _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: fixture.root, session: session, role: role)).value()
+        try await waitFor { await events.completionCount() == count }
+    }
+    try await send(developer, 1)
+    try await send(developer, 2)
+    // Same rights: the warm process takes the turn.
+    #expect(fixture.launches().count == 1)
+    let first = try #require(fixture.launches().first?["pid"].int)
+    let worker = try #require(fixture.helperArguments().first.flatMap { args in args.firstIndex(of: "--profile").map { args[$0 + 1] } })
+    // A project setting changes (a folder for every project): the old group is gone before the new process starts.
+    let shared = fixture.root.appendingPathComponent("shared")
+    try FileManager.default.createDirectory(at: shared, withIntermediateDirectories: true)
+    let widened = boundaryDeveloper(fixture.root, sharedRoots: [.init(path: shared.path, writable: true)])
+    // The next process gets a token close to expiry.
+    fixture.tokens.set(.success(.init(value: fixture.token, expiresAt: Date().addingTimeInterval(60))))
+    try await send(widened, 3)
+    #expect(fixture.launches().count == 2)
+    let second = try #require(fixture.launches().last?["pid"].int)
+    #expect(second != first && kill(pid_t(first), 0) != 0)
+    try await waitFor { !FileManager.default.fileExists(atPath: URL(fileURLWithPath: worker).deletingLastPathComponent().path) }
+    // Its token expires within the margin: the next turn starts a new process with a fresh read instead of reusing it.
+    try await send(widened, 4)
+    #expect(fixture.launches().count == 3 && kill(pid_t(second), 0) != 0 && fixture.tokens.readCount == 3)
+    await adapter.disconnect()
+}
+
+@Test func claudeBoundaryTokenParsingAndRelayRewrite() throws {
+    let now = Date()
+    func document(_ expires: Date, token: String = "sk-ant-oat01-x") -> Data {
+        Data(#"{"claudeAiOauth":{"accessToken":"\#(token)","refreshToken":"r","expiresAt":\#(Int(expires.timeIntervalSince1970 * 1000))}}"#.utf8)
+    }
+    #expect(try ClaudeBoundaryToken.parse(document(now.addingTimeInterval(3600)), now: now).get().value == "sk-ant-oat01-x")
+    #expect(ClaudeBoundaryToken.parse(document(now.addingTimeInterval(600)), now: now) == .failure(.expiring))
+    #expect(ClaudeBoundaryToken.parse(Data("{}".utf8), now: now) == .failure(.missing))
+    #expect(ClaudeBoundaryToken.parse(document(now.addingTimeInterval(3600), token: "a\\nb"), now: now) == .failure(.missing))
+    let item = ClaudeKeychainTokenSource.item(home: URL(fileURLWithPath: "/tmp/profile"))
+    #expect(item.hasPrefix("Claude Code-credentials-") && item.count == "Claude Code-credentials-".count + 8)
+
+    let fixture = try boundaryFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let project = Project(path: fixture.root.path)
+    var input = ExternalSandboxPlanner.Input(project: project.path, profile: boundaryDeveloper(fixture.root), providerHome: fixture.home,
+                                             providerExecutable: fixture.binary, resources: fixture.resources, workerID: "rw" + String(UUID().uuidString.prefix(6)),
+                                             home: fixture.root.appendingPathComponent("user-home"))
+    input.settingsFile = true
+    let plan = try ExternalSandboxPlanner.plan(input, helper: .success(ExternalSandboxHelper(executable: fixture.binary, version: "0.81.0"))).get()
+    try plan.materialize()
+    defer { plan.removeWorkerFolder() }
+    let boundary = ClaudeBoundaryLaunch(launch: ExternalSandboxLaunch(plan: plan, helper: ExternalSandboxHelper(executable: fixture.binary, version: "0.81.0")))
+    let config = #"{"mcpServers":{"project_tool":{"command":"/usr/bin/python3","args":["tool.py"]},"switchboard_browser":{"type":"stdio","command":"/usr/bin/python3","args":["-I","/app/server.py"]}}}"#
+    let rewritten = try boundary.rewrite(["--settings", #"{"sandbox":{"enabled":false}}"#, "--mcp-config", config, "--resume", "x"],
+                                         appServers: ["switchboard_browser", ChatDirectory.serverName])
+    let written = try String(contentsOf: plan.settingsFile, encoding: .utf8)
+    #expect(rewritten[1] == plan.settingsFile.path && written == #"{"sandbox":{"enabled":false}}"#)
+    let servers = try JSONDecoder().decode(JSONValue.self, from: Data(rewritten[3].utf8))["mcpServers"]
+    #expect(servers["switchboard_browser"]["args"].array.compactMap(\.string) == ["-I", plan.relay.path, plan.socket.path, "switchboard_browser"])
+    #expect(servers["project_tool"]["args"].array.compactMap(\.string) == ["tool.py"])
+    let spec = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: plan.serversFile))["servers"]
+    #expect(spec.object.keys.sorted() == ["switchboard_browser"] && spec["switchboard_browser"]["args"].array.compactMap(\.string) == ["-I", "/app/server.py"])
+    // The token launcher: nono's helper, then zsh with the fd-3 hand-over, then the real CLI.
+    let command = boundary.command(claude: fixture.binary, arguments: ["--print"])
+    let separator = try #require(command.arguments.lastIndex(of: "--"))
+    #expect(Array(command.arguments[(separator + 1)...]) == ["/bin/zsh"] + ClaudeBoundaryLaunch.tokenLauncher + [fixture.binary.path, "--print"])
+    let environment = boundary.environment(base: ["CLAUDE_CODE_OAUTH_TOKEN": "leak", "ANTHROPIC_API_KEY": "leak", "HOME": "/h"])
+    #expect(environment["CLAUDE_CODE_OAUTH_TOKEN"] == nil && environment["ANTHROPIC_API_KEY"] == nil && environment["HOME"] == "/h")
+    #expect(environment["TMPDIR"] == plan.temporary.path && environment["CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR"] == "3")
+    // Policy under the boundary: CLI sandbox off, Bash allowed, the role's command hook kept; never for unrestricted roles.
+    let policy = ClaudeLaunchPolicy(boundaryDeveloper(fixture.root), scheduled: false, userChromeEnabled: false, boundary: true)
+    #expect(policy.boundary && policy.sandbox == nil && policy.allowRules.contains("Bash") && policy.hooks != .null)
+    #expect(policy.sandboxSettings(cwd: fixture.root.path) == .object(["enabled": .bool(false)]))
+    #expect(!ClaudeLaunchPolicy(.unrestricted, scheduled: false, userChromeEnabled: false, boundary: true).boundary)
+}

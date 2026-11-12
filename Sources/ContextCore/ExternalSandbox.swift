@@ -152,9 +152,19 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
     public let relay: URL
     public let temporary: URL
     public var policyFile: URL { worker.appendingPathComponent("policy.json") }
+    /// Provider settings the app writes before launch (Claude `--settings`); granted read-only when the plan asks for it.
+    public var settingsFile: URL { worker.appendingPathComponent("settings.json") }
     public var serversFile: URL { worker.appendingPathComponent("servers.json") }
     public var hostLog: URL { worker.appendingPathComponent("mcp-host.log") }
     public var readOnlyProject: Bool { !grants.contains { $0.mode == .allow && $0.path == project } }
+    /// What the plan grants, without the per-worker paths (folder, tmp, socket, settings): two plans with equal authority
+    /// give a process the same rights, so a live process is kept; a different authority replaces it.
+    public var authority: [String] {
+        let own = worker.path
+        let paths = grants.filter { !$0.path.hasPrefix(own + "/") && $0.path != socket.path }.map { $0.mode.rawValue + " " + $0.path }
+        let mediated = commands.map { "command \($0.name) \($0.executable) keychain=\($0.keychain) network=\($0.network) trees=\($0.executableTrees.joined(separator: ","))" }
+        return ["project " + project] + paths + mediated + executableDirectories.map { "exec " + $0 }
+    }
 
     /// Environment the wrapped process receives on top of the provider's: a private temp folder inside the grants and
     /// nono's own state away from the user's `~/.config`.
@@ -198,8 +208,10 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
             }
             commands[command.name] = policy
         }
-        return ["meta": ["name": "switchboard-\(workerID)", "version": "1"], "workdir": ["access": "none"],
-                "command_policies": ["executable_dirs": executableDirectories, "commands": commands]]
+        var document: [String: Any] = ["meta": ["name": "switchboard-\(workerID)", "version": "1"], "workdir": ["access": "none"]]
+        // nono 0.81.0 refuses `command_policies` fields when no command is mediated (`inactive_non_empty`, B1 probe).
+        if !commands.isEmpty { document["command_policies"] = ["executable_dirs": executableDirectories, "commands": commands] }
+        return document
     }
 
     /// Writes the worker folder, policy and an empty server spec. The folder is private to the app (0700).
@@ -215,7 +227,11 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
     /// Replaces the MCP spec the host reads on every connection: `name -> command, args, env`.
     public func writeServers(_ servers: [String: ExternalSandboxServer]) throws {
         var document: [String: Any] = [:]
-        for (name, server) in servers { document[name] = ["command": server.command, "args": server.arguments, "env": server.environment] }
+        // Each server starts in the project folder, as it does when the provider launches it itself: the browser server
+        // takes its workspace from its working directory, and the host's own is the app's.
+        for (name, server) in servers {
+            document[name] = ["command": server.command, "args": server.arguments, "env": server.environment, "cwd": project]
+        }
         let data = try JSONSerialization.data(withJSONObject: ["servers": document], options: [.sortedKeys])
         try data.write(to: serversFile, options: .atomic)
     }
@@ -249,6 +265,15 @@ public enum ExternalSandboxPlanner {
         public var workflowDirectories: [URL]
         public var workerID: String
         public var home: URL
+        /// Provider-specific app folders the session reads (attachments) or writes (the settings proposal inbox).
+        public var extraReads: [String] = []
+        public var extraWrites: [String] = []
+        /// Grant the worker's own `settings.json` read-only (Claude reads its launch settings from that file).
+        public var settingsFile = false
+        /// Mediate `pgrep`: inside the session it sees only sandboxed processes (B1 probe, check 4).
+        public var mediateProcessList = false
+        /// Refuse the boundary when a trusted project command cannot run inside it (`trustedCommandOutside`).
+        public var commandInventory = false
         public init(project: String, profile: AgentPermissionProfile, providerHome: URL, providerExecutable: URL, resources: URL?,
                     workflowDirectories: [URL] = [], workerID: String = String(UUID().uuidString.lowercased().prefix(8)),
                     home: URL = FileManager.default.homeDirectoryForCurrentUser) {
@@ -263,6 +288,8 @@ public enum ExternalSandboxPlanner {
         case networkOff
         case commandSandboxOff
         case resourcesMissing
+        /// A trusted project command that is neither mediated nor able to run inside the boundary.
+        case trustedCommandOutside(String)
         public func description(language: AppLanguage = L10n.language) -> String {
             switch self {
             case .helper(let failure): failure.errorDescription ?? ""
@@ -270,6 +297,10 @@ public enum ExternalSandboxPlanner {
             case .networkOff: L10n.text("роль без сети пока не поддерживается внешней границей", "a role without network is not yet supported by the external boundary", language: language)
             case .commandSandboxOff: L10n.text("песочница команд выключена в настройках проекта", "the command sandbox is off in the project settings", language: language)
             case .resourcesMissing: L10n.text("компонент SandboxRuntime отсутствует в сборке", "the SandboxRuntime component is missing from this build", language: language)
+            case .trustedCommandOutside(let command): L10n.text(
+                "доверенная команда проекта `\(command)` не может работать внутри границы; убери её из настроек проекта или замени инструментом приложения",
+                "the project's trusted command `\(command)` cannot run inside the boundary; remove it from the project settings or replace it with an app tool",
+                language: language)
             }
         }
     }
@@ -344,12 +375,15 @@ public enum ExternalSandboxPlanner {
         for tree in toolchainTrees { add(.read, tree) }
         add(.read, resources.path)
         for directory in input.workflowDirectories { add(.read, directory.path) }
+        for path in input.extraReads { add(.read, path) }
+        for path in input.extraWrites { add(.allow, path) }
         add(.readFile, input.home.appendingPathComponent(".gitconfig").path)
         add(.read, input.home.appendingPathComponent(".config/git").path)
         let temporary = worker.appendingPathComponent("tmp", isDirectory: true)
         grants.append(.init(.allow, temporary.path))
         grants.append(.init(.readFile, resources.appendingPathComponent("SandboxRuntime/mcp_relay.py").path))
         grants.append(.init(.unixSocket, socket.path))
+        if input.settingsFile { grants.append(.init(.readFile, worker.appendingPathComponent("settings.json").path)) }
         var executableDirectories: [String] = []
         for tree in toolchainTrees.prefix(2) {
             // nono refuses a policy executable directory that its group or everyone may write (Command Line Tools' usr/bin is).
@@ -373,10 +407,46 @@ public enum ExternalSandboxPlanner {
                 if let execPath = gitExecPath(git) { trees += [execPath, canonical(execPath)] }
                 commands.append(.init(name: "git", executable: git, keychain: true, network: true, executableTrees: Array(Set(trees)).sorted()))
             }
+            if input.mediateProcessList { commands.append(.init(name: "pgrep", executable: "/usr/bin/pgrep", keychain: false, network: false)) }
+            if input.commandInventory,
+               let command = unrunnableTrustedCommand(trusted, mediated: Set(commands.map(\.name)), grants: grants, home: input.home) {
+                return .failure(.trustedCommandOutside(command))
+            }
         }
         return .success(.init(workerID: input.workerID, project: project, grants: grants, commands: commands,
                               executableDirectories: executableDirectories, worker: worker, socket: socket,
                               relay: resources.appendingPathComponent("SandboxRuntime/mcp_relay.py"), temporary: temporary))
+    }
+
+    /// Heads nono can neither run in the session nor mediates here: setuid tools, the unified log, launchd, Apple Events,
+    /// process killers, screen capture, Launch Services, system settings (B1 probe, check 4).
+    static let unrunnableHeads: Set<String> = ["log", "ps", "launchctl", "sudo", "su", "osascript", "pkill", "killall", "screencapture",
+                                               "open", "defaults", "diskutil", "security", "shutdown", "reboot"]
+    /// System trees a command may name as an argument without a grant (executables, devices, configuration).
+    static let systemPrefixes = ["/usr/", "/bin/", "/sbin/", "/System/", "/Library/Developer/", "/Applications/", "/opt/homebrew/",
+                                 "/dev/", "/etc/", "/private/etc/"]
+    /// The project command inventory: the first trusted command that can neither be mediated nor run inside the plan's
+    /// grants, or nil. The app's base entries (`AccessPresetCatalog.baseUnsandboxed`) are exempt. Pure, so both providers
+    /// can call it; only Claude does today (Codex: PERMISSIONS.md section 5).
+    public static func unrunnableTrustedCommand(_ trusted: [String], mediated: Set<String>, grants: [ExternalSandboxPlan.Grant], home: URL) -> String? {
+        let base = Set(AccessPresetCatalog.baseUnsandboxed)
+        func inside(_ raw: String) -> Bool {
+            let path = canonical(expand(raw, home: home))
+            if systemPrefixes.contains(where: { (path + "/").hasPrefix($0) }) { return true }
+            return grants.contains { $0.mode != .unixSocket && (path == $0.path || path.hasPrefix($0.path + "/")) }
+        }
+        for command in trusted where !base.contains(command) {
+            let tokens = command.split(whereSeparator: { $0 == " " || $0 == "\t" })
+                .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "\"'")) }.filter { !$0.isEmpty }
+            guard let first = tokens.first else { continue }
+            let head = (first as NSString).lastPathComponent
+            if mediated.contains(head) { continue }
+            if unrunnableHeads.contains(head) { return command }
+            for token in tokens where token.hasPrefix("/") || token.hasPrefix("~/") || token == "~" {
+                if !inside(token) { return command }
+            }
+        }
+        return nil
     }
 
     static func isGroupOrWorldWritable(_ path: String, manager: FileManager) -> Bool {

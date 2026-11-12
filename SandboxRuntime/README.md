@@ -6,7 +6,7 @@ the app owns (browser, chat diagnostics, user Chrome) cannot run inside it: it w
 Keychain, Chrome, process information and the app's data. These servers stay outside.
 
 - `mcp_host.py` - started by Switchboard per sandboxed worker, outside the boundary. Listens on a unix
-  socket, reads `servers.json` (`{"servers": {name: {command, args, env}}}`, written by the app) and
+  socket, reads `servers.json` (`{"servers": {name: {command, args, env, cwd}}}`, written by the app; `cwd` is the project folder) and
   starts the named server with the connection as its stdin/stdout. Exits with its children when the
   app terminates it or the owning app process is gone.
 - `mcp_relay.py` - the MCP server command the sandboxed provider launches instead. Connects to the

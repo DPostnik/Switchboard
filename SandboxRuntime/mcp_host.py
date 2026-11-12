@@ -50,7 +50,11 @@ class Host:
             return None
         if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
             return None
-        return entry['command'], args, env
+        # A server takes its workspace from its working directory (the browser does); the host's own is the app's.
+        cwd = entry.get('cwd')
+        if cwd is not None and (not isinstance(cwd, str) or not os.path.isabs(cwd) or not os.path.isdir(cwd)):
+            return None
+        return entry['command'], args, env, cwd
 
     def serve(self, connection):
         try:
@@ -68,11 +72,11 @@ class Host:
             if resolved is None:
                 self.note('rejected: unknown server %r' % name)
                 return
-            command, args, env = resolved
+            command, args, env, cwd = resolved
             environment = dict(os.environ)
             environment.update(env)
             child = subprocess.Popen([command] + args, stdin=connection.fileno(), stdout=connection.fileno(),
-                                     stderr=self.log, env=environment, close_fds=True)
+                                     stderr=self.log, env=environment, cwd=cwd, close_fds=True)
             with self.lock:
                 if self.closing:
                     child.terminate()

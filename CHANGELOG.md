@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Claude Developer chats now run under the same external OS boundary as Codex: commands and edits inside the project's settings run without prompts, a path outside is refused with the way to request it, and a chat that cannot use the boundary says why once and keeps the CLI sandbox with prompts.
+
 - Update Claude Code compatibility to 2.1.322, add Fable 5.2, and remove Haiku suggestions while preserving existing model selections.
 
 - Quit the agent browser after a scheduled run when only blank tabs remain, so a browser launched for a sign-in transfer no longer stays open after a run that never used it.

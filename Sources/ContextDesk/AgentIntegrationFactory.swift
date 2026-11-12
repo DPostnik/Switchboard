@@ -15,7 +15,12 @@ enum AgentIntegrationFactory {
     static let claudeVersion = ClaudeJobRunner.version
     /// The user's own skill folders, loaded read-only in chats (user decision 2026-11-04).
     static func codex() -> any AgentIntegration { CodexIntegration(userSkills: SkillCatalog.codexRoots[0]) }
-    static func claude() -> any AgentIntegration { ClaudeIntegration(userSkills: SkillCatalog.claudeRoots[0]) }
+    /// Eligible Claude chats run under the same external boundary as Codex (PERMISSIONS.md, channel 1).
+    /// `defaults write local.daniil.switchboard ClaudeExternalBoundaryOff -bool YES` keeps Claude on the CLI sandbox (rollback switch).
+    static func claude() -> any AgentIntegration {
+        ClaudeIntegration(userSkills: SkillCatalog.claudeRoots[0],
+                          boundary: UserDefaults.standard.bool(forKey: "ClaudeExternalBoundaryOff") ? nil : .live)
+    }
     static func gemini() -> any AgentIntegration { ACPIntegration(profile: GeminiProfile.profile) }
 
     /// The presentation table: every agent this build supports, in the order the app lists them.
