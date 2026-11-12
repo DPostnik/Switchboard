@@ -318,6 +318,14 @@ Known gaps. Check this list before you treat a failure as a new defect.
 - The queue holds an install lease: while an installed batch still waits for `confirm-live` or
   `publish`, `install` of another batch is refused, unless the lease is older than 45 minutes or
   the user approves `install BATCH --take-over` (see `scripts/verification-README.md`).
+- Mediated `git` cannot exec helpers outside its trees: `git rebase --continue` with `GIT_EDITOR=true` fails
+  (`cannot run true`); use `GIT_EDITOR=:` (git's built-in no-op).
+- The verification queue runs all `native-tests` filters of one check in one parallel run. A SwiftUI layout suite
+  (`SettingsProposalLayoutTests`, about 7 s on the main actor) beside the process-fixture suites
+  (`ClaudeInteractiveTests`) doubles their wall time and makes fixed-deadline tests flaky (seen 2026-11-13, two
+  runs). Put such a suite into its own `native-tests` check.
+- A task submitted from the CLI sandbox cannot be run from a chat under the boundary (`toolchain changed since
+  submission`): the environment fingerprint differs. Submit and run from the same mode.
 - Under nono `ps` cannot run (setuid) and `log show` cannot run in any sandbox: use
   `project_diagnostics` and `app_log`. `pgrep` sees only sandboxed processes unless mediated.
   `lsof -i` and `sysctl -n vm.loadavg` work.
