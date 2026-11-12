@@ -2,7 +2,7 @@ import Foundation
 import Testing
 import AgentContract
 import ContextCore
-@_spi(NativeProtocol) import CodexAdapter
+@_spi(NativeProtocol) @testable import CodexAdapter
 
 private func commandFixture() throws -> (URL, URL) {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -335,4 +335,25 @@ private func commandFixture() throws -> (URL, URL) {
     #expect(coldCalls.last?["method"].string == "mcpServerStatus/list")
     #expect(!coldCalls.contains { $0["method"].string == "turn/start" })
     await cold.stop()
+}
+
+@Test func chatInspectionDisablesDiagnosticsWithAValidTransport() {
+    for base: JSONValue in [.object([:]), .object([
+        "mcp_servers.switchboard_diagnostics": .object([
+            "command": .string("/usr/bin/python3"), "args": .array([.string("old-project")]),
+            "enabled": .bool(true), "required": .bool(true)
+        ])
+    ])] {
+        let config = CodexClient.chatDirectoryConfiguration(base, arguments: ["/runtime/server.py", "--chat", "allowed"])
+        let disabled = config["mcp_servers.switchboard_diagnostics"]
+        #expect(disabled["command"].string == "/usr/bin/false")
+        #expect(disabled["args"].array.isEmpty)
+        #expect(disabled["enabled"].bool == false)
+        #expect(disabled["required"].bool == false)
+        #expect(config["mcp_servers.switchboard_chats"]["enabled"].bool == true)
+    }
+    let base: JSONValue = .object(["mcp_servers.switchboard_diagnostics": .object([
+        "command": .string("/usr/bin/python3"), "enabled": .bool(true)
+    ])])
+    #expect(CodexClient.chatDirectoryConfiguration(base, arguments: nil)["mcp_servers.switchboard_diagnostics"] == base["mcp_servers.switchboard_diagnostics"])
 }

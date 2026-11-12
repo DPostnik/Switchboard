@@ -20,6 +20,7 @@ public actor CodexIntegration: AgentIntegration {
         let permissions: AgentPermissionProfile
         let route: AgentRoute
         let scheduled: Bool
+        let chatDirectory: [String]?
     }
     private var chromeWorkers: [AgentSessionReference: CodexClient] = [:]
     private var chromeObservers: [AgentSessionReference: Task<Void, Never>] = [:]
@@ -263,7 +264,7 @@ public actor CodexIntegration: AgentIntegration {
     }
     private func chromeScope(_ request: AgentExecutionRequest) throws -> ChromeScope {
         ChromeScope(grant: request.userChromeGrant, project: request.projectPath, permissions: try access(request.permissions),
-                    route: request.route, scheduled: request.kind == .scheduled)
+                    route: request.route, scheduled: request.kind == .scheduled, chatDirectory: request.chatDirectory)
     }
     private func bindChromeWorker(_ worker: CodexClient, session: AgentSessionReference, scope: ChromeScope) async {
         let old = chromeWorkers[session]
@@ -351,7 +352,8 @@ public actor CodexIntegration: AgentIntegration {
             // The process that loaded the thread holds its writer lock; the cold worker cannot resume it until it is released.
             try await (chromeWorkers[session] ?? worker(for: request.route)).release(session)
             try await fresh.resume(session, projectPath: request.projectPath, permissions: scope.permissions,
-                                   route: route(request.route), scheduled: scope.scheduled, userChromeGrant: request.userChromeGrant)
+                                   route: route(request.route), scheduled: scope.scheduled, userChromeGrant: request.userChromeGrant,
+                                   chatDirectory: request.chatDirectory)
         } catch { await fresh.stop(); throw error }
         await bindChromeWorker(fresh, session: session, scope: scope)
     }
@@ -373,7 +375,7 @@ public actor CodexIntegration: AgentIntegration {
                 do {
                     session = try await worker.createSession(projectPath: request.projectPath, permissions: access, model: request.model.model, route: route,
                                                              browserProfile: request.browserProfile, scheduled: request.kind == .scheduled,
-                                                             userChromeGrant: request.userChromeGrant)
+                                                             userChromeGrant: request.userChromeGrant, chatDirectory: request.chatDirectory)
                 } catch { await worker.stop(); throw error }
                 await self.bindChromeWorker(worker, session: session, scope: try self.chromeScope(request))
                 self.sessionRoutes[session] = (request.route, request.model.context)

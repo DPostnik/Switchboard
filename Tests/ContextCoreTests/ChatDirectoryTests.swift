@@ -207,13 +207,13 @@ private func writeState(_ rows: [String: Any], to url: URL) throws {
     #expect(ChatReferences.load(chat: "own", root: root).isEmpty && ChatEventLog.events(chat: "own", root: root).isEmpty)
 }
 
-@Test @MainActor func namingAChatAttachesOnlyInspectChat() throws {
+@Test(arguments: [AgentConnectionID.appClaude, .originalCodex]) @MainActor func namingAChatAttachesOnlyInspectChat(connection: AgentConnectionID) throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: root) }
     let model = DeskModel(store: AppStore(file: root.appendingPathComponent("store.sqlite")), pluginDirectory: root.appendingPathComponent("plugins"), summaryResources: nil)
     let project = Project(path: root.path)
-    let caller = Chat(session: .init(connection: .appClaude, nativeID: UUID().uuidString), projectID: project.id, title: "Caller", model: "claude")
+    let caller = Chat(session: .init(connection: connection, nativeID: UUID().uuidString), projectID: project.id, title: "Caller", model: "claude")
     let other = Chat(session: .init(connection: .appClaude, nativeID: UUID().uuidString), projectID: project.id, title: "Other", model: "claude")
     model.state.projects = [project]; model.state.chats = [caller, other]
     defer { ChatReferences.remove(chat: caller.id) }

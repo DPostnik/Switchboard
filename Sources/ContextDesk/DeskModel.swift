@@ -1838,7 +1838,7 @@ private struct ChatRunState: Equatable {
         scheduleQueue(threadID: id)
         return true
     }
-    /// The chat directory server's command line (Claude chats only, plan Phase 5): all tools for a chat the user opted
+    /// The chat directory server's command line (Codex and Claude): all tools for a chat the user opted
     /// in; only `inspect_chat` over the chats the user named in this chat's messages otherwise; nothing without either.
     func chatDirectoryArguments(for id: String, script: URL? = Bundle.main.resourceURL?.appendingPathComponent("ChatDirectoryRuntime/server.py")) -> [String]? {
         guard let chat = state.chats.first(where: { $0.id == id }), traits(chat.nativeSession?.connection).contains(.chatDirectory),

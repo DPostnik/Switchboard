@@ -216,3 +216,28 @@ func explicitSignOutStopsDedicatedWorkerWithoutAccountNotification(mode: String)
     #expect(Darwin.kill(pid, 0) != 0)
     await app.stop()
 }
+
+@Test func chatReferenceScopeReplacesOnlyItsWorker() async throws {
+    let (root, executable) = try workerFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let app = AgentClient(integration: CodexIntegration())
+    _ = try await app.start(.init(executable: executable, home: root))
+    let permissions = AgentPermissionProfile.unrestricted
+    let session = try await app.createSession(projectPath: root.path, permissions: permissions, model: "", route: .direct)
+    let arguments = ["/app/server.py", "--chat", "caller", "--root", "/app/data", "--references", "/app/references.json"]
+    for scope in [nil, arguments, arguments, nil] as [[String]?] {
+        _ = try await app.send("children", to: session, projectPath: root.path, permissions: permissions, model: "", effort: "", chatDirectory: scope)
+    }
+    let calls = try String(contentsOf: root.appendingPathComponent("calls.jsonl"), encoding: .utf8)
+        .split(separator: "\n").map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+    let turns = calls.filter { $0["method"].string == "turn/start" }
+    #expect(turns.count == 4)
+    #expect(turns[0]["pid"] != turns[1]["pid"])
+    #expect(turns[1]["pid"] == turns[2]["pid"])
+    #expect(turns[2]["pid"] != turns[3]["pid"])
+    let resumes = calls.filter { $0["method"].string == "thread/resume" }
+    #expect(resumes.count == 2)
+    #expect(resumes[0]["params"]["config"]["mcp_servers.switchboard_chats"]["args"].array == (["-I"] + arguments).map(JSONValue.string))
+    #expect(resumes[1]["params"]["config"]["mcp_servers.switchboard_chats"]["enabled"] == .bool(false))
+    await app.stop()
+}

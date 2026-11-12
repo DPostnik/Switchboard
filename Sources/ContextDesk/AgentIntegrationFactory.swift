@@ -28,7 +28,7 @@ enum AgentIntegrationFactory {
 
     static let codexProfile = AgentProfile(
         connection: .originalCodex, engine: .codex, name: "Codex", productName: "Codex",
-        traits: [.connectsAtLaunch, .sharedEngine, .optimizerPlugins, .remoteChatSettings],
+        traits: [.connectsAtLaunch, .sharedEngine, .optimizerPlugins, .remoteChatSettings, .chatDirectory],
         accountLine: { $0.connecting ? L10n.text("Подключение…", "Connecting…") : ($0.versionIssue ?? $0.accountLabel) },
         accountLabel: { account in
             account.authenticated ? L10n.text("ChatGPT · \(account.plan ?? "подключён")", "ChatGPT · \(account.plan ?? "connected")")

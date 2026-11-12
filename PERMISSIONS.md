@@ -203,6 +203,14 @@ brief are in `docs/handoffs/claude-boundary-2026-11-12/`.
 Rollback switch for the Claude boundary: `defaults write local.daniil.switchboard ClaudeExternalBoundaryOff -bool YES`,
 then restart the app; Claude chats return to the CLI sandbox.
 
+Codex chat inspection (2026-11-12, implementation pending verification): channel 3 uses the same
+`ChatDirectoryRuntime` reference allowlist as Claude. Directory arguments are part of the dedicated
+worker scope; adding or revoking the server replaces only that worker before submission.
+No role, root or automatic approval grant changes. See `docs/codex-chat-inspection.md`.
+Follow-up (2026-11-12): disabling the duplicate diagnostics server must retain a valid stdio
+transport (`/usr/bin/false`, empty arguments, disabled and not required); Codex validates even
+disabled entries. Channel 3 only; no grant or retry behavior changes. Verification pending.
+
 Known gaps. Check this list before you treat a failure as a new defect.
 
 - Under nono `ps` cannot run (setuid) and `log show` cannot run in any sandbox. `pgrep` sees only

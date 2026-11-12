@@ -13,6 +13,7 @@ public actor CodexClient {
     var seenRequestIDs = Set<JSONValue>()
     var knownSessions = Set<AgentSessionReference>()
     private var diagnosticScopes: [AgentSessionReference: (project: String, shell: AgentPermissionProfile.Shell, route: RequestRoute, scheduled: Bool, browser: AgentPermissionProfile.Browser, userChromeGrant: AgentUserChromeGrant?)] = [:]
+    private var chatDirectories: [AgentSessionReference: [String]] = [:]
     private var diagnosticsResources: URL?
     private var browserResources: URL?
     private var userChromeEnabled = false
@@ -62,7 +63,7 @@ public actor CodexClient {
         }
         generatedImagesHome = home.appendingPathComponent("generated_images", isDirectory: true)
         generatedImageBaselines.removeAll()
-        diagnosticScopes.removeAll()
+        diagnosticScopes.removeAll(); chatDirectories.removeAll()
         self.diagnosticsResources = diagnosticsResources
         self.browserResources = browserResources
         self.browserRoot = browserRoot
@@ -134,7 +135,7 @@ public actor CodexClient {
     }
 
     public func createSession(projectPath: String, permissions: AgentPermissionProfile, model: String, route: RequestRoute,
-                              browserProfile: AgentBrowserProfile? = nil, scheduled: Bool = false, userChromeGrant: AgentUserChromeGrant? = nil) async throws -> AgentSessionReference {
+                              browserProfile: AgentBrowserProfile? = nil, scheduled: Bool = false, userChromeGrant: AgentUserChromeGrant? = nil, chatDirectory: [String]? = nil) async throws -> AgentSessionReference {
         var params = permissions.codexThreadParameters(external: boundary != nil)
         let profiles = BrowserProfileStore(root: browserRoot)
         guard browserProfile == nil || browserResources != nil else { throw BrowserProfileError.scope }
@@ -144,6 +145,7 @@ public actor CodexClient {
         params["config"] = permissions.codexThreadConfiguration(browser: try BrowserConfiguration.threadConfiguration(resources: browserResources, root: browserRoot, environment: grant?.environment, grant: grant,
                                                                                                                      policy: BrowserLaunchPolicy(permissions, scheduled: scheduled)))
         params["config"] = diagnosticsConfiguration(params["config"] ?? .object([:]), project: projectPath, permissions: permissions)
+        params["config"] = Self.chatDirectoryConfiguration(params["config"] ?? .object([:]), arguments: chatDirectory)
         params["config"] = try userChromeConfiguration(params["config"] ?? .object([:]), permissions: permissions, scheduled: scheduled, grant: userChromeGrant)
         params["config"] = try relayed(params["config"] ?? .object([:]))
         params["cwd"] = .string(projectPath)
@@ -157,12 +159,13 @@ public actor CodexClient {
         let session = AgentSessionReference(connection: .originalCodex, nativeID: id)
         try await verifyUserChromeDiscovery(session: session, permissions: permissions, scheduled: scheduled, grant: userChromeGrant)
         if let grant { try profiles.acknowledge(grant, session: session) }
+        chatDirectories[session] = chatDirectory
         diagnosticScopes[session] = (projectPath, permissions.shell, route, scheduled, permissions.effective.browser, userChromeGrant)
         knownSessions.insert(session)
         return session
     }
     public func resume(_ session: AgentSessionReference, projectPath: String, permissions: AgentPermissionProfile, route: RequestRoute,
-                       scheduled: Bool = false, userChromeGrant: AgentUserChromeGrant? = nil) async throws {
+                       scheduled: Bool = false, userChromeGrant: AgentUserChromeGrant? = nil, chatDirectory: [String]? = nil) async throws {
         var params = permissions.codexThreadParameters(external: boundary != nil)
         let id = try nativeID(session)
         let profiles = BrowserProfileStore(root: browserRoot)
@@ -171,6 +174,7 @@ public actor CodexClient {
                                                                                                                      policy: BrowserLaunchPolicy(permissions, scheduled: scheduled)))
         params["threadId"] = .string(id)
         params["config"] = diagnosticsConfiguration(params["config"] ?? .object([:]), project: projectPath, permissions: permissions)
+        params["config"] = Self.chatDirectoryConfiguration(params["config"] ?? .object([:]), arguments: chatDirectory)
         params["config"] = try userChromeConfiguration(params["config"] ?? .object([:]), permissions: permissions, scheduled: scheduled, grant: userChromeGrant)
         params["config"] = try relayed(params["config"] ?? .object([:]))
         params["cwd"] = .string(projectPath)
@@ -181,6 +185,7 @@ public actor CodexClient {
         _ = try await transport.request("thread/resume", params: .object(params))
         try await verifyUserChromeDiscovery(session: session, permissions: permissions, scheduled: scheduled, grant: userChromeGrant)
         if let grant { try profiles.acknowledge(grant, session: session) }
+        chatDirectories[session] = chatDirectory
         diagnosticScopes[session] = (projectPath, permissions.shell, route, scheduled, permissions.effective.browser, userChromeGrant)
     }
     /// Unloads an idle thread from this process so another app-server can take its writer lock.
@@ -188,7 +193,7 @@ public actor CodexClient {
     func release(_ session: AgentSessionReference) async throws {
         let id = try nativeID(session)
         let status = try await transport.request("thread/unsubscribe", params: .object(["threadId": .string(id)]))["status"].string
-        diagnosticScopes[session] = nil
+        diagnosticScopes[session] = nil; chatDirectories[session] = nil
         guard status == "unsubscribed" else { return }
         for _ in 0..<50 {
             let loaded = try await transport.request("thread/loaded/list", params: .object([:]))["data"].array
@@ -246,6 +251,24 @@ public actor CodexClient {
         throw ClientFailure(L10n.text("Codex не обнаружил инструменты «Мой Chrome». Проверь подключение расширения в настройках браузера.",
                                      "Codex did not discover My Chrome tools. Check the extension connection in browser settings."))
     }
+    /// Arguments are assembled by DeskModel from app-owned references, never from model output.
+    static func chatDirectoryConfiguration(_ base: JSONValue, arguments: [String]?) -> JSONValue {
+        var config = base.object
+        let enabled = arguments != nil
+        config["mcp_servers.switchboard_chats"] = .object([
+            "command": .string(enabled ? "/usr/bin/python3" : "/usr/bin/false"),
+            "args": .array(arguments.map { (["-I"] + $0).map(JSONValue.string) } ?? []),
+            "enabled": .bool(enabled), "required": .bool(enabled), "tool_timeout_sec": .number(30)
+        ])
+        if enabled {
+            // Disabled MCP entries still need a valid transport when Codex parses configuration.
+            config["mcp_servers.switchboard_diagnostics"] = .object([
+                "command": .string("/usr/bin/false"), "args": .array([]),
+                "enabled": .bool(false), "required": .bool(false)
+            ])
+        }
+        return .object(config)
+    }
     private func diagnosticsConfiguration(_ base: JSONValue, project: String, permissions: AgentPermissionProfile) -> JSONValue {
         var config = base.object
         let script = diagnosticsResources?.appendingPathComponent("ChatDirectoryRuntime/server.py")
@@ -265,7 +288,7 @@ public actor CodexClient {
                 throw ClientFailure(L10n.text("Сначала возобнови чат для обновления диагностики.", "Resume this chat before updating diagnostics."))
             }
             if scope.project != projectPath || scope.shell != permissions.shell || scope.browser != permissions.effective.browser || scope.userChromeGrant != userChromeGrant {
-                try await resume(session, projectPath: projectPath, permissions: permissions, route: scope.route, scheduled: scope.scheduled, userChromeGrant: userChromeGrant)
+                try await resume(session, projectPath: projectPath, permissions: permissions, route: scope.route, scheduled: scope.scheduled, userChromeGrant: userChromeGrant, chatDirectory: chatDirectories[session])
             }
         }
         var params: [String: JSONValue] = [
