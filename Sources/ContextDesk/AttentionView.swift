@@ -164,6 +164,11 @@ struct AttentionView: View {
                             Label(L10n.text("Вернуть", "Reopen"), systemImage: "arrow.uturn.backward")
                         }.buttonStyle(DeskButtonStyle())
                     }
+                    if let jobID = item.jobID, model.jobLedger.jobs.contains(where: { $0.id == jobID }) {
+                        Button { model.openScheduledJob(jobID) } label: {
+                            Label(L10n.text("Открыть задание", "Open task"), systemImage: "calendar")
+                        }.buttonStyle(DeskButtonStyle())
+                    }
                     if let thread = item.threadID, let chat = model.state.chats.first(where: { $0.id == thread }) {
                         Button { Task { await model.openChat(chat) } } label: {
                             Label(L10n.text("Открыть отчёт", "Open report"), systemImage: "bubble.left")

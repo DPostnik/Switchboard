@@ -100,8 +100,6 @@ import ContextCore
                 await finishJob(run.id, status: .blocked, output: L10n.text("Исполнитель недоступен", "The agent is unavailable")); return
             }
             guard !schedulerStopping else { await finishJob(run.id, status: .interrupted); return }
-            let executor = makeExecutor(self, job, run, project)
-            jobExecutors[run.id] = executor
             jobTasks[run.id] = Task { [weak self] in
                 guard let self else { return }
                 defer {
@@ -111,15 +109,6 @@ import ContextCore
                     }
                 }
                 do {
-                    let descriptor = try await executor.descriptor().value()
-                    if let routine = job.routine {
-                        do {
-                            try routine.validate(descriptor: descriptor)
-                            guard try routine.prompt() == job.prompt else { throw ConversationIdentity.invalidStorage }
-                        } catch {
-                            await finishJob(run.id, status: .blocked, output: error.localizedDescription); return
-                        }
-                    }
                     var runJob = job
                     if let check = job.precondition, !check.isEmpty {
                         switch await check.evaluate(in: project.path, label: "precondition-" + run.id.uuidString.lowercased()) {
@@ -128,6 +117,18 @@ import ContextCore
                         case .run(let output): runJob.prompt = JobPrecondition.prompt(job.prompt, output: output)
                         }
                         guard !Task.isCancelled, !schedulerStopping else { await finishJob(run.id, status: .interrupted); return }
+                    }
+                    // Bind validation and chat delivery to the same prompt, including precondition output.
+                    let executor = makeExecutor(self, runJob, run, project)
+                    jobExecutors[run.id] = executor
+                    let descriptor = try await executor.descriptor().value()
+                    if let routine = job.routine {
+                        do {
+                            try routine.validate(descriptor: descriptor)
+                            guard try routine.prompt() == job.prompt else { throw ConversationIdentity.invalidStorage }
+                        } catch {
+                            await finishJob(run.id, status: .blocked, output: error.localizedDescription); return
+                        }
                     }
                     let request = runJob.executionRequest(runID: run.id, project: project, descriptor: descriptor, sharedRoots: sharedRoots)
                     let result = try await executor.execute(request) { [weak self] in

@@ -4,6 +4,10 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Important run warnings now link directly to their scheduled task, and failed runs without chats explain where to inspect and retry them.
+
+- Scheduled chat tasks now accept and deliver prompts enriched with precondition output instead of rejecting them as invalid.
+
 - "Open in editor" in the change windows is disabled with an explanation when the file is no longer on disk, instead of doing nothing.
 
 - Add Settings → Advanced → Folders for every project: folders added there apply like a project folder to Developer and operator chats and scheduled jobs in every project (Claude and Codex), never to Editor or Reader; the home folder and the app's data folder are refused.

@@ -23,6 +23,12 @@ enum DeskViewRequest {
 
 extension DeskModel {
     /// The Schedule page from the sidebar dock.
+    func openScheduledJob(_ id: UUID) {
+        guard jobLedger.jobs.contains(where: { $0.id == id }) else { return }
+        selectedScheduledJobID = id.uuidString
+        openSchedule()
+    }
+
     func openSchedule() {
         showingArchive = false; showingAttention = false; showingJobs = true
         Task { await refreshJobs() }

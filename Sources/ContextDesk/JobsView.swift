@@ -4,7 +4,7 @@ import ContextCore
 
 struct JobsView: View {
     @ObservedObject var model: DeskModel
-    @State private var selection: String?
+    private var selection: String? { model.selectedScheduledJobID }
     @State private var editing: ManagedJob?
     @State private var deleting: ManagedJob?
     @State private var showingRoutines = false
@@ -24,7 +24,7 @@ struct JobsView: View {
             HSplitView {
                 VStack(spacing: 0) {
                 DeskSearchField(prompt: L10n.text("Найти задание", "Find a task"), text: $search).padding(12)
-                List(selection: $selection) {
+                List(selection: $model.selectedScheduledJobID) {
                     Section("Switchboard") {
                         ForEach(model.jobLedger.jobs.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }) { job in
                             VStack(alignment: .leading, spacing: 6) {
@@ -63,10 +63,10 @@ struct JobsView: View {
                 }
             }
         }
-        .onAppear { if selection == nil { selection = model.jobLedger.jobs.first?.id.uuidString } }
+        .onAppear { if selection == nil { model.selectedScheduledJobID = model.jobLedger.jobs.first?.id.uuidString } }
         .onChange(of: model.jobLedger.jobs.map(\.id)) { _, ids in
             if selection == nil || (selection?.hasPrefix("source:") == false && !ids.contains(where: { $0.uuidString == selection })) {
-                selection = ids.first?.uuidString
+                model.selectedScheduledJobID = ids.first?.uuidString
             }
         }
         .background(DeskPalette.canvas)
@@ -168,6 +168,10 @@ struct JobsView: View {
                             if let id = run.threadID, let chat = model.state.chats.first(where: { $0.id == id }) {
                                 Button(L10n.text("Открыть чат", "Open chat")) { Task { await model.openChat(chat) } }
                             }
+                        }
+                        if run.threadID == nil && [.blocked, .failed].contains(run.status) {
+                            Text(L10n.text("Запуск остановился до создания чата. Подробности доступны в результате запуска; повторить можно кнопкой «Запустить сейчас».", "This run stopped before a chat was created. See the run output for details; use Run now to try again."))
+                                .font(.ui(.caption)).foregroundStyle(.secondary)
                         }
                         if !run.output.isEmpty {
                             DisclosureGroup(L10n.text("Результат запуска", "Run output")) {

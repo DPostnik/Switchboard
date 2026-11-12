@@ -59,7 +59,11 @@ private actor RecordingExecutorFixture: AgentScheduledExecutor {
     let model = DeskModel(store: AppStore(file: root.appendingPathComponent("state.sqlite")),
                           jobStore: JobStore(file: root.appendingPathComponent("jobs.json")))
     let fixture = RecordingExecutorFixture()
-    model.jobExecutorFactories[.claude] = { _, _, _, _ in fixture }
+    var executorPrompts: [String] = []
+    model.jobExecutorFactories[.claude] = { _, job, _, _ in
+        executorPrompts.append(job.prompt)
+        return fixture
+    }
     let project = Project(path: root.path); model.state.projects = [project]; model.schedulerReady = true
     func run(_ command: String) async throws -> JobRun {
         var job = ManagedJob(); job.name = "Mail"; job.prompt = "Check mail"; job.projectID = project.id; job.engine = .claude
@@ -80,5 +84,27 @@ private actor RecordingExecutorFixture: AgentScheduledExecutor {
     let ran = try await run("echo 2 new letters")
     #expect(ran.status == .completed)
     let prompts = await fixture.prompts
+    // Production chat executors bind both validation and delivery to the factory job.
+    #expect(executorPrompts.count == 1)
+    #expect(executorPrompts.last == prompts.last)
     #expect(prompts.count == 1 && prompts[0].hasPrefix("Check mail") && prompts[0].contains("2 new letters"))
+}
+
+@Test @MainActor func scheduledTaskNavigationSelectsTheTaskWithoutAChat() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let model = DeskModel(store: AppStore(file: root.appendingPathComponent("state.sqlite")),
+                          jobStore: JobStore(file: root.appendingPathComponent("jobs.json")))
+    var first = ManagedJob(); first.name = "First"
+    var target = ManagedJob(); target.name = "Mail"
+    model.jobLedger.jobs = [first, target]
+    model.showingAttention = true
+    model.showingArchive = true
+    model.openScheduledJob(target.id)
+    #expect(model.showingJobs && !model.showingAttention && !model.showingArchive)
+    #expect(model.selectedScheduledJobID == target.id.uuidString)
+    #expect(model.state.chats.isEmpty)
+    model.openScheduledJob(UUID())
+    #expect(model.selectedScheduledJobID == target.id.uuidString)
 }

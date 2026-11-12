@@ -221,6 +221,7 @@ private struct ChatRunState: Equatable {
     }
     @Published var showingArchive = false
     @Published var archiveViewingChat = false
+    @Published var selectedScheduledJobID: String?
     @Published var showingJobs = false
     @Published var jobs: [ScheduledJob] = []
     @Published var jobLedger = JobLedger()
