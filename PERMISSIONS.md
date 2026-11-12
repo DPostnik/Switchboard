@@ -52,6 +52,24 @@ Rules for the channels:
   commands.
 - Channel 4 is the only way a boundary gets wider.
 
+### After a refusal
+
+Decided by the user on 2026-11-12. A refusal must cost one step, not twenty minutes of workarounds.
+
+1. A refusal names the standard route when the app knows one: the app-owned tool to use, or the
+   setting to request. A bare `Operation not permitted` is a defect in the refusal, not in the agent.
+2. One refusal, one request. If the agent knows the standard tool, it uses it. If not, it sends one
+   access request (channel 4) with the exact folder, access set or command and the reason. It does
+   not search for another command, interpreter, path or flag that reaches the same effect: a
+   workaround is a boundary bypass, even when it succeeds.
+3. The agent continues the independent part of the task while the request waits, and reports the
+   request in its final message if it is still open.
+4. The user answers once. The grant is a project setting, so no later chat asks again. After the
+   answer the app replaces the provider process with the new rights and continues the same task
+   (planned, see section 5).
+5. A request that repeats across projects for a safe standard resource becomes a default (an access
+   set or a role default), found by the review in section 7. It must not stay a per-project grant.
+
 ## 2. Terms
 
 Use one term for one concept, in code comments, copy and reports.
@@ -153,8 +171,10 @@ Do not reopen these without the user.
 - Shared roots are opt-in. Nothing is granted until the user adds a folder.
 - For Claude Bash the CLI's own `dangerouslyDisableSandbox` flag is the sandbox decision. No text
   heuristic (the removed `runsSandboxed`) comes back.
-- Under the boundary an action outside the roots fails; it is not asked. The user accepted this for
-  Developer chats.
+- Under the boundary an action outside the roots fails; the command itself is never asked about.
+  The agent then follows "After a refusal" in section 1: one access request for a durable project
+  setting, no workaround (user decision 2026-11-12; it refines the earlier "fails, not asked").
+- Grants are reviewed about twice a week (section 7). Accumulated grants are not trusted forever.
 - Sub-agents inherit the parent's rights. The role cap limits their tool names only; there is no
   read-only promise for them.
 - A project whose trusted commands nono cannot mediate is ineligible for the boundary until those
@@ -190,6 +210,15 @@ Known gaps. Check this list before you treat a failure as a new defect.
   have.
 - This project's trusted `/usr/bin/log show` needs an app-owned tool before Claude can move under
   the boundary.
+- Access requests are files today (`SettingsProposalInbox`). `applySettingsProposal` saves the
+  settings and nothing else: no card in the chat, no process replacement, no continuation of the
+  task. Planned, not built: a request card in the chat, one click, relaunch at a turn boundary,
+  automatic continuation.
+- The "one refusal, one request, no workaround" rule is not in the instructions the app gives every
+  chat (`AgentAutonomy`); only this file and `AGENTS.md` state it. Refusal texts do not name the
+  standard route yet, and a nono OS refusal carries no text at all.
+- Grants carry no origin: the settings do not record when, by which chat and why a folder or command
+  was added, and nothing reports a grant that is never used.
 - Roles without network stay on the native path (the proxy allowlist for model hosts is not wired).
 - `git worktree add ../sibling` is outside the git grant.
 - Requests outside an active turn (background sub-agents) get the role's own answer; what would
@@ -218,7 +247,7 @@ Known gaps. Check this list before you treat a failure as a new defect.
    them changed, stop and ask the user with the concrete case.
 4. **Keep the fix as small as the defect.** One shape in `AgentCommandPolicy`, one grant in the
    planner, one tool. No second policy layer, no new permission vocabulary.
-5. **Verify** (section 7), then update section 5 if the state or a known gap changed.
+5. **Verify** (section 8), then update section 5 if the state or a known gap changed.
 
 Wrong fixes that were proposed or shipped before, and why:
 
@@ -233,7 +262,24 @@ Wrong fixes that were proposed or shipped before, and why:
 | Pass the Claude token in an environment variable | Agent Bash reads it through `sysctl KERN_PROCARGS2` | fd 3 through the launcher |
 | Tests built from the adapter's own constants | They pass while the real provider message differs | A fixture copied from a sanitized real message |
 
-## 7. Verification
+## 7. Grant review
+
+Every answered request widens a project for good, so the settings are reviewed on a schedule
+(target: twice a week) with the `access-review` skill. The review only proposes; the user applies.
+
+- **Remove:** a grant no chat used in the review window; a grant wider than its use (a folder where
+  one subfolder is used, writable where only reads happen, a command prefix that also matches a
+  destructive form); anything from the skill's "do not grant" list that got in.
+- **Narrow:** replace single commands and folders with an access set when one covers them.
+- **Promote:** the same safe grant in several projects becomes a default, so it stops being asked.
+- **Report:** refusals followed by a retry of the same command (`denied_then_retried`) and long
+  turns after a refusal. They show a missing default, a missing app-owned tool or an agent that
+  ignored "After a refusal".
+
+Removals go out as settings proposals (`removePresets`, `removeFolders`, `removeCommands`), one rule
+per file, and are recorded in `docs/access-reviews.md`.
+
+## 8. Verification
 
 - Tests: `zsh scripts/test.sh --filter` with the files that cover the change. The set for this area:
   `AgentRoleTests`, `AgentCommandPolicyTests`, `CommandSandboxTests`, `ExternalSandboxTests`,
@@ -250,7 +296,7 @@ Wrong fixes that were proposed or shipped before, and why:
   the ledger rows carry the expected `reason`.
 - Record the result in `docs/improvements.md`. State what was not checked.
 
-## 8. Code map
+## 9. Code map
 
 | Area | Files |
 | --- | --- |
