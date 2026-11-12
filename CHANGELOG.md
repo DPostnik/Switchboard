@@ -5,6 +5,15 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 ## [Unreleased]
 
 - "Open in editor" in the change windows is disabled with an explanation when the file is no longer on disk, instead of doing nothing.
+
+- Add Settings → Advanced → Folders for every project: folders added there apply like a project folder to Developer and operator chats and scheduled jobs in every project (Claude and Codex), never to Editor or Reader; the home folder and the app's data folder are refused.
+
+- Claude chats no longer ask about sandboxed shell commands that contain a backslash; a command leaves the sandbox only with the CLI's own flag, and then only trusted project commands run unasked.
+
+- Record why Claude's permission answers were given (for example a deny-list hit, a sandboxed command, or a request to leave the sandbox with the trust check's reason) in the permissions ledger, and count denied commands an agent retried in the same turn.
+
+- Trusted project commands accept more everyday shapes without a prompt: reading a log the same command just wrote with `cat`, `grep`, `sed -n` or `wc -l`, `date`/`pwd`/`printf`, and a `cd` to the chat's own project (also `"$(pwd)"` or `"$(git rev-parse --show-toplevel)"`) before its scripts; a `cd` anywhere else and every other substitution still ask.
+
 - Switch the provider of a new chat with a Claude/ChatGPT toggle beside the model chip, and show each chat's provider mark in the sidebar.
 
 - Offer native session approval for Codex commands when supported by the engine.

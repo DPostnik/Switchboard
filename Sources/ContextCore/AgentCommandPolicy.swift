@@ -107,54 +107,185 @@ public struct AgentCommandPolicy: Sendable {
             return trustedPrefixes.contains { $0.matches(words.map(\.text)) }
         }
     }
+    /// Why `trusts` refuses a command. Stable identifiers: the capability ledger records them as reasons.
+    public enum TrustRejection: String, Sendable, CaseIterable {
+        /// A command substitution or backtick other than `$(pwd)` / `$(git rev-parse --show-toplevel)`.
+        case substitution
+        /// A `cd` to anything but the session working directory before a script given by a relative path.
+        case cdBeforeScript
+        /// A segment that is neither a trusted command, a no-file command nor an accepted reader or filter.
+        case unknownFilter
+        /// A redirection that reads a file or writes outside temporary folders.
+        case redirection
+        /// No trusted command in the line, or no command sandbox (and so no grants) for this profile.
+        case noGrant
+        /// A backslash-newline line continuation.
+        case lineContinuation
+    }
     /// Whether a command outside the sandbox runs without a prompt: every segment, as written, is a trusted command,
-    /// a `cd`, an `echo`, an `exit` with a status, or a filter that reads only its input (`| tail -5`, `| grep -E 'x'`)
-    /// or `tail`/`head` of a temporary file the same command overwrote before. Allowed redirections: descriptor copies (`2>&1`), `/dev/null`
-    /// and files in temporary folders, also as `$TMPDIR/…` when the command never sets `TMPDIR`. Environment prefixes
-    /// and wrappers (`GIT_SSH_COMMAND=…`, `env`, `nohup`), reading redirections and any other target could run or
-    /// reach anything outside the sandbox, so they are asked.
-    public func trusts(_ command: String) -> Bool {
-        guard sandbox != nil else { return false }
-        // The segment scanner is used for deny/ask inspection, not as a complete shell grammar. Never derive an
-        // allow decision from recursive executable substitutions (including the scanner's depth limit).
-        guard !command.contains("$("), !command.contains("`"), !command.contains("\\\n") else { return false }
+    /// a no-file command (`cd`, `echo`, `true`, `pwd`, `date`, `printf`, `exit` with a status), a filter that reads
+    /// only its input (`| tail -5`, `| grep -E 'x'`), or a reader (`cat`, `grep`, `sed -n 1,20p`, `wc -l`, `tail`,
+    /// `head`) of a temporary file the same sequential command overwrote before. Allowed redirections: descriptor
+    /// copies (`2>&1`), `/dev/null` and files in temporary folders, also as `$TMPDIR/…` when the command never sets
+    /// `TMPDIR`. Environment prefixes and wrappers (`GIT_SSH_COMMAND=…`, `env`, `nohup`), reading redirections and any
+    /// other target could run or reach anything outside the sandbox, so they are asked.
+    public func trusts(_ command: String) -> Bool { trusts(command, cwd: nil) }
+    /// `cwd` is the session's working directory, the project that owns the trusted commands: a `cd` to it (also as
+    /// `"$(pwd)"` or `"$(git rev-parse --show-toplevel)"`) may precede a trusted script given by a relative path.
+    public func trusts(_ command: String, cwd: String?) -> Bool { rejection(command, cwd: cwd) == nil }
+    /// Nil when `trusts(command, cwd:)` holds, otherwise a `TrustRejection` identifier.
+    public func trustRejection(_ command: String, cwd: String?) -> String? { rejection(command, cwd: cwd)?.rawValue }
+
+    func rejection(_ original: String, cwd: String?) -> TrustRejection? {
+        guard sandbox != nil else { return .noGrant }
+        guard !original.contains("\\\n") else { return .lineContinuation }
+        guard !original.contains("\u{E000}") else { return .unknownFilter }
+        // The two directory queries are read-only and stand for the working directory; they are replaced by one
+        // token before parsing. The segment scanner is used for deny/ask inspection, not as a complete shell grammar:
+        // never derive an allow decision from any other executable substitution (including the scanner's depth limit).
+        let command = Self.withoutDirectorySubstitutions(original)
+        guard !command.contains("$("), !command.contains("`") else { return .substitution }
+        // Comments and ANSI-C quoting (`$'\''`) would end or open quotes where the word parser does not see them.
+        guard !Self.hasComment(command), !command.contains("$'") else { return .unknownFilter }
         // The segment parser splits at `&`: descriptor copies (`2>&1`) only route output and are dropped first, and
         // `&>` writes like `>`. Both only remove characters, so quoted text cannot gain a command this way.
         let normalized = command.replacingOccurrences(of: #"(^|\s)\d*>&\d+(?=\s|[;|&)]|$)"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: "&>", with: ">")
         let temporaryVariable = Self.onlyExpandsTemporaryVariable(command)
         let segments = ShellSegments.commands(normalized + " ").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        let changesDirectory = segments.contains { Self.words($0)?.first?.text == "cd" }
-        // Temporary files an earlier segment overwrote with `>`: `tail`/`head` may read their output back.
-        // Only in a sequential command: in a pipeline or
-        // with `&` the reader could run before the file is overwritten.
+        // A relative script prefix belongs to the session's working directory. Any `cd` elsewhere (another project, a
+        // writable root, `cd` alone, `cd -`) could run another project's same-named script, in whatever order or
+        // branch (`||`) it appears; leave such compound commands for an explicit approval.
+        let session = cwd.flatMap(Self.canonicalDirectory)
+        let leavesSession = segments.contains { segment in
+            guard let raw = Self.words(segment), let words = Self.withoutSafeRedirections(raw, temporaryVariable: temporaryVariable)
+            else { return false }
+            let command = Self.withoutGrouping(words)
+            guard command.first?.text == "cd", command.first?.quoted == false else { return false }
+            return !Self.entersSession(Array(command.dropFirst()), session: session)
+        }
+        // Temporary files an earlier segment overwrote with `>`: readers may read their output back. Only in a
+        // sequential command: in a pipeline or with `&` the reader could run before the file is overwritten.
         var written = Set<String>()
         var matchedGrant = false
-        let sequential = normalized.range(of: #"(^|[^|])\|([^|]|$)|(^|[^&])&([^&]|$)"#, options: .regularExpression) == nil
+        let sequential = Self.isSequential(normalized)
         for segment in segments {
-            guard let raw = Self.words(segment), var words = Self.withoutSafeRedirections(raw, temporaryVariable: temporaryVariable) else { return false }
-            while let first = words.first, ["{", "(", "!"].contains(first.text) { words.removeFirst() }
-            while let last = words.last, ["}", ")"].contains(last.text) { words.removeLast() }
+            guard let raw = Self.words(segment) else { return .unknownFilter }
+            guard let unredirected = Self.withoutSafeRedirections(raw, temporaryVariable: temporaryVariable) else { return .redirection }
+            let words = Self.withoutGrouping(unredirected)
             defer { if sequential { written.formUnion(Self.overwrittenFiles(raw)) } }
             guard let head = words.first?.text else { continue }
             // Only assignments (`status=$?`) set a variable; before a command they would change what it runs.
             if words.count == 1, !words[0].quoted,
                words[0].text.range(of: #"^(code|exit_code|status)=\$\?$"#, options: .regularExpression) != nil { continue }
-            if ["cd", "echo", "true"].contains(head) { continue }
             let texts = words.map(\.text)
-            // `exit $code` after `code=$?` returns the trusted command's status.
-            if head == "exit", texts.count <= 2,
-               texts.dropFirst().allSatisfy({ $0.range(of: #"^(\d+|\$[A-Za-z_?][A-Za-z0-9_]*)$"#, options: .regularExpression) != nil }) { continue }
+            if head == "cd" || Self.usesNoFiles(texts) { continue }
             if let prefix = trustedPrefixes.first(where: { $0.matches(texts) }) {
-                // A relative script prefix belongs to the supplied working directory. A directory switch could run
-                // another project's same-named script; leave such compound commands for an explicit approval.
-                if changesDirectory, prefix.requiresWorkingDirectory { return false }
+                if leavesSession, prefix.requiresWorkingDirectory { return .cdBeforeScript }
                 matchedGrant = true
                 continue
             }
-            guard Self.readsOnlyInput(texts, written: written) else { return false }
+            guard Self.readsOnlyInput(texts, written: written) else { return .unknownFilter }
         }
-        return !segments.isEmpty && matchedGrant
+        return !segments.isEmpty && matchedGrant ? nil : .noGrant
+    }
+    /// Stands for `$(pwd)` and `$(git rev-parse --show-toplevel)`; a private-use character no accepted command contains.
+    static let directoryToken = "\u{E000}session-directory\u{E000}"
+    static func withoutDirectorySubstitutions(_ command: String) -> String {
+        command.replacingOccurrences(of: #"\$\((pwd|git rev-parse --show-toplevel)\)"#, with: directoryToken, options: .regularExpression)
+    }
+    /// Words without grouping (`{`, `(`, `!` before and `}`, `)` after the command).
+    static func withoutGrouping(_ words: [Word]) -> [Word] {
+        var words = words
+        while let first = words.first, !first.quoted, ["{", "(", "!"].contains(first.text) { words.removeFirst() }
+        while let last = words.last, !last.quoted, ["}", ")"].contains(last.text) { words.removeLast() }
+        return words
+    }
+    /// Commands that open no file and run nothing (`cd` is checked separately; `printf -v` would set a variable,
+    /// `date` with an operand would set the clock).
+    static func usesNoFiles(_ words: [String]) -> Bool {
+        guard let head = words.first else { return false }
+        let arguments = words.dropFirst()
+        switch head {
+        case "echo", "true": return true
+        case "pwd": return arguments.allSatisfy { ["-L", "-P"].contains($0) }
+        case "date": return arguments.allSatisfy { $0 == "-u" || $0.hasPrefix("+") }
+        case "printf": return !arguments.isEmpty && !arguments.contains { $0.hasPrefix("-v") }
+        case "exit":
+            // `exit $code` after `code=$?` returns the trusted command's status.
+            return arguments.count <= 1
+                && arguments.allSatisfy { $0.range(of: #"^(\d+|\$[A-Za-z_?][A-Za-z0-9_]*)$"#, options: .regularExpression) != nil }
+        default: return false
+        }
+    }
+    /// Whether the operands of a `cd` name the session directory: exactly one absolute path (or `~/…`, or the
+    /// directory token) that canonicalizes to it. Expansions, globs and `..` never match.
+    static func entersSession(_ operands: [Word], session: String?) -> Bool {
+        guard let session, operands.count == 1 else { return false }
+        let operand = operands[0]
+        // Unquoted, the shell splits the substituted path at spaces, and `cd a b` in zsh changes to another directory.
+        if operand.text == directoryToken { return operand.quoted || session.rangeOfCharacter(from: .whitespacesAndNewlines) == nil }
+        guard !(operand.quoted && operand.text.hasPrefix("~")),
+              operand.text.rangeOfCharacter(from: CharacterSet(charactersIn: "$*?[]{}`\u{E000}")) == nil,
+              !operand.text.split(separator: "/").contains("..") else { return false }
+        return canonicalDirectory(operand.text) == session
+    }
+    /// An absolute directory path with `~` expanded, symbolic links resolved and no trailing slash.
+    static func canonicalDirectory(_ path: String) -> String? {
+        var path = path.trimmingCharacters(in: .whitespaces)
+        if path == "~" || path.hasPrefix("~/") { path = NSHomeDirectory() + path.dropFirst() }
+        guard path.hasPrefix("/"), !path.utf8.contains(0) else { return nil }
+        return URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+    }
+    /// Whether the command has a shell comment: an unquoted, unescaped `#` at the start of a word (line start, after
+    /// whitespace or after `;`, `|`, `&`, `(`, `)`, `{`, `}`). A `#` inside quotes or within a word is data.
+    static func hasComment(_ command: String) -> Bool {
+        let chars = Array(command)
+        var index = 0, wordStart = true
+        var quote: Character?
+        while index < chars.count {
+            let char = chars[index]
+            if quote == "'" {
+                if char == "'" { quote = nil }
+                wordStart = false
+            } else if quote == "\"" {
+                if char == "\\" { index += 1 } else if char == "\"" { quote = nil }
+                wordStart = false
+            } else if char == "\\" {
+                index += 1; wordStart = false
+            } else if char == "'" || char == "\"" {
+                quote = char; wordStart = false
+            } else if char == "#" {
+                if wordStart { return true }
+            } else {
+                wordStart = char.isWhitespace || ";|&(){}".contains(char)
+            }
+            index += 1
+        }
+        return false
+    }
+    /// No pipe (`|`, `|&`) or background `&` outside quotes; `||`, `&&`, `;` and newlines keep segments in order.
+    static func isSequential(_ command: String) -> Bool {
+        let chars = Array(command)
+        var index = 0
+        var quote: Character?
+        while index < chars.count {
+            let char = chars[index]
+            if quote == "'" {
+                if char == "'" { quote = nil }
+            } else if char == "\\" {
+                index += 1
+            } else if quote == "\"" {
+                if char == "\"" { quote = nil }
+            } else if char == "'" || char == "\"" {
+                quote = char
+            } else if char == "|" || char == "&" {
+                if index + 1 < chars.count, chars[index + 1] == char { index += 2; continue }
+                return false
+            }
+            index += 1
+        }
+        return true
     }
     /// Whether every mention of `TMPDIR` reads it (`$TMPDIR`, `${TMPDIR}`), so the command cannot point it elsewhere.
     static func onlyExpandsTemporaryVariable(_ command: String) -> Bool {
@@ -171,8 +302,9 @@ public struct AgentCommandPolicy: Sendable {
         }
         return result
     }
-    /// A filter after a pipe that reads only its input: no file operands. `tail` and `head` may also read a temporary
-    /// file an earlier segment of the same command overwrote (`written`), such as a trusted command's log.
+    /// A filter after a pipe that reads only its input: no file operands. Readers may also read a temporary file an
+    /// earlier segment of the same sequential command overwrote (`written`), such as a trusted command's log:
+    /// `tail`, `head`, `cat`, `wc`, `grep` (a path-like pattern is refused) and `sed -n <address>p` (no other script).
     static func readsOnlyInput(_ words: [String], written: Set<String> = []) -> Bool {
         guard let head = words.first else { return false }
         let arguments = Array(words.dropFirst())
@@ -196,25 +328,40 @@ public struct AgentCommandPolicy: Sendable {
                 index += 1
             }
             return true
-        case "wc": return arguments.allSatisfy { flags($0, allowed: "clmwL") }
+        case "cat": return arguments.allSatisfy(written.contains)
+        case "wc": return arguments.allSatisfy { flags($0, allowed: "clmwL") || written.contains($0) }
+        case "sed":
+            // Print a line range only (`sed -n 1,20p`, `sed -n '$p'`): any other script could write (`w`), read (`r`)
+            // or run (`e`) files, and `-i` edits in place.
+            guard arguments.count >= 2, arguments[0] == "-n",
+                  arguments[1].range(of: #"^(\d+|\$)(,(\d+|\$))?p$"#, options: .regularExpression) != nil else { return false }
+            return arguments.dropFirst(2).allSatisfy(written.contains)
         case "sort": return arguments.allSatisfy { flags($0, allowed: "bdfghinrRuVz") }
         case "uniq": return arguments.allSatisfy { flags($0, allowed: "cduiz") }
         case "sleep": return arguments.allSatisfy(number)
         case "grep", "egrep":
-            // Options, then at most one pattern; `-e` takes the next word as a pattern.
-            var patterns = 0, index = 0
+            // Options without file arguments, one pattern (`-e` takes the next word as the pattern), then only files
+            // from `written`.
+            var pattern: String?, files: [String] = [], index = 0
             while index < arguments.count {
                 let word = arguments[index]
                 if word == "-e" {
                     index += 1
-                    guard index < arguments.count else { return false }
-                    patterns += 1
+                    guard index < arguments.count, pattern == nil else { return false }
+                    pattern = arguments[index]
+                } else if word.hasPrefix("-") && word != "-" {
+                    guard flags(word, allowed: "EFGivwxclnoqshHbz") else { return false }
+                } else if pattern == nil {
+                    pattern = word
+                } else {
+                    files.append(word)
                 }
-                else if word.hasPrefix("-") && word != "-", !flags(word, allowed: "EFGivwxclnoqshHbz") { return false }
-                else if !word.hasPrefix("-") || word == "-" { patterns += 1 }
                 index += 1
             }
-            return patterns <= 1
+            guard files.allSatisfy(written.contains) else { return false }
+            // With file operands, a path-like pattern is refused rather than guessed at.
+            if !files.isEmpty, let pattern, pattern.hasPrefix("/") || pattern.hasPrefix("~") { return false }
+            return true
         default: return false
         }
     }
@@ -223,13 +370,25 @@ public struct AgentCommandPolicy: Sendable {
         var quoted: Bool
         var unquotedRedirection: Bool = false
     }
-    /// Shell words with quotes removed; nil for an unfinished quote.
+    /// Shell words with quotes and backslash escapes removed; nil for an unfinished quote or a trailing backslash.
+    /// An escaped character counts as quoted: it is never a redirection, a `~` or grouping.
     static func words(_ segment: String) -> [Word]? {
         var result: [Word] = [], current = "", quoted = false, inWord = false, unquotedRedirection = false
         var quote: Character?
-        for char in segment {
-            if let open = quote {
-                if char == open { quote = nil } else { current.append(char) }
+        let chars = Array(segment)
+        var index = 0
+        while index < chars.count {
+            let char = chars[index]
+            index += 1
+            if quote == "'" {
+                if char == "'" { quote = nil } else { current.append(char) }
+            } else if quote == "\"" {
+                if char == "\"" { quote = nil }
+                else if char == "\\", index < chars.count, "$`\"\\\n".contains(chars[index]) { current.append(chars[index]); index += 1 }
+                else { current.append(char) }
+            } else if char == "\\" {
+                guard index < chars.count else { return nil }
+                current.append(chars[index]); index += 1; quoted = true; inWord = true
             } else if char == "'" || char == "\"" {
                 quote = char; quoted = true; inWord = true
             } else if char == " " || char == "\t" {

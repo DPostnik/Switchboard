@@ -55,6 +55,11 @@ struct AgentCatalogLink: Sendable {
     let checkEnvironment: [String: String]
 }
 
+/// Provider logos the app draws itself (`AgentMark`): Anthropic's Claude mark and OpenAI's.
+enum AgentBrandMark: Sendable {
+    case anthropic, openAI
+}
+
 /// Copy and identifiers of one agent: the presentation table. Only the composition root fills it.
 struct AgentProfile: Sendable {
     let connection: AgentConnectionID
@@ -91,6 +96,8 @@ struct AgentProfile: Sendable {
     var installation: AgentInstallation? = nil
     /// SF Symbol beside the agent's name in pickers and its Settings section; nil shows the name alone.
     var systemImage: String? = nil
+    /// Provider logo drawn by `AgentMark` instead of `systemImage`; nil uses the SF Symbol.
+    var brandMark: AgentBrandMark? = nil
     /// The agent runs scheduled jobs (as chats of its connection). Off keeps it out of the job editor and the scheduler.
     var scheduledJobs = true
 }

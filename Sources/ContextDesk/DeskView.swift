@@ -727,7 +727,7 @@ struct DeskView: View {
                 } else {
                     // The provider's mark holds the place of the selection check, so selecting a row does not shift its title.
                     let connection = chat.nativeSession?.connection
-                    AgentMark(agent: connection?.agent, systemImage: model.profile(connection)?.systemImage, size: .ui(12))
+                    AgentMark(profile: model.profile(connection), size: .ui(12))
                         .foregroundStyle(.secondary)
                         .frame(width: .ui(16))
                 }

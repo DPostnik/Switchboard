@@ -3,26 +3,31 @@ import AgentContract
 import ContextCore
 import ContextTranscript
 
-/// The provider of an agent connection as a small mark: the Claude and OpenAI logos for Claude Code and Codex,
-/// else the profile's SF Symbol. Shown in the composer's provider toggle, the model chip and the sidebar chat rows.
+/// The provider of an agent connection as a small mark: the profile's brand logo (`AgentProfile.brandMark`, Claude and
+/// OpenAI), else its SF Symbol. Shown in the composer's provider toggle, the model chip and the sidebar chat rows.
 struct AgentMark: View {
-    let agent: AgentID?
+    let brand: AgentBrandMark?
     /// SF Symbol of an agent without a brand mark (`AgentProfile.systemImage`).
     var systemImage: String? = nil
     var size: CGFloat = 12
     /// Brand colour instead of the inherited foreground.
     var tinted = false
 
+    init(profile: AgentProfile?, size: CGFloat = 12, tinted: Bool = false) {
+        brand = profile?.brandMark; systemImage = profile?.systemImage; self.size = size; self.tinted = tinted
+    }
+
     /// Claude's brand orange.
     static let claudeColor = Color(red: 0xD9 / 255, green: 0x77 / 255, blue: 0x57 / 255)
 
     var body: some View {
         Group {
-            if agent == .claudeCode {
+            switch brand {
+            case .anthropic:
                 BrandGlyph(glyph: BrandGlyph.claude).fill(tinted ? AnyShapeStyle(Self.claudeColor) : AnyShapeStyle(.foreground))
-            } else if agent == .codex {
+            case .openAI:
                 BrandGlyph(glyph: BrandGlyph.openAI).fill(.foreground)
-            } else {
+            case nil:
                 Image(systemName: systemImage ?? "sparkle").resizable().scaledToFit()
             }
         }
@@ -56,7 +61,7 @@ struct AgentToggle: View {
         return Button {
             withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.82)) { model.selectAgent(id) }
         } label: {
-            AgentMark(agent: id.agent, systemImage: model.profile(id)?.systemImage, size: .ui(13), tinted: selected)
+            AgentMark(profile: model.profile(id), size: .ui(13), tinted: selected)
                 .foregroundStyle(selected ? DeskPalette.ink : DeskPalette.muted)
                 .frame(width: .ui(26), height: .ui(22))
                 .background {

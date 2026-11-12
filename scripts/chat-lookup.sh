@@ -1,6 +1,7 @@
 #!/bin/zsh
 # Diagnoses one Switchboard chat by ID (switchboard-chat:<UUID>, chat, agent session or turn UUID): chat record,
-# agent session and transcript path, latest turns, app events, refused requests and the latest transcript events.
+# agent session and transcript path, latest turns, app events, refused requests (with reasons), denied-then-retried
+# command counts and the latest transcript events.
 # Usage: zsh scripts/chat-lookup.sh <ID> [--events N] [--before K]
 # Reads the app's data read-only; SWITCHBOARD_DATA_ROOT points it at another data folder.
 set -eu

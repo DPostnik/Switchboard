@@ -13,7 +13,7 @@ extension DeskModel {
               URL(fileURLWithPath: cwd).standardizedFileURL.path == URL(fileURLWithPath: project.path).standardizedFileURL.path,
               let support = agentState(action.interaction.session.connection).descriptor?.permissions else { return nil }
         let profile = chat.resolvedRole(in: project, catalog: roleCatalog)
-            .profile(for: project, addOns: chat.resolvedAddOns(in: project))
+            .profile(for: project, addOns: chat.resolvedAddOns(in: project), sharedRoots: sharedRoots)
         return AgentCommandPolicy(profile).assessInvocation(command: command, support: support)
     }
 

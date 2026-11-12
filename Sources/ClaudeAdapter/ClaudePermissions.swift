@@ -131,6 +131,8 @@ struct ClaudeLaunchPolicy: Equatable {
     /// The `sandbox` flag setting: the home folder is closed to commands except the chat's folder, the project's
     /// roots and presets and `extraReads` (the app's own files a command needs, such as skill scripts). Temporary
     /// folders stay writable. Commands outside the sandbox stay possible but reach `permission()` (see `trusts`).
+    /// No `excludedCommands`: Claude Code (2.1.292 `shouldUseSandbox`) then sandboxes every Bash command unless the
+    /// call sets `dangerouslyDisableSandbox`, so that input field alone is the CLI's own sandbox decision.
     func sandboxSettings(cwd: String?, extraReads: [String] = [], extraWrites: [String] = []) -> JSONValue? {
         guard let sandbox else { return nil }
         func unique(_ values: [String]) -> [String] { var seen = Set<String>(); return values.filter { !$0.isEmpty && seen.insert($0).inserted } }
@@ -139,41 +141,42 @@ struct ClaudeLaunchPolicy: Equatable {
         let filesystem: [String: JSONValue] = ["denyRead": .array([.string("~/")]),
                                                "allowRead": .array(read.map(JSONValue.string)),
                                                "allowWrite": .array(write.map(JSONValue.string))]
-        let excluded = AgentCommandPolicy(profile).trustedPrefixes.flatMap { [$0.command, $0.command + " *"] }
         // `*` keeps the network open for roles that have it; the CLI's proxy then passes every host.
         let network: [String: JSONValue] = ["allowedDomains": .array(profile.network ? [.string("*")] : []),
                                             "allowLocalBinding": .bool(profile.network)]
         return .object(["enabled": .bool(true), "failIfUnavailable": .bool(true), "autoAllowBashIfSandboxed": .bool(true),
-                        "allowUnsandboxedCommands": .bool(true), "excludedCommands": .array(excluded.map(JSONValue.string)),
+                        "allowUnsandboxedCommands": .bool(true),
                         "filesystem": .object(filesystem), "network": .object(network)])
     }
-    /// Whether a command runs inside the sandbox: not asked to leave it and no segment is an excluded command.
-    func runsSandboxed(_ command: String, disableSandbox: Bool) -> Bool {
-        guard sandbox != nil, !disableSandbox else { return false }
-        // The inspection scanner does not decode shell escapes. An escaped executable may still match a CLI
-        // exclusion, so a provider question about that command cannot be classified as confined from text alone.
-        guard !command.contains("\\") else { return false }
-        return !AgentCommandPolicy(profile).containsTrustedCommand(command)
+    /// Existing project command grants are evaluated by the shared deterministic policy; `cwd` is the session's
+    /// working directory, the project that owns relative trusted scripts.
+    func trusts(_ command: String, cwd: String? = nil) -> Bool { AgentCommandPolicy(profile).trusts(command, cwd: cwd) }
+    /// Ledger reason a command is not trusted (`AgentCommandPolicy.TrustRejection`), nil when it is trusted.
+    func trustRejection(_ command: String, cwd: String? = nil) -> String? {
+        let policy = AgentCommandPolicy(profile)
+        if let reason = policy.trustRejection(command, cwd: cwd) { return reason }
+        return policy.trusts(command, cwd: cwd) ? nil : "untrusted"
     }
-    /// Existing project command grants are evaluated by the shared deterministic policy.
-    func trusts(_ command: String) -> Bool { AgentCommandPolicy(profile).trusts(command) }
     enum CommandDecision: Equatable { case allow, ask, deny(String) }
     /// Inspection of one shell command against the role: deny-list first, then the network list, then the ask-list.
     /// A recursive delete whose every target stays inside the project, a writable root or a temporary folder is not asked.
-    func inspect(command: String, cwd: String? = nil) -> CommandDecision {
+    func inspect(command: String, cwd: String? = nil) -> CommandDecision { inspection(command: command, cwd: cwd).decision }
+    /// `inspect` with the ledger reason of a non-allow answer: `denyList`, `network` or `askList`
+    /// (an ask-list hit refused in an unattended run keeps `askList`).
+    func inspection(command: String, cwd: String? = nil) -> (decision: CommandDecision, reason: String?) {
         let text = command.trimmingCharacters(in: .whitespacesAndNewlines) + " "
         if let hit = profile.commandInspection.deny.first(where: { Self.matches(text, $0) }) {
-            return .deny(L10n.text("Команда запрещена ролью: \(hit.trimmingCharacters(in: .whitespaces))", "The role forbids this command: \(hit.trimmingCharacters(in: .whitespaces))"))
+            return (.deny(L10n.text("Команда запрещена ролью: \(hit.trimmingCharacters(in: .whitespaces))", "The role forbids this command: \(hit.trimmingCharacters(in: .whitespaces))")), "denyList")
         }
         if !profile.network, let hit = Self.networkCommands.first(where: { Self.matches(text, $0) }) {
-            return .deny(L10n.text("Роль без сети: \(hit.trimmingCharacters(in: .whitespaces))", "The role has no network: \(hit.trimmingCharacters(in: .whitespaces))"))
+            return (.deny(L10n.text("Роль без сети: \(hit.trimmingCharacters(in: .whitespaces))", "The role has no network: \(hit.trimmingCharacters(in: .whitespaces))")), "network")
         }
         for head in Self.heads(text) {
             guard let pattern = profile.commandInspection.ask.first(where: { (head + " ").hasPrefix($0) }) else { continue }
             if pattern.hasPrefix("rm "), let cwd, safeRemoval(head, cwd: cwd) { continue }
-            return profile.approvals == .ask && !scheduled ? .ask : .deny(L10n.text("Действие вне роли; запуск без присмотра не ждёт.", "Outside the role; an unattended run does not wait."))
+            return (profile.approvals == .ask && !scheduled ? .ask : .deny(L10n.text("Действие вне роли; запуск без присмотра не ждёт.", "Outside the role; an unattended run does not wait.")), "askList")
         }
-        return .allow
+        return (.allow, nil)
     }
     /// `rm` targets that are plain paths inside the project, a writable extra root or a temporary folder.
     /// Variables, `~`, globs at the root and `..` are never considered safe.

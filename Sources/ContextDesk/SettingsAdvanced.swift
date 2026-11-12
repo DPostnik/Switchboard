@@ -6,13 +6,14 @@ import ContextTranscript
 /// Settings → Advanced: rarely used groups behind a small list on the left; each panel scrolls on its own.
 struct AdvancedSettings: View {
     enum Panel: String, CaseIterable, Identifiable {
-        case plugins, mobile, permissions, processes, data, about
+        case plugins, mobile, permissions, folders, processes, data, about
         var id: String { rawValue }
         var title: String {
             switch self {
             case .plugins: L10n.text("Плагины", "Plugins")
             case .mobile: L10n.text("Мобильный доступ", "Mobile access")
             case .permissions: L10n.text("Журнал разрешений", "Permission log")
+            case .folders: L10n.text("Папки для всех проектов", "Folders for every project")
             case .processes: L10n.text("Процессы чатов", "Chat processes")
             case .data: L10n.text("Данные", "Data")
             case .about: L10n.text("О приложении", "About")
@@ -23,6 +24,7 @@ struct AdvancedSettings: View {
             case .plugins: "puzzlepiece.extension"
             case .mobile: "iphone"
             case .permissions: "lock.shield"
+            case .folders: "folder.badge.plus"
             case .processes: "cpu"
             case .data: "externaldrive"
             case .about: "info.circle"
@@ -56,6 +58,7 @@ struct AdvancedSettings: View {
         case .plugins: Form { PluginSettings(model: model) }.formStyle(.grouped)
         case .mobile: Form { MobileRemoteSettings(host: model.mobileRemote, model: model) }.formStyle(.grouped)
         case .permissions: PermissionsLedgerView(model: model)
+        case .folders: Form { SharedRootsSettings(model: model) }.formStyle(.grouped)
         case .processes: Form { OrphanProcessSettings(controller: model.orphanProcesses) }.formStyle(.grouped)
         case .data: Form { DataSettings() }.formStyle(.grouped)
         case .about: Form { AboutSettings() }.formStyle(.grouped)

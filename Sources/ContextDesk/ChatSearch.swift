@@ -125,7 +125,7 @@ extension DeskModel {
         let role = roleCatalog.role(AgentRoleID.reader) ?? project.chatRole(roleCatalog)
         try prepareChatSearchRecipe()
         refreshChatSearchIndex()
-        let session = try await client.createSession(projectPath: project.path, permissions: role.profile(for: project), model: model, route: .direct)
+        let session = try await client.createSession(projectPath: project.path, permissions: role.profile(for: project, sharedRoots: sharedRoots), model: model, route: .direct)
         guard ConversationIdentity.appID(for: session.nativeID, in: state, connection: session.connection) == nil else { throw ConversationIdentity.invalidStorage }
         var chat = Chat(session: session, projectID: project.id, title: L10n.text("Поиск: ", "Search: ") + String(query.prefix(60)), model: model)
         if let web {

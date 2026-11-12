@@ -358,3 +358,64 @@ private func settings(_ args: [String]) throws -> JSONValue {
     let decoded = try JSONDecoder().decode(AgentModelSelection.self, from: JSONSerialization.data(withJSONObject: object))
     #expect(decoded.advisor == nil && decoded.model == "m")
 }
+
+// MARK: - Folders for every project
+
+@Test func sharedRootsReachOnlyRolesThatAcceptExtraFolders() {
+    let shared: [AgentPermissionProfile.Root] = [.init(path: "/Users/me/Public/self-projects/", writable: true)]
+    let own = project(extraRoots: [.init(path: "/Users/me/wiki", writable: false)])
+    let developer = preset(AgentRoleID.developer).profile(for: own, sharedRoots: shared)
+    #expect(developer.extraRoots == [.init(path: "/Users/me/wiki", writable: false), .init(path: "/Users/me/Public/self-projects", writable: true)])
+    #expect(developer.commandSandbox?.write.contains("/Users/me/Public/self-projects") == true)
+    #expect(preset(AgentRoleID.routineOperator).profile(for: own, sharedRoots: shared).extraRoots.contains { $0.path == "/Users/me/Public/self-projects" })
+    for id in [AgentRoleID.editor, AgentRoleID.reader] {
+        let profile = preset(id).profile(for: own, sharedRoots: shared)
+        #expect(profile.extraRoots.isEmpty && profile.commandSandbox == nil)
+    }
+    // A folder the project already has keeps write access if either side grants it; the project itself is never added.
+    let both = preset(AgentRoleID.developer).profile(for: own, sharedRoots: [.init(path: "/Users/me/wiki", writable: true), .init(path: own.path, writable: true)])
+    #expect(both.extraRoots == [.init(path: "/Users/me/wiki", writable: true)])
+    // Nothing is granted until the user adds a folder.
+    #expect(preset(AgentRoleID.developer).profile(for: project()).extraRoots.isEmpty)
+}
+
+@Test func sharedRootsRefuseTheHomeAndTheDataFolder() {
+    let home = "/Users/me", data = ["/Users/me/Library/Application Support/Switchboard", "/Users/me/Library/Application Support/Context Desk"]
+    func refusal(_ path: String) -> SharedRoots.Refusal? { SharedRoots.refusal(path, home: home, dataRoots: data) }
+    #expect(refusal("~") == .home && refusal("/Users/me/") == .home)
+    #expect(refusal("~/Library/Application Support/Switchboard") == .dataFolder)
+    #expect(refusal("/Users/me/Library/Application Support/Context Desk/chats") == .dataFolder)
+    #expect(refusal("/Users/me/Library") == .dataFolder && refusal("/") == .dataFolder)
+    #expect(refusal("relative/folder") == .notAbsolute)
+    #expect(refusal("~/Public/self-projects") == nil && SharedRoots.canonical("~/Public/self-projects/", home: home) == "/Users/me/Public/self-projects")
+    let kept = SharedRoots.usable([.init(path: "~", writable: true), .init(path: data[0], writable: true), .init(path: "~/Public/x/../self-projects", writable: false),
+                                   .init(path: "/Users/me/Public/self-projects", writable: true)], home: home, dataRoots: data)
+    #expect(kept == [.init(path: "/Users/me/Public/self-projects", writable: true)])
+    // The app's real data folder is refused without any arguments, so a stored entry can never reach a profile.
+    #expect(SharedRoots.refusal(Locations.root.path) == .dataFolder && SharedRoots.refusal(NSHomeDirectory()) == .home)
+    #expect(preset(AgentRoleID.developer).profile(for: project(), sharedRoots: [.init(path: NSHomeDirectory(), writable: true)]).extraRoots.isEmpty)
+    #expect(SharedRoots.Refusal.home.message("~", language: .english).contains("home folder"))
+}
+
+@Test func sharedRootsRoundTripAndOldStatesDecodeWithoutThem() throws {
+    var state = SavedState()
+    state.sharedRoots = [.init(path: "/Users/me/Public/self-projects", writable: true)]
+    let decoded = try JSONDecoder().decode(SavedState.self, from: JSONEncoder().encode(state))
+    #expect(decoded.sharedRoots == state.sharedRoots)
+    var old = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(SavedState())) as? [String: Any])
+    old.removeValue(forKey: "sharedRoots")
+    let legacy = try JSONDecoder().decode(SavedState.self, from: JSONSerialization.data(withJSONObject: old))
+    #expect(legacy.sharedRoots == nil)
+}
+
+@Test func scheduledJobsGetSharedRootsAsSet() throws {
+    var job = ManagedJob(); job.roleID = AgentRoleID.routineOperator
+    var own = project(); own.jobRoleID = AgentRoleID.routineOperator
+    let descriptor = AgentDescriptor(context: .init(connection: .originalCodex, accountRevision: UUID()), identityMode: .appOwnedHome,
+                                     capabilities: [.scheduledExecution], permissions: .codexProjectPolicy, routes: [.direct])
+    let shared: [AgentPermissionProfile.Root] = [.init(path: "/Users/me/Public/self-projects", writable: true)]
+    let request = job.executionRequest(runID: UUID(), project: own, descriptor: descriptor, sharedRoots: shared)
+    #expect(request.permissions == .profile(preset(AgentRoleID.routineOperator).profile(for: own, sharedRoots: shared), root: own.path))
+    guard case .profile(let profile, _) = request.permissions else { Issue.record("expected a role profile"); return }
+    #expect(profile.extraRoots == shared)
+}

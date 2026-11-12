@@ -1283,7 +1283,7 @@ private struct ChatRunState: Equatable {
             let current = state.projects.first { $0.id == project.id } ?? project
             let resolvedRole = roleCatalog.role(role) ?? current.chatRole(roleCatalog)
             let reservedID = UUID().uuidString
-            let permissions = resolvedRole.profile(for: current, addOns: Self.projectAddOns(current))
+            let permissions = resolvedRole.profile(for: current, addOns: Self.projectAddOns(current), sharedRoots: sharedRoots)
             let chromeGrant = try await UserChromeControl.shared.grant(chat: reservedID, projectRoot: project.path,
                 allowed: state.userChromeEnabled != false && permissions.effective.browser == .appAndUserChrome)
             let session = try await client.createSession(projectPath: project.path, permissions: permissions,
@@ -1509,7 +1509,7 @@ private struct ChatRunState: Equatable {
     /// Dimensions the current agent can only approximate for the current role; shown, never silently downgraded.
     var roleApproximations: [AgentPermissionDimension] {
         guard let project = state.projects.first(where: { $0.id == projectID }) else { return [] }
-        return agentState(currentAgent).descriptor?.permissions.approximations(currentRole.profile(for: project, addOns: currentAddOns)) ?? []
+        return agentState(currentAgent).descriptor?.permissions.approximations(currentRole.profile(for: project, addOns: currentAddOns, sharedRoots: sharedRoots)) ?? []
     }
     /// Add-ons of the selected chat, or the ones picked for the new chat; both fall back to the project's.
     var currentAddOns: Set<RoleAddOn> {
@@ -1569,7 +1569,7 @@ private struct ChatRunState: Equatable {
     }
     private func revokeUserChromeIfNeeded(_ chat: Chat) {
         guard let project = state.projects.first(where: { $0.id == chat.projectID }) else { return }
-        let permissions = chat.resolvedRole(in: project, catalog: roleCatalog).profile(for: project, addOns: chat.resolvedAddOns(in: project))
+        let permissions = chat.resolvedRole(in: project, catalog: roleCatalog).profile(for: project, addOns: chat.resolvedAddOns(in: project), sharedRoots: sharedRoots)
         guard permissions.effective.browser != .appAndUserChrome else { return }
         Task {
             do { try await UserChromeControl.shared.revoke(chat: chat.id) }
@@ -1633,6 +1633,18 @@ private struct ChatRunState: Equatable {
         if let mcpServers { state.projects[index].mcpServers = mcpServers.isEmpty ? nil : mcpServers }
         for chat in state.chats where chat.projectID == id { revokeUserChromeIfNeeded(chat) }
         persist()
+    }
+    /// Folders for every project that may be applied (`SharedRoots.usable`); empty until the user adds one.
+    var sharedRoots: [AgentPermissionProfile.Root] { SharedRoots.usable(state.sharedRoots ?? []) }
+    /// Replaces the folders for every project. A refused folder is not stored; the first refusal comes back for the user.
+    @discardableResult func updateSharedRoots(_ roots: [AgentPermissionProfile.Root]) -> String? {
+        let refused = roots.lazy.compactMap { root in SharedRoots.refusal(root.path).map { $0.message(SharedRoots.canonical(root.path)) } }.first
+        let kept = SharedRoots.usable(roots)
+        if kept != state.sharedRoots ?? [] {
+            state.sharedRoots = kept.isEmpty ? nil : kept
+            persist()
+        }
+        return refused
     }
     /// The project's own model and effort for new chats, by agent ID; empty choices follow the app default.
     func updateProjectChatModels(_ id: UUID, _ choices: [String: ModelChoice]) {
@@ -1831,7 +1843,7 @@ private struct ChatRunState: Equatable {
               let script, FileManager.default.fileExists(atPath: script.path) else { return nil }
         let root = Locations.root.path
         let project = state.projects.first { $0.id == chat.projectID }
-        let permissions = project.map { chat.resolvedRole(in: $0, catalog: roleCatalog).profile(for: $0, addOns: chat.resolvedAddOns(in: $0)) }
+        let permissions = project.map { chat.resolvedRole(in: $0, catalog: roleCatalog).profile(for: $0, addOns: chat.resolvedAddOns(in: $0), sharedRoots: sharedRoots) }
         let diagnostics = permissions?.shell != nil && permissions?.shell != .off ? workingDirectory(forChat: id) : nil
         guard chat.chatDirectoryAccess == true else {
             if !ChatReferences.load(chat: id).isEmpty, let references = ChatReferences.file(chat: id) {
@@ -2075,7 +2087,7 @@ private struct ChatRunState: Equatable {
         let addOns: Set<RoleAddOn> = scheduledRun != nil ? [] : threadID.flatMap { id in state.chats.first { $0.id == id }?.resolvedAddOns(in: project) }
             ?? newChatAddOns[project.id] ?? Set((project.chatRoleAddOns ?? []).compactMap(RoleAddOn.init(rawValue:)))
         let explicitNewChatAddOns = scheduledRun == nil && threadID == nil ? newChatAddOns[project.id] : nil
-        let access = role.profile(for: project, addOns: addOns)
+        let access = role.profile(for: project, addOns: addOns, sharedRoots: sharedRoots)
         let newWorktree = threadID == nil && scheduledRun == nil ? worktree : nil
         // The chat's own folder (`Chat.workingDirectory(in:)`): engine cwd, permission root and checkpoints.
         let workingDirectory = newWorktree?.workingDirectory ?? threadID.flatMap { workingDirectory(forChat: $0) } ?? project.path
@@ -2618,7 +2630,7 @@ private struct ChatRunState: Equatable {
     /// Add-ons the phone may turn on: only those the project's chat default (role and project add-ons) already grants,
     /// so a phone never widens a chat beyond the project default, as with roles (audit M3).
     private func remoteAllowedAddOns(project: Project) -> Set<RoleAddOn> {
-        let base = project.chatRole(roleCatalog).profile(for: project, addOns: Self.projectAddOns(project))
+        let base = project.chatRole(roleCatalog).profile(for: project, addOns: Self.projectAddOns(project), sharedRoots: sharedRoots)
         return Set(RoleAddOn.allCases.filter { addOn in
             var widened = base
             addOn.apply(to: &widened)
@@ -2706,7 +2718,7 @@ private struct ChatRunState: Equatable {
         let role = explicitRole ?? project.chatRole(roleCatalog)
         let explicitAddOns = try remoteAddOns(options, allowed: remoteAllowedAddOns(project: project))
         // Persist the stable app ID before sending. Native identity never comes from the phone.
-        let permissions = role.profile(for: project, addOns: explicitAddOns ?? Self.projectAddOns(project))
+        let permissions = role.profile(for: project, addOns: explicitAddOns ?? Self.projectAddOns(project), sharedRoots: sharedRoots)
         let chromeGrant = try await UserChromeControl.shared.grant(chat: command.chat, projectRoot: project.path,
             allowed: state.userChromeEnabled != false && permissions.effective.browser == .appAndUserChrome)
         let session = try await client.createSession(projectPath: project.path, permissions: permissions,

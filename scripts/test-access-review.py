@@ -15,15 +15,20 @@ SOURCE = Path(__file__).resolve().parents[1] / '.agents/skills/access-review/scr
 spec = importlib.util.spec_from_file_location('access_requests', SOURCE)
 review = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(review)
+SERVER = Path(__file__).resolve().parents[1] / 'ChatDirectoryRuntime/server.py'
+server_spec = importlib.util.spec_from_file_location('chat_directory_server', SERVER)
+server = importlib.util.module_from_spec(server_spec)
+server_spec.loader.exec_module(server)
 
 PROJECT = '1F04568B-EF17-43A6-8E75-9FD26E81373E'
 SCHEMA = ('CREATE TABLE decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, date REAL NOT NULL, chat TEXT, run TEXT, project TEXT, '
           'role TEXT NOT NULL, agent TEXT NOT NULL, tool TEXT NOT NULL, capability TEXT NOT NULL, target TEXT, decision TEXT NOT NULL, '
           'turn TEXT, audit INTEGER NOT NULL)')
+LIFECYCLE = SCHEMA[:-1] + ', request_id TEXT, source TEXT, stage TEXT, outcome TEXT, rule_id TEXT, reason TEXT)'
 
 
 class AccessReviewTests(unittest.TestCase):
-    def run_script(self, rows, schema=SCHEMA, *arguments):
+    def run_script(self, rows, schema=SCHEMA, *arguments, extra=()):
         with tempfile.TemporaryDirectory() as tmp:
             ledger, metadata = Path(tmp) / 'ledger.sqlite', Path(tmp) / 'metadata.sqlite'
             with contextlib.closing(sqlite3.connect(ledger)) as connection, connection:
@@ -31,6 +36,8 @@ class AccessReviewTests(unittest.TestCase):
                 for row in rows:
                     connection.execute('INSERT INTO decisions (date, chat, project, role, agent, tool, capability, target, decision, audit) '
                                        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', row)
+                for statement in extra:
+                    connection.execute(statement)
             state = {'projects': [{'id': PROJECT, 'name': 'switchboard', 'path': '/work/app', 'accessPresets': ['github'],
                                    'sandboxCommands': ['zsh scripts/test.sh'], 'extraRoots': [{'path': '/work/notes', 'writable': False}]}],
                      'chats': [{'id': 'C1', 'title': 'First'}]}
@@ -43,7 +50,8 @@ class AccessReviewTests(unittest.TestCase):
             with patch.object(sys, 'argv', argv), contextlib.redirect_stdout(output):
                 review.main()
             self.assertEqual(ledger.read_bytes(), before)
-            return json.loads(output.getvalue())
+            text = output.getvalue()
+            return json.loads(text) if '--format' not in arguments else text
 
     def row(self, chat, capability, target, decision='asked', tool='Bash', age=60):
         return (time.time() - age, chat, PROJECT, 'developer', 'claude-code', tool, capability, target, decision, 0)
@@ -68,6 +76,50 @@ class AccessReviewTests(unittest.TestCase):
         self.assertEqual(test['examples'][0]['title'], 'First')
         self.assertEqual(report['requests'], 6)
         self.assertEqual(report['oneOff']['switchboard']['groups'], 1)
+
+    def test_reasons_are_counted_per_group_and_shown(self):
+        rows = [self.row('C1', 'shell', 'swift build'), self.row('C2', 'shell', 'swift build --verbose'),
+                self.row('C2', 'shell', 'swift build -c release', decision='denied')]
+        # Lifecycle rows: requested with a reason; the old row without one stays legacy.
+        reasons = ["UPDATE decisions SET request_id = 'r' || id, stage = 'requested', reason = 'sandboxed' WHERE id = 1",
+                   "UPDATE decisions SET request_id = 'r' || id, stage = 'requested', reason = 'denyList' WHERE id = 3"]
+        report = self.run_script(rows, LIFECYCLE, extra=reasons)
+        group = next(g for g in report['groups'] if g['target'] == 'swift build')
+        self.assertEqual(group['reasons'], {'sandboxed': 1, 'denyList': 1})
+        markdown = self.run_script(rows, LIFECYCLE, '--format', 'md', extra=reasons)
+        self.assertIn('reasons sandboxed 1, denyList 1', markdown)
+
+    def test_old_ledger_without_reason_column_reads_without_reasons(self):
+        report = self.run_script([self.row('C1', 'shell', 'swift build'), self.row('C2', 'shell', 'swift build -v')])
+        self.assertEqual(report['groups'][0]['reasons'], {})
+
+    def test_chat_lookup_counts_denied_commands_retried_in_the_same_turn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Path(tmp) / 'capability-ledger.sqlite'
+            with contextlib.closing(sqlite3.connect(ledger)) as connection, connection:
+                connection.execute(SCHEMA)
+                for chat, turn, target, decision in [
+                        ('C1', 't1', 'pgrep -f app', 'used'),          # the call itself, before the denial
+                        ('C1', 't1', 'pgrep -f app', 'hookDenied'),
+                        ('C1', 't1', 'pgrep -f app', 'asked'),         # retried, any decision
+                        ('C1', 't1', 'sudo ls', 'denied'),            # never retried
+                        ('C1', 't1', 'log show', 'denied'),
+                        ('C1', 't2', 'log show', 'used'),             # another turn is not a retry
+                        ('C2', 't1', 'sudo ls', 'used')]:              # another chat is not a retry
+                    connection.execute('INSERT INTO decisions (date, chat, role, agent, tool, capability, target, decision, turn, audit) '
+                                       "VALUES (?, ?, 'developer', 'claude', 'Bash', 'shell', ?, ?, ?, 0)", (time.time(), chat, target, decision, turn))
+            before = ledger.read_bytes()
+            self.assertEqual(server.denied_then_retried(tmp, 'C1'), {'denied': 3, 'retried': 1})
+            self.assertEqual(server.denied_then_retried(tmp, 'C3'), {'denied': 0, 'retried': 0})
+            # Old ledger without `reason`: refused requests still read, without the key.
+            self.assertTrue(all('reason' not in row for row in server.refused_requests(tmp, 'C1')))
+            self.assertEqual(ledger.read_bytes(), before)
+            with contextlib.closing(sqlite3.connect(ledger)) as connection, connection:
+                connection.execute('ALTER TABLE decisions ADD COLUMN reason TEXT')
+                connection.execute("UPDATE decisions SET reason = 'denyList' WHERE target = 'sudo ls'")
+            self.assertIn({'decision': 'denied', 'reason': 'denyList'},
+                          [{k: row[k] for k in ('decision', 'reason') if k in row} for row in server.refused_requests(tmp, 'C1')])
+            self.assertEqual(server.denied_then_retried(Path(tmp) / 'missing', 'C1'), None)
 
     def test_missing_column_fails_with_a_clear_error(self):
         with self.assertRaises(SystemExit) as stop, contextlib.redirect_stderr(io.StringIO()):
