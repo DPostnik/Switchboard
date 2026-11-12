@@ -37,6 +37,11 @@ struct ProjectSettingsView: View {
     @State private var accessPresets: Set<String>
     @State private var sandboxCommands: String
     @FocusState private var sandboxCommandsFocused: Bool
+    /// Named Keychain items the project's scripts may read under the external boundary (`KeychainItemRule`).
+    @State private var keychainItems: [AgentPermissionProfile.KeychainItem]
+    @State private var newKeychainService = ""
+    @State private var newKeychainAccount = ""
+    @State private var keychainIssue: String?
     /// Presets the project's files suggest, marked in the list.
     private let suggestedPresets: Set<String>
     @State private var cookieSites: String
@@ -62,6 +67,7 @@ struct ProjectSettingsView: View {
         _sandboxEnabled = State(initialValue: project.usesCommandSandbox)
         _accessPresets = State(initialValue: Set(project.accessPresets ?? []))
         _sandboxCommands = State(initialValue: (project.sandboxCommands ?? []).joined(separator: "\n"))
+        _keychainItems = State(initialValue: KeychainItemRule.usable(project.keychainItems ?? []))
         suggestedPresets = Set(AccessPresetCatalog.detect(projectPath: project.path))
         _cookieSites = State(initialValue: (project.cookieSites ?? []).joined(separator: "\n"))
         _mcpServers = State(initialValue: project.mcpServers ?? [:])
@@ -319,6 +325,45 @@ struct ProjectSettingsView: View {
                 hint(L10n.text("По одной в строке, начало команды: например zsh scripts/build-app.sh. В Claude эти команды получают доступ ко всему Mac без вопроса. Codex пока не поддерживает такие разрешения отдельно для проекта или чата и продолжает запрашивать подтверждение.",
                                "One literal command prefix per line, for example zsh scripts/build-app.sh. In Claude these commands get access to the whole Mac without a prompt. Codex cannot yet apply these grants separately to a project or chat and still requests approval."))
             }
+            Divider()
+            keychainSection.disabled(!sandboxEnabled)
+        }
+    }
+
+    private var keychainSection: some View {
+        VStack(alignment: .leading, spacing: .ui(6)) {
+            Text(L10n.text("Записи Связки ключей", "Keychain items")).font(.ui(.callout).weight(.semibold))
+            ForEach(keychainItems, id: \.self) { item in
+                HStack(spacing: .ui(8)) {
+                    Image(systemName: "key").foregroundStyle(DeskPalette.attention).accessibilityHidden(true)
+                    Text(KeychainItemRule.label(item)).font(.ui(.callout).monospaced()).textSelection(.enabled)
+                    Spacer()
+                    Button(L10n.text("Убрать", "Remove")) { keychainItems.removeAll { $0 == item } }
+                        .buttonStyle(.borderless).pointingHandCursor()
+                        .accessibilityLabel(L10n.text("Убрать запись \(KeychainItemRule.label(item))", "Remove item \(KeychainItemRule.label(item))"))
+                }
+            }
+            HStack(spacing: .ui(8)) {
+                TextField(L10n.text("Сервис", "Service"), text: $newKeychainService).textFieldStyle(.roundedBorder)
+                TextField(L10n.text("Учётная запись (необязательно)", "Account (optional)"), text: $newKeychainAccount).textFieldStyle(.roundedBorder)
+                Button(L10n.text("Добавить", "Add")) { addKeychainItem() }
+                    .disabled(newKeychainService.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            if let keychainIssue { Text(keychainIssue).font(.ui(.caption)).foregroundStyle(DeskPalette.problem) }
+            hint(L10n.text("Скрипты проекта читают только эти записи командой security find-generic-password -s <сервис> [-a <учётная запись>] -w. Секрет записи становится доступен агентам этого проекта; остальная Связка ключей закрыта. Работает в чатах под внешней границей.",
+                           "Project scripts read only these items with security find-generic-password -s <service> [-a <account>] -w. An item's secret becomes readable by this project's agents; the rest of the Keychain stays closed. Works in chats under the external boundary."))
+        }
+    }
+
+    private func addKeychainItem() {
+        let candidate = AgentPermissionProfile.KeychainItem(service: newKeychainService, account: newKeychainAccount)
+        switch KeychainItemRule.checked(candidate) {
+        case .failure(let rejection): keychainIssue = rejection.message(candidate)
+        case .success(let item):
+            if keychainItems.contains(item) { keychainIssue = nil }
+            else if keychainItems.count >= KeychainItemRule.maximumPerProject { keychainIssue = KeychainItemRule.limitMessage(); return }
+            else { keychainItems.append(item); keychainIssue = nil }
+            newKeychainService = ""; newKeychainAccount = ""
         }
     }
 
@@ -451,7 +496,8 @@ struct ProjectSettingsView: View {
         model.updateProjectRoles(project.id, chatRole: chatRole, jobRole: jobRole, extraRoots: extraRoots,
                                  cookieSites: cookieSites.split(whereSeparator: \.isNewline).map(String.init), mcpServers: mcpServers,
                                  chatAddOns: chatAddOns,
-                                 sandbox: (sandboxEnabled, Array(accessPresets), sandboxCommands.split(whereSeparator: \.isNewline).map(String.init)))
+                                 sandbox: (sandboxEnabled, Array(accessPresets), sandboxCommands.split(whereSeparator: \.isNewline).map(String.init)),
+                                 keychainItems: keychainItems)
         model.updateProjectChatModels(project.id, chatModels)
         if shownOnPhone != initiallyShownOnPhone { phone.setProject(project.id, shown: shownOnPhone) }
         dismiss()

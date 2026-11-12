@@ -1713,8 +1713,13 @@ private struct ChatRunState: Equatable {
     /// Project defaults for chats and jobs plus the declared extra roots; the agent never changes these.
     func updateProjectRoles(_ id: UUID, chatRole: String?, jobRole: String?, extraRoots: [AgentPermissionProfile.Root]?, cookieSites: [String]?,
                             mcpServers: [String: String]? = nil, chatAddOns: Set<RoleAddOn>? = nil,
-                            sandbox: (enabled: Bool, presets: [String], commands: [String])? = nil) {
+                            sandbox: (enabled: Bool, presets: [String], commands: [String])? = nil,
+                            keychainItems: [AgentPermissionProfile.KeychainItem]? = nil) {
         guard let index = state.projects.firstIndex(where: { $0.id == id }) else { return }
+        if let keychainItems {
+            let items = KeychainItemRule.usable(keychainItems)
+            state.projects[index].keychainItems = items.isEmpty ? nil : items
+        }
         if let sandbox {
             state.projects[index].commandSandbox = sandbox.enabled ? nil : false
             state.projects[index].accessPresets = AccessPresetCatalog.all.map(\.id).filter(sandbox.presets.contains)

@@ -21,7 +21,8 @@ refused with a reason it can read. The agent never receives a wider boundary bec
 failed.**
 
 - The boundary of a chat = its role + the project's settings (folders, access sets, trusted
-  commands, command sandbox switch) + the app-level folders for every project + the chat's add-ons.
+  commands, named Keychain items, command sandbox switch) + the app-level folders for every project
+  + the chat's add-ons.
 - Only the user changes these settings. An agent may write a settings proposal
   (`$SWITCHBOARD_SETTINGS_PROPOSALS`, the chat's own folder, `SettingsProposals.swift`); the app
   shows it and applies it only on the user's click.
@@ -36,9 +37,9 @@ does not invent a fifth.
 | # | Channel | For what | Who holds the authority | Example |
 | --- | --- | --- | --- | --- |
 | 1 | Inside the boundary | Ordinary work: files in the granted roots, shell, builds, tests, the project's own `.mcp.json` servers | The OS sandbox, compiled from the role and project settings | `zsh scripts/test.sh`, `swift build`, edits |
-| 2 | Mediated command | A command that needs something the session must never hold: the Keychain, a credential, its own network policy | The nono broker; the policy is per command and comes from an access set | `codesign`, `security`, `gh`, `git push` |
+| 2 | Mediated command | A command that needs something the session must never hold: the Keychain, a credential, its own network policy | The nono broker; the policy is per command and comes from an access set; an argument allow-list where the command could reach more than it needs | `codesign`, `security find-identity`, `gh`, `git push` |
 | 3 | App-owned tool | An operation on app or host state: browser, chats, user Chrome, process list, load, unified log, app restart | Switchboard itself, outside the boundary, behind the MCP relay; per-chat scope and consent | `browser_*`, `inspect_chat`, `project_diagnostics` |
-| 4 | Settings proposal | Anything the user has not granted yet: another folder, an access set, a trusted command | The user | `addFolders`, `addPresets`, `addCommands` |
+| 4 | Settings proposal | Anything the user has not granted yet: another folder, an access set, a trusted command, a named Keychain item | The user | `addFolders`, `addPresets`, `addCommands`, `addKeychainItems` |
 
 Rules for the channels:
 
@@ -46,6 +47,9 @@ Rules for the channels:
   channel 1, also after the script changes. Never move a build or a project script outside the
   boundary to make it pass.
 - Channel 2 is never a shell or an interpreter. A shell cannot carry extra rights in nono's model.
+- A mediated command that can reach the whole Keychain (`security`) carries an argument allow-list
+  (nono `invocation_policy`, default deny): only the listed argument forms run, everything else is
+  refused by nono.
 - Channel 3 tools have a fixed operation and typed arguments. They accept no command line, no
   arbitrary path and no code. The app checks the chat's role and project before it acts. "The agent
   asks Switchboard and Switchboard performs it" means this channel, not a forwarder for failed
@@ -130,7 +134,11 @@ Enforcement
 Secrets
 11. Credentials are never copied between homes and never reach an agent-readable place: not
     arguments, environment, files inside the grants, logs or the ledger. The session has no
-    Keychain; only a mediated command or the app reads it.
+    Keychain; only a mediated command or the app reads it. One deliberate exception (user decision
+    2026-11-12): a named Keychain item the user granted to a project (`Project.keychainItems`) is
+    readable by that project's agents through the mediated `security find-generic-password` forms.
+    Per item, visible and removable in the project settings, listed by the grant review; never the
+    whole Keychain and never a reserved item (`KeychainItemRule.reserved`).
 12. Secret paths (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `.env*`, provider credential
     files) stay denied inside every restricted role.
 
@@ -170,6 +178,12 @@ Do not reopen these without the user.
 - `osascript` under the boundary only as a mediated command enabled in the role (off by default).
   `pkill` and `screencapture` are not trusted and not mediated.
 - Shared roots are opt-in. Nothing is granted until the user adds a folder.
+- Named Keychain items (2026-11-12): a project may be granted single generic-password items (service,
+  optional account). The agent asks with `addKeychainItems` and the reason; the user applies once on the
+  request card; later chats of that project are not asked. Enforcement is nono's argument allow-list on
+  the mediated `/usr/bin/security` (exact `find-generic-password` forms, default deny), not an app
+  helper or an approval backend. The whole Keychain is never granted. Only the project settings fill the
+  list (`Project.commandSandbox(extraRoots:)`), so Reader and Editor never get it.
 - For Claude Bash the CLI's own `dangerouslyDisableSandbox` flag is the sandbox decision. No text
   heuristic (the removed `runsSandboxed`) comes back.
 - Under the boundary an action outside the roots fails; the command itself is never asked about.
@@ -188,7 +202,7 @@ Do not reopen these without the user.
 | Enforcement for eligible Developer chats | External boundary (nono), since 2026-11-11, commit 2cddfce | External boundary (nono), phase B2+B3 (commit 524ba0e, verified live in super-wiki 2026-11-12) + the role's command hook; the phase A CLI sandbox remains the fallback |
 | Prompts for commands | None: `externalSandbox`, `approvalPolicy: never` | Under the boundary none except the role's ask list (hook); ledger reason `boundary`. On the fallback: as phase A (CLI sandbox, `trusts`, ask or deny) |
 | File tools | Share the session union (approximation: access-set paths are writable to them) | Answered by roots in `permission()` (inner check, stricter than the session union); under the boundary a path outside is denied without a prompt, reason `outsideBoundary`, text names the settings proposal |
-| Leaving the sandbox | Not possible; mediated commands (`pgrep`, `codesign`/`security`, `gh`, `git` by access set) and relay tools only | Under the boundary not possible (`dangerouslyDisableSandbox` changes nothing); mediated `pgrep`, `codesign`/`security`, `gh`, `git` by access set. On the fallback: flag + trusted command |
+| Leaving the sandbox | Not possible; mediated commands (`pgrep`, `codesign`/`security`, `gh`, `git` by access set; `security` only `find-identity …` and the exact reads of the project's Keychain items) and relay tools only | Under the boundary not possible (`dangerouslyDisableSandbox` changes nothing); mediated `pgrep`, `codesign`/`security`, `gh`, `git` by access set (`security` only `find-identity …` and the project's Keychain items). On the fallback: flag + trusted command; Keychain items not enforced |
 | App-owned tools | Through the relay. `project_diagnostics` (diagnostics server) for every role with a shell; `app_log` and `request_app_restart` only where the running app bundle lies inside the project | Under the boundary through the relay (`switchboard_browser`, chat directory with `project_diagnostics`, `app_log`, `request_app_restart` under the same gates); project `.mcp.json` servers inside. On the fallback: direct |
 | Access requests (channel 4) | Under the boundary: the worker's own inbox folder is a writable grant and `$SWITCHBOARD_SETTINGS_PROPOSALS` points there; the format has no `chat`. A worker serves one chat for its life, so the folder is the thread ID when the worker starts for an existing thread, else an app token (`codex-<uuid>`) that the app maps to the new thread's ID once `thread/start` returns (`settings-proposals-authors.json`, next to the inbox, outside every grant). Native path: none | The session's own inbox folder, named by its session ID, writable in the CLI sandbox and under the boundary; the format has no `chat` |
 | Request card and continuation | The author is the chat whose folder holds the file (`SettingsProposalInbox.load`); a `chat` field in a folder file is ignored. A root file (sessions started before 2026-11-12's per-chat folders) keeps the old rule: its `chat` must name an existing, unarchived, non-scheduled chat. A known author gets a card in that chat (Apply, Reject; waiting state in the sidebar, Needs you, palette, dock, notch and Fringe). Apply saves the settings, removes the file, queues one fixed message; Reject removes the file, queues one fixed rejection. Only a removed file continues its chat, once. Other proposals keep the global sheet, which says in one sentence that the requesting chat is unknown and the task will not continue by itself | Same (shared code in `DeskModel`) |
@@ -267,6 +281,29 @@ disabled entries. Channel 3 only; no grant or retry behavior changes. Verificati
 
 Known gaps. Check this list before you treat a failure as a new defect.
 
+- Mediated `security` (2026-11-12): before, apple-signing mediated `/usr/bin/security` with Keychain read and no
+  argument filter, so agents of such a project could read the whole login Keychain. It now carries an argument
+  allow-list (`ExternalSandboxCommand.arguments` -> nono `from.session.invocation_policy`, default deny):
+  `find-identity …` only. A signing project that calls other forms (`cms -D`, `find-certificate`,
+  `unlock-keychain`) fails under the boundary with nono's fixed refusal. The shape was checked with the pinned
+  helper (`nono profile validate`, `nono why`); the probes were updated but not run since.
+- Named Keychain items (2026-11-12, `KeychainItemRule`): the planner mediates `security` when signing is on or the
+  project lists items, one command with the rules unioned (`find-identity` prefix, exact `find-generic-password -s S
+  [-a A] -w` orders per item). The list is part of the profile, so a changed list replaces the provider process at
+  the next turn (Claude: plan authority in the launch identity; Codex: the worker scope) and an unchanged list keeps
+  it. Proposal fields `addKeychainItems`, `removeKeychainItems` (at most 8 per change, 16 per project; names 1-128
+  characters, letters, digits, inner spaces and `. _ - @ : / + =`, no leading `-`); the card shows the exact service
+  and account with warning weight; settings section "Keychain items" in the sandbox pane. Paths: Developer under the
+  boundary (both providers) reads listed items through the shim; every other `security` form is refused by nono. Not
+  enforced on the Claude CLI-sandbox fallback or the Codex native sandbox (items work only under the boundary); Reader
+  and Editor never; Routine operator (audit mode) and Operator unrestricted as before. An item without an account
+  matches calls without `-a` only. The script must call `security` by name (`/usr/bin/security` exits 127 under
+  nono). Not checked live: the real read through the shim, nono's exact refusal text (the instruction quotes "command
+  policy denied security"), Keychain ACL behaviour for an item that `security` did not create (dialog, hang or
+  failure), the psy-wiki case, and the mobile card (its proposal lines live in another branch).
+- Mediated `git` has Keychain read and runs its helpers: a github-set project can likely obtain internet passwords
+  through `git credential-osxkeychain` (inferred, not run). Not narrowed here.
+
 - `scripts/build-app.sh` and the queue's `confirm-live` read the process list and a process's path and
   start time through libproc instead of `ps` (2026-11-12): `ps` stopped the app build after a
   successful compile under the boundary. libproc sees every process there.
@@ -329,8 +366,9 @@ Known gaps. Check this list before you treat a failure as a new defect.
   sheet) now plans the requesting chat's provider and role (unknown author: every provider, project default role) for
   the project as it would be after the proposal, with the adapters' planner inputs (`SettingsProposalBoundary`,
   `AgentIntegrationFactory.proposalBoundaryKind`). Per added command it says either "runs inside, no extra access"
-  (naming an access set whose mediated command would cover it; else an app-owned tool, a folder, a Keychain item grant,
-  planned) or "the boundary cannot run it: the chats move to the provider's sandbox with prompts". Apply stays enabled.
+  (naming an access set whose mediated command would cover it; else an app-owned tool, a folder, a Keychain item; for a
+  `security` command always a Keychain item, `addKeychainItems`) or "the boundary cannot run it: the chats move to the
+  provider's sandbox with prompts". Apply stays enabled.
   When everything the proposal adds is such a no-effect command, the continuation is the fixed `appliedWithoutEffect`
   text (do not retry; report the blocker or request the right access). Not checked live; the Claude token and Codex
   launch-info preconditions are not part of the review.
@@ -400,7 +438,11 @@ Every answered request widens a project for good, so the settings are reviewed o
   turns after a refusal. They show a missing default, a missing app-owned tool or an agent that
   ignored "After a refusal".
 
-Removals go out as settings proposals (`removePresets`, `removeFolders`, `removeCommands`), one rule
+Keychain items are listed per project in every review: each is a standing secret grant. An item no
+script reads any more is removed.
+
+Removals go out as settings proposals (`removePresets`, `removeFolders`, `removeCommands`,
+`removeKeychainItems`), one rule
 per file, and are recorded in `docs/access-reviews.md`.
 
 ## 8. Verification
@@ -427,6 +469,7 @@ per file, and are recorded in `docs/access-reviews.md`.
 | Profile and support declarations | `Sources/AgentContract/AgentPermissions.swift` |
 | Roles, add-ons, resolution per chat | `Sources/ContextCore/AgentRoles.swift`, `Sources/ContextDesk/DeskModelPermissions.swift` |
 | Access sets, command sandbox compile | `Sources/ContextCore/AccessPresets.swift` |
+| Named Keychain items: validation, reserved list, argument forms, card lines | `Sources/ContextCore/KeychainItems.swift` |
 | Trusted-command matcher | `Sources/ContextCore/AgentCommandPolicy.swift` |
 | External boundary: helper check, planner, policy, launch, teardown | `Sources/ContextCore/ExternalSandbox.swift`, `NonoRuntime/`, `scripts/prepare-nono.py` |
 | Relay for app-owned MCP servers | `SandboxRuntime/` |

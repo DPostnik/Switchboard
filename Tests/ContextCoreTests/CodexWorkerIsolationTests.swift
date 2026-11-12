@@ -145,6 +145,41 @@ private func workerFixture() throws -> (URL, URL) {
     await app.stop()
 }
 
+/// A granted Keychain item is part of the worker scope (the profile's command sandbox): applying it moves the thread to a new
+/// worker at the next send; an unchanged list keeps the worker.
+@Test func appliedKeychainItemReplacesTheWorkerOnceAndAnUnchangedListKeepsIt() async throws {
+    let (root, executable) = try workerFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let app = AgentClient(integration: CodexIntegration())
+    let log = WorkerEventLog()
+    let observer = Task { for await event in app.events { await log.append(event) } }
+    defer { observer.cancel() }
+    _ = try await app.start(.init(executable: executable, home: root))
+    var state = SavedState()
+    var project = Project(path: root.path); project.accessPresets = []
+    state.projects = [project]
+    func rights() -> AgentPermissionProfile { AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: state.projects[0]) }
+    let session = try await app.createSession(projectPath: root.path, permissions: rights(), model: "", route: .direct)
+    func send() async throws {
+        let marker = await log.events.count
+        _ = try await app.send("children", to: session, projectPath: root.path, permissions: rights(), model: "", effort: "")
+        _ = try await log.wait(after: marker) { if case .completed = $0.payload { return $0.session == session }; return false }
+    }
+    try await send()
+    var change = SettingsProposal.Change(project: root.path); change.addKeychainItems = [.init(service: "fixture-api")]
+    let applied = state.apply(SettingsProposalReview(id: "k.json", proposal: .init(changes: [change]), state: state))
+    #expect(applied && rights().commandSandbox?.keychainItems == [.init(service: "fixture-api")])
+    try await send()
+    let appliedAgain = state.apply(SettingsProposalReview(id: "k.json", proposal: .init(changes: [change]), state: state))
+    #expect(!appliedAgain)
+    try await send()
+    let pids = try String(contentsOf: root.appendingPathComponent("calls.jsonl"), encoding: .utf8)
+        .split(separator: "\n").map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+        .filter { $0["method"].string == "turn/start" }.compactMap { $0["pid"].int }
+    #expect(pids.count == 3 && pids[1] != pids[0] && pids[2] == pids[1])
+    await app.stop()
+}
+
 /// The Codex worker under the boundary gets the same settings proposal inbox as Claude: a writable grant and the variable.
 @Test func codexBoundaryInputCarriesTheSettingsProposalInbox() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

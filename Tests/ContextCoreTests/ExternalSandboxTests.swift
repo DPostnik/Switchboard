@@ -100,10 +100,25 @@ private func sha256(_ data: Data) -> String {
     #expect((policies["codesign"] as! [String: Any])["allow_direct_exec_bypass"] as? [String] == ["/usr/bin/codesign"])
     #expect((policies["security"] as! [String: Any])["allow_direct_exec_bypass"] == nil)
     #expect((policies["git"] as! [String: Any])["allow_direct_exec_bypass"] == nil)
-    let security = (policies["security"] as! [String: Any])["sandbox"] as! [String: Any]
+    // `security` carries an argument allow-list, so its sandbox moves into the session edge with nono's invocation policy:
+    // signing alone lists identities only, never a secret.
+    let securityPolicy = policies["security"] as! [String: Any]
+    #expect(securityPolicy["sandbox"] == nil && securityPolicy["executable"] as? String == "/usr/bin/security")
+    let edge = (securityPolicy["from"] as! [String: Any])["session"] as! [String: Any]
+    let security = edge["sandbox"] as! [String: Any]
     #expect(security["keychain_access"] as? String == "read" && (security["fs_write"] as! [String]).contains(canonicalProject))
     #expect((security["fs_read_file"] as! [String]).contains { $0.hasSuffix("/.gitconfig") })
     #expect((security["network"] as! [String: Bool])["allow_all"] == false)
+    let invocation = edge["invocation_policy"] as! [String: Any]
+    #expect(invocation["default"] as? String == "deny" && invocation["deny"] == nil && invocation["approve"] == nil)
+    let allow = invocation["allow"] as! [[String: [String: [String]]]]
+    #expect(allow == [["argv": ["prefix": ["find-identity"]]]])
+    // Commands without an allow-list keep the shorthand and filter no arguments.
+    #expect((policies["codesign"] as! [String: Any])["sandbox"] != nil && (policies["codesign"] as! [String: Any])["from"] == nil)
+    #expect((policies["git"] as! [String: Any])["from"] == nil)
+    #expect(plan.commands.first { $0.name == "security" }?.arguments == [.prefix(["find-identity"])])
+    #expect(plan.commands.filter { $0.name != "security" }.allSatisfy { $0.arguments == nil })
+    #expect(plan.authority.contains { $0.hasPrefix("command security ") && $0.hasSuffix("argv=prefix \"find-identity\"") })
     #expect((document["workdir"] as! [String: String])["access"] == "none")
     #expect(plan.environment["TMPDIR"] == plan.temporary.path && plan.environment["SWITCHBOARD_EXTERNAL_SANDBOX"] == "1")
     #expect(plan.environment["SSL_CERT_FILE"] == "/etc/ssl/cert.pem")
@@ -454,4 +469,83 @@ private func claudeInput(_ root: URL, project: Project, workerID: String) -> Ext
     #expect(ExternalSandboxPlanner.resolveGit(found: "/usr/bin/git", homebrew: nil, locate: { _ in "/nonexistent/git" }) == "/usr/bin/git")
     #expect(ExternalSandboxPlanner.resolveGit(found: nil, locate: { _ in real }) == nil)
     #expect(ExternalSandboxPlanner.resolveGit(found: "/usr/bin/git", homebrew: real, locate: { _ in nil }) == real)
+}
+
+// MARK: - Named Keychain items (user decision 2026-11-12)
+
+@Test func keychainItemRuleAcceptsExactNamesOnlyAndBuildsTheExactReadForms() throws {
+    typealias Item = AgentPermissionProfile.KeychainItem
+    #expect(try KeychainItemRule.checked(.init(service: "  my api ", account: " ")).get() == Item(service: "my api"))
+    #expect(try KeychainItemRule.checked(.init(service: "svc.v2_x-y@host:443/p+q=", account: "me@example.com")).get().account == "me@example.com")
+    #expect(try KeychainItemRule.checked(.init(service: "Ключ")).get().service == "Ключ")
+    // Negative: empty, too long, wildcards, quotes, backslash, control characters, a leading dash, reserved services.
+    #expect(KeychainItemRule.checked(.init(service: "   ")) == .failure(.empty))
+    #expect(KeychainItemRule.checked(.init(service: String(repeating: "a", count: 129))) == .failure(.tooLong))
+    #expect(KeychainItemRule.checked(.init(service: "ok", account: String(repeating: "a", count: 129))) == .failure(.tooLong))
+    for bad in ["api*", "a?b", "a\"b", "a'b", "a\\b", "a\tb", "a\nb", "a\u{0}b", "-w", "-s", "a;b", "a|b", "$(x)", "a`b`"] {
+        #expect(KeychainItemRule.checked(.init(service: bad)) == .failure(.characters), "\(bad.debugDescription)")
+        #expect(KeychainItemRule.checked(.init(service: "ok", account: bad)) == .failure(.characters), "\(bad.debugDescription)")
+    }
+    for reserved in ["Claude Code-credentials", "claude code-credentials-1a2b3c4d", "Chrome Safe Storage", "CHROMIUM SAFE STORAGE", "Claude Safe Storage"] {
+        #expect(KeychainItemRule.checked(.init(service: reserved)) == .failure(.reserved))
+    }
+    // Exact forms only: both orders without an account, every order of the three groups with one.
+    let plain = KeychainItemRule.argumentForms(.init(service: "my api"))
+    #expect(plain == [["find-generic-password", "-s", "my api", "-w"], ["find-generic-password", "-w", "-s", "my api"]])
+    let withAccount = KeychainItemRule.argumentForms(.init(service: "svc", account: "me"))
+    #expect(withAccount.count == 6 && Set(withAccount).count == 6)
+    #expect(withAccount.allSatisfy { $0.first == "find-generic-password" && $0.count == 6 && !$0.contains("-g") })
+    #expect(withAccount.contains(["find-generic-password", "-a", "me", "-s", "svc", "-w"]) && withAccount.contains(["find-generic-password", "-w", "-s", "svc", "-a", "me"]))
+    // Usable: invalid dropped, duplicates merged, capped.
+    let many = (1...20).map { Item(service: "s\($0)") } + [.init(service: "s1"), .init(service: "bad*")]
+    #expect(KeychainItemRule.usable(many).count == KeychainItemRule.maximumPerProject)
+    #expect(KeychainItemRule.usable([.init(service: " a "), .init(service: "a"), .init(service: "Chrome Safe Storage")]) == [.init(service: "a")])
+}
+
+@Test func plannerMediatesSecurityWithExactItemReadsAndChangesAuthorityWithTheList() throws {
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    var project = Project(path: root.appendingPathComponent("project").path)
+    project.accessPresets = []
+    func plan(_ project: Project, role: String = AgentRoleID.developer, worker: String = "k") throws -> ExternalSandboxPlan {
+        var input = claudeInput(root, project: project, workerID: worker)
+        input.profile = AgentRoleCatalog.preset(role).profile(for: project)
+        return try ExternalSandboxPlanner.plan(input, helper: .success(helper)).get()
+    }
+    // No signing, no items: no `security` at all.
+    #expect(try plan(project).commands.contains { $0.name == "security" } == false)
+    // Items alone: `security` is mediated with only their exact reads; no identity listing.
+    project.keychainItems = [.init(service: "openai-api"), .init(service: "deepgram", account: "me"), .init(service: "bad*")]
+    let items = try plan(project)
+    let security = try #require(items.commands.first { $0.name == "security" })
+    #expect(security.executable == "/usr/bin/security" && security.keychain && !security.network)
+    let rules = try #require(security.arguments)
+    #expect(rules.count == 8 && !rules.contains(.prefix(["find-identity"])))
+    #expect(rules.contains(.exact(["find-generic-password", "-s", "openai-api", "-w"])))
+    #expect(!rules.contains { if case .exact(let argv) = $0 { return argv.contains("bad*") }; return true })
+    let commands = (items.policyDocument()["command_policies"] as! [String: Any])["commands"] as! [String: Any]
+    let edge = ((commands["security"] as! [String: Any])["from"] as! [String: Any])["session"] as! [String: Any]
+    let invocation = edge["invocation_policy"] as! [String: Any]
+    #expect(invocation["default"] as? String == "deny")
+    #expect((invocation["allow"] as! [[String: [String: [String]]]]).first == ["argv": ["exact": ["find-generic-password", "-s", "openai-api", "-w"]]])
+    // Signing and items: one command, rules unioned.
+    project.accessPresets = ["apple-signing"]
+    let both = try #require(try plan(project).commands.first { $0.name == "security" }?.arguments)
+    #expect(both.first == .prefix(["find-identity"]) && both.count == 9)
+    // Launch identity: the same list keeps the authority, another list replaces it.
+    let same = try plan(project, worker: "k2")
+    #expect(try plan(project, worker: "k3").authority == same.authority)
+    var fewer = project; fewer.keychainItems = [.init(service: "openai-api")]
+    #expect(try plan(fewer).authority != same.authority)
+    #expect(same.authority.contains { $0.contains("\"openai-api\"") })
+    // Reader and Editor never get items: no shell sandbox, so no `security`.
+    project.accessPresets = []
+    for role in [AgentRoleID.reader, AgentRoleID.editor] {
+        #expect(AgentRoleCatalog.preset(role).profile(for: project).commandSandbox?.keychainItems == nil)
+    }
+    #expect(try plan(project, role: AgentRoleID.reader).commands.contains { $0.name == "security" } == false)
+    // The command sandbox switch off removes them too.
+    var off = project; off.commandSandbox = false
+    #expect(AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: off).commandSandbox == nil)
 }

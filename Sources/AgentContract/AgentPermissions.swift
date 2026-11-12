@@ -44,9 +44,18 @@ public struct AgentPermissionProfile: Codable, Hashable, Sendable {
         public var write: [String]
         /// Trusted command prefixes that run outside the sandbox without a prompt.
         public var unsandboxed: [String]
-        public init(read: [String], write: [String], unsandboxed: [String] = []) {
-            self.read = read; self.write = write; self.unsandboxed = unsandboxed
+        /// Named Keychain items the project's scripts may read with `security find-generic-password` under the external
+        /// boundary (mediated, argument allow-list); nil or empty: none. Only the project settings fill this.
+        public var keychainItems: [KeychainItem]?
+        public init(read: [String], write: [String], unsandboxed: [String] = [], keychainItems: [KeychainItem]? = nil) {
+            self.read = read; self.write = write; self.unsandboxed = unsandboxed; self.keychainItems = keychainItems
         }
+    }
+    /// One generic-password Keychain item by service and, optionally, account. Never the whole Keychain.
+    public struct KeychainItem: Codable, Hashable, Sendable {
+        public var service: String
+        public var account: String?
+        public init(service: String, account: String? = nil) { self.service = service; self.account = account }
     }
 
     public var filesystem: Filesystem

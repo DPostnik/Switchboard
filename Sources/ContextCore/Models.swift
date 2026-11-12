@@ -21,6 +21,8 @@ public struct Project: Identifiable, Codable, Hashable, Sendable {
     public var commandSandbox: Bool?
     /// The project's own command prefixes that run outside the sandbox without a prompt.
     public var sandboxCommands: [String]?
+    /// Named Keychain items this project's agents may read under the external boundary (`KeychainItemRule`); set only by the user.
+    public var keychainItems: [AgentPermissionProfile.KeychainItem]?
     /// Sites a `routine-operator` job may import Chrome cookies for.
     public var cookieSites: [String]?
     /// Approved servers from the project's `.mcp.json`: name -> fingerprint of the approved entry (`ProjectMCPServers`).

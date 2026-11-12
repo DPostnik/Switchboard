@@ -15,6 +15,9 @@ public struct SettingsProposal: Codable, Sendable {
         public var removeFolders: [String]?
         public var addCommands: [String]?
         public var removeCommands: [String]?
+        /// Named Keychain items (`KeychainItemRule`): exact service and optional account, never a pattern.
+        public var addKeychainItems: [AgentPermissionProfile.KeychainItem]?
+        public var removeKeychainItems: [AgentPermissionProfile.KeychainItem]?
         public init(project: String) { self.project = project }
     }
     /// The proposing chat's session ID. Agent-written, so it is read only for a file in the inbox root (sessions started
@@ -39,9 +42,12 @@ public struct SettingsProposalReview: Identifiable, Equatable, Sendable {
         public var removeFolders: [String] = []
         public var addCommands: [String] = []
         public var removeCommands: [String] = []
+        /// Checked items (`KeychainItemRule.checked`) the project does not have yet, and listed items to remove.
+        public var addKeychainItems: [AgentPermissionProfile.KeychainItem] = []
+        public var removeKeychainItems: [AgentPermissionProfile.KeychainItem] = []
         public var isEmpty: Bool {
             sandbox == nil && addPresets.isEmpty && removePresets.isEmpty && addFolders.isEmpty && removeFolders.isEmpty
-                && addCommands.isEmpty && removeCommands.isEmpty
+                && addCommands.isEmpty && removeCommands.isEmpty && addKeychainItems.isEmpty && removeKeychainItems.isEmpty
         }
     }
     /// The file's path relative to the inbox: `<name>.json` in the root, `<folder>/<name>.json` in a chat's folder.
@@ -104,6 +110,26 @@ public struct SettingsProposalReview: Identifiable, Equatable, Sendable {
                 let command = raw.trimmingCharacters(in: .whitespaces)
                 if commands.contains(command), !diff.removeCommands.contains(command) { diff.removeCommands.append(command) }
             }
+            let items = KeychainItemRule.usable(project.keychainItems ?? [])
+            for raw in change.removeKeychainItems ?? [] {
+                if case .success(let item) = KeychainItemRule.checked(raw), items.contains(item), !diff.removeKeychainItems.contains(item) {
+                    diff.removeKeychainItems.append(item)
+                }
+            }
+            for raw in (change.addKeychainItems ?? []).prefix(KeychainItemRule.maximumPerChange) {
+                switch KeychainItemRule.checked(raw) {
+                case .failure(let rejection): skipped.append(rejection.message(raw))
+                case .success(let item):
+                    if items.contains(item) || diff.addKeychainItems.contains(item) { continue }
+                    let kept = items.filter { !diff.removeKeychainItems.contains($0) }.count + diff.addKeychainItems.count
+                    guard kept < KeychainItemRule.maximumPerProject else {
+                        let line = KeychainItemRule.limitMessage()
+                        if !skipped.contains(line) { skipped.append(line) }
+                        continue
+                    }
+                    diff.addKeychainItems.append(item)
+                }
+            }
             if let index = projects.firstIndex(where: { $0.projectID == project.id }) { projects[index] = diff } else { projects.append(diff) }
         }
         self.projects = projects.filter { !$0.isEmpty }
@@ -155,6 +181,10 @@ extension SavedState {
             var commands = (project.sandboxCommands ?? []).filter { !diff.removeCommands.contains($0) }
             commands += diff.addCommands.filter { !commands.contains($0) }
             project.sandboxCommands = commands.isEmpty ? nil : commands
+            var items = KeychainItemRule.usable(project.keychainItems ?? []).filter { !diff.removeKeychainItems.contains($0) }
+            items += diff.addKeychainItems.filter { !items.contains($0) }
+            items = Array(items.prefix(KeychainItemRule.maximumPerProject))
+            project.keychainItems = items.isEmpty ? nil : items
             if project != projects[index] { projects[index] = project; changed = true }
         }
         return changed
@@ -174,8 +204,8 @@ public enum SettingsProposalOutcome: Sendable {
             "Switchboard: the user applied your project settings request. The new access applies from this message. Retry the step that lacked access and continue the task.",
             language: language)
         case .appliedWithoutEffect: L10n.text(
-            "Switchboard: пользователь применил твой запрос на изменение настроек проекта, но этот чат работает под внешней границей: добавленная доверенная команда всё равно выполняется внутри неё и не получает дополнительного доступа. Не повторяй тот же шаг. Сообщи, что задача заблокирована, или запроси правильный доступ: набор доступа с командой-посредником, папку или инструмент приложения.",
-            "Switchboard: the user applied your project settings request, but this chat runs under the external boundary: the added trusted command still runs inside it and gets no extra access. Do not retry the same step. Report that the task is blocked, or request the right access: an access set with a mediated command, a folder or an app-owned tool.",
+            "Switchboard: пользователь применил твой запрос на изменение настроек проекта, но этот чат работает под внешней границей: добавленная доверенная команда всё равно выполняется внутри неё и не получает дополнительного доступа. Не повторяй тот же шаг. Сообщи, что задача заблокирована, или запроси правильный доступ: набор доступа с командой-посредником, папку, запись Связки ключей (`addKeychainItems`) или инструмент приложения.",
+            "Switchboard: the user applied your project settings request, but this chat runs under the external boundary: the added trusted command still runs inside it and gets no extra access. Do not retry the same step. Report that the task is blocked, or request the right access: an access set with a mediated command, a folder, a Keychain item (`addKeychainItems`) or an app-owned tool.",
             language: language)
         case .rejected: L10n.text(
             "Switchboard: пользователь отклонил твой запрос на изменение настроек проекта. Не ищи другой способ получить тот же доступ. Продолжай независимую часть задачи или сообщи, что без этого доступа задача заблокирована.",
@@ -298,7 +328,7 @@ public enum SettingsProposalInbox {
     public static func instructions(sharedChatVariable: String? = nil, language: AppLanguage = L10n.language) -> String {
         let presets = AccessPresetCatalog.all.map(\.id).joined(separator: ", ")
         let chat = sharedChatVariable.map { #""chat": "<$"# + $0 + #">", "# } ?? ""
-        let format = "{" + chat + #""reason": "...", "changes": [{"project": "<project path or name>", "addPresets": ["vercel"], "removePresets": [], "addFolders": [{"path": "~/path", "writable": false}], "removeFolders": [], "addCommands": ["zsh scripts/build.sh"], "removeCommands": [], "sandbox": true}]}"#
+        let format = "{" + chat + #""reason": "...", "changes": [{"project": "<project path or name>", "addPresets": ["vercel"], "removePresets": [], "addFolders": [{"path": "~/path", "writable": false}], "removeFolders": [], "addCommands": ["zsh scripts/build.sh"], "removeCommands": [], "addKeychainItems": [{"service": "example-api", "account": "me"}], "removeKeychainItems": [], "sandbox": true}]}"#
         let author = sharedChatVariable.map { variable in L10n.text(
             "- Поле `chat` ОБЯЗАТЕЛЬНО: впиши значение `$\(variable)`. Без него приложение не знает, какой чат просит, и после решения пользователя задача сама не продолжится.",
             "- The `chat` field is REQUIRED: put the value of `$\(variable)` there. Without it the app does not know which chat asks, and the task will not continue by itself after the user decides.",
@@ -308,20 +338,22 @@ public enum SettingsProposalInbox {
             language: language)
         return L10n.text(
             """
-            Настройки проектов в Switchboard (песочница команд, наборы доступа, папки вне проекта, команды вне песочницы) меняет только пользователь. Если задаче нужен доступ, которого нет, или пользователь просит изменить эти настройки, предложи изменение:
+            Настройки проектов в Switchboard (песочница команд, наборы доступа, папки вне проекта, команды вне песочницы, записи Связки ключей) меняет только пользователь. Если задаче нужен доступ, которого нет, или пользователь просит изменить эти настройки, предложи изменение:
             - Запиши один JSON-файл в папку "$\(environmentKey)" (она доступна на запись в песочнице), например "$\(environmentKey)/<короткое-имя>.json". Формат: \(format). Пропускай ненужные поля; в одном файле может быть несколько проектов. Причина (`reason`) - до \(SettingsProposalReview.maximumText) символов, остальное обрезается.
             \(author)
             - Наборы: \(presets).
             \(boundaryCommandRule(language: .russian))
+            \(keychainItemRule(language: .russian))
             - Приложение покажет пользователю список изменений в этом чате; применит их только он. Скажи пользователю, что предложение ждёт его решения. Предлагай только то, что нужно задаче; команды вне песочницы получают доступ ко всему Mac.
             - Когда пользователь решит, этот чат получит сообщение от приложения. До тех пор продолжай независимую часть задачи.
             """,
             """
-            Project settings in Switchboard (the command sandbox, access sets, folders outside the project, commands outside the sandbox) are changed only by the user. When the task needs access that is missing, or the user asks to change these settings, propose the change:
+            Project settings in Switchboard (the command sandbox, access sets, folders outside the project, commands outside the sandbox, Keychain items) are changed only by the user. When the task needs access that is missing, or the user asks to change these settings, propose the change:
             - Write one JSON file into the folder "$\(environmentKey)" (writable inside the sandbox), for example "$\(environmentKey)/<short-name>.json". Format: \(format). Omit fields you do not need; one file may cover several projects. Keep `reason` within \(SettingsProposalReview.maximumText) characters; the rest is cut.
             \(author)
             - Sets: \(presets).
             \(boundaryCommandRule(language: .english))
+            \(keychainItemRule(language: .english))
             - The app shows the user the list of changes in this chat; only the user applies them. Tell the user the proposal waits for their decision. Propose only what the task needs; commands outside the sandbox get access to the whole Mac.
             - When the user decides, this chat receives a message from the app. Until then continue the independent part of the task.
             """, language: language)
@@ -329,8 +361,14 @@ public enum SettingsProposalInbox {
     /// Under the external boundary a trusted command stays inside (PERMISSIONS.md, section 1); shared with the Claude
     /// boundary instructions.
     public static func boundaryCommandRule(language: AppLanguage = L10n.language) -> String {
-        L10n.text("- Под внешней границей (`SWITCHBOARD_EXTERNAL_SANDBOX=1`) `addCommands` не выводит команду наружу: она всё равно выполняется внутри. Для Связки ключей, учётных данных или сетевой идентичности запрашивай набор доступа с командой-посредником (`addPresets`), а не доверенную команду.",
-                  "- Under the external boundary (`SWITCHBOARD_EXTERNAL_SANDBOX=1`) `addCommands` does not take a command outside: it still runs inside. For the Keychain, a credential or a network identity request an access set with a mediated command (`addPresets`), not a trusted command.",
+        L10n.text("- Под внешней границей (`SWITCHBOARD_EXTERNAL_SANDBOX=1`) `addCommands` не выводит команду наружу: она всё равно выполняется внутри. Для записи Связки ключей запрашивай `addKeychainItems`, для учётных данных или сетевой идентичности - набор доступа с командой-посредником (`addPresets`), но не доверенную команду.",
+                  "- Under the external boundary (`SWITCHBOARD_EXTERNAL_SANDBOX=1`) `addCommands` does not take a command outside: it still runs inside. For a Keychain item request `addKeychainItems`; for a credential or a network identity, an access set with a mediated command (`addPresets`); never a trusted command.",
+                  language: language)
+    }
+    /// How a project script reads a granted Keychain item under the external boundary, and the one request when it is missing.
+    public static func keychainItemRule(language: AppLanguage = L10n.language) -> String {
+        L10n.text("- Под внешней границей `security` читает только записи Связки ключей, перечисленные в настройках проекта, в форме `security find-generic-password -s <сервис> [-a <учётная запись>] -w`, вызванной по имени (не `/usr/bin/security`). Отказ «command policy denied security» значит, что записи нет в списке: запиши одно предложение с `addKeychainItems` (точный сервис и учётная запись, без шаблонов) и причиной. Никогда не выводи секрет в ответ, файл или журнал.",
+                  "- Under the external boundary `security` reads only the Keychain items listed in the project settings, in the form `security find-generic-password -s <service> [-a <account>] -w`, called by name (not `/usr/bin/security`). A \"command policy denied security\" refusal means the item is not listed: write one proposal with `addKeychainItems` (exact service and account, no wildcards) and the reason. Never print the secret into a reply, a file or a log.",
                   language: language)
     }
     private static func date(_ file: URL) -> Date? { try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate }

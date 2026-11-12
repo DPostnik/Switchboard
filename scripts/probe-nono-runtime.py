@@ -7,9 +7,11 @@ docs/handoffs/permission-runtime-2026-11-11/nono-runtime-results.json. Run outsi
 Seatbelt sandbox; it creates disposable folders under .build (not /tmp) and removes them.
 """
 import argparse
+import hashlib
 import json
 import os
 import pathlib
+import secrets
 import shutil
 import signal
 import subprocess
@@ -54,6 +56,13 @@ fixture = pathlib.Path(tempfile.mkdtemp(prefix='runtime-', dir=ROOT / '.build/no
 results = {}
 checks = []
 STATE_DIRS = []
+# A throwaway generic-password item for the named-item checks (`KeychainItemRule`). Created and deleted outside the sandbox by
+# `security` itself, so its ACL trusts `/usr/bin/security`. The value is random; only its SHA-256 enters the sandboxed script,
+# and the probe prints yes/no, never the value.
+PROBE_SERVICE = 'switchboard-probe-' + secrets.token_hex(6)
+PROBE_ACCOUNT = 'switchboard-probe'
+PROBE_SECRET = secrets.token_hex(16)
+PROBE_HASH = hashlib.sha256(PROBE_SECRET.encode()).hexdigest()
 
 
 def check(name, ok, detail=''):
@@ -100,8 +109,15 @@ def policy(case, browser_port):
                                     'environment': {'allow_vars': ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_*', 'TERM', 'TMPDIR', 'GIT_*']},
                                     'unsafe_macos_seatbelt_rules': [r for tree in GIT_TREES for r in (
                                         '(allow process-exec* (subpath "%s"))' % tree, '(allow file-read* (subpath "%s"))' % tree, '(allow file-map-executable (subpath "%s"))' % tree)]}},
+                # The app's shape (`ExternalSandboxPlan.policyDocument`): the sandbox in the session edge plus an argument
+                # allow-list, default deny. Signing lists identities only; a listed item gets its exact secret reads.
                 'security': {'executable': '/usr/bin/security',
-                             'sandbox': {'keychain_access': 'read', 'fs_read': [str(case / 'project')], 'network': {'allow_all': False}}},
+                             'from': {'session': {
+                                 'sandbox': {'keychain_access': 'read', 'fs_read': [str(case / 'project')], 'network': {'allow_all': False}},
+                                 'invocation_policy': {'default': 'deny', 'allow': [
+                                     {'argv': {'prefix': ['find-identity']}},
+                                     {'argv': {'exact': ['find-generic-password', '-s', PROBE_SERVICE, '-w']}},
+                                     {'argv': {'exact': ['find-generic-password', '-w', '-s', PROBE_SERVICE]}}]}}}},
                 'switchboard-browser': {'executable': PYTHON, 'allow_direct_exec_bypass': [PYTHON],
                                         'sandbox': {'fs_read': [str(case / 'resources'), str(case / 'project'), str(DEVELOPER)], 'fs_write': [str(profiles), str(case / 'tmp')],
                                                     'network': {'allow_all': False, 'open_port': [browser_port]},
@@ -138,6 +154,9 @@ def lines(out):
 
 
 try:
+    # The value travels in argv for a moment here; it is random and deleted at the end.
+    subprocess.run(['/usr/bin/security', 'add-generic-password', '-U', '-s', PROBE_SERVICE, '-a', PROBE_ACCOUNT, '-w', PROBE_SECRET],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     # ---- developer: union session + mediated commands --------------------------------------------------------
     case = make_case('developer')
     env = environment(case)
@@ -199,6 +218,19 @@ cd "{case}/other" && printf X > marker 2>/dev/null; echo "CHECK other-cwd-write 
 xcrun --find swiftc > /dev/null 2>&1; echo "CHECK xcrun-find $?"
 n=$(security find-identity -v -p codesigning 2>/dev/null | grep -c 'Apple Development'); echo "CHECK security-shim $? identities=$n"
 /usr/bin/security find-identity -v -p codesigning > /dev/null 2>&1; echo "CHECK security-direct-denied $?"
+security dump-keychain > /dev/null 2>&1; echo "CHECK security-dump-denied $?"
+security dump-keychain -d > /dev/null 2>&1; echo "CHECK security-dump-d-denied $?"
+security -i < /dev/null > /dev/null 2>&1; echo "CHECK security-interactive-denied $?"
+security find-internet-password -s github.com -w > /dev/null 2>&1; echo "CHECK security-internet-denied $?"
+security find-generic-password -s switchboard-probe-unlisted -w > /dev/null 2>&1; echo "CHECK security-unlisted-denied $?"
+security < /dev/null > /dev/null 2>&1; echo "CHECK security-empty-denied $?"
+h=$(security find-generic-password -s "{PROBE_SERVICE}" -w 2>/dev/null | /usr/bin/shasum -a 256 | cut -c1-64); [ "$h" = "{PROBE_HASH}" ]; echo "CHECK security-listed-item $?"
+h=$(security find-generic-password -w -s "{PROBE_SERVICE}" 2>/dev/null | /usr/bin/shasum -a 256 | cut -c1-64); [ "$h" = "{PROBE_HASH}" ]; echo "CHECK security-listed-item-other-order $?"
+security find-generic-password -s "{PROBE_SERVICE}" -w -g > /dev/null 2>&1; echo "CHECK security-listed-extra-flag-denied $?"
+security find-generic-password -s "{PROBE_SERVICE}" > /dev/null 2>&1; echo "CHECK security-listed-attributes-denied $?"
+security find-generic-password -s "{PROBE_SERVICE}" -a "{PROBE_ACCOUNT}" -w > /dev/null 2>&1; echo "CHECK security-listed-with-account-denied $?"
+/usr/bin/security find-generic-password -s "{PROBE_SERVICE}" -w > /dev/null 2>&1; echo "CHECK security-listed-absolute $?"
+security find-generic-password -s switchboard-probe-unlisted -w > /dev/null 2> "{case}/tmp/deny.err"; echo "CHECK security-unlisted-stderr $? $(head -c 240 "{case}/tmp/deny.err" | tr '\\n' ' ')"
 /usr/bin/python3 -c 'print(1)' > /dev/null 2>&1; echo "CHECK python-direct-bypass $?"
 echo "CHECK python-stub-session $(/usr/bin/python3 -c 'import sys;print(sys.executable)' 2>&1)"
 echo "CHECK python-mediated $(switchboard-browser -c 'import sys;print(sys.executable)' 2>&1)"
@@ -241,8 +273,17 @@ wait
     exp.update({'git-status-shim': '0', 'git-commit-shim': '0', 'git-ls-remote': '0', 'git-push-dry-run': '0'})
     for name, code in exp.items():
         check('developer/' + name, found.get(name, '').split(' ')[0] == code, found.get(name, 'missing'))
-    for name in ['other-write', 'other-cwd-write', 'security-direct-denied', 'session-profiles-hidden', 'session-keychain-hidden', 'git-helper-direct-no-secret']:
+    for name in ['other-write', 'other-cwd-write', 'security-direct-denied', 'session-profiles-hidden', 'session-keychain-hidden', 'git-helper-direct-no-secret',
+                 'security-dump-denied', 'security-dump-d-denied', 'security-interactive-denied', 'security-internet-denied',
+                 'security-unlisted-denied', 'security-empty-denied', 'security-listed-extra-flag-denied',
+                 'security-listed-attributes-denied', 'security-listed-with-account-denied']:
         check('developer/' + name, found.get(name, '0').split(' ')[0] not in ('0', ''), found.get(name, 'missing'))
+    # A listed item reads through the shim in both orders, the value matches (compared by hash, never printed); by absolute
+    # path `security` is not the shim and exits 127. The refusal text of an unlisted item is recorded for the agent instructions.
+    for name in ['security-listed-item', 'security-listed-item-other-order']:
+        check('developer/' + name, found.get(name, '') == '0', 'yes' if found.get(name, '') == '0' else 'no')
+    check('developer/security-listed-absolute-127', found.get('security-listed-absolute', '') == '127', found.get('security-listed-absolute', 'missing'))
+    check('developer/security-unlisted-stderr (informational)', True, found.get('security-unlisted-stderr', 'missing'))
     sec = found.get('security-shim', '')
     check('developer/security-shim', sec.startswith('0 ') and not sec.endswith('identities=0'), sec)
     if not args.skip_chrome:
@@ -319,6 +360,8 @@ echo "CHECK blocked $(curl -sS -m 10 -o /dev/null -w '%{http_code}' https://api.
         results['network-blocked'] = {'checks': found, 'exit': code}
         check('network/block-net', found.get('blocked', '200').strip() not in ('200', '401'), found.get('blocked', 'missing'))
 finally:
+    subprocess.run(['/usr/bin/security', 'delete-generic-password', '-s', PROBE_SERVICE, '-a', PROBE_ACCOUNT],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     results['checks'] = checks
     (OUT / 'nono-runtime-results.json').write_text(json.dumps(results, indent=2))
     shutil.rmtree(fixture, ignore_errors=True)

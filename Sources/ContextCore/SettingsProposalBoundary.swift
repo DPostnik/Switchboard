@@ -25,18 +25,29 @@ public struct SettingsProposalBoundaryNote: Equatable, Sendable {
     /// One warning line, RU/EN (invariant 16). The command itself is shown next to it as data.
     public func text(language: AppLanguage = L10n.language) -> String {
         func set(_ id: String) -> String { AccessPresetCatalog.preset(id)?.title(language: language) ?? id }
+        // A `security` command reads the Keychain: the route is a named item, never a trusted command or a whole set.
+        let keychain = ExternalSandboxPlanner.commandHead(command) == "security"
         switch effect {
         case .noExtraAccess(let id):
+            if keychain {
+                return L10n.text(
+                    "Чаты \(provider) этого проекта работают под внешней границей: эта команда всё равно выполнится внутри неё и не получит там доступа к Связке ключей. Вместо этого: запись Связки ключей в настройках проекта (`addKeychainItems`) с точным сервисом и учётной записью.",
+                    "\(provider) chats of this project run under the external boundary: this command will still run inside it and gets no Keychain access there. Instead: a Keychain item in the project settings (`addKeychainItems`) with the exact service and account.",
+                    language: language)
+            }
             let instead = id.map { L10n.text("набор доступа «\(set($0))» (его команда-посредник выполняет её со Связкой ключей или сетью), ",
                                              "the access set “\(set($0))” (its mediated command runs this with the Keychain or network), ",
                                              language: language) } ?? ""
             return L10n.text(
-                "Чаты \(provider) этого проекта работают под внешней границей: эта команда всё равно выполнится внутри неё и не получит там дополнительного доступа. Вместо этого: \(instead)инструмент приложения, доступ к папке или доступ к элементу Связки ключей (планируется).",
-                "\(provider) chats of this project run under the external boundary: this command will still run inside it and gets no extra access there. Instead: \(instead)an app-owned tool, a folder grant, or a Keychain item grant (planned).",
+                "Чаты \(provider) этого проекта работают под внешней границей: эта команда всё равно выполнится внутри неё и не получит там дополнительного доступа. Вместо этого: \(instead)инструмент приложения, доступ к папке или запись Связки ключей (`addKeychainItems`).",
+                "\(provider) chats of this project run under the external boundary: this command will still run inside it and gets no extra access there. Instead: \(instead)an app-owned tool, a folder grant, or a Keychain item (`addKeychainItems`).",
                 language: language)
         case .leavesBoundary(let id):
-            let instead = id.map { L10n.text(" Вместо этого: набор доступа «\(set($0))» выполняет её как команду-посредника.",
-                                             " Instead: the access set “\(set($0))” runs it as a mediated command.", language: language) } ?? ""
+            let instead = keychain
+                ? L10n.text(" Вместо этого: запись Связки ключей в настройках проекта (`addKeychainItems`).",
+                            " Instead: a Keychain item in the project settings (`addKeychainItems`).", language: language)
+                : id.map { L10n.text(" Вместо этого: набор доступа «\(set($0))» выполняет её как команду-посредника.",
+                                     " Instead: the access set “\(set($0))” runs it as a mediated command.", language: language) } ?? ""
             return L10n.text(
                 "Внешняя граница не может выполнить эту команду: после применения чаты \(provider) этого проекта уйдут с границы в собственную песочницу провайдера с запросами подтверждения.\(instead)",
                 "The external boundary cannot run this command: applying it moves this project's \(provider) chats off the boundary to the provider's own sandbox with approval prompts.\(instead)",
@@ -84,8 +95,10 @@ public enum SettingsProposalBoundary {
                       let afterInput = kind.input(after), let afterPlan = plan(afterInput, inventory: false) else { continue }
                 let mediated = Set(afterPlan.commands.map(\.name))
                 for command in diff.addCommands {
-                    guard let head = ExternalSandboxPlanner.commandHead(command), !mediated.contains(head) else { continue }
-                    let set = coveringSet(head, project: after, kind: kind, plan: { plan($0, inventory: false) })
+                    // A mediated `security` runs only its argument allow-list, so a trusted `security` command gains nothing
+                    // there either; its note points to a Keychain item rather than an access set.
+                    guard let head = ExternalSandboxPlanner.commandHead(command), !mediated.contains(head) || head == "security" else { continue }
+                    let set = head == "security" ? nil : coveringSet(head, project: after, kind: kind, plan: { plan($0, inventory: false) })
                     let unrunnable = ExternalSandboxPlanner.unrunnableTrustedCommand([command], mediated: mediated, grants: afterPlan.grants,
                                                                                      home: afterInput.home) != nil
                     notes.append(.init(projectID: diff.projectID, command: command, provider: kind.provider,
@@ -116,7 +129,7 @@ extension SettingsProposalOutcome {
     public static func afterApply(_ review: SettingsProposalReview, notes: [SettingsProposalBoundaryNote]) -> Self {
         let commands = review.projects.flatMap { diff in diff.addCommands.map { (diff.projectID, $0) } }
         guard !commands.isEmpty,
-              review.projects.allSatisfy({ $0.addPresets.isEmpty && $0.addFolders.isEmpty && $0.sandbox == nil }),
+              review.projects.allSatisfy({ $0.addPresets.isEmpty && $0.addFolders.isEmpty && $0.addKeychainItems.isEmpty && $0.sandbox == nil }),
               commands.allSatisfy({ project, command in notes.contains {
                   guard $0.projectID == project, $0.command == command, case .noExtraAccess = $0.effect else { return false }
                   return true

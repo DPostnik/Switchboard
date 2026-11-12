@@ -190,6 +190,8 @@ extension ClaudeIntegration {
         case "osascript": hint = (" Для браузера используй инструменты браузера Switchboard.", " For a browser, use Switchboard's browser tools.")
         case "launchctl": hint = (" Перезапуск Switchboard запрашивай инструментом `request_app_restart`, если он подключён.",
                                   " To restart Switchboard, use the `request_app_restart` tool when it is attached.")
+        case "security": hint = (" Скрипты проекта читают записи Связки ключей, перечисленные в настройках проекта; если нужна другая запись, запиши одно предложение настроек с `addKeychainItems`.",
+                                 " Project scripts read the Keychain items listed in the project settings; if another item is needed, write one settings proposal with `addKeychainItems`.")
         default: hint = ("", "")
         }
         return L10n.text("Команда запрещена ролью: \(command). Обход не допускается: не ищи другую команду, интерпретатор, путь или флаг с тем же действием.\(hint.ru) Если без неё задача не решается, сообщи об этом пользователю.",

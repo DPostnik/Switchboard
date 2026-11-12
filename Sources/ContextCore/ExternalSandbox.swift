@@ -121,14 +121,34 @@ public enum ExternalSandboxLocations {
 /// One mediated command: runs through nono's broker shim with its own grants (the session union plus the Keychain
 /// or network it needs). Commands the role does not list run inside the session sandbox like everything else.
 public struct ExternalSandboxCommand: Hashable, Sendable, Encodable {
+    /// One allowed argument list, compared by nono with the arguments after the command name (`invocation_policy`).
+    public enum ArgumentRule: Hashable, Sendable, Encodable {
+        case exact([String])
+        case prefix([String])
+        var policy: [String: Any] {
+            switch self {
+            case .exact(let argv): ["argv": ["exact": argv]]
+            case .prefix(let argv): ["argv": ["prefix": argv]]
+            }
+        }
+        var label: String {
+            switch self {
+            case .exact(let argv): "exact " + argv.map { $0.debugDescription }.joined(separator: " ")
+            case .prefix(let argv): "prefix " + argv.map { $0.debugDescription }.joined(separator: " ")
+            }
+        }
+    }
     public let name: String
     public let executable: String
     public let keychain: Bool
     public let network: Bool
     /// Directories whose executables the command may run by absolute path (git's own helpers).
     public let executableTrees: [String]
-    public init(name: String, executable: String, keychain: Bool, network: Bool, executableTrees: [String] = []) {
+    /// The only argument lists nono lets through (default deny); nil leaves the arguments unfiltered.
+    public let arguments: [ArgumentRule]?
+    public init(name: String, executable: String, keychain: Bool, network: Bool, executableTrees: [String] = [], arguments: [ArgumentRule]? = nil) {
         self.name = name; self.executable = executable; self.keychain = keychain; self.network = network; self.executableTrees = executableTrees
+        self.arguments = arguments
     }
 }
 
@@ -162,7 +182,10 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
     public var authority: [String] {
         let own = worker.path
         let paths = grants.filter { !$0.path.hasPrefix(own + "/") && $0.path != socket.path }.map { $0.mode.rawValue + " " + $0.path }
-        let mediated = commands.map { "command \($0.name) \($0.executable) keychain=\($0.keychain) network=\($0.network) trees=\($0.executableTrees.joined(separator: ","))" }
+        let mediated = commands.map { command in
+            let rules = command.arguments.map { " argv=" + $0.map(\.label).joined(separator: "; ") } ?? ""
+            return "command \(command.name) \(command.executable) keychain=\(command.keychain) network=\(command.network) trees=\(command.executableTrees.joined(separator: ","))" + rules
+        }
         return ["project " + project] + paths + mediated + executableDirectories.map { "exec " + $0 }
     }
 
@@ -200,7 +223,16 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
                     ["(allow process-exec* (subpath \"\(tree)\"))", "(allow file-read* (subpath \"\(tree)\"))", "(allow file-map-executable (subpath \"\(tree)\"))"]
                 }
             }
-            var policy: [String: Any] = ["executable": command.executable, "sandbox": sandbox]
+            var policy: [String: Any] = ["executable": command.executable]
+            if let rules = command.arguments {
+                // `sandbox` is shorthand for `from.session.sandbox`; an argument allow-list needs the edge form (nono 0.81.0
+                // schema: deny, approve, allow, then default; one argv matcher per rule, compared after the command name).
+                let invocation: [String: Any] = ["default": "deny", "allow": rules.map(\.policy)]
+                let edge: [String: Any] = ["sandbox": sandbox, "invocation_policy": invocation]
+                policy["from"] = ["session": edge] as [String: Any]
+            } else {
+                policy["sandbox"] = sandbox
+            }
             // Swift Build invokes codesign by absolute path for ad-hoc signatures.
             // Direct execution retains the session sandbox (no Keychain); named execution uses the broker.
             if command.name == "codesign" && command.executable == "/usr/bin/codesign" {
@@ -402,9 +434,16 @@ public enum ExternalSandboxPlanner {
         var commands: [ExternalSandboxCommand] = []
         if effective.shell == .on, let sandbox = effective.commandSandbox {
             let trusted = sandbox.unsandboxed
-            if trusted.contains("codesign") {
-                commands.append(.init(name: "codesign", executable: "/usr/bin/codesign", keychain: true, network: false))
-                commands.append(.init(name: "security", executable: "/usr/bin/security", keychain: true, network: false))
+            let signing = trusted.contains("codesign")
+            if signing { commands.append(.init(name: "codesign", executable: "/usr/bin/codesign", keychain: true, network: false)) }
+            // One `security`, one allow-list: identity listing for signing, the exact secret reads of the project's named
+            // items. The rest of the Keychain stays closed (nono refuses any other argv).
+            var securityRules: [ExternalSandboxCommand.ArgumentRule] = signing ? [.prefix(["find-identity"])] : []
+            for item in KeychainItemRule.usable(sandbox.keychainItems ?? []) {
+                securityRules += KeychainItemRule.argumentForms(item).map(ExternalSandboxCommand.ArgumentRule.exact)
+            }
+            if !securityRules.isEmpty {
+                commands.append(.init(name: "security", executable: "/usr/bin/security", keychain: true, network: false, arguments: securityRules))
             }
             if trusted.contains("gh"), let gh = resolveExecutable("gh") {
                 commands.append(.init(name: "gh", executable: gh, keychain: true, network: true))

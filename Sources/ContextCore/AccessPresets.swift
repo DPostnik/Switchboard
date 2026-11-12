@@ -126,8 +126,11 @@ extension Project {
         let write = unique([path] + roots.filter(\.writable).map(\.path) + presets.flatMap(\.write))
         let read = unique(write + roots.map(\.path) + presets.flatMap(\.read))
         let commands = (sandboxCommands ?? []).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        // The only entry point for Keychain items: roles without a shell or without this sandbox (Reader, Editor) never get them.
+        let items = KeychainItemRule.usable(keychainItems ?? [])
         return .init(read: read, write: write,
-                     unsandboxed: unique(AccessPresetCatalog.baseUnsandboxed + presets.flatMap(\.unsandboxed) + commands))
+                     unsandboxed: unique(AccessPresetCatalog.baseUnsandboxed + presets.flatMap(\.unsandboxed) + commands),
+                     keychainItems: items.isEmpty ? nil : items)
     }
 }
 

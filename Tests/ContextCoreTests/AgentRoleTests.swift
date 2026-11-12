@@ -221,6 +221,12 @@ private func settings(_ args: [String]) throws -> JSONValue {
     #expect(ClaudeIntegration.roleDenyRefusal("launchctl", language: .english).contains("`request_app_restart`")
             && ClaudeIntegration.roleDenyRefusal("launchctl", language: .russian).contains("`request_app_restart`"))
     #expect(!ClaudeIntegration.roleDenyRefusal("diskutil", language: .english).contains("request_app_restart"))
+    // A direct `security` stays denied; the text names the project's Keychain items and the one request for another item.
+    #expect(developer.inspect(command: "security find-generic-password -s api -w") == .deny(ClaudeIntegration.roleDenyRefusal("security")))
+    #expect(ClaudeIntegration.roleDenyRefusal("security", language: .english).contains("Keychain items listed in the project settings")
+            && ClaudeIntegration.roleDenyRefusal("security", language: .english).contains("`addKeychainItems`")
+            && ClaudeIntegration.roleDenyRefusal("security", language: .russian).contains("`addKeychainItems`"))
+    #expect(!ClaudeIntegration.roleDenyRefusal("sudo", language: .english).contains("addKeychainItems"))
     #expect(developer.inspect(command: "pseudo tool") == .allow && developer.inspect(command: "FOO=1 sudo ls") != .allow && developer.inspect(command: "echo hi; sudo ls") != .allow)
     #expect(developer.inspect(command: "git push --force origin main") != .allow)
     let unattended = ClaudeLaunchPolicy(preset(AgentRoleID.developer).profile, scheduled: true, userChromeEnabled: false)

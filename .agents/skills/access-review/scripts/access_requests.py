@@ -268,6 +268,9 @@ def collect(args):
     settings = {p['name']: {'path': tilde(p['path']), 'sets': p.get('accessPresets') or [],
                             'folders': [tilde(r['path']) + (' (write)' if r['writable'] else '') for r in p.get('extraRoots') or []],
                             'commands': p.get('sandboxCommands') or [],
+                            # Named Keychain items: each one's secret is readable by the project's agents. Names only;
+                            # the app state never holds a secret value.
+                            **({'keychainItems': [keychain_label(item) for item in p['keychainItems']]} if p.get('keychainItems') else {}),
                             **({'sandbox': False} if p.get('commandSandbox') is False else {})}
                 for p in projects.values() if not selected or p['id'] == selected}
     return {'version': 2, 'since': local(since.timestamp()), 'requests': sum(totals.values()), 'records': records,
@@ -276,6 +279,12 @@ def collect(args):
             'groups': result, 'oneOff': one_off, 'settings': settings,
             **({'unknownValues': dict(unknown)} if unknown else {}),
             **({'warning': 'app sources not found: access-set coverage and value checks skipped'} if catalog is None else {})}
+
+
+def keychain_label(item):
+    """`service` or `service (account)`, as the app shows it (`KeychainItemRule.label`)."""
+    service = str(item.get('service', ''))
+    return service + (f" ({item['account']})" if item.get('account') else '')
 
 
 def local(timestamp):
@@ -335,7 +344,9 @@ def markdown(report):
             lines += ['', f'## {project}']
             if settings:
                 lines.append(f"Now: sets {', '.join(settings['sets']) or '-'}; folders {'; '.join(settings['folders']) or '-'}; "
-                             f"commands {'; '.join(settings['commands']) or '-'}" + ('; sandbox off' if settings.get('sandbox') is False else ''))
+                             f"commands {'; '.join(settings['commands']) or '-'}"
+                             + (f"; KEYCHAIN ITEMS {'; '.join(settings['keychainItems'])}" if settings.get('keychainItems') else '')
+                             + ('; sandbox off' if settings.get('sandbox') is False else ''))
         decisions = ', '.join(f'{k} {v}' for k, v in group['decisions'].items())
         lines.append(f"- **{group['capability']}** `{group['target']}`: {group['requests']} req, {group['interruptions']} interruptions, "
                      f"{group['records']} records, {group['chats']} chats, last {group['last']}; "
@@ -348,6 +359,11 @@ def markdown(report):
                      + (f"; ALREADY OPEN BY {group['alreadyOpenBy']}" if group.get('alreadyOpenBy') else ''))
         for example in group['examples']:
             lines.append(f"  - {example['chat']} «{example['title']}»: `{example['target'][:120]}`")
+    # Every granted Keychain item, also in projects without requests in the window: each is a standing secret grant.
+    granted = {name: s['keychainItems'] for name, s in report['settings'].items() if s.get('keychainItems')}
+    if granted:
+        lines += ['', "## Keychain items (each one's secret is readable by the project's agents)"]
+        lines += [f"- {name}: " + '; '.join(f'`{label}`' for label in items) for name, items in sorted(granted.items())]
     return '\n'.join(lines)
 
 

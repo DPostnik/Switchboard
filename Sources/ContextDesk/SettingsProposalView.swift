@@ -101,6 +101,9 @@ struct SettingsProposalChanges: View {
                 }
             }
             ForEach(diff.removeCommands, id: \.self) { line("−", L10n.text("Убрать команду вне песочницы (доступ сужается): ", "Remove command outside the sandbox (access gets narrower): ") + $0) }
+            // The secret of an added item becomes readable by the project's agents: warning weight, exact service as data.
+            ForEach(diff.addKeychainItems, id: \.self) { line("+", KeychainItemRule.addLine($0), warning: true) }
+            ForEach(diff.removeKeychainItems, id: \.self) { line("−", KeychainItemRule.removeLine($0)) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, .ui(12)).padding(.vertical, .ui(10))

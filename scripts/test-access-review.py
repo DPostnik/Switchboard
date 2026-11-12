@@ -28,7 +28,7 @@ LIFECYCLE = SCHEMA[:-1] + ', request_id TEXT, source TEXT, stage TEXT, outcome T
 
 
 class AccessReviewTests(unittest.TestCase):
-    def run_script(self, rows, schema=SCHEMA, *arguments, extra=()):
+    def run_script(self, rows, schema=SCHEMA, *arguments, extra=(), projects=()):
         with tempfile.TemporaryDirectory() as tmp:
             ledger, metadata = Path(tmp) / 'ledger.sqlite', Path(tmp) / 'metadata.sqlite'
             with contextlib.closing(sqlite3.connect(ledger)) as connection, connection:
@@ -39,7 +39,8 @@ class AccessReviewTests(unittest.TestCase):
                 for statement in extra:
                     connection.execute(statement)
             state = {'projects': [{'id': PROJECT, 'name': 'switchboard', 'path': '/work/app', 'accessPresets': ['github'],
-                                   'sandboxCommands': ['zsh scripts/test.sh'], 'extraRoots': [{'path': '/work/notes', 'writable': False}]}],
+                                   'sandboxCommands': ['zsh scripts/test.sh'], 'extraRoots': [{'path': '/work/notes', 'writable': False}]},
+                                  *projects],
                      'chats': [{'id': 'C1', 'title': 'First'}]}
             with contextlib.closing(sqlite3.connect(metadata)) as connection, connection:
                 connection.execute('CREATE TABLE state (key TEXT PRIMARY KEY, value BLOB NOT NULL)')
@@ -88,6 +89,21 @@ class AccessReviewTests(unittest.TestCase):
         self.assertEqual(group['reasons'], {'sandboxed': 1, 'denyList': 1})
         markdown = self.run_script(rows, LIFECYCLE, '--format', 'md', extra=reasons)
         self.assertIn('reasons sandboxed 1, denyList 1', markdown)
+
+    def test_keychain_items_are_listed_per_project_even_without_requests(self):
+        wiki = {'id': 'B2E0C0DE-0000-4000-8000-000000000001', 'name': 'psy-wiki', 'path': '/work/wiki',
+                'keychainItems': [{'service': 'deepgram-api'}, {'service': 'openai', 'account': 'me@example.com'}]}
+        rows = [self.row('C1', 'shell', 'swift build'), self.row('C2', 'shell', 'swift build -v')]
+        report = self.run_script(rows, projects=[wiki])
+        self.assertEqual(report['settings']['psy-wiki']['keychainItems'], ['deepgram-api', 'openai (me@example.com)'])
+        # Negative: a project without items has no key, so nothing is listed for it.
+        self.assertNotIn('keychainItems', report['settings']['switchboard'])
+        markdown = self.run_script(rows, SCHEMA, '--format', 'md', projects=[wiki])
+        self.assertIn("## Keychain items (each one's secret is readable by the project's agents)", markdown)
+        self.assertIn('- psy-wiki: `deepgram-api`; `openai (me@example.com)`', markdown)
+        self.assertNotIn('- switchboard: `', markdown)
+        # Without any item the section is absent.
+        self.assertNotIn('Keychain items', self.run_script(rows, SCHEMA, '--format', 'md'))
 
     def test_old_ledger_without_reason_column_reads_without_reasons(self):
         report = self.run_script([self.row('C1', 'shell', 'swift build'), self.row('C2', 'shell', 'swift build -v')])

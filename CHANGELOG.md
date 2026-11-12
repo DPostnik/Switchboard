@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- A project can be granted named Keychain items (Project settings → Command sandbox → Keychain items, or an agent's access request with `addKeychainItems`, applied once on its card): under the external boundary the project's scripts read just those items with `security find-generic-password -s <service> [-a <account>] -w`, and the item's secret becomes readable by that project's agents. The rest of the Keychain stays closed: the Apple signing set no longer opens the whole Keychain to `security` and only lists signing identities; every other `security` call is refused.
+
 - Prevent access-request boundary warnings from pushing the sidebar and composer outside the window.
 
 - An access request that adds a trusted command now warns, before Apply, when the project's chats run under the external boundary: the command would still run inside it (with the access set that would help, if one does) or would move the chats off the boundary; after Apply such a chat is told not to retry the same step.

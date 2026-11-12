@@ -75,6 +75,9 @@ try:
             {'cmd': f'printf CACHE > "{cache}/marker" && cat "{cache}/marker"', 'workdir': str(workdir)},
             {'cmd': f'"{TOOLCHAIN}/swiftc" --version > /dev/null && echo TOOLCHAIN', 'workdir': str(workdir)},
             {'cmd': 'security find-identity -v -p codesigning | grep -c "Apple Development"', 'workdir': str(workdir)},
+            # Every other `security` form is refused by the argument allow-list (output discarded, exit 0 = refused).
+            {'cmd': '! security dump-keychain > /dev/null 2>&1 && ! security find-generic-password -s switchboard-probe-unlisted -w > /dev/null 2>&1'
+                    ' && ! security find-internet-password -s github.com -w > /dev/null 2>&1', 'workdir': str(workdir)},
         ]
         requests, events, calls = [], [], []
 
@@ -127,8 +130,10 @@ try:
             'meta': {'name': 'switchboard-codex-probe', 'version': '1'}, 'workdir': {'access': 'none'},
             'command_policies': {
                 'executable_dirs': [str(TOOLCHAIN), str(DEVELOPER / 'usr/bin')],
-                'commands': {'security': {'executable': '/usr/bin/security',
-                                          'sandbox': {'keychain_access': 'read', 'fs_read': [str(project)], 'network': {'allow_all': False}}}}}}))
+                # The app's shape: sandbox in the session edge, argument allow-list with default deny.
+                'commands': {'security': {'executable': '/usr/bin/security', 'from': {'session': {
+                    'sandbox': {'keychain_access': 'read', 'fs_read': [str(project)], 'network': {'allow_all': False}},
+                    'invocation_policy': {'default': 'deny', 'allow': [{'argv': {'prefix': ['find-identity']}}]}}}}}}}))
         grants = [('--read' if reader else '--allow', project), ('--read' if reader else '--allow', cache), ('--read', other),
                   ('--allow', home), ('--allow', case / 'tmp'), ('--read', pathlib.Path(BIN).parent), ('--read', DEVELOPER),
                   ('--read-file', RELAY), ('--allow-unix-socket', sock)]
@@ -259,18 +264,18 @@ try:
             failures.append(name + ': MCP tools through the relay ' + str(s['mcp_tools']))
         exits = [c['exit'] for c in s['commands']]
         # The cache grant does not depend on the command's workdir; a reader has no write grant at all.
-        expected = [0, 0, 0, 0, 0] if name == 'developer' else ([1, 1, 0, 0, 0] if name == 'other-workdir' else [1, 1, 1, 0, 0])
+        expected = [0, 0, 0, 0, 0, 0] if name == 'developer' else ([1, 1, 0, 0, 0, 0] if name == 'other-workdir' else [1, 1, 1, 0, 0, 0])
         if exits != expected:
             failures.append(name + ': command exits ' + str(exits) + ' expected ' + str(expected))
-        if name == 'developer' and s['commands'] and not s['commands'][-1]['output'].endswith('1'):
-            failures.append('developer: security identities ' + s['commands'][-1]['output'])
+        if name == 'developer' and len(s['commands']) > 4 and not s['commands'][4]['output'].endswith('1'):
+            failures.append('developer: security identities ' + s['commands'][4]['output'])
         if s['markers'] != {'project': name == 'developer', 'other': False, 'cache': name != 'reader'}:
             failures.append(name + ': markers ' + str(s['markers']))
         if s['teardown']['members_before'] < 2 or s['teardown']['after_sigkill'] or s['teardown']['relay_alive_after']:
             failures.append(name + ': teardown ' + str(s['teardown']))
     for f in failures:
         print('FAIL', f)
-    print('PASS: Codex externalSandbox under nono (option 1): repeated writes, caches, toolchain, Keychain mediation, MCP relay, denials, teardown'
+    print('PASS: Codex externalSandbox under nono (option 1): repeated writes, caches, toolchain, Keychain mediation with argument allow-list, MCP relay, denials, teardown'
           if not failures else 'FAILED %d checks' % len(failures))
 finally:
     shutil.rmtree(root, ignore_errors=True)

@@ -477,8 +477,8 @@ private func commandReview(_ commands: [String], project: Project, folders: [Age
     #expect(notes.map(\.provider) == ["Claude", "Codex"])
     #expect(notes.allSatisfy { $0.command == "scripts/transcribe-audio" && $0.effect == .noExtraAccess(set: nil) && $0.projectID == project.id })
     let english = notes.first?.text(language: .english) ?? "", russian = notes.first?.text(language: .russian) ?? ""
-    #expect(english == "Claude chats of this project run under the external boundary: this command will still run inside it and gets no extra access there. Instead: an app-owned tool, a folder grant, or a Keychain item grant (planned).")
-    #expect(russian.contains("всё равно выполнится внутри неё") && russian.contains("элементу Связки ключей (планируется)"))
+    #expect(english == "Claude chats of this project run under the external boundary: this command will still run inside it and gets no extra access there. Instead: an app-owned tool, a folder grant, or a Keychain item (`addKeychainItems`).")
+    #expect(russian.contains("всё равно выполнится внутри неё") && russian.contains("запись Связки ключей (`addKeychainItems`)"))
     #expect(SettingsProposalBoundarySummary.text(notes, language: .english)?.contains("gets no extra access") == true)
     // The continuation does not claim new access; it is fixed app text in both languages.
     let outcome = SettingsProposalOutcome.afterApply(review, notes: notes)
@@ -504,13 +504,15 @@ private func commandReview(_ commands: [String], project: Project, folders: [Age
     #expect(signing.count == 2 && signing.allSatisfy { $0.effect == .noExtraAccess(set: "apple-signing") })
     #expect(signing.first?.text(language: .english).contains("Instead: the access set “Apple code signing” (its mediated command runs this with the Keychain or network), an app-owned tool") == true)
     #expect(signing.first?.text(language: .russian).contains("набор доступа «Подпись приложений Apple»") == true)
-    // The inventory: `security` cannot run inside unless mediated, so applying moves the chats off the boundary.
+    // The inventory: `security` cannot run inside unless mediated, so applying moves the chats off the boundary. The route
+    // is a named Keychain item, never the signing set (its `security` lists identities only).
     let keychain = notes(["security find-generic-password -s api"], in: project)
-    #expect(keychain.count == 2 && keychain.allSatisfy { $0.effect == .leavesBoundary(set: "apple-signing") })
+    #expect(keychain.count == 2 && keychain.allSatisfy { $0.effect == .leavesBoundary(set: nil) })
     #expect(keychain.map { $0.text(language: .english) } == [
-        "The external boundary cannot run this command: applying it moves this project's Claude chats off the boundary to the provider's own sandbox with approval prompts. Instead: the access set “Apple code signing” runs it as a mediated command.",
-        "The external boundary cannot run this command: applying it moves this project's Codex chats off the boundary to the provider's own sandbox with approval prompts. Instead: the access set “Apple code signing” runs it as a mediated command."])
+        "The external boundary cannot run this command: applying it moves this project's Claude chats off the boundary to the provider's own sandbox with approval prompts. Instead: a Keychain item in the project settings (`addKeychainItems`).",
+        "The external boundary cannot run this command: applying it moves this project's Codex chats off the boundary to the provider's own sandbox with approval prompts. Instead: a Keychain item in the project settings (`addKeychainItems`)."])
     #expect(keychain.first?.text(language: .russian).contains("уйдут с границы в собственную песочницу провайдера") == true)
+    #expect(keychain.first?.text(language: .russian).contains("`addKeychainItems`") == true)
     let log = notes(["/usr/bin/log show"], in: project)
     #expect(log.count == 2 && log.allSatisfy { $0.effect == .leavesBoundary(set: nil) })
     #expect(SettingsProposalBoundarySummary.text(log, language: .english)?.contains("off the external boundary") == true)
@@ -519,9 +521,87 @@ private func commandReview(_ commands: [String], project: Project, folders: [Age
     #expect(SettingsProposalOutcome.afterApply(logReview, notes: log) == .applied)
     // Negative: the exact entry the planner mediates (`codesign`) does take effect; no note.
     #expect(notes(["codesign"], in: project).isEmpty)
-    // With the set already ticked, `security` is mediated: no note.
+    // With the set ticked, `security` is mediated but only with its argument allow-list: the trusted command gains nothing,
+    // and the note points to a Keychain item.
     var signed = project; signed.accessPresets = ["apple-signing"]
-    #expect(notes(["security find-generic-password -s api"], in: signed).isEmpty)
+    let mediated = notes(["security find-generic-password -s api"], in: signed)
+    #expect(mediated.count == 2 && mediated.allSatisfy { $0.effect == .noExtraAccess(set: nil) })
+    #expect(mediated.first?.text(language: .english) == "Claude chats of this project run under the external boundary: this command will still run inside it and gets no Keychain access there. Instead: a Keychain item in the project settings (`addKeychainItems`) with the exact service and account.")
+    #expect(mediated.first?.text(language: .russian).contains("запись Связки ключей в настройках проекта (`addKeychainItems`)") == true)
+    // The same with a listed item: mediated by the item alone, still nothing gained by the trusted command.
+    var listed = project; listed.keychainItems = [.init(service: "api")]
+    #expect(notes(["security find-generic-password -s api"], in: listed).allSatisfy { $0.effect == .noExtraAccess(set: nil) })
+}
+
+// MARK: - Named Keychain items (user decision 2026-11-12)
+
+private func keychainReview(_ project: Project, add: [AgentPermissionProfile.KeychainItem] = [], remove: [AgentPermissionProfile.KeychainItem] = [])
+    -> (SettingsProposalReview, SavedState) {
+    var state = SavedState(); state.projects = [project]
+    var change = SettingsProposal.Change(project: project.path)
+    change.addKeychainItems = add; change.removeKeychainItems = remove
+    return (SettingsProposalReview(id: "k.json", proposal: .init(reason: "transcription key", changes: [change]), state: state), state)
+}
+
+@Test func aKeychainItemProposalIsCheckedShownAndAppliedOnce() throws {
+    var project = Project(path: "/tmp/kc-project"); project.accessPresets = []
+    let (review, state) = keychainReview(project, add: [
+        .init(service: " openai-api ", account: ""), .init(service: "deepgram", account: "me@example.com"),
+        .init(service: "openai-api"),                              // duplicate after trimming
+        .init(service: "Claude Code-credentials-1a2b3c4d"),         // reserved
+        .init(service: "chrome safe storage"),                     // reserved, any case
+        .init(service: "api*"), .init(service: "-g"), .init(service: "a\nb")])
+    let diff = try #require(review.projects.first)
+    #expect(diff.addKeychainItems == [.init(service: "openai-api"), .init(service: "deepgram", account: "me@example.com")])
+    #expect(review.skipped.count == 5)
+    #expect(review.skipped.filter { $0.contains("refused") || $0.contains("не принята") }.count == 3)
+    #expect(review.skipped.filter { $0.contains("never granted") || $0.contains("не выдаётся") }.count == 2)
+    // The card line names the exact item as data, RU and EN, and says the secret becomes readable.
+    #expect(KeychainItemRule.addLine(diff.addKeychainItems[0], language: .english) == "Keychain: this project's agents will be able to read the secret of the item \"openai-api\" (any account of this service)")
+    #expect(KeychainItemRule.addLine(diff.addKeychainItems[1], language: .english) == "Keychain: this project's agents will be able to read the secret of the item \"deepgram\", account \"me@example.com\"")
+    #expect(KeychainItemRule.addLine(diff.addKeychainItems[1], language: .russian) == "Связка ключей: агенты проекта смогут прочитать секрет записи «deepgram», учётная запись «me@example.com»")
+    #expect(KeychainItemRule.removeLine(diff.addKeychainItems[1], language: .english) == "Remove Keychain item (access gets narrower): deepgram (me@example.com)")
+    var applied = state
+    let changed = applied.apply(review)
+    #expect(changed && applied.projects[0].keychainItems == diff.addKeychainItems)
+    // Applied once: the same proposal again changes nothing and shows nothing to add.
+    let (again, _) = keychainReview(applied.projects[0], add: [.init(service: "openai-api")])
+    #expect(again.projects.isEmpty)
+    // Removal narrows; an item the project does not have is not a removal.
+    let (removal, removalState) = keychainReview(applied.projects[0], remove: [.init(service: "openai-api"), .init(service: "other")])
+    #expect(removal.projects.first?.removeKeychainItems == [.init(service: "openai-api")])
+    var narrowed = removalState
+    let removed = narrowed.apply(removal)
+    #expect(removed && narrowed.projects[0].keychainItems == [.init(service: "deepgram", account: "me@example.com")])
+    // An item with an account is a different item from the service alone.
+    let (other, _) = keychainReview(applied.projects[0], add: [.init(service: "deepgram")])
+    #expect(other.projects.first?.addKeychainItems == [.init(service: "deepgram")])
+    // A Keychain item grants something: the normal continuation, never the no-effect one.
+    #expect(SettingsProposalOutcome.afterApply(review, notes: []) == .applied)
+}
+
+@Test func keychainItemsStopAtTheProjectAndChangeLimits() {
+    var project = Project(path: "/tmp/kc-limits"); project.accessPresets = []
+    project.keychainItems = (1...15).map { .init(service: "s\($0)") }
+    let (review, _) = keychainReview(project, add: (1...8).map { .init(service: "n\($0)") })
+    #expect(review.projects.first?.addKeychainItems == [.init(service: "n1")])
+    #expect(review.skipped == [KeychainItemRule.limitMessage()])
+    // At most eight per change are read; the rest of the list is ignored.
+    var empty = project; empty.keychainItems = nil
+    let (many, _) = keychainReview(empty, add: (1...12).map { .init(service: "m\($0)") })
+    #expect(many.projects.first?.addKeychainItems.count == KeychainItemRule.maximumPerChange && many.skipped.isEmpty)
+}
+
+@Test func agentInstructionsExplainKeychainItemsWithoutTheSecret() {
+    for language in [AppLanguage.english, .russian] {
+        let rule = SettingsProposalInbox.keychainItemRule(language: language)
+        #expect(SettingsProposalInbox.instructions(language: language).contains(rule))
+        #expect(CodexClient.settingsProposalInstructions(boundary: true, language: language)?.contains(rule) == true)
+        #expect(rule.contains("security find-generic-password -s") && rule.contains("`addKeychainItems`") && rule.contains("/usr/bin/security"))
+        #expect(SettingsProposalInbox.boundaryCommandRule(language: language).contains("`addKeychainItems`"))
+    }
+    #expect(SettingsProposalInbox.keychainItemRule(language: .english).contains("Never print the secret"))
+    #expect(SettingsProposalInbox.instructions(language: .english).contains(#""addKeychainItems": [{"service": "example-api", "account": "me"}]"#))
 }
 
 @Test @MainActor func noBoundaryNoWarningAndTheNormalContinuation() throws {
