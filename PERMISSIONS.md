@@ -275,8 +275,9 @@ Known gaps. Check this list before you treat a failure as a new defect.
 - A checkout behind `origin/main` still has the old `scripts/verify-project.py` and
   `scripts/build-app.sh`: from a chat under the boundary they fail on `ps` until the checkout is
   updated (run the queue script of an updated worktree with `--repo` and `--state-dir`).
-- Two chats that install builds in the same period replace each other's bundle before
-  `confirm-live` (seen twice on 2026-11-12). The queue does not serialize install-to-publish.
+- The queue holds an install lease: while an installed batch still waits for `confirm-live` or
+  `publish`, `install` of another batch is refused, unless the lease is older than 45 minutes or
+  the user approves `install BATCH --take-over` (see `scripts/verification-README.md`).
 - Under nono `ps` cannot run (setuid) and `log show` cannot run in any sandbox: use
   `project_diagnostics` and `app_log`. `pgrep` sees only sandboxed processes unless mediated.
   `lsof -i` and `sysctl -n vm.loadavg` work.

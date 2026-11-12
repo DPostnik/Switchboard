@@ -110,7 +110,46 @@ class VerificationQueue:
             CREATE TABLE IF NOT EXISTS results (identity TEXT PRIMARY KEY, batch_id TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS lease (
               singleton INTEGER PRIMARY KEY CHECK(singleton=1), owner TEXT, pid INTEGER, started REAL);
+            CREATE TABLE IF NOT EXISTS install_lease (
+              singleton INTEGER PRIMARY KEY CHECK(singleton=1), batch_id TEXT NOT NULL,
+              installed_at REAL NOT NULL, displaced TEXT);
         ''')
+
+    def install_lease(self, now):
+        """The batch whose bundle `install` last placed in build/, and whether it still holds it.
+
+        A holder keeps the lease while any of its tasks can still reach live confirmation or publication:
+        `awaiting_live`, or `verified` while publication is allowed. Every other task state is final for an
+        installed batch (`published`, `blocked` after awaiting_live, and the defensive `failed`, `cancelled`,
+        `interrupted`, `conflict`), so it no longer holds. Expiry is the caller's policy."""
+        row = self.db.execute('SELECT * FROM install_lease WHERE singleton=1').fetchone()
+        if row is None:
+            return None
+        batch = self.batch(row['batch_id'])
+        tasks = [self.status(task_id) for task_id in (batch['spec']['task_ids'] if batch else [])]
+        allow_publish = bool(batch) and batch['spec']['restrictions'].get('allow_publish') is not False
+        pending = [t for t in tasks if t and (t['status'] == 'awaiting_live' or (t['status'] == 'verified' and allow_publish))]
+        waiting_for = ('live confirmation' if any(t['status'] == 'awaiting_live' for t in pending)
+                       else 'publication' if pending else None)
+        return dict(batch_id=row['batch_id'], installed_at=row['installed_at'],
+                    age_seconds=max(0.0, now - row['installed_at']), active=bool(pending), waiting_for=waiting_for,
+                    tasks=[dict(id=t['id'], title=t['spec'].get('title', t['id']), status=t['status']) for t in tasks if t],
+                    displaced=json.loads(row['displaced']) if row['displaced'] else None)
+
+    def record_install_lease(self, batch_id, installed_at, displaced=None):
+        """Record durable intent before the bundle is replaced; returns the previous row for an exact rollback."""
+        with self.transaction():
+            previous = self.db.execute('SELECT * FROM install_lease WHERE singleton=1').fetchone()
+            self.db.execute('INSERT OR REPLACE INTO install_lease VALUES (1,?,?,?)',
+                            (batch_id, installed_at, canonical(displaced) if displaced else None))
+        return dict(previous) if previous else None
+
+    def restore_install_lease(self, previous):
+        with self.transaction():
+            self.db.execute('DELETE FROM install_lease')
+            if previous:
+                self.db.execute('INSERT INTO install_lease VALUES (?,?,?,?)', (previous['singleton'], previous['batch_id'],
+                                previous['installed_at'], previous['displaced']))
 
     def projection(self):
         tasks = []

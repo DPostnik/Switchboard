@@ -218,6 +218,178 @@ class VerificationIntegrationTests(unittest.TestCase):
         self.assertEqual(batch['status'], 'awaiting_live')
         self.reject_publish(batch)
 
+    # Install lease: one batch at a time owns build/Switchboard.app until it is confirmed live and published.
+
+    def built(self, name, file, **extra):
+        self.submit(name, file=file, **{'after': name, 'title': 'Title of ' + name, **extra})
+        batch = self.run_batch()
+        self.assertIn(batch['status'], ('verified', 'awaiting_live'))
+        return batch
+
+    def install(self, batch, take_over=False, at=0):
+        home = Path(self.temp.name) / 'home'
+        with patch.object(project.Path, 'home', return_value=home), \
+             patch.object(project, 'request_restart', side_effect=lambda repo, path: self.restarts.append(batch['id']) or {'restart': 'requested'}), \
+             contextlib.redirect_stderr(io.StringIO()) as stderr:
+            result = project.install_batch(self.queue, self.repo, self.state, batch['id'], take_over=take_over,
+                                           now=lambda: self.clock + at)
+        return result, stderr.getvalue()
+
+    def refused(self, batch, at=0):
+        before = self.installed_build_info()
+        with self.assertRaises(project.InstallRefused) as caught:
+            self.install(batch, at=at)
+        # Nothing staged, replaced, recorded or requested.
+        self.assertEqual(self.installed_build_info(), before)
+        self.assertFalse((self.state / 'batches' / batch['id'] / 'install-attempt.json').exists())
+        self.assertNotIn(batch['id'], self.restarts)
+        self.assertEqual([p for p in (self.repo / 'build').iterdir() if p.name.startswith('verification-install-')], [])
+        return caught.exception
+
+    def installed_build_info(self):
+        return (self.repo / 'build/Switchboard.app/Contents/Resources/build-info.json').read_text()
+
+    def archived_build_info(self, batch):
+        return (self.state / 'batches' / batch['id'] / 'artifact/Switchboard.app/Contents/Resources/build-info.json').read_text()
+
+    def publish(self, batch):
+        (self.state / 'batches' / batch['id'] / 'live-evidence.json').write_text('{}')
+        messages = Path(self.temp.name) / 'messages.json'
+        messages.write_text(json.dumps({t: 'Publish ' + t for t in batch['spec']['task_ids']}))
+        with patch('verification_snapshot.publish_plan', return_value={'state': 'published'}):
+            project.publish_batch(self.queue, self.repo, self.state, batch['id'], messages, self.base, 'main')
+
+    def lease_fixture(self, **extra):
+        self.restarts = []
+        self.clock = 1_900_000_000.0
+        first = self.built('first', 'a', needs_live=True, **extra)
+        second = self.built('second', 'b', needs_live=True)
+        self.install(first)
+        self.assertEqual(self.installed_build_info(), self.archived_build_info(first))
+        return first, second
+
+    def test_install_refused_while_holder_awaits_live_and_until_published(self):
+        first, second = self.lease_fixture()
+        refusal = self.refused(second, at=12 * 60)
+        message = str(refusal)
+        self.assertNotIn('\n', message)
+        for expected in (first['id'], 'first (Title of first)', '12 min ago', 'live confirmation',
+                         'confirm-live and publish', f'install {second["id"]} --take-over', '45 min'):
+            self.assertIn(expected, message)
+        self.assertEqual(refusal.details['state'], 'refused')
+        self.assertEqual(refusal.details['holder']['batch_id'], first['id'])
+        # Live confirmed but not yet published: still the holder.
+        self.queue.transition('first', 'verified', 'fixture live evidence')
+        self.assertIn('waiting for publication', str(self.refused(second, at=20 * 60)))
+        self.publish(first)
+        result, note = self.install(second, at=21 * 60)
+        self.assertEqual(result['state'], 'waiting_for_restart')
+        self.assertNotIn('displaced', result)
+        self.assertEqual(note, '')
+        self.assertEqual(self.installed_build_info(), self.archived_build_info(second))
+        self.assertEqual(self.restarts, [first['id'], second['id']])
+        self.assertEqual(self.queue.install_lease(self.clock)['batch_id'], second['id'])
+
+    def assert_lease_ends(self, final):
+        first, second = self.lease_fixture()
+        self.refused(second)
+        if final == 'blocked':
+            self.queue.transition('first', 'blocked', 'fixture live check failed')
+        else:
+            # Not reachable after install through the CLI today; the lease must still not outlive it.
+            self.queue.db.execute('UPDATE tasks SET status=? WHERE id=?', (final, 'first'))
+        self.assertFalse(self.queue.install_lease(self.clock)['active'])
+        result, _ = self.install(second)
+        self.assertNotIn('displaced', result)
+        self.assertEqual(self.installed_build_info(), self.archived_build_info(second))
+
+    def test_lease_ends_when_holder_live_check_is_blocked(self):
+        self.assert_lease_ends('blocked')
+
+    def test_lease_ends_when_holder_failed(self):
+        self.assert_lease_ends('failed')
+
+    def test_lease_ends_when_holder_cancelled(self):
+        self.assert_lease_ends('cancelled')
+
+    def test_publication_policy_decides_whether_verified_holder_still_holds(self):
+        self.restarts, self.clock = [], 1_900_000_000.0
+        unpublishable = self.built('first', 'a', restrictions={'allow_publish': False})
+        second = self.built('second', 'b')
+        self.install(unpublishable)
+        # Verified without live and publication prohibited: nothing is pending, so no lease.
+        self.assertFalse(self.queue.install_lease(self.clock)['active'])
+        self.install(second)
+        third = self.built('third', 'a', before='base', after='third')
+        # Verified without live but publication pending: holds.
+        self.assertIn('waiting for publication', str(self.refused(third)))
+
+    def test_stale_lease_expires_after_the_limit(self):
+        first, second = self.lease_fixture()
+        self.refused(second, at=project.INSTALL_LEASE_LIMIT_SECONDS - 1)
+        result, note = self.install(second, at=project.INSTALL_LEASE_LIMIT_SECONDS)
+        self.assertEqual(result['displaced']['batch_id'], first['id'])
+        self.assertEqual(result['displaced']['reason'], 'expired')
+        self.assertIn('stale lease had expired', note)
+        self.assertIn(first['id'], note)
+        self.assertEqual(self.installed_build_info(), self.archived_build_info(second))
+        lease = self.queue.install_lease(self.clock + project.INSTALL_LEASE_LIMIT_SECONDS)
+        self.assertEqual((lease['batch_id'], lease['displaced']['reason']), (second['id'], 'expired'))
+        attempt = json.loads((self.state / 'batches' / second['id'] / 'install-attempt.json').read_text())
+        self.assertEqual(attempt['displaced']['batch_id'], first['id'])
+
+    def test_take_over_is_explicit_and_records_the_displaced_holder(self):
+        first, second = self.lease_fixture()
+        self.refused(second, at=60)
+        result, note = self.install(second, take_over=True, at=60)
+        self.assertEqual((result['displaced']['batch_id'], result['displaced']['reason']), (first['id'], 'take_over'))
+        self.assertEqual(result['displaced']['task_ids'], ['first'])
+        self.assertIn('explicit --take-over', note)
+        self.assertEqual(self.installed_build_info(), self.archived_build_info(second))
+        self.assertEqual(self.queue.install_lease(self.clock)['displaced']['batch_id'], first['id'])
+        # The displaced batch is now refused in turn; it does not get its bundle back automatically.
+        with self.assertRaises(project.InstallRefused):
+            self.install(first, at=120)
+        self.assertEqual(self.installed_build_info(), self.archived_build_info(second))
+        self.assertEqual(self.restarts, [first['id'], second['id']])
+
+    def test_reinstalling_the_holder_keeps_the_attempt_guard(self):
+        first, second = self.lease_fixture()
+        with self.assertRaises(FileExistsError):
+            self.install(first, at=60)
+        self.assertEqual(self.restarts, [first['id']])
+        self.assertEqual(self.installed_build_info(), self.archived_build_info(first))
+        lease = self.queue.install_lease(self.clock)
+        self.assertEqual((lease['batch_id'], lease['installed_at'], lease['displaced']), (first['id'], self.clock, None))
+
+    def cli(self, *args):
+        return REAL_RUN([sys.executable, '-B', str(Path(project.__file__).resolve()), '--repo', str(self.repo),
+                         '--state-dir', str(self.state), *args], capture_output=True, text=True)
+
+    def test_cli_refusal_exit_and_status(self):
+        self.restarts, self.clock = [], __import__('time').time() - 5 * 60
+        first = self.built('first', 'a', needs_live=True)
+        second = self.built('second', 'b', needs_live=True)
+        status = json.loads(self.cli('status').stdout)
+        self.assertIsNone(status['install_lease'])
+        self.install(first)
+        refused = self.cli('install', second['id'])
+        self.assertEqual(refused.returncode, 1)
+        self.assertEqual(len(refused.stderr.strip().splitlines()), 1)
+        self.assertIn('install refused: batch ' + first['id'], refused.stderr)
+        self.assertEqual(json.loads(refused.stdout)['holder']['batch_id'], first['id'])
+        self.assertFalse((self.state / 'batches' / second['id'] / 'install-attempt.json').exists())
+        status = json.loads(self.cli('status').stdout)
+        lease = status['install_lease']
+        self.assertEqual((lease['batch_id'], lease['holds'], lease['waiting_for']), (first['id'], True, 'live confirmation'))
+        self.assertGreaterEqual(lease['age_seconds'], 5 * 60)
+        self.assertLess(lease['expires_in_seconds'], project.INSTALL_LEASE_LIMIT_SECONDS - 5 * 60 + 1)
+        self.assertNotIn('install_lease', json.loads((self.state / 'status.json').read_text()))
+        self.queue.transition('first', 'verified', 'fixture live evidence')
+        self.publish(first)
+        lease = json.loads(self.cli('status').stdout)['install_lease']
+        self.assertEqual((lease['batch_id'], lease['holds'], lease['waiting_for']), (first['id'], False, None))
+
     def test_flaky_exit_zero_does_not_verify(self):
         self.submit('one', checks=[dict(kind='native-tests', filters=['FixtureTests'])])
         self.flaky = True

@@ -130,6 +130,8 @@ def main():
     cancel.add_argument('task_id')
     install = subs.add_parser('install')
     install.add_argument('batch_id')
+    install.add_argument('--take-over', action='store_true',
+                         help='install even while another batch holds the installed bundle; only with the user')
     publish = subs.add_parser('publish')
     publish.add_argument('batch_id')
     publish.add_argument('messages', type=Path, help='JSON map of task IDs to commit messages')
@@ -180,7 +182,7 @@ def main():
                 task['checks'].insert(0, {'kind': 'build', 'filters': []})
             emit(queue.submit(task))
         elif args.action == 'status':
-            emit(queue.projection())
+            emit(dict(queue.projection(), install_lease=lease_view(queue, time.time())))
         elif args.action == 'plan':
             emit(queue.plan_batch())
         elif args.action == 'cancel':
@@ -188,7 +190,7 @@ def main():
         elif args.action == 'recover':
             emit(queue.recover())
         elif args.action == 'install':
-            emit(install_batch(queue, args.repo, args.state_dir, args.batch_id))
+            emit(install_batch(queue, args.repo, args.state_dir, args.batch_id, take_over=args.take_over))
         elif args.action == 'publish':
             emit(publish_batch(queue, args.repo, args.state_dir, args.batch_id, args.messages, args.expected_remote_base, args.branch))
         elif args.action == 'reconcile':
@@ -314,12 +316,61 @@ def durable_attempt(path, value):
         os.close(descriptor)
 
 
-def install_batch(queue, repo, state_dir, batch_id):
+INSTALL_LEASE_LIMIT_SECONDS = 45 * 60
+
+
+class InstallRefused(ValueError):
+    """Another batch holds the installed bundle. Nothing was staged, replaced or recorded."""
+
+    def __init__(self, details):
+        super().__init__(details['reason'])
+        self.details = details
+
+
+def minutes(seconds):
+    return f'{int(seconds // 60)} min'
+
+
+def lease_view(queue, now, limit=INSTALL_LEASE_LIMIT_SECONDS):
+    """The install lease as `status` shows it, or None when no batch was installed through the queue."""
+    lease = queue.install_lease(now)
+    if lease is None:
+        return None
+    expired = lease['age_seconds'] >= limit
+    return dict(lease, holds=lease['active'] and not expired, expired=lease['active'] and expired,
+                limit_seconds=limit, expires_in_seconds=max(0.0, limit - lease['age_seconds']) if lease['active'] else 0.0)
+
+
+def claim_install_lease(queue, batch_id, now, take_over=False, limit=INSTALL_LEASE_LIMIT_SECONDS):
+    """Refuse an install of a different batch while the holder waits for live confirmation or publication.
+
+    Returns who was displaced (expired lease or explicit take-over), or None. Must run under the executor lock."""
+    lease = lease_view(queue, now, limit)
+    if lease is None or lease['batch_id'] == batch_id or not lease['active']:
+        return None
+    displaced = dict(batch_id=lease['batch_id'], installed_at=lease['installed_at'],
+                     age_seconds=lease['age_seconds'], task_ids=[t['id'] for t in lease['tasks']])
+    if lease['expired']:
+        return dict(displaced, reason='expired', at=now)
+    if take_over:
+        return dict(displaced, reason='take_over', at=now)
+    tasks = ', '.join(f"{t['id']} ({t['title']})" for t in lease['tasks']) or 'no tasks'
+    reason = (f"install refused: batch {lease['batch_id']} holds the installed bundle (tasks: {tasks}; installed "
+              f"{minutes(lease['age_seconds'])} ago; waiting for {lease['waiting_for']}). Wait, or let its chat finish "
+              f"with confirm-live and publish, or with the user's approval run install {batch_id} --take-over; "
+              f"the lease expires {minutes(limit)} after install")
+    raise InstallRefused(dict(state='refused', batch_id=batch_id, reason=reason, holder=lease,
+                              options=['wait', 'holder runs confirm-live and publish',
+                                       f'install {batch_id} --take-over (explicit, with the user)']))
+
+
+def install_batch(queue, repo, state_dir, batch_id, take_over=False, now=time.time):
     """Publish bundle locally once; retain old bundle for its running process."""
     with queue.executor():
         batch = queue.batch(batch_id)
         if not batch or batch['status'] not in ('verified', 'awaiting_live'):
             raise ValueError('installation requires completed machine checks')
+        displaced = claim_install_lease(queue, batch_id, now(), take_over)
         directory = state_dir / 'batches' / batch_id
         artifact = directory / 'artifact/Switchboard.app'
         executable = artifact / 'Contents/MacOS/Switchboard'
@@ -340,6 +391,8 @@ def install_batch(queue, repo, state_dir, batch_id):
             fcntl.flock(lock, fcntl.LOCK_EX)
             marker = directory / 'install-attempt.json'
             record = {'state': 'installing', 'executable_sha256': digest(executable), 'started_at': time.time()}
+            if displaced:
+                record['displaced'] = displaced
             durable_attempt(marker, record)
             stage = Path(tempfile.mkdtemp(prefix='verification-install-', dir=build)) / 'Switchboard.app'
             clone_bundle(artifact, stage)
@@ -348,21 +401,32 @@ def install_batch(queue, repo, state_dir, batch_id):
                 raise ValueError('staged bundle differs from verified archive')
             destination = build / 'Switchboard.app'
             backup = build / '.replaced' / ('Switchboard-' + str(time.time_ns()) + '.app')
-            if destination.exists():
-                backup.parent.mkdir(exist_ok=True)
-                destination.rename(backup)
+            # Durable lease before the bundle is replaced: a crash after this point still blocks other batches.
+            previous_lease = queue.record_install_lease(batch_id, now(), displaced)
             try:
+                if destination.exists():
+                    backup.parent.mkdir(exist_ok=True)
+                    destination.rename(backup)
                 stage.rename(destination)
             except BaseException:
                 if backup.exists():
                     backup.rename(destination)
+                # The previous bundle is back in place (or was never moved), so its lease is too.
+                queue.restore_install_lease(previous_lease)
                 raise
             stage.parent.rmdir()
             record['state'] = 'installed'
             record['installed_at'] = time.time()
             record['destination'] = str(destination)
             marker.write_text(json.dumps(record, indent=2))
+        if displaced:
+            note = (f"install: took over the install lease of batch {displaced['batch_id']} (installed "
+                    f"{minutes(displaced['age_seconds'])} ago): "
+                    + ('the stale lease had expired' if displaced['reason'] == 'expired' else 'explicit --take-over'))
+            print(note, file=sys.stderr, flush=True)
         result = request_restart(repo, directory / 'restart-attempt.json')
+        if displaced:
+            result['displaced'] = displaced
         return {'state': 'waiting_for_restart', 'batch_id': batch_id, 'artifact': str(destination), 'next': 'confirm-live', **result}
 
 
@@ -507,6 +571,10 @@ def make_runner(repo, state_dir, queue=None):
 if __name__ == '__main__':
     try:
         main()
+    except InstallRefused as refusal:
+        emit(refusal.details)
+        print(f'verify-project: {refusal}', file=sys.stderr)
+        sys.exit(1)
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.CalledProcessError) as error:
         print(f'verify-project: {error}', file=sys.stderr)
         sys.exit(1)

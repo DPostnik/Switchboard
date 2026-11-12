@@ -88,6 +88,23 @@ restart intent before acting. It requests a restart exactly once, then returns
 must call the app-owned `request_app_restart` tool exactly once, then end the turn and wait. An existing attempt blocks repetition, including after uncertain
 transport delivery. Installation does not mark live behavior verified.
 
+Only one batch at a time owns the installed bundle. `install` records an install lease in the
+queue database (holder batch and install time) before it replaces `build/Switchboard.app`. While
+the holder still waits for `confirm-live` or `publish`, `install` of a different batch is refused
+before anything is checked, staged or replaced: it exits 1 with a one-line reason on stderr (holder
+batch, its task IDs and titles, how long ago it was installed, what it waits for) and the same details
+as JSON on stdout. It consumes no install or restart attempt. The holder keeps the lease while any of its
+tasks is `awaiting_live`, or `verified` while publication is allowed (live confirmed but not yet
+published still holds). The lease ends when its tasks are `published`, `blocked` (failed live check),
+`failed`, `cancelled`, `interrupted` or `conflict`, or `verified` with `allow_publish: false`. A lease
+older than 45 minutes (`INSTALL_LEASE_LIMIT_SECONDS`) no longer blocks, so an abandoned chat cannot block
+everyone; the next install says it took over the stale lease. `install BATCH_ID --take-over` installs
+anyway and records the displaced batch in the lease and in `install-attempt.json`; it is never automatic
+and needs the user's approval, because the displaced chat's `confirm-live` can no longer match.
+Re-running `install` for the holder batch still stops at its existing attempt. `status` adds
+`install_lease` (holder, tasks, `age_seconds`, `holds`, `expired`, `expires_in_seconds`, `displaced`);
+`status.json` is unchanged.
+
 After restart, `confirm-live` requires JSON evidence with `snapshot_digest`,
 `executable_sha256`, `running_executable` (absolute path), `pid`, `verified_by`, and
 `checks` (concrete observed behavior). It verifies exact archived identity, matching

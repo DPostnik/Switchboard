@@ -206,5 +206,41 @@ class BoundaryTests(unittest.TestCase):
                 module.request_restart(Path(directory), record, environ={})
             run.assert_not_called()
 
+class InstallLeaseTests(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(Path(__file__).parent))
+        self.addCleanup(sys.path.remove, str(Path(__file__).parent))
+        from verification_queue import VerificationQueue
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.queue = VerificationQueue(Path(self.temp.name))
+        self.addCleanup(self.queue.close)
+
+    def test_without_install_there_is_no_lease_and_take_over_displaces_nobody(self):
+        self.assertIsNone(module.lease_view(self.queue, 100.0))
+        self.assertIsNone(module.claim_install_lease(self.queue, 'any', 100.0, take_over=True))
+
+    def test_failed_replacement_restores_the_previous_lease_exactly(self):
+        self.queue.record_install_lease('old', 10.0)
+        previous = self.queue.record_install_lease('new', 20.0, {'batch_id': 'old', 'reason': 'take_over'})
+        self.assertEqual(self.queue.install_lease(30.0)['displaced'], {'batch_id': 'old', 'reason': 'take_over'})
+        self.queue.restore_install_lease(previous)
+        lease = self.queue.install_lease(30.0)
+        self.assertEqual((lease['batch_id'], lease['installed_at'], lease['displaced'], lease['age_seconds']), ('old', 10.0, None, 20.0))
+        self.queue.restore_install_lease(None)
+        self.assertIsNone(self.queue.install_lease(30.0))
+
+    def test_unknown_holder_batch_does_not_block(self):
+        self.queue.record_install_lease('vanished', 10.0)
+        view = module.lease_view(self.queue, 20.0)
+        self.assertEqual((view['active'], view['holds'], view['expired']), (False, False, False))
+        self.assertIsNone(module.claim_install_lease(self.queue, 'other', 20.0))
+
+    def test_take_over_flag_is_opt_in(self):
+        parser_help = subprocess.run([sys.executable, '-B', str(Path(module.__file__)), 'install', '--help'],
+                                     capture_output=True, text=True).stdout
+        self.assertIn('--take-over', parser_help)
+
+
 if __name__ == '__main__':
     unittest.main()
