@@ -31,6 +31,10 @@ public actor CodexIntegration: AgentIntegration {
     private var resources: URL?
     /// Reasons already logged for running a worker natively instead of under the external boundary.
     private var loggedBoundaryReasons = Set<String>()
+    /// The fallback notice last shown per chat: once per session and reason.
+    private var boundaryNotices = CodexBoundaryNotices()
+    /// The nono helper a worker runs under; tests inject one.
+    private let boundaryHelper: @Sendable () -> Result<ExternalSandboxHelper, ExternalSandboxHelper.Failure>
     private var providerArguments: [String] = []
     private var dispatched = Set<UUID>()
     private var turnContexts: [AgentSessionReference: [String: AgentContext]] = [:]
@@ -43,8 +47,9 @@ public actor CodexIntegration: AgentIntegration {
     private var knownModels: [AgentModelInfo] = []
     /// The user's own skill folder (`~/.codex/skills` in the app), registered read-only next to the app's workflows.
     private let userSkills: URL?
-    public init(client: CodexClient = CodexClient(), userSkills: URL? = nil) {
-        self.client = client; self.userSkills = userSkills
+    public init(client: CodexClient = CodexClient(), userSkills: URL? = nil,
+                boundaryHelper: @escaping @Sendable () -> Result<ExternalSandboxHelper, ExternalSandboxHelper.Failure> = { ExternalSandboxHelper.bundled() }) {
+        self.client = client; self.userSkills = userSkills; self.boundaryHelper = boundaryHelper
         let pair = AsyncStream<AgentEvent>.makeStream(); events = pair.stream; sink = pair.continuation
     }
     deinit { for task in chromeObservers.values { task.cancel() }; observer?.cancel(); for task in providerObservers.values { task.cancel() }; sink.finish() }
@@ -323,41 +328,60 @@ public actor CodexIntegration: AgentIntegration {
         // Keep the owner after the parent completes: background children and their stop/history
         // operations still belong to this process. Scope changes and disconnect release it.
     }
-    /// The planner input for a Codex worker. The settings proposal inbox is writable, as for Claude, so "one refusal, one
-    /// request" works inside the boundary (invariant 14).
+    /// The planner input for a Codex worker: the same planner path as Claude (invariant 14). The settings proposal inbox is
+    /// writable, so "one refusal, one request" works inside the boundary; `pgrep` is mediated (inside, it sees only sandboxed
+    /// processes); a trusted project command the boundary cannot run keeps the worker on the native sandbox.
     static func boundaryInput(project: String, permissions: AgentPermissionProfile, home: URL, executable: URL, resources: URL?,
                               workflowDirectories: [URL], inbox: URL = SettingsProposalInbox.directory) -> ExternalSandboxPlanner.Input {
         var input = ExternalSandboxPlanner.Input(project: project, profile: permissions, providerHome: home, providerExecutable: executable,
                                                  resources: resources, workflowDirectories: workflowDirectories)
         try? FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
         input.extraWrites = [inbox.path]
+        input.mediateProcessList = true; input.commandInventory = true
         return input
     }
-    /// The external boundary for a worker, or nil (native sandbox and prompts) with the reason logged once.
-    private func boundary(project: String, permissions: AgentPermissionProfile, route: AgentRoute) async throws -> ExternalSandboxLaunch? {
-        let base = try worker(for: route)
-        guard let launch = await base.launchInfo else { return nil }
-        let helper = ExternalSandboxHelper.bundled()
-        let input = Self.boundaryInput(project: project, permissions: permissions, home: launch.home, executable: launch.executable,
-                                       resources: resources, workflowDirectories: await base.registeredWorkflowDirectories)
+    /// The boundary decision for a planner input. Role-defined reasons come first, as for Claude, so an Operator chat is never
+    /// reported as a missing helper.
+    static func boundaryDecision(_ input: ExternalSandboxPlanner.Input,
+                                 helper: () -> Result<ExternalSandboxHelper, ExternalSandboxHelper.Failure>) -> Result<ExternalSandboxLaunch, ExternalSandboxPlanner.Ineligible> {
+        if let reason = ExternalSandboxPlanner.eligibility(input.profile) { return .failure(reason) }
+        let helper = helper()
         switch ExternalSandboxPlanner.plan(input, helper: helper) {
         case .success(let plan):
-            guard case .success(let verified) = helper else { return nil }
-            return ExternalSandboxLaunch(plan: plan, helper: verified)
+            guard case .success(let verified) = helper else { return .failure(.helper(.missing(""))) }
+            return .success(ExternalSandboxLaunch(plan: plan, helper: verified))
+        case .failure(let reason): return .failure(reason)
+        }
+    }
+    /// The external boundary for a worker, or nil (native sandbox and prompts) with the reason logged once. The reason is
+    /// returned for the chat notice; nil when the boundary is used or not attempted (no launch info).
+    private func boundary(project: String, permissions: AgentPermissionProfile, route: AgentRoute) async throws
+        -> (launch: ExternalSandboxLaunch?, fallback: ExternalSandboxPlanner.Ineligible?) {
+        let base = try worker(for: route)
+        guard let launch = await base.launchInfo else { return (nil, nil) }
+        let input = Self.boundaryInput(project: project, permissions: permissions, home: launch.home, executable: launch.executable,
+                                       resources: resources, workflowDirectories: await base.registeredWorkflowDirectories)
+        switch Self.boundaryDecision(input, helper: boundaryHelper) {
+        case .success(let launch): return (launch, nil)
         case .failure(let reason):
             let text = reason.description(language: .english)
-            if loggedBoundaryReasons.insert(text).inserted {
+            if loggedBoundaryReasons.insert(project + "\n" + text).inserted {
                 ExternalSandboxLog.logger.notice("Native Codex sandbox for \(project, privacy: .public): \(text, privacy: .public)")
             }
-            return nil
+            return (nil, reason)
         }
+    }
+    /// Shows the fallback notice in the chat once per session and reason; a worker under the boundary resets it.
+    private func noteFallback(_ reason: ExternalSandboxPlanner.Ineligible?, session: AgentSessionReference) {
+        if let text = boundaryNotices.note(reason, session: session) { sink.yield(.init(session: session, payload: .diagnostic(text))) }
     }
     private func refreshChromeWorker(_ request: AgentExecutionRequest, session: AgentSessionReference) async throws {
         let scope = try chromeScope(request)
         guard chromeScopes[session] != scope else { return }
+        let decision = try await boundary(project: scope.project, permissions: scope.permissions, route: request.route)
         let fresh = try await worker(for: request.route).isolatedSibling(
             permissionArguments: scope.permissions.codexProcessArguments(projectPath: scope.project),
-            boundary: boundary(project: scope.project, permissions: scope.permissions, route: request.route))
+            boundary: decision.launch)
         do {
             // The process that loaded the thread holds its writer lock; the cold worker cannot resume it until it is released.
             try await (chromeWorkers[session] ?? worker(for: request.route)).release(session)
@@ -366,6 +390,7 @@ public actor CodexIntegration: AgentIntegration {
                                    chatDirectory: request.chatDirectory)
         } catch { await fresh.stop(); throw error }
         await bindChromeWorker(fresh, session: session, scope: scope)
+        noteFallback(decision.fallback, session: session)
     }
     public func prepare(_ request: AgentExecutionRequest) async -> AgentResult<AgentSessionReference> {
         do {
@@ -378,9 +403,10 @@ public actor CodexIntegration: AgentIntegration {
                     return session
                 }
                 let chosen = try self.worker(for: request.route)
+                let decision = try await self.boundary(project: request.projectPath, permissions: access, route: request.route)
                 let worker = try await chosen.isolatedSibling(
                     permissionArguments: access.codexProcessArguments(projectPath: request.projectPath),
-                    boundary: self.boundary(project: request.projectPath, permissions: access, route: request.route))
+                    boundary: decision.launch)
                 let session: AgentSessionReference
                 do {
                     session = try await worker.createSession(projectPath: request.projectPath, permissions: access, model: request.model.model, route: route,
@@ -388,6 +414,7 @@ public actor CodexIntegration: AgentIntegration {
                                                              userChromeGrant: request.userChromeGrant, chatDirectory: request.chatDirectory)
                 } catch { await worker.stop(); throw error }
                 await self.bindChromeWorker(worker, session: session, scope: try self.chromeScope(request))
+                self.noteFallback(decision.fallback, session: session)
                 self.sessionRoutes[session] = (request.route, request.model.context)
                 return session
             }

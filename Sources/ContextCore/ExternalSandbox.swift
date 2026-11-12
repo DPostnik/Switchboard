@@ -305,6 +305,14 @@ public enum ExternalSandboxPlanner {
         }
     }
 
+    /// The chat notice for a native fallback, shared by both providers: the reason (with its route when the user can act)
+    /// and the sandbox the chat runs with instead. RU/EN (invariant 16).
+    public static func fallbackNotice(_ reason: String, sandbox: (ru: String, en: String), language: AppLanguage = L10n.language) -> String {
+        L10n.text("Внешняя граница недоступна: \(reason). Чат работает с \(sandbox.ru) и запросами подтверждения.",
+                  "External boundary unavailable: \(reason). This chat runs with \(sandbox.en) and approval prompts.",
+                  language: language)
+    }
+
     /// Fixed read-only trees every sandboxed worker needs for its toolchain: Xcode, Command Line Tools, Homebrew.
     static let toolchainTrees = ["/Applications/Xcode.app/Contents/Developer", "/Library/Developer/CommandLineTools", "/opt/homebrew"]
     static let executableSubdirectories = ["Toolchains/XcodeDefault.xctoolchain/usr/bin", "usr/bin"]
@@ -426,8 +434,8 @@ public enum ExternalSandboxPlanner {
     static let systemPrefixes = ["/usr/", "/bin/", "/sbin/", "/System/", "/Library/Developer/", "/Applications/", "/opt/homebrew/",
                                  "/dev/", "/etc/", "/private/etc/"]
     /// The project command inventory: the first trusted command that can neither be mediated nor run inside the plan's
-    /// grants, or nil. The app's base entries (`AccessPresetCatalog.baseUnsandboxed`) are exempt. Pure, so both providers
-    /// can call it; only Claude does today (Codex: PERMISSIONS.md section 5).
+    /// grants, or nil. The app's base entries (`AccessPresetCatalog.baseUnsandboxed`) are exempt. Both providers apply it
+    /// through `Input.commandInventory`.
     public static func unrunnableTrustedCommand(_ trusted: [String], mediated: Set<String>, grants: [ExternalSandboxPlan.Grant], home: URL) -> String? {
         let base = Set(AccessPresetCatalog.baseUnsandboxed)
         func inside(_ raw: String) -> Bool {

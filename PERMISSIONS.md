@@ -188,12 +188,12 @@ Do not reopen these without the user.
 | Enforcement for eligible Developer chats | External boundary (nono), since 2026-11-11, commit 2cddfce | External boundary (nono), phase B2+B3 (commit 524ba0e, verified live in super-wiki 2026-11-12) + the role's command hook; the phase A CLI sandbox remains the fallback |
 | Prompts for commands | None: `externalSandbox`, `approvalPolicy: never` | Under the boundary none except the role's ask list (hook); ledger reason `boundary`. On the fallback: as phase A (CLI sandbox, `trusts`, ask or deny) |
 | File tools | Share the session union (approximation: access-set paths are writable to them) | Answered by roots in `permission()` (inner check, stricter than the session union); under the boundary a path outside is denied without a prompt, reason `outsideBoundary`, text names the settings proposal |
-| Leaving the sandbox | Not possible; mediated commands and relay tools only | Under the boundary not possible (`dangerouslyDisableSandbox` changes nothing); mediated `pgrep`, `codesign`/`security`, `gh`, `git` by access set. On the fallback: flag + trusted command |
+| Leaving the sandbox | Not possible; mediated commands (`pgrep`, `codesign`/`security`, `gh`, `git` by access set) and relay tools only | Under the boundary not possible (`dangerouslyDisableSandbox` changes nothing); mediated `pgrep`, `codesign`/`security`, `gh`, `git` by access set. On the fallback: flag + trusted command |
 | App-owned tools | Through the relay. `project_diagnostics` (diagnostics server) for every role with a shell; `app_log` and `request_app_restart` only where the running app bundle lies inside the project | Under the boundary through the relay (`switchboard_browser`, chat directory with `project_diagnostics`, `app_log`, `request_app_restart` under the same gates); project `.mcp.json` servers inside. On the fallback: direct |
 | Access requests (channel 4) | Under the boundary: the inbox is a writable grant, `$SWITCHBOARD_SETTINGS_PROPOSALS` is set, the format instructions are given, `chat` = `CODEX_THREAD_ID`. Native path: none | Inbox writable in the CLI sandbox and under the boundary, `chat` = `SWITCHBOARD_CHAT_ID` |
 | Request card and continuation | A proposal whose `chat` names an existing, unarchived, non-scheduled chat is a card in that chat (Apply, Reject; waiting state in the sidebar, Needs you, palette, dock, notch and Fringe). Apply saves the settings, removes the file, queues one fixed message; Reject removes the file, queues one fixed rejection. Only a removed file continues its chat, once. Other proposals keep the global sheet | Same (shared code in `DeskModel`) |
 | Credentials | `CODEX_HOME` auth file inside the provider home | The app reads its profile's Keychain item with `/usr/bin/security` outside; the bare token goes as the first stdin line to a zsh launcher that moves it to fd 3 (option d). The CLI cannot refresh it: a live worker is replaced at the next turn once less than 30 minutes remain; a launch with a missing or expiring token falls back to the CLI sandbox, whose CLI renews the Keychain item itself (assumption, unverified live) |
-| Ineligible cases | Operator role, role without network, command sandbox off, helper not verified: native sandbox with prompts | Codex's cases, plus: a trusted project command the boundary cannot run (inventory), the user's Chrome (`--chrome`) enabled, token missing or expiring. Visible RU/EN chat notice, once per session and reason; role-defined cases (unrestricted, no network) only logged (`externalSandbox`) |
+| Ineligible cases | Operator role, role without network, command sandbox off, helper not verified, a trusted project command the boundary cannot run (inventory, same planner input as Claude; `ps` and `sysctl -n` exempt): native sandbox with prompts. Visible RU/EN chat notice (`CodexBoundaryNotices`, text from `ExternalSandboxPlanner.fallbackNotice`), once per chat and reason, when a worker starts; role-defined cases (unrestricted, no network, command sandbox off) only logged | Codex's cases, plus: the user's Chrome (`--chrome`) enabled, token missing or expiring. Visible RU/EN chat notice, once per session and reason; role-defined cases (unrestricted, no network) only logged (`externalSandbox`); command sandbox off is shown |
 | Revocation | A changed scope replaces the worker at the next send | A changed plan authority or launch replaces the process at the next turn: process group SIGTERM, wait up to 3 s, SIGKILL, relay host stopped, worker folder removed, then the new process; per-session epoch for pending interactions. A running turn is not stopped by a settings change (both providers) |
 
 Claude phases B2+B3 were published as `524ba0e` (with the relay fix: app-owned servers start in the
@@ -292,12 +292,13 @@ Known gaps. Check this list before you treat a failure as a new defect.
   outside a sandbox) and so `scripts/build-app.sh` as a whole are unverified under the boundary.
 - job-search's trusted `launchctl` and `cp … ~/Library/LaunchAgents/` keep its Claude chats on the
   CLI sandbox (inventory); no app-owned tool covers them.
-- The command inventory (`ExternalSandboxPlanner.unrunnableTrustedCommand`) is used by Claude only.
-  Codex does not apply it yet (invariant 14 gap, waiting for the user's decision): it would take
-  this project's Codex chats off the boundary they use today because of the trusted `log show`.
-  The base entries `ps` and `sysctl -n` are exempt for both.
-- Mediated `pgrep` is a Claude planner input only; Codex chats under the boundary do not have it.
-- Codex shows no chat notice when it falls back to the native sandbox; the reason is only logged.
+- The command inventory (`ExternalSandboxPlanner.unrunnableTrustedCommand`) and mediated `pgrep` apply
+  to both providers through the same planner inputs (Codex since 2026-11-12, after the user removed
+  this project's trusted `/usr/bin/log show`). The base entries `ps` and `sysctl -n` are exempt for
+  both. Not checked live for Codex: a project with an unrunnable trusted command, the notice, `pgrep`.
+- The Codex fallback notice appears when a worker starts (new chat, scope change), not on every
+  turn: a chat whose worker is kept shows it once. Claude shows a notice for "command sandbox off";
+  Codex treats it as role-defined and only logs it, as the brief of 2026-11-12 asked.
 - Claude's own Claude in Chrome bridge (`--chrome`) is not verified under nono, so chats with the
   user's Chrome stay on the CLI sandbox.
 - Access requests: the card does not reach the mobile app. A proposal without a valid chat (none,

@@ -99,9 +99,7 @@ enum ClaudeBoundaryFallback: Error, Equatable, Sendable {
     }
     /// The chat notice: once per change of reason, RU/EN.
     func notice(language: AppLanguage = L10n.language) -> String {
-        L10n.text("Внешняя граница недоступна: \(description(language: language)). Чат работает с песочницей CLI и запросами подтверждения.",
-                  "External boundary unavailable: \(description(language: language)). This chat runs with the CLI sandbox and approval prompts.",
-                  language: language)
+        ExternalSandboxPlanner.fallbackNotice(description(language: language), sandbox: ("песочницей CLI", "the CLI sandbox"), language: language)
     }
 }
 

@@ -155,12 +155,50 @@ private func workerFixture() throws -> (URL, URL) {
     let input = CodexIntegration.boundaryInput(project: project.path, permissions: profile, home: root.appendingPathComponent("codex-home"),
                                                executable: root.appendingPathComponent("codex"), resources: nil, workflowDirectories: [], inbox: inbox)
     #expect(input.extraWrites == [inbox.path] && FileManager.default.fileExists(atPath: inbox.path))
-    // Only the inbox: no settings file, no mediated pgrep, no command inventory (Codex behavior unchanged otherwise).
-    #expect(input.extraReads.isEmpty && !input.settingsFile && !input.mediateProcessList && !input.commandInventory)
+    // The inbox, mediated pgrep and the command inventory, as for Claude; no settings file and no extra reads.
+    #expect(input.extraReads.isEmpty && !input.settingsFile && input.mediateProcessList && input.commandInventory)
     // Negative: the native path's file roots stay the project's own (invariant 6).
     let native = try #require(profile.codexTurnParameters(projectPath: project.path)["sandboxPolicy"])
     #expect(!native["writableRoots"].array.contains(.string(inbox.path)))
     #expect(!native["writableRoots"].array.contains(.string(SettingsProposalInbox.directory.path)))
+}
+
+/// A Codex chat that falls back to the native sandbox for a reason the user can act on shows the notice once; a
+/// role-defined fallback (Operator) shows none. The helper is injected as unverified; the fallback keeps the native
+/// sandbox (invariant 9).
+@Test(arguments: [AgentRoleID.developer, AgentRoleID.fullOperator])
+func codexFallbackShowsTheNoticeOncePerChatAndNeverForRoleDefinedReasons(role: String) async throws {
+    let (root, executable) = try workerFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let app = AgentClient(integration: CodexIntegration(boundaryHelper: { .failure(.missing("/fixture/nono")) }))
+    let log = WorkerEventLog()
+    let observer = Task { for await event in app.events { await log.append(event) } }
+    defer { observer.cancel() }
+    _ = try await app.start(.init(executable: executable, home: root))
+    var project = Project(path: root.path); project.accessPresets = []
+    let rights = AgentRoleCatalog.preset(role).profile(for: project)
+    let session = try await app.createSession(projectPath: root.path, permissions: rights, model: "", route: .direct)
+    for _ in 1...2 {
+        let marker = await log.events.count
+        _ = try await app.send("children", to: session, projectPath: root.path, permissions: rights, model: "", effort: "")
+        _ = try await log.wait(after: marker) { if case .completed = $0.payload { return $0.session == session }; return false }
+    }
+    func notices() async -> [String] {
+        await log.events.compactMap { event -> String? in
+            if case .diagnostic(let text) = event.payload, event.session == session { return text }; return nil
+        }
+    }
+    let expected = CodexBoundaryNotices.text(.helper(.missing("/fixture/nono")))
+    // Developer: once over two turns. Operator (unrestricted, role-defined): only logged.
+    #expect(await notices() == (role == AgentRoleID.developer ? [expected] : []))
+    // A scope change replaces the worker. Reader has the same actionable reason: after Developer it is not repeated,
+    // after Operator it is shown once (the negative: the Operator silence was the role, not a missing channel).
+    let reader = AgentRoleCatalog.preset(AgentRoleID.reader).profile(for: project)
+    let marker = await log.events.count
+    _ = try await app.send("children", to: session, projectPath: root.path, permissions: reader, model: "", effort: "")
+    _ = try await log.wait(after: marker) { if case .completed = $0.payload { return $0.session == session }; return false }
+    #expect(await notices() == [expected])
+    await app.stop()
 }
 
 @Test(arguments: ["reset", "crash"])

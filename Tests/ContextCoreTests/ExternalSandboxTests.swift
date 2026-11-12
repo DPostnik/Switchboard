@@ -273,7 +273,7 @@ private func claudeInput(_ root: URL, project: Project, workerID: String) -> Ext
     #expect(!plan.authority.contains { $0.contains(plan.worker.path) })
     var narrower = claudeInput(root, project: project, workerID: "c3"); narrower.extraReads = [attachments.path]
     #expect(try ExternalSandboxPlanner.plan(narrower, helper: .success(helper)).get().authority != plan.authority)
-    // Codex inputs keep their behavior: no pgrep, no settings file.
+    // A bare input adds neither: pgrep and the settings file are planner inputs, not defaults.
     let codex = try ExternalSandboxPlanner.plan(.init(project: project.path, profile: input.profile, providerHome: input.providerHome,
                                                       providerExecutable: input.providerExecutable, resources: input.resources, workerID: "x1", home: input.home),
                                                 helper: .success(helper)).get()
@@ -318,8 +318,8 @@ private func claudeInput(_ root: URL, project: Project, workerID: String) -> Ext
     input.workerID = "cx1"; input.home = root.appendingPathComponent("home")
     let plan = try ExternalSandboxPlanner.plan(input, helper: .success(helper)).get()
     #expect(plan.grants.contains(.init(.allow, inbox.resolvingSymlinksInPath().path)))
-    // The inbox is the only addition: Codex still has no settings file and no mediated pgrep.
-    #expect(!plan.commands.contains { $0.name == "pgrep" } && !plan.grants.contains { $0.path == plan.settingsFile.path })
+    // Codex has the inbox and mediated pgrep, as Claude; no settings file (Claude-only launch settings).
+    #expect(plan.commands.contains { $0.name == "pgrep" } && !plan.grants.contains { $0.path == plan.settingsFile.path })
     let environment = CodexConnection.boundaryEnvironment(ExternalSandboxLaunch(plan: plan, helper: helper))
     #expect(environment[SettingsProposalInbox.environmentKey] == SettingsProposalInbox.directory.path)
     #expect(environment["TMPDIR"] == plan.temporary.path && environment["SWITCHBOARD_EXTERNAL_SANDBOX"] == "1")
@@ -353,15 +353,80 @@ private func claudeInput(_ root: URL, project: Project, workerID: String) -> Ext
     #expect(check(["cat '/private/var/root/x'"]) == "cat '/private/var/root/x'")
     #expect(check(["tee /private/tmp/x.sock"]) == "tee /private/tmp/x.sock")
     #expect(check(["osascript -e x"]) == "osascript -e x" && check(["pkill -f x"]) == "pkill -f x" && check(["sudo true"]) == "sudo true")
-    // In the planner: Claude refuses the boundary with the command named; the Codex input is unchanged (user decision pending).
+    // In the planner: Claude refuses the boundary with the command named; an input without the inventory still plans.
     var project = Project(path: root.appendingPathComponent("project").path)
     project.sandboxCommands = ["zsh scripts/test.sh", "/usr/bin/log show"]
     let input = claudeInput(root, project: project, workerID: "inv1")
     #expect(ExternalSandboxPlanner.plan(input, helper: .success(helper)) == .failure(.trustedCommandOutside("/usr/bin/log show")))
-    var codex = input; codex.commandInventory = false; codex.mediateProcessList = false; codex.settingsFile = false
-    #expect((try? ExternalSandboxPlanner.plan(codex, helper: .success(helper)).get()) != nil)
+    var bare = input; bare.commandInventory = false
+    #expect((try? ExternalSandboxPlanner.plan(bare, helper: .success(helper)).get()) != nil)
     let reason = ExternalSandboxPlanner.Ineligible.trustedCommandOutside("/usr/bin/log show")
     #expect(reason.description(language: .english).contains("`/usr/bin/log show`") && reason.description(language: .russian).contains("`/usr/bin/log show`"))
+}
+
+/// Codex goes through the same planner path as Claude: the inventory refuses an unrunnable trusted command, the base
+/// entries stay exempt, `pgrep` is mediated, and role-defined reasons win over the helper check.
+@Test func codexAppliesTheCommandInventoryThroughTheSamePlannerPath() throws {
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    var project = Project(path: root.appendingPathComponent("project").path)
+    func decision(_ commands: [String], role: String = AgentRoleID.developer,
+                  helper result: Result<ExternalSandboxHelper, ExternalSandboxHelper.Failure>? = nil) -> Result<ExternalSandboxLaunch, ExternalSandboxPlanner.Ineligible> {
+        project.sandboxCommands = commands
+        var input = CodexIntegration.boundaryInput(project: project.path, profile: AgentRoleCatalog.preset(role).profile(for: project),
+                                                   root: root, inbox: root.appendingPathComponent("inbox"))
+        input.workerID = "cxi"; input.home = root.appendingPathComponent("home")
+        return CodexIntegration.boundaryDecision(input, helper: { result ?? .success(helper) })
+    }
+    // An unrunnable trusted command: native sandbox, the command named.
+    guard case .failure(.trustedCommandOutside("/usr/bin/log show")) = decision(["zsh scripts/test.sh", "/usr/bin/log show"]) else {
+        Issue.record("Codex must refuse the boundary for an unrunnable trusted command"); return
+    }
+    // Without it: under the boundary, with mediated pgrep.
+    let plan = try decision(["zsh scripts/test.sh"]).get().plan
+    #expect(plan.commands.contains { $0.name == "pgrep" && $0.executable == "/usr/bin/pgrep" && !$0.keychain && !$0.network })
+    // The base entries `ps` and `sysctl -n` are exempt although `ps` cannot run under nono.
+    let trusted = try #require(AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: project).commandSandbox?.unsandboxed)
+    #expect(Set(AccessPresetCatalog.baseUnsandboxed).isSubset(of: Set(trusted)) && AccessPresetCatalog.baseUnsandboxed.contains("ps"))
+    #expect((try? decision(["ps", "sysctl -n"]).get()) != nil)
+    // Negative: `ps` with an argument is not the base entry; other unrunnable heads are refused too.
+    guard case .failure(.trustedCommandOutside("ps aux")) = decision(["ps aux"]),
+          case .failure(.trustedCommandOutside("launchctl list")) = decision(["launchctl list"]) else {
+        Issue.record("Only the exact base entries are exempt"); return
+    }
+    // A role-defined reason comes before the helper: an Operator chat is never reported as a missing helper.
+    guard case .failure(.unrestricted) = decision(["/usr/bin/log show"], role: AgentRoleID.fullOperator, helper: .failure(.missing("/x/nono"))) else {
+        Issue.record("Operator falls back as unrestricted"); return
+    }
+    guard case .failure(.helper(.missing("/x/nono"))) = decision([], helper: .failure(.missing("/x/nono"))) else {
+        Issue.record("A Developer chat without a verified helper falls back with the helper reason"); return
+    }
+}
+
+/// The Codex fallback notice: once per chat and reason, RU/EN with the route, nothing for role-defined reasons.
+@Test func codexFallbackNoticeIsShownOncePerSessionAndReason() {
+    var notices = CodexBoundaryNotices()
+    let chat = AgentSessionReference(connection: .originalCodex, nativeID: "a"), other = AgentSessionReference(connection: .originalCodex, nativeID: "b")
+    let outside = ExternalSandboxPlanner.Ineligible.trustedCommandOutside("/usr/bin/log show")
+    let first = notices.note(outside, session: chat)
+    #expect(first == CodexBoundaryNotices.text(outside))
+    #expect(notices.note(outside, session: chat) == nil)
+    // Another chat gets its own notice; another reason in the same chat is shown.
+    #expect(notices.note(outside, session: other) != nil)
+    #expect(notices.note(.helper(.checksum), session: chat) != nil)
+    // A worker under the boundary resets the chat, so a later fallback is shown again.
+    #expect(notices.note(nil, session: chat) == nil && notices.note(outside, session: chat) != nil)
+    // Role-defined reasons are only logged.
+    for reason in [ExternalSandboxPlanner.Ineligible.unrestricted, .networkOff, .commandSandboxOff] {
+        #expect(notices.note(reason, session: AgentSessionReference(connection: .originalCodex, nativeID: "r")) == nil)
+    }
+    // The text names the command, the route and the sandbox, in both languages, from the same source as Claude's notice.
+    let english = CodexBoundaryNotices.text(outside, language: .english), russian = CodexBoundaryNotices.text(outside, language: .russian)
+    #expect(english.hasPrefix("External boundary unavailable:") && english.contains("`/usr/bin/log show`")
+            && english.contains("remove it from the project settings") && english.contains("the Codex sandbox and approval prompts"))
+    #expect(russian.hasPrefix("Внешняя граница недоступна:") && russian.contains("`/usr/bin/log show`")
+            && russian.contains("убери её из настроек проекта") && russian.contains("песочницей Codex"))
 }
 
 /// Apple's `/usr/bin/git` is an `xcrun` shim that cannot start inside a mediated sandbox; the planner mediates the real binary.
