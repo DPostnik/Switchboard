@@ -312,21 +312,27 @@ private func claudeInput(_ root: URL, project: Project, workerID: String) -> Ext
     defer { try? FileManager.default.removeItem(at: root) }
     let helper = try helperFromFixture()
     let project = Project(path: root.appendingPathComponent("project").path)
-    let inbox = root.appendingPathComponent("inbox", isDirectory: true)
+    let shared = root.appendingPathComponent("inbox", isDirectory: true)
+    let inbox = try #require(SettingsProposalInbox.chatFolder("codex-worker-a", directory: shared, create: true))
+    let sibling = try #require(SettingsProposalInbox.chatFolder("codex-worker-b", directory: shared, create: true))
     var input = CodexIntegration.boundaryInput(project: project.path, profile: AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: project),
                                                root: root, inbox: inbox)
     input.workerID = "cx1"; input.home = root.appendingPathComponent("home")
     let plan = try ExternalSandboxPlanner.plan(input, helper: .success(helper)).get()
     #expect(plan.grants.contains(.init(.allow, inbox.resolvingSymlinksInPath().path)))
+    // Only the worker's own folder: neither the whole inbox nor another chat's folder is granted.
+    #expect(!plan.grants.contains { $0.path == shared.resolvingSymlinksInPath().path || $0.path == sibling.resolvingSymlinksInPath().path })
     // Codex has the inbox and mediated pgrep, as Claude; no settings file (Claude-only launch settings).
     #expect(plan.commands.contains { $0.name == "pgrep" } && !plan.grants.contains { $0.path == plan.settingsFile.path })
-    let environment = CodexConnection.boundaryEnvironment(ExternalSandboxLaunch(plan: plan, helper: helper))
-    #expect(environment[SettingsProposalInbox.environmentKey] == SettingsProposalInbox.directory.path)
+    let environment = CodexConnection.boundaryEnvironment(ExternalSandboxLaunch(plan: plan, helper: helper, settingsInbox: inbox))
+    #expect(environment[SettingsProposalInbox.environmentKey] == inbox.path)
     #expect(environment["TMPDIR"] == plan.temporary.path && environment["SWITCHBOARD_EXTERNAL_SANDBOX"] == "1")
+    // Negative: a launch without a folder exports no variable.
+    #expect(CodexConnection.boundaryEnvironment(ExternalSandboxLaunch(plan: plan, helper: helper))[SettingsProposalInbox.environmentKey] == nil)
     // Negative: without the inbox input no grant appears for it.
     var bare = input; bare.extraWrites = []; bare.workerID = "cx2"
     let barePlan = try ExternalSandboxPlanner.plan(bare, helper: .success(helper)).get()
-    #expect(!barePlan.grants.contains { $0.path.hasSuffix("/inbox") })
+    #expect(!barePlan.grants.contains { $0.path.hasPrefix(shared.resolvingSymlinksInPath().path) })
 }
 
 @Test func commandInventoryRefusesTrustedCommandsTheBoundaryCannotRun() throws {

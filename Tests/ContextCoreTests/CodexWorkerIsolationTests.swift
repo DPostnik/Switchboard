@@ -161,6 +161,22 @@ private func workerFixture() throws -> (URL, URL) {
     let native = try #require(profile.codexTurnParameters(projectPath: project.path)["sandboxPolicy"])
     #expect(!native["writableRoots"].array.contains(.string(inbox.path)))
     #expect(!native["writableRoots"].array.contains(.string(SettingsProposalInbox.directory.path)))
+    // Negative: no folder, no grant.
+    let bare = CodexIntegration.boundaryInput(project: project.path, permissions: profile, home: root.appendingPathComponent("codex-home"),
+                                              executable: root.appendingPathComponent("codex"), resources: nil, workflowDirectories: [], inbox: nil)
+    #expect(bare.extraWrites.isEmpty)
+}
+
+/// A Codex worker serves one chat for its whole life (`bindChromeWorker`), so its folder names that chat: the thread ID when
+/// it starts for an existing thread, an app token for a new thread (mapped once the thread ID is known).
+@Test func codexWorkerFolderIsTheThreadOrAnAppToken() throws {
+    let thread = "019a2b3c-4d5e-7f00-8a9b-0c1d2e3f4a5b"
+    #expect(CodexIntegration.inboxFolderName(for: AgentSessionReference(connection: .originalCodex, nativeID: thread)) == thread)
+    let token = CodexIntegration.inboxFolderName(for: nil)
+    #expect(token.hasPrefix("codex-") && SettingsProposalInbox.isFolderName(token) && token != CodexIntegration.inboxFolderName(for: nil))
+    // Negative: a thread ID the app would not use as a folder name gets a token instead.
+    let unsafe = CodexIntegration.inboxFolderName(for: AgentSessionReference(connection: .originalCodex, nativeID: "../x"))
+    #expect(unsafe.hasPrefix("codex-") && !unsafe.contains("/"))
 }
 
 /// A Codex chat that falls back to the native sandbox for a reason the user can act on shows the notice once; a

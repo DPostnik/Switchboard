@@ -17,8 +17,9 @@ public struct SettingsProposal: Codable, Sendable {
         public var removeCommands: [String]?
         public init(project: String) { self.project = project }
     }
-    /// The proposing chat's session ID (`SWITCHBOARD_CHAT_ID` for Claude, `CODEX_THREAD_ID` for Codex). Agent-written: it only
-    /// chooses where the request card is shown; the message that chat later receives is fixed app text.
+    /// The proposing chat's session ID. Agent-written, so it is read only for a file in the inbox root (sessions started
+    /// before per-chat folders); a file in a chat's own folder gets its author from the folder and this field is ignored.
+    /// It only chooses where the request card is shown; the message that chat later receives is fixed app text.
     public var chat: String?
     public var reason: String?
     public var changes: [Change]
@@ -43,9 +44,13 @@ public struct SettingsProposalReview: Identifiable, Equatable, Sendable {
                 && addCommands.isEmpty && removeCommands.isEmpty
         }
     }
-    /// The file name in the inbox.
+    /// The file's path relative to the inbox: `<name>.json` in the root, `<folder>/<name>.json` in a chat's folder.
     public var id: String
+    /// The session ID of the chat that asked. For a file in a chat's folder the app sets it from the folder
+    /// (`folder` is non-nil); for a root file it is the agent-written `chat` field.
     public var chat: String?
+    /// The per-chat folder the file lies in, chosen by the app at launch; nil for a file in the inbox root.
+    public var folder: String?
     public var reason: String?
     public var projects: [ProjectDiff]
     /// Parts that were dropped, in the user's language (unknown project, relative path, unknown set).
@@ -53,9 +58,11 @@ public struct SettingsProposalReview: Identifiable, Equatable, Sendable {
 
     static let maximumText = 300
 
-    public init(id: String, proposal: SettingsProposal, state: SavedState, home: String = NSHomeDirectory()) {
+    /// `author` is the app's mapping of `folder` to a session ID; with a folder the proposal's own `chat` is ignored.
+    public init(id: String, proposal: SettingsProposal, state: SavedState, home: String = NSHomeDirectory(), folder: String? = nil, author: String? = nil) {
         self.id = id
-        chat = proposal.chat.map { String($0.prefix(80)) }
+        self.folder = folder
+        chat = folder == nil ? proposal.chat.map { String($0.prefix(80)) } : author
         reason = proposal.reason.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(Self.maximumText)) }.flatMap { $0.isEmpty ? nil : $0 }
         var projects: [ProjectDiff] = [], skipped: [String] = []
         for change in proposal.changes.prefix(32) {
@@ -103,14 +110,23 @@ public struct SettingsProposalReview: Identifiable, Equatable, Sendable {
         self.skipped = skipped
     }
 
-    /// The app chat the proposal names: an existing, unarchived, interactive chat whose agent session ID (or app chat ID)
-    /// equals `chat`. Nil otherwise; such a proposal stays a global review. The label is agent-written, so it only picks
-    /// where the card is shown: the chat later receives fixed app text (`SettingsProposalOutcome.message`), never its strings.
-    public func requestingChat(in chats: [Chat]) -> Chat? {
-        guard let label = chat, !label.isEmpty else { return nil }
+    /// The app chat that asked: an existing, unarchived, interactive chat whose agent session ID (or app chat ID) equals
+    /// `chat`. Nil otherwise; such a proposal stays a global review with `unknownAuthorNotice`. For a root file the label
+    /// is agent-written, so it only picks where the card is shown: the chat later receives fixed app text
+    /// (`SettingsProposalOutcome.message`), never its strings.
+    public func requestingChat(in chats: [Chat]) -> Chat? { Self.chat(labeled: chat, in: chats) }
+    static func chat(labeled label: String?, in chats: [Chat]) -> Chat? {
+        guard let label, !label.isEmpty else { return nil }
         return chats.first { chat in
             !chat.isArchived && !chat.isScheduledRecord && (chat.nativeSession?.nativeID == label || chat.id == label)
         }
+    }
+
+    /// Shown on a global review (no requesting chat): nothing continues the task after the decision.
+    public static func unknownAuthorNotice(language: AppLanguage = L10n.language) -> String {
+        L10n.text("Неизвестно, какой чат запросил это изменение, поэтому после «Применить» задача сама не продолжится: вернись в тот чат и скажи ему продолжить.",
+                  "The chat that requested this change is unknown, so after Apply the task will not continue by itself: return to that chat and tell it to continue.",
+                  language: language)
     }
 
     /// `~/` expanded, standardized; nil for relative paths and `..` components.
@@ -163,49 +179,132 @@ public enum SettingsProposalOutcome: Sendable {
     }
 }
 
-/// The folder agents write proposals to (writable inside every command sandbox) and its reader.
+/// The folder agents write proposals to and its reader. Each chat's provider process gets its own subfolder, chosen by the
+/// app at launch (`chatFolder`): the variable points there and the write grant covers only it, so the app knows the author
+/// of a proposal from the folder it lies in, without any agent-written field. Files in the root come from sessions started
+/// before per-chat folders and keep the old rule (the agent-written `chat`).
 public enum SettingsProposalInbox {
     public static let environmentKey = "SWITCHBOARD_SETTINGS_PROPOSALS"
     public static var directory: URL { Locations.root.appendingPathComponent("settings-proposals", isDirectory: true) }
-    static let maximumFiles = 20, maximumSize = 64 * 1024
+    static let maximumFiles = 20, maximumSize = 64 * 1024, maximumFolders = 500
+    /// An empty folder of no current chat is removed only after this long, so a launch that has just created it (a new
+    /// Codex thread before its ID is known) never loses it.
+    static let staleFolderAge: TimeInterval = 3600
+
+    /// A folder name the app chose: a session ID or an app token. ASCII letters, digits, `-` and `_` only, starting with a
+    /// letter or digit, so it can never be `..`, a nested path or hidden.
+    public static func isFolderName(_ name: String) -> Bool {
+        (1...100).contains(name.count) && name.first.map { $0.isASCII && ($0.isLetter || $0.isNumber) } == true
+            && name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }
+    }
+    /// One chat's folder: `name` is the session ID the app launched the process for (Claude) or an app token (a Codex
+    /// worker). Nil for a name the app would not create. With `create`, the folder exists afterwards.
+    public static func chatFolder(_ name: String, directory: URL = directory, create: Bool = false) -> URL? {
+        guard isFolderName(name) else { return nil }
+        let folder = directory.appendingPathComponent(name, isDirectory: true)
+        if create { try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) }
+        return folder
+    }
+    /// Where the app records which session a token folder belongs to (a new Codex thread gets its ID only after its worker
+    /// started). Next to the inbox, never inside it: no agent grant covers it.
+    public static func authorsFile(directory: URL = directory) -> URL {
+        directory.deletingLastPathComponent().appendingPathComponent(directory.lastPathComponent + "-authors.json")
+    }
+    /// Records that `folder` belongs to `session`; entries of folders that no longer exist are dropped. Called by the app
+    /// only, with a name it chose and the session ID the provider returned.
+    public static func recordAuthor(folder: String, session: String, directory: URL = directory) {
+        guard isFolderName(folder), !session.isEmpty, session.count <= 100 else { return }
+        var map = authors(directory: directory).filter { FileManager.default.fileExists(atPath: directory.appendingPathComponent($0.key).path) }
+        map[folder] = session
+        guard let data = try? JSONEncoder().encode(map) else { return }
+        try? data.write(to: authorsFile(directory: directory), options: .atomic)
+    }
+    static func authors(directory: URL) -> [String: String] {
+        guard let data = try? Data(contentsOf: authorsFile(directory: directory)),
+              let map = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
+        return map.filter { isFolderName($0.key) }
+    }
+    /// Removes a folder only while it is empty (`rmdir`): a file written meanwhile is never deleted with it.
+    public static func removeEmptyFolder(_ folder: URL) { _ = rmdir(folder.path) }
 
     /// Pending proposals, oldest first. Unreadable or oversized files and proposals that change nothing are removed.
-    public static func load(state: SavedState, directory: URL = directory, manager: FileManager = .default) -> [SettingsProposalReview] {
+    /// Reads the root and one level of per-chat folders; links are never followed. A file in a folder is authored by the
+    /// session the folder belongs to; an empty folder of no current chat is removed once it is stale.
+    public static func load(state: SavedState, directory: URL = directory, manager: FileManager = .default, now: Date = Date()) -> [SettingsProposalReview] {
         try? manager.createDirectory(at: directory, withIntermediateDirectories: true)
-        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
-        let files = ((try? manager.contentsOfDirectory(at: directory, includingPropertiesForKeys: keys)) ?? [])
-            .filter { $0.pathExtension == "json" }
-            .sorted { (date($0) ?? .distantPast, $0.lastPathComponent) < (date($1) ?? .distantPast, $1.lastPathComponent) }
+        let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey]
+        let entries = (try? manager.contentsOfDirectory(at: directory, includingPropertiesForKeys: keys)) ?? []
+        let map = authors(directory: directory)
+        func proposalFiles(_ urls: [URL]) -> [URL] { urls.filter { $0.pathExtension == "json" && !$0.lastPathComponent.hasPrefix(".") } }
+        var files: [(url: URL, folder: String?)] = proposalFiles(entries).map { ($0, nil) }
+        var folders = 0
+        for entry in entries where isFolderName(entry.lastPathComponent) {
+            let values = try? entry.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey])
+            guard values?.isDirectory == true, values?.isSymbolicLink != true else { continue }
+            folders += 1
+            guard folders <= maximumFolders else { break }
+            let name = entry.lastPathComponent
+            let inside = proposalFiles((try? manager.contentsOfDirectory(at: entry, includingPropertiesForKeys: keys)) ?? [])
+            if inside.isEmpty {
+                if SettingsProposalReview.chat(labeled: map[name] ?? name, in: state.chats) == nil,
+                   now.timeIntervalSince(values?.contentModificationDate ?? now) > staleFolderAge { removeEmptyFolder(entry) }
+                continue
+            }
+            files += inside.map { ($0, name) }
+        }
+        func id(_ file: (url: URL, folder: String?)) -> String { (file.folder.map { $0 + "/" } ?? "") + file.url.lastPathComponent }
+        files.sort { (date($0.url) ?? .distantPast, id($0)) < (date($1.url) ?? .distantPast, id($1)) }
         var result: [SettingsProposalReview] = []
         for file in files.prefix(maximumFiles) {
-            let values = try? file.resourceValues(forKeys: Set(keys))
-            guard values?.isRegularFile == true, (values?.fileSize ?? .max) <= maximumSize,
-                  let data = try? Data(contentsOf: file), let proposal = try? JSONDecoder().decode(SettingsProposal.self, from: data) else {
-                try? manager.removeItem(at: file); continue
+            let values = try? file.url.resourceValues(forKeys: Set(keys))
+            guard values?.isRegularFile == true, values?.isSymbolicLink != true, (values?.fileSize ?? .max) <= maximumSize,
+                  let data = try? Data(contentsOf: file.url), let proposal = try? JSONDecoder().decode(SettingsProposal.self, from: data) else {
+                try? manager.removeItem(at: file.url); continue
             }
-            let review = SettingsProposalReview(id: file.lastPathComponent, proposal: proposal, state: state)
-            if review.projects.isEmpty && review.skipped.isEmpty { try? manager.removeItem(at: file); continue }
+            let review = SettingsProposalReview(id: id(file), proposal: proposal, state: state, folder: file.folder,
+                                                author: file.folder.map { map[$0] ?? $0 })
+            if review.projects.isEmpty && review.skipped.isEmpty { try? manager.removeItem(at: file.url); continue }
             result.append(review)
         }
         return result
     }
     /// Removes one proposal file; true when it is gone afterwards. A decided proposal is continued only after its file
-    /// is gone, so a restart can never show it again and a continuation is sent at most once.
+    /// is gone, so a restart can never show it again and a continuation is sent at most once. The id is `<name>` or
+    /// `<folder>/<name>` and never reaches outside the inbox: no `..`, no deeper path, no hidden name, no linked folder.
     @discardableResult public static func remove(_ id: String, directory: URL = directory) -> Bool {
-        guard !id.contains("/"), !id.hasPrefix(".") else { return false }
-        let file = directory.appendingPathComponent(id)
+        let parts = id.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard (1...2).contains(parts.count), let name = parts.last, !name.isEmpty, !name.hasPrefix(".") else { return false }
+        var parent = directory
+        if parts.count == 2 {
+            guard isFolderName(parts[0]) else { return false }
+            parent = directory.appendingPathComponent(parts[0], isDirectory: true)
+            // `attributesOfItem` does not follow a link; a missing folder means the file is gone.
+            guard let type = (try? FileManager.default.attributesOfItem(atPath: parent.path))?[.type] as? FileAttributeType else { return true }
+            guard type == .typeDirectory else { return false }
+        }
+        let file = parent.appendingPathComponent(name)
         try? FileManager.default.removeItem(at: file)
-        return !FileManager.default.fileExists(atPath: file.path)
+        return (try? FileManager.default.attributesOfItem(atPath: file.path)) == nil
     }
-    /// How a chat writes a proposal, shared by every provider whose sessions can write to the inbox. `chatVariable` is the
-    /// environment variable that holds the chat's own session ID in its commands (`SWITCHBOARD_CHAT_ID`, `CODEX_THREAD_ID`).
-    public static func instructions(chatVariable: String, language: AppLanguage = L10n.language) -> String {
+    /// How a chat writes a proposal, shared by every provider whose sessions can write to the inbox. Without
+    /// `sharedChatVariable` the variable names the chat's own folder and the app knows the author, so the format has no
+    /// `chat`. With it (a process that writes to the shared root) `chat` is required and holds that variable's value.
+    public static func instructions(sharedChatVariable: String? = nil, language: AppLanguage = L10n.language) -> String {
         let presets = AccessPresetCatalog.all.map(\.id).joined(separator: ", ")
-        let format = #"{"chat": "<$"# + chatVariable + #">", "reason": "...", "changes": [{"project": "<project path or name>", "addPresets": ["vercel"], "removePresets": [], "addFolders": [{"path": "~/path", "writable": false}], "removeFolders": [], "addCommands": ["zsh scripts/build.sh"], "removeCommands": [], "sandbox": true}]}"#
+        let chat = sharedChatVariable.map { #""chat": "<$"# + $0 + #">", "# } ?? ""
+        let format = "{" + chat + #""reason": "...", "changes": [{"project": "<project path or name>", "addPresets": ["vercel"], "removePresets": [], "addFolders": [{"path": "~/path", "writable": false}], "removeFolders": [], "addCommands": ["zsh scripts/build.sh"], "removeCommands": [], "sandbox": true}]}"#
+        let author = sharedChatVariable.map { variable in L10n.text(
+            "- Поле `chat` ОБЯЗАТЕЛЬНО: впиши значение `$\(variable)`. Без него приложение не знает, какой чат просит, и после решения пользователя задача сама не продолжится.",
+            "- The `chat` field is REQUIRED: put the value of `$\(variable)` there. Without it the app does not know which chat asks, and the task will not continue by itself after the user decides.",
+            language: language) } ?? L10n.text(
+            "- Эта папка принадлежит этому чату: приложение само знает, какой чат просит, поле `chat` не нужно.",
+            "- This folder belongs to this chat: the app knows which chat asks, so no `chat` field is needed.",
+            language: language)
         return L10n.text(
             """
             Настройки проектов в Switchboard (песочница команд, наборы доступа, папки вне проекта, команды вне песочницы) меняет только пользователь. Если задаче нужен доступ, которого нет, или пользователь просит изменить эти настройки, предложи изменение:
             - Запиши один JSON-файл в папку "$\(environmentKey)" (она доступна на запись в песочнице), например "$\(environmentKey)/<короткое-имя>.json". Формат: \(format). Пропускай ненужные поля; в одном файле может быть несколько проектов. Причина (`reason`) - до \(SettingsProposalReview.maximumText) символов, остальное обрезается.
+            \(author)
             - Наборы: \(presets).
             - Приложение покажет пользователю список изменений в этом чате; применит их только он. Скажи пользователю, что предложение ждёт его решения. Предлагай только то, что нужно задаче; команды вне песочницы получают доступ ко всему Mac.
             - Когда пользователь решит, этот чат получит сообщение от приложения. До тех пор продолжай независимую часть задачи.
@@ -213,6 +312,7 @@ public enum SettingsProposalInbox {
             """
             Project settings in Switchboard (the command sandbox, access sets, folders outside the project, commands outside the sandbox) are changed only by the user. When the task needs access that is missing, or the user asks to change these settings, propose the change:
             - Write one JSON file into the folder "$\(environmentKey)" (writable inside the sandbox), for example "$\(environmentKey)/<short-name>.json". Format: \(format). Omit fields you do not need; one file may cover several projects. Keep `reason` within \(SettingsProposalReview.maximumText) characters; the rest is cut.
+            \(author)
             - Sets: \(presets).
             - The app shows the user the list of changes in this chat; only the user applies them. Tell the user the proposal waits for their decision. Propose only what the task needs; commands outside the sandbox get access to the whole Mac.
             - When the user decides, this chat receives a message from the app. Until then continue the independent part of the task.

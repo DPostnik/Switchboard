@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Each chat writes access requests into its own folder, so the app knows which chat asked and continues it after Apply or Reject even when the request names no chat; a request whose chat is unknown says so.
+
 - Codex chats apply the same trusted-command check as Claude before using the external boundary, get mediated `pgrep` there, and show a notice in the chat when they fall back to the Codex sandbox for a reason you can act on.
 
 - Access request cards label removals explicitly, and agents are told the length limit of the reason text.

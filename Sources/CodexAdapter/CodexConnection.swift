@@ -62,10 +62,10 @@ struct CodexReplyTooLarge: LocalizedError, Sendable {
         scopedEvents = scoped.stream; scopedSink = scoped.continuation
     }
 
-    /// What a provider under the boundary adds to its environment: the plan's own variables and where a chat leaves a
-    /// settings proposal (`SettingsProposalInbox.instructions`, writable in the plan by `CodexIntegration.boundaryInput`).
+    /// What a provider under the boundary adds to its environment: the plan's own variables and the worker's own settings
+    /// proposal folder (`SettingsProposalInbox.instructions`, writable in the plan by `CodexIntegration.boundaryInput`).
     static func boundaryEnvironment(_ boundary: ExternalSandboxLaunch) -> [String: String] {
-        boundary.plan.environment.merging([SettingsProposalInbox.environmentKey: SettingsProposalInbox.directory.path]) { _, new in new }
+        boundary.plan.environment.merging(boundary.settingsInbox.map { [SettingsProposalInbox.environmentKey: $0.path] } ?? [:]) { _, new in new }
     }
     public func start(executable: URL, home: URL, extraArguments: [String] = [], boundary: ExternalSandboxLaunch? = nil) async throws {
         guard process == nil else { return }

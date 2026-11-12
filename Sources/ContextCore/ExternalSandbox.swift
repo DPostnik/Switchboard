@@ -505,7 +505,12 @@ public enum ExternalSandboxPlanner {
 public struct ExternalSandboxLaunch: Hashable, Sendable {
     public let plan: ExternalSandboxPlan
     public let helper: ExternalSandboxHelper
-    public init(plan: ExternalSandboxPlan, helper: ExternalSandboxHelper) { self.plan = plan; self.helper = helper }
+    /// The chat's own settings proposal folder (`SettingsProposalInbox.chatFolder`), granted writable in the plan; the
+    /// provider's environment points there. Nil: no inbox.
+    public var settingsInbox: URL?
+    public init(plan: ExternalSandboxPlan, helper: ExternalSandboxHelper, settingsInbox: URL? = nil) {
+        self.plan = plan; self.helper = helper; self.settingsInbox = settingsInbox
+    }
     public static let launcher = "/usr/bin/python3"
     // Foundation's Process already makes the child a process-group leader; setsid then fails with EPERM and is not needed.
     public static let launcherArguments = ["-I", "-c", "import os,sys\ntry:\n    os.setsid()\nexcept PermissionError:\n    pass\nos.execv(sys.argv[1], sys.argv[1:])"]

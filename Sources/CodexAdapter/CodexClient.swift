@@ -27,12 +27,11 @@ public actor CodexClient {
     private var boundaryHost: ExternalSandboxHost?
     var launchInfo: (executable: URL, home: URL)? { launch.map { ($0.executable, $0.home) } }
     var runsUnderExternalBoundary: Bool { boundary != nil }
-    /// The variable Codex exports to the commands of a thread with its own thread ID.
-    static let threadEnvironmentKey = "CODEX_THREAD_ID"
-    /// How a chat under the boundary writes a settings proposal: only there the inbox is writable and in the environment
-    /// (`CodexConnection`, `CodexIntegration.boundaryInput`). The native path keeps its file roots (invariant 6), so it gets no text.
+    /// How a chat under the boundary writes a settings proposal: only there the worker's own inbox folder is writable and in
+    /// the environment (`CodexConnection`, `CodexIntegration.boundaryInput`), so the app knows the author and the format has
+    /// no `chat`. The native path keeps its file roots (invariant 6), so it gets no text.
     static func settingsProposalInstructions(boundary: Bool, language: AppLanguage = L10n.language) -> String? {
-        boundary ? SettingsProposalInbox.instructions(chatVariable: threadEnvironmentKey, language: language) : nil
+        boundary ? SettingsProposalInbox.instructions(language: language) : nil
     }
     var registeredWorkflowDirectories: [URL] { workflowDirectories }
     private var workflowDirectories: [URL] = []

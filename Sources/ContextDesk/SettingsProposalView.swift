@@ -22,6 +22,11 @@ struct SettingsProposalView: View {
                         if let reason = review.reason {
                             Text(reason).font(.ui(.callout)).foregroundStyle(DeskPalette.ink).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                         }
+                        // No chat to continue: say so instead of leaving the user to wait for a continuation that never comes.
+                        if review.requestingChat(in: model.state.chats) == nil {
+                            Text(SettingsProposalReview.unknownAuthorNotice()).font(.ui(.callout)).foregroundStyle(DeskPalette.attention)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                         Text(L10n.text("Ничего не изменится, пока ты не нажмёшь «Применить». Агент не может применить это сам.",
                                        "Nothing changes until you press Apply. The agent cannot apply this itself."))
                             .font(.ui(.caption)).foregroundStyle(DeskPalette.muted).fixedSize(horizontal: false, vertical: true)

@@ -2252,7 +2252,7 @@ private func boundaryFixture(token: Result<ClaudeAccessToken, ClaudeTokenFailure
     launch={'fd_token':token,'argv':a,'token_in_env':bool(token) and any(token in v for v in os.environ.values()),
         'token_in_argv':bool(token) and any(token in x for x in a),'settings_path':raw if raw.startswith('/') else None,'settings':settings,
         'mcp':json.loads(a[a.index('--mcp-config')+1]),'pid':os.getpid(),'pgid':os.getpgid(0),
-        'env':{k:v for k,v in os.environ.items() if k.startswith(('CLAUDE_CODE','SWITCHBOARD_EXTERNAL','TMPDIR','SSL_CERT'))},
+        'env':{k:v for k,v in os.environ.items() if k.startswith(('CLAUDE_CODE','SWITCHBOARD_EXTERNAL','SWITCHBOARD_SETTINGS','TMPDIR','SSL_CERT'))},
         'prompt':a[a.index('--append-system-prompt')+1]}
     with (home/'boundary-launches').open('a') as f: f.write(json.dumps(launch)+'\n')
     sid=a[a.index('--resume' if '--resume' in a else '--session-id')+1]
@@ -2437,6 +2437,14 @@ private func boundaryDeveloper(_ root: URL, sharedRoots: [AgentPermissionProfile
     }
     try await send(1)
     let first = try #require(fixture.launches().first?["pid"].int)
+    // The process writes proposals into its own folder, named by its session ID; the grant covers only that folder.
+    let own = try #require(SettingsProposalInbox.chatFolder(session.nativeID))
+    #expect(fixture.launches().first?["env"][SettingsProposalInbox.environmentKey].string == own.path)
+    let allows = fixture.helperArguments().first.map { args in args.indices.dropLast().filter { args[$0] == "--allow" }.map { args[$0 + 1] } } ?? []
+    #expect(allows.contains(own.resolvingSymlinksInPath().path))
+    // Negative: not the whole inbox, and no other chat's folder.
+    let shared = SettingsProposalInbox.directory.resolvingSymlinksInPath().path
+    #expect(allows.filter { $0 == shared || $0.hasPrefix(shared + "/") } == [own.resolvingSymlinksInPath().path])
     // The user applies a proposal (a folder for this project), as the request card does: the next turn runs in a new process.
     let notes = fixture.root.appendingPathComponent("notes")
     try FileManager.default.createDirectory(at: notes, withIntermediateDirectories: true)

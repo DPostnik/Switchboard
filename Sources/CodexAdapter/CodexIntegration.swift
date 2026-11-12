@@ -328,42 +328,53 @@ public actor CodexIntegration: AgentIntegration {
         // Keep the owner after the parent completes: background children and their stop/history
         // operations still belong to this process. Scope changes and disconnect release it.
     }
-    /// The planner input for a Codex worker: the same planner path as Claude (invariant 14). The settings proposal inbox is
-    /// writable, so "one refusal, one request" works inside the boundary; `pgrep` is mediated (inside, it sees only sandboxed
-    /// processes); a trusted project command the boundary cannot run keeps the worker on the native sandbox.
+    /// The planner input for a Codex worker: the same planner path as Claude (invariant 14). The worker's own settings
+    /// proposal folder is writable (only it, not the whole inbox), so "one refusal, one request" works inside the boundary
+    /// and the app knows the author; `pgrep` is mediated (inside, it sees only sandboxed processes); a trusted project
+    /// command the boundary cannot run keeps the worker on the native sandbox.
     static func boundaryInput(project: String, permissions: AgentPermissionProfile, home: URL, executable: URL, resources: URL?,
-                              workflowDirectories: [URL], inbox: URL = SettingsProposalInbox.directory) -> ExternalSandboxPlanner.Input {
+                              workflowDirectories: [URL], inbox: URL?) -> ExternalSandboxPlanner.Input {
         var input = ExternalSandboxPlanner.Input(project: project, profile: permissions, providerHome: home, providerExecutable: executable,
                                                  resources: resources, workflowDirectories: workflowDirectories)
-        try? FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
-        input.extraWrites = [inbox.path]
+        if let inbox {
+            try? FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
+            input.extraWrites = [inbox.path]
+        }
         input.mediateProcessList = true; input.commandInventory = true
         return input
     }
     /// The boundary decision for a planner input. Role-defined reasons come first, as for Claude, so an Operator chat is never
-    /// reported as a missing helper.
-    static func boundaryDecision(_ input: ExternalSandboxPlanner.Input,
+    /// reported as a missing helper. `inbox` is the folder `input` grants; the launch exports it.
+    static func boundaryDecision(_ input: ExternalSandboxPlanner.Input, inbox: URL? = nil,
                                  helper: () -> Result<ExternalSandboxHelper, ExternalSandboxHelper.Failure>) -> Result<ExternalSandboxLaunch, ExternalSandboxPlanner.Ineligible> {
         if let reason = ExternalSandboxPlanner.eligibility(input.profile) { return .failure(reason) }
         let helper = helper()
         switch ExternalSandboxPlanner.plan(input, helper: helper) {
         case .success(let plan):
             guard case .success(let verified) = helper else { return .failure(.helper(.missing(""))) }
-            return .success(ExternalSandboxLaunch(plan: plan, helper: verified))
+            return .success(ExternalSandboxLaunch(plan: plan, helper: verified, settingsInbox: inbox))
         case .failure(let reason): return .failure(reason)
         }
     }
+    /// The settings proposal folder of a worker that serves one chat for its whole life (`bindChromeWorker`): the thread ID
+    /// when the worker starts for an existing thread, else an app token that `recordAuthor` maps to the new thread's ID.
+    static func inboxFolderName(for session: AgentSessionReference?) -> String {
+        session.map(\.nativeID).flatMap { SettingsProposalInbox.isFolderName($0) ? $0 : nil } ?? "codex-" + UUID().uuidString.lowercased()
+    }
     /// The external boundary for a worker, or nil (native sandbox and prompts) with the reason logged once. The reason is
     /// returned for the chat notice; nil when the boundary is used or not attempted (no launch info).
-    private func boundary(project: String, permissions: AgentPermissionProfile, route: AgentRoute) async throws
+    private func boundary(project: String, permissions: AgentPermissionProfile, route: AgentRoute, inboxFolder: String) async throws
         -> (launch: ExternalSandboxLaunch?, fallback: ExternalSandboxPlanner.Ineligible?) {
         let base = try worker(for: route)
         guard let launch = await base.launchInfo else { return (nil, nil) }
+        let inbox = SettingsProposalInbox.chatFolder(inboxFolder)
         let input = Self.boundaryInput(project: project, permissions: permissions, home: launch.home, executable: launch.executable,
-                                       resources: resources, workflowDirectories: await base.registeredWorkflowDirectories)
-        switch Self.boundaryDecision(input, helper: boundaryHelper) {
+                                       resources: resources, workflowDirectories: await base.registeredWorkflowDirectories, inbox: inbox)
+        switch Self.boundaryDecision(input, inbox: inbox, helper: boundaryHelper) {
         case .success(let launch): return (launch, nil)
         case .failure(let reason):
+            // The native path has no inbox (invariant 6); an empty folder made for this attempt goes.
+            if let inbox { SettingsProposalInbox.removeEmptyFolder(inbox) }
             let text = reason.description(language: .english)
             if loggedBoundaryReasons.insert(project + "\n" + text).inserted {
                 ExternalSandboxLog.logger.notice("Native Codex sandbox for \(project, privacy: .public): \(text, privacy: .public)")
@@ -378,7 +389,8 @@ public actor CodexIntegration: AgentIntegration {
     private func refreshChromeWorker(_ request: AgentExecutionRequest, session: AgentSessionReference) async throws {
         let scope = try chromeScope(request)
         guard chromeScopes[session] != scope else { return }
-        let decision = try await boundary(project: scope.project, permissions: scope.permissions, route: request.route)
+        let decision = try await boundary(project: scope.project, permissions: scope.permissions, route: request.route,
+                                          inboxFolder: Self.inboxFolderName(for: session))
         let fresh = try await worker(for: request.route).isolatedSibling(
             permissionArguments: scope.permissions.codexProcessArguments(projectPath: scope.project),
             boundary: decision.launch)
@@ -403,7 +415,9 @@ public actor CodexIntegration: AgentIntegration {
                     return session
                 }
                 let chosen = try self.worker(for: request.route)
-                let decision = try await self.boundary(project: request.projectPath, permissions: access, route: request.route)
+                // A new thread has no ID before its worker starts: the worker gets an app token folder, mapped to the thread below.
+                let folder = Self.inboxFolderName(for: nil)
+                let decision = try await self.boundary(project: request.projectPath, permissions: access, route: request.route, inboxFolder: folder)
                 let worker = try await chosen.isolatedSibling(
                     permissionArguments: access.codexProcessArguments(projectPath: request.projectPath),
                     boundary: decision.launch)
@@ -413,6 +427,7 @@ public actor CodexIntegration: AgentIntegration {
                                                              browserProfile: request.browserProfile, scheduled: request.kind == .scheduled,
                                                              userChromeGrant: request.userChromeGrant, chatDirectory: request.chatDirectory)
                 } catch { await worker.stop(); throw error }
+                if decision.launch?.settingsInbox != nil { SettingsProposalInbox.recordAuthor(folder: folder, session: session.nativeID) }
                 await self.bindChromeWorker(worker, session: session, scope: try self.chromeScope(request))
                 self.noteFallback(decision.fallback, session: session)
                 self.sessionRoutes[session] = (request.route, request.model.context)

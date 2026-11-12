@@ -303,8 +303,11 @@ public actor ClaudeIntegration: AgentIntegration {
             let projectServers = ProjectMCPServers.approved(projectPath: record.cwd, approvals: profile.mcpServers)
             // Also read at every turn: a skill folder created or removed since the last launch changes it.
             let skills = try ClaudeSkills.pluginRoot(home: home, user: userSkills)?.path
+            // This session's own settings proposal folder, named by its session ID: the app knows the author of every file in
+            // it. Stable across turns, so it never changes the launch identity by itself.
+            let inbox = SettingsProposalInbox.chatFolder(id, create: true)
             // Recompiled at every turn: a changed project setting changes the plan's authority and so replaces the process.
-            let boundaryDecision = boundaryPlan(profile: profile, cwd: record.cwd, skills: skills, scheduled: scheduled)
+            let boundaryDecision = boundaryPlan(profile: profile, cwd: record.cwd, skills: skills, scheduled: scheduled, inbox: inbox)
             var boundary: ClaudeBoundaryLaunch? = if case .success(let value) = boundaryDecision { value } else { nil }
             /// The launch identity: the CLI arguments and, under the boundary, the plan's authority.
             func identity(_ arguments: [String], _ boundary: ClaudeBoundaryLaunch?) -> [String] {
@@ -403,8 +406,8 @@ public actor ClaudeIntegration: AgentIntegration {
                 var environment = ClaudeProfile.environment(home: home).merging(Self.sessionEnvironment) { _, new in new }
                 // Every descendant of this CLI (also after `setsid`) carries the chat label for the orphan sweeper.
                 environment.merge(ProcessLabels.environment(chat: id)) { _, new in new }
-                // Where the agent may leave a settings proposal for the user (`settingsProposalInstructions`).
-                environment[SettingsProposalInbox.environmentKey] = SettingsProposalInbox.directory.path
+                // Where the agent may leave a settings proposal for the user (`settingsProposalInstructions`): its own folder.
+                if let inbox { environment[SettingsProposalInbox.environmentKey] = inbox.path }
                 // Same startup/tool limits as the Codex MCP entry (30 s / 90 s).
                 if server != nil || policy.connectors || policy.userChrome || !projectServers.isEmpty { environment.merge(Self.browserEnvironment) { _, new in new } }
                 if policy.connectors { environment.merge(Self.connectorEnvironment) { _, new in new } }
@@ -539,7 +542,7 @@ public actor ClaudeIntegration: AgentIntegration {
         // A setting, not `--advisor`: the flag exits at launch on an unsupported pairing, the setting is skipped.
         if let advisor, !advisor.isEmpty { settings["advisorModel"] = .string(advisor) }
         if let sandbox = policy.sandboxSettings(cwd: cwd, extraReads: Self.sandboxReads(home: home, skills: skills),
-                                                extraWrites: Self.userTemporaryFolders + [SettingsProposalInbox.directory.path]) {
+                                                extraWrites: Self.userTemporaryFolders + (SettingsProposalInbox.chatFolder(id).map { [$0.path] } ?? [])) {
             settings["sandbox"] = sandbox
         }
         if !settings.isEmpty {
@@ -594,7 +597,7 @@ public actor ClaudeIntegration: AgentIntegration {
     }
     /// How a sandboxed chat proposes project settings; only the user applies them in the app.
     static func settingsProposalInstructions(language: AppLanguage = L10n.language) -> String {
-        SettingsProposalInbox.instructions(chatVariable: ProcessLabels.chatKey, language: language)
+        SettingsProposalInbox.instructions(language: language)
     }
     /// When to reach for the user's own Chrome rather than the app's isolated browser.
     static func userChromeInstructions(language: AppLanguage = L10n.language) -> String {
@@ -930,18 +933,17 @@ public actor ClaudeIntegration: AgentIntegration {
     }
     /// The external boundary for a launch of this profile, or why it stays on the CLI sandbox; nil without a boundary runtime.
     /// Compiles the plan only; the token is read when a process actually starts.
-    private func boundaryPlan(profile: AgentPermissionProfile, cwd: String, skills: String?, scheduled: Bool) -> Result<ClaudeBoundaryLaunch, ClaudeBoundaryFallback>? {
+    private func boundaryPlan(profile: AgentPermissionProfile, cwd: String, skills: String?, scheduled: Bool, inbox: URL?) -> Result<ClaudeBoundaryLaunch, ClaudeBoundaryFallback>? {
         guard let runtime = boundaryRuntime, let home, let executable else { return nil }
         if let reason = ExternalSandboxPlanner.eligibility(profile) { return .failure(.planner(reason)) }
         if ClaudeLaunchPolicy(profile, scheduled: scheduled, userChromeEnabled: userChrome).userChrome { return .failure(.userChrome) }
         let helper = runtime.helper()
-        try? FileManager.default.createDirectory(at: SettingsProposalInbox.directory, withIntermediateDirectories: true)
         var input = ExternalSandboxPlanner.Input(project: cwd, profile: profile, providerHome: home, providerExecutable: executable,
                                                  resources: resources, home: runtime.home)
-        // Attachments and skill scripts (the plugin folder and its link targets) read-only; the proposal inbox writable,
-        // so "one refusal, one request" works inside the boundary.
+        // Attachments and skill scripts (the plugin folder and its link targets) read-only; this session's own proposal
+        // folder writable (not the whole inbox), so "one refusal, one request" works inside the boundary.
         input.extraReads = Self.sandboxReads(home: nil, skills: skills).filter { !$0.hasPrefix(home.path + "/") }
-        input.extraWrites = [SettingsProposalInbox.directory.path]
+        input.extraWrites = inbox.map { [$0.path] } ?? []
         input.settingsFile = true; input.mediateProcessList = true; input.commandInventory = true
         switch ExternalSandboxPlanner.plan(input, helper: helper) {
         case .success(let plan):
