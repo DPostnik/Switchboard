@@ -21,7 +21,7 @@ sys.dont_write_bytecode = True
 
 from install import LOCK, ROOT, resolve_node, verify
 from transport import StdioRPC
-from chrome_host import ChromeHost
+from chrome_host import BLANK_PAGES, ChromeHost
 from cdp import CDPError, CDPTransportError, PageSession, jpeg_size
 import page_input
 
@@ -30,7 +30,6 @@ SCRIPT = Path(__file__).with_name('cards.js').read_text()
 PAGE_READ = Path(__file__).with_name('page_read.js').read_text()
 PAGE_TREE = Path(__file__).with_name('page_tree.js').read_text()
 LANGUAGE = 'en'
-BLANK_PAGES = ('about:blank', 'chrome://newtab/', 'chrome://new-tab-page/')
 
 
 def tr(ru, en):

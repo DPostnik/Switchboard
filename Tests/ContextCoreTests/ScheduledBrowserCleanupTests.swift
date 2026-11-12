@@ -46,3 +46,28 @@ import AgentContract
     }
     #expect(try store.ownedGrant(session: session) == grant)
 }
+
+@Test func scheduledBrowserCleanupIdleOnlyKeepsBrowserWithOpenPages() throws {
+    let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let session = AgentSessionReference(connection: .appClaude, nativeID: "scheduled-idle-cleanup")
+    let store = BrowserProfileStore(root: root)
+    let grant = try store.prepareNew(project: root.path, connection: session.connection)
+    try store.acknowledge(grant, session: session)
+    try FileManager.default.createDirectory(at: store.environment(grant.environment), withIntermediateDirectories: true)
+    let runtime = root.appendingPathComponent("runtime")
+    try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
+    // Run by /usr/bin/python3 directly, so no executable bit is needed. It answers by mode.
+    let script = """
+    import json, sys
+    if '--close-if-idle' in sys.argv:
+        print(json.dumps({'running': True, 'kept': True}))
+    elif '--close' in sys.argv:
+        print(json.dumps({'running': False}))
+    else:
+        print(json.dumps({'error': 'unexpected mode'})); sys.exit(1)
+    """
+    try Data(script.utf8).write(to: runtime.appendingPathComponent("chrome_host.py"))
+    #expect(ScheduledBrowserCleanup.close(session: session, runtime: runtime, idleOnly: true, root: root) == .kept)
+    #expect(ScheduledBrowserCleanup.close(session: session, runtime: runtime, root: root) == .closed)
+}

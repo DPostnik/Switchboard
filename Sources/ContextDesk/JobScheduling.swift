@@ -203,6 +203,19 @@ import ContextCore
         if wasActive {
             await finishScheduledRecord(id, status: status, output: output)
             if let run = jobLedger.runs.first(where: { $0.id == id }) { await recordAttention(run, status: status, output: output) }
+            closeIdleRunBrowser(id)
+        }
+    }
+    /// A finished run leaves no browser task, but Chrome stayed open when the sign-in preflight launched it
+    /// and the agent never opened a tab: no session could close it. Quit it only if every tab is blank.
+    func closeIdleRunBrowser(_ id: UUID) {
+        guard !schedulerStopping, let thread = jobLedger.runs.first(where: { $0.id == id })?.threadID,
+              let session = state.chats.first(where: { $0.id == thread })?.nativeSession,
+              let resources = Bundle.main.resourceURL else { return }
+        let runtime = resources.appendingPathComponent("BrowserRuntime")
+        Task.detached {
+            let result = ScheduledBrowserCleanup.close(session: session, runtime: runtime, idleOnly: true)
+            AppLog.delivery.info("Idle browser cleanup after scheduled run \(id, privacy: .public): \(String(describing: result), privacy: .public)")
         }
     }
     func stopJob(_ run: JobRun) async {

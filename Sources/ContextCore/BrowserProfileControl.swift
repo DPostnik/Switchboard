@@ -6,6 +6,8 @@ public enum BrowserProfileControl {
     public struct Result: Decodable, Sendable {
         public let running: Bool?
         public let pid: Int32?
+        /// Set by `--close-if-idle` when a tab with an address kept Chrome running.
+        public let kept: Bool?
         public let error: String?
     }
     public static func status(environment: URL, runtime: URL, grant: BrowserProfileGrant?, close: Bool = false) throws -> Result {

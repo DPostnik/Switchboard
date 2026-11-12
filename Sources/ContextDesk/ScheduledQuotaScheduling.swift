@@ -102,6 +102,7 @@ import ContextCore
                     switch result {
                     case .notNeeded: note = L10n.text("Автоматическое закрытие браузера не требовалось или профиль не принадлежит агенту.", "Automatic browser closure was not needed or the profile is not agent-owned.")
                     case .closed: note = L10n.text("Агентный браузер закрыт; профиль сохранён.", "Agent browser closed; profile preserved.")
+                    case .kept: note = L10n.text("Браузер оставлен открытым: в нём есть открытые страницы.", "The browser was kept open: it has open pages.")
                     case .failed(let reason): note = L10n.text("Браузер не освобождён: ", "Browser resources were not released: ") + reason
                     }
                     do {

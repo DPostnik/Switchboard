@@ -22,6 +22,8 @@ from urllib.parse import urlparse
 
 from install import chrome_app, verify_chrome
 
+# Pages that carry no task or person's work: a Chrome with only these may be quit.
+BLANK_PAGES = ('about:blank', 'chrome://newtab/', 'chrome://new-tab-page/')
 
 class ChromeLaunchError(RuntimeError):
     # Stable machine-readable reason for native callers; the message stays localized.
@@ -330,6 +332,27 @@ function run(args) {
         endpoint = self.ensure()
         return {'webSocketURL': endpoint.replace('http://', 'ws://', 1) + self.owner['browserPath']}
 
+    def close_if_idle(self):
+        """Caller holds operation.lock. Quit this environment's Chrome only when every tab is blank.
+
+        A scheduled run that never opened a tab (for example, one whose sign-in preflight launched
+        Chrome but whose agent did not need the site) otherwise left Chrome running with no owner
+        able to close it. Any page with an address (an unclosed task tab, a person's tab) keeps it.
+        Never launches Chrome; the close itself is control_owned's single, never-resent request.
+        """
+        if not self.record.exists():
+            return {'running': False}
+        owner = json.loads(self.record.read_text())
+        if self.process_gone(owner):
+            return {'running': False}
+        targets = self.page_targets(owner)
+        if not isinstance(targets, dict):
+            raise self.error('Не удалось проверить вкладки Chrome. Ничего не закрыто.',
+                             'Could not inspect the Chrome tabs. Nothing was closed.')
+        if any(url not in BLANK_PAGES for url in targets.values()):
+            return {'running': True, 'kept': True}
+        return self.control_owned(True)
+
     def control_owned(self, close):
         owner = json.loads(self.record.read_text())
         if self.process_gone(owner):
@@ -414,6 +437,7 @@ if __name__ == '__main__':
     parser.add_argument('--language', choices=('ru', 'en'), default='en')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--close', action='store_true')
+    mode.add_argument('--close-if-idle', action='store_true')
     mode.add_argument('--prepare-cookie-import', action='store_true')
     mode.add_argument('--profile-idle', action='store_true')
     parser.add_argument('--profile-lease')
@@ -440,7 +464,10 @@ if __name__ == '__main__':
                     raise host.error('Браузер выполняет операцию. Действие управления не отправлено.',
                                      'The browser is performing an operation. No control action was sent.')
                 validate(host.root, args.profile_lease, allow_human=True, language=args.language)
-                print(json.dumps(host.control_owned(args.close) if host.record.exists() else {'running': False}))
+                if args.close_if_idle:
+                    print(json.dumps(host.close_if_idle()))
+                else:
+                    print(json.dumps(host.control_owned(args.close) if host.record.exists() else {'running': False}))
     except Exception as error:
         result = {'error': str(error)}
         if getattr(error, 'code', None):

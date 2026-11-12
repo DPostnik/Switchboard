@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Quit the agent browser after a scheduled run when only blank tabs remain, so a browser launched for a sign-in transfer no longer stays open after a run that never used it.
+
 - Defer scheduled routines when provider quota is exhausted, resume the same run after recovery, and release its idle agent browser while waiting.
 
 - Important run warnings now link directly to their scheduled task, and failed runs without chats explain where to inspect and retry them.

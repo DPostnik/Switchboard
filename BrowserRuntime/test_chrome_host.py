@@ -233,3 +233,28 @@ class ChromeHostTests(unittest.TestCase):
             self.assertFalse(self.host.hide_created_browser(self.owner))
             self.assertIn('still running', errors.getvalue())
         run.assert_called_once()
+
+    def test_close_if_idle_quits_only_a_chrome_with_blank_tabs(self):
+        self.host.record.parent.mkdir(parents=True, exist_ok=True)
+        self.assertEqual(self.host.close_if_idle(), {'running': False})  # No record: never launches.
+        self.host.persist(self.owner)
+        with patch.object(ChromeHost, 'process_gone', return_value=True), \
+             patch.object(ChromeHost, 'control_owned') as close:
+            self.assertEqual(self.host.close_if_idle(), {'running': False})
+        close.assert_not_called()
+        with patch.object(ChromeHost, 'process_gone', return_value=False), \
+             patch.object(ChromeHost, 'page_targets', return_value={'A' * 32: 'https://www.linkedin.com/feed/', 'B' * 32: 'about:blank'}), \
+             patch.object(ChromeHost, 'control_owned') as close:
+            self.assertEqual(self.host.close_if_idle(), {'running': True, 'kept': True})
+        close.assert_not_called()
+        with patch.object(ChromeHost, 'process_gone', return_value=False), \
+             patch.object(ChromeHost, 'page_targets', return_value=None), \
+             patch.object(ChromeHost, 'control_owned') as close:
+            with self.assertRaises(ChromeLaunchError):
+                self.host.close_if_idle()
+        close.assert_not_called()
+        with patch.object(ChromeHost, 'process_gone', return_value=False), \
+             patch.object(ChromeHost, 'page_targets', return_value={'A' * 32: 'about:blank', 'B' * 32: 'chrome://newtab/'}), \
+             patch.object(ChromeHost, 'control_owned', return_value={'running': False}) as close:
+            self.assertEqual(self.host.close_if_idle(), {'running': False})
+        close.assert_called_once_with(True)

@@ -8,10 +8,14 @@ public enum ScheduledBrowserCleanup {
     public enum Outcome: Equatable, Sendable {
         case notNeeded
         case closed
+        /// `idleOnly` found a tab with an address (an unclosed task tab or a person's tab).
+        case kept
         case failed(String)
     }
 
-    public static func close(session: AgentSessionReference, runtime: URL,
+    /// `idleOnly` quits Chrome only when every tab is blank. A finished run uses it, so a browser
+    /// that the sign-in preflight launched but the agent never used does not stay open without an owner.
+    public static func close(session: AgentSessionReference, runtime: URL, idleOnly: Bool = false,
                              root: URL = BrowserEnvironmentStore.directory) -> Outcome {
         do {
             // Keep ownership stable until chrome_host has checked the captured lease
@@ -35,7 +39,8 @@ public enum ScheduledBrowserCleanup {
             guard !FileManager.default.fileExists(atPath: environment.appendingPathComponent("executor-in-flight.json").path) else {
                 throw BrowserProfileError.uncertain
             }
-            let result = try run(environment: environment, runtime: runtime, grant: grant)
+            let result = try run(environment: environment, runtime: runtime, grant: grant, idleOnly: idleOnly)
+            if idleOnly, result.running == true, result.kept == true, result.error == nil { return .kept }
             guard result.running == false, result.error == nil else { throw BrowserProfileError.closeFirst }
             return .closed
         } catch {
@@ -43,12 +48,12 @@ public enum ScheduledBrowserCleanup {
         }
     }
 
-    private static func run(environment: URL, runtime: URL, grant: BrowserProfileGrant) throws -> BrowserProfileControl.Result {
+    private static func run(environment: URL, runtime: URL, grant: BrowserProfileGrant, idleOnly: Bool) throws -> BrowserProfileControl.Result {
         let process = Process(), pipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         process.arguments = ["-B", runtime.appendingPathComponent("chrome_host.py").path,
                              "--root", environment.path, "--language", L10n.language.rawValue,
-                             "--profile-lease", grant.generation.uuidString.lowercased(), "--close"]
+                             "--profile-lease", grant.generation.uuidString.lowercased(), idleOnly ? "--close-if-idle" : "--close"]
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
         try process.run()
