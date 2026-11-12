@@ -61,17 +61,35 @@ private func sandboxSettings(_ profile: AgentPermissionProfile, cwd: String) thr
     // `--add-dir` would make a folder writable for commands, so read-only folders are not passed; no deny closes
     // the writable folders inside them.
     #expect(filesystem["denyWrite"] == .null && settings["permissions"]["additionalDirectories"] == .null)
-    #expect(sandbox["excludedCommands"].array.contains(.string("swift build *")) && sandbox["network"]["allowedDomains"].array == [.string("*")])
+    // No exclusions: only the call's `dangerouslyDisableSandbox` takes a command out of the CLI sandbox.
+    #expect(sandbox["excludedCommands"] == .null && sandbox["allowUnsandboxedCommands"] == .bool(true))
+    #expect(sandbox["network"]["allowedDomains"].array == [.string("*")])
     #expect(!settings["permissions"]["allow"].array.contains(.string("Bash")))
+}
+
+@Test func claudeSandboxedLaunchTellsTheAgentHowTrustedCommandsLeaveTheSandbox() throws {
+    var project = Project(path: "/Users/me/app")
+    project.sandboxCommands = ["zsh scripts/test.sh"]
+    let args = try ClaudeIntegration.arguments(id: UUID().uuidString, resumed: false, permissions: developer(project), model: "", effort: nil, cwd: "/Users/me/app")
+    let prompt = try #require(args.firstIndex(of: "--append-system-prompt").map { args[$0 + 1] })
+    #expect(prompt.contains(ClaudeIntegration.sandboxCommandInstructions(trusted: AgentCommandPolicy(developer(project)).trustedPrefixes.map(\.command))))
+    #expect(prompt.contains("`zsh scripts/test.sh`") && prompt.contains("dangerouslyDisableSandbox: true"))
+    for language in [AppLanguage.russian, .english] {
+        let text = ClaudeIntegration.sandboxCommandInstructions(trusted: ["swift build"], language: language)
+        #expect(text.contains("`swift build`") && text.contains("dangerouslyDisableSandbox: true"))
+    }
+    #expect(ClaudeIntegration.sandboxCommandInstructions(trusted: [], language: .english).contains("(none)"))
+    // Without a command sandbox there is nothing to leave.
+    project.commandSandbox = false
+    let open = try ClaudeIntegration.arguments(id: UUID().uuidString, resumed: false, permissions: developer(project), model: "", effort: nil, cwd: "/Users/me/app")
+    let openPrompt = open.firstIndex(of: "--append-system-prompt").map { open[$0 + 1] } ?? ""
+    #expect(!openPrompt.contains("Command sandbox in this chat") && !openPrompt.contains("Песочница команд в этом чате"))
 }
 
 @Test func onlyTrustedCommandsLeaveTheSandboxUnasked() {
     var profile = AgentRoleCatalog.preset(AgentRoleID.developer).profile
     profile.commandSandbox = .init(read: [], write: [], unsandboxed: ["ps", "sysctl -n", "gh", "git push", "swift build", "zsh scripts/test.sh"])
     let policy = ClaudeLaunchPolicy(profile, scheduled: false, userChromeEnabled: false)
-    #expect(policy.runsSandboxed("ls ~/Public/work && cat x", disableSandbox: false))
-    #expect(!policy.runsSandboxed("ls", disableSandbox: true))
-    #expect(!policy.runsSandboxed("echo x && swift build", disableSandbox: false))
     for trusted in ["gh pr list", "cd sub && git push origin main", "swift build -c release", "gh",
                     "zsh scripts/test.sh --filter X 2>&1 | tail -30", "git push 2>&1 | tail -3", "gh pr create --body 'a > b'",
                     "zsh scripts/test.sh > /tmp/claude-501/t.log 2>&1; echo \"exit=$?\"",

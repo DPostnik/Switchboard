@@ -29,7 +29,7 @@ private func auditDatabase(_ file: URL, sql: String) throws {
     #expect(before[0].requestID == nil && before[0].source == nil && before[0].stage == nil && before[0].outcome == nil && before[0].reason == nil)
     let record = AgentCapabilityRecord(tool: "mcpElicitation", capability: .other, decision: .answered, turn: "turn",
         requestID: "interaction-1", source: "mcpServer/elicitation/request", stage: .responded, outcome: .unknown, ruleID: "rule-fixture",
-        reason: "backslash")
+        reason: "disableSandboxRequested:substitution")
     await ledger.record(.init(chatID: "chat", runID: nil, projectID: nil, roleID: "developer", agent: "codex", record: record, audit: false))
     await ledger.flush()
     // Old versions omit the new nullable columns and still write successfully.
@@ -37,7 +37,7 @@ private func auditDatabase(_ file: URL, sql: String) throws {
     let rows = try await CapabilityLedger(file: file).recent(days: 1)
     let migrated = try #require(rows.first { $0.requestID == "interaction-1" })
     #expect(rows.count == 3)
-    #expect(migrated.source == record.source && migrated.stage == .responded && migrated.outcome == .unknown && migrated.ruleID == "rule-fixture" && migrated.reason == "backslash")
+    #expect(migrated.source == record.source && migrated.stage == .responded && migrated.outcome == .unknown && migrated.ruleID == "rule-fixture" && migrated.reason == "disableSandboxRequested:substitution")
     #expect(await ledger.lastError == nil)
     #expect(try await ledger.interruptions(days: 1) == 0)
 }
@@ -95,7 +95,7 @@ private func auditDatabase(_ file: URL, sql: String) throws {
     let ledger = CapabilityLedger(file: file)
     let old = try #require(try await ledger.recent(days: 1).first)
     #expect(old.requestID == "old-request" && old.reason == nil)
-    for reason in ["cliAskedSandboxed", "denyList"] {
+    for reason in ["sandboxed", "denyList"] {
         await ledger.record(.init(chatID: "chat", runID: nil, projectID: nil, roleID: "developer", agent: "claude",
             record: .init(tool: "Bash", capability: .shell, target: reason, decision: .allowed, reason: reason), audit: false))
     }
@@ -105,6 +105,6 @@ private func auditDatabase(_ file: URL, sql: String) throws {
     let rows = try await CapabilityLedger(file: file).recent(days: 1)
     #expect(rows.count == 4)
     let reasons = Dictionary(uniqueKeysWithValues: rows.compactMap { row in row.target.map { ($0, row.reason ?? "-") } })
-    #expect(reasons == ["echo old": "-", "cliAskedSandboxed": "cliAskedSandboxed", "denyList": "denyList", "echo legacy": "-"])
+    #expect(reasons == ["echo old": "-", "sandboxed": "sandboxed", "denyList": "denyList", "echo legacy": "-"])
     #expect(await ledger.lastError == nil)
 }

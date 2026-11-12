@@ -510,10 +510,28 @@ public actor ClaudeIntegration: AgentIntegration {
         // Only roles with subagents get the delegation guidance; it would be noise elsewhere.
         let delegation = policy.delegation ? delegationInstructions() : nil
         let proposals = policy.sandbox != nil ? settingsProposalInstructions() : nil
-        args += ["--append-system-prompt", ([AgentAutonomy.instructions(), delegation, chrome ? userChromeInstructions() : nil, proposals,
+        let sandboxRules = policy.sandbox != nil
+            ? sandboxCommandInstructions(trusted: AgentCommandPolicy(policy.profile).trustedPrefixes.map(\.command)) : nil
+        args += ["--append-system-prompt", ([AgentAutonomy.instructions(), delegation, chrome ? userChromeInstructions() : nil, sandboxRules, proposals,
                                              home.flatMap { ClaudeProfile.instructions(home: $0) },
                                              projectInstructions].compactMap { $0 }).joined(separator: "\n\n")]
         return args
+    }
+    /// How Bash leaves the command sandbox. The launch passes no `excludedCommands`, so only the call's
+    /// `dangerouslyDisableSandbox` takes a command out, and the app then runs only trusted commands unasked.
+    static func sandboxCommandInstructions(trusted: [String], language: AppLanguage = L10n.language) -> String {
+        let list = trusted.isEmpty ? L10n.text("нет", "none", language: language) : trusted.map { "`\($0)`" }.joined(separator: ", ")
+        return L10n.text(
+            """
+            Песочница команд в этом чате:
+            - Каждая команда Bash идёт внутри песочницы, если в вызове не указан `dangerouslyDisableSandbox: true`. Вне песочницы без вопроса пользователю идут только доверенные команды проекта; любую другую команду с этим флагом подтверждает пользователь.
+            - Доверенные команды проекта (\(list)) выходят из песочницы только с `dangerouslyDisableSandbox: true`; запускай их так с первой попытки, отдельно или только с чтением их вывода.
+            """,
+            """
+            Command sandbox in this chat:
+            - Every Bash command runs inside the sandbox unless the call sets `dangerouslyDisableSandbox: true`. Outside the sandbox only the project's trusted commands run without asking the user; any other command with that flag waits for the user.
+            - Project trusted commands (\(list)) leave the CLI sandbox only with `dangerouslyDisableSandbox: true`; run them that way on the first attempt, on their own or followed only by reads of their output.
+            """, language: language)
     }
     /// How a sandboxed chat proposes project settings; only the user applies them in the app.
     static func settingsProposalInstructions(language: AppLanguage = L10n.language) -> String {
@@ -1020,14 +1038,14 @@ public actor ClaudeIntegration: AgentIntegration {
         case "Bash":
             guard profile.shell == .on || profile.filesystem == .unrestricted else { await deny(outside, reason: "shellOff"); return }
             if policy.sandbox != nil {
-                // Inside the sandbox the OS holds the role's folders, so the CLI's other questions need no prompt.
+                // Without `excludedCommands` the CLI sandboxes every Bash command unless the call sets
+                // `dangerouslyDisableSandbox` (2.1.292 `shouldUseSandbox`): the input field is the CLI's own decision.
+                // Inside the sandbox the OS holds the role's folders, so the CLI's questions need no prompt.
                 // Outside it, only trusted commands run unasked; the rest is the user's call, one command at a time.
-                let command = input["command"].string ?? "", disableSandbox = input["dangerouslyDisableSandbox"].bool == true
-                // The app's heuristic says sandboxed, yet the CLI asked: evidence for step A2 of the boundary plan.
-                if policy.runsSandboxed(command, disableSandbox: disableSandbox) { await allow("cliAskedSandboxed"); return }
-                if policy.trusts(command) { await allow("trusted"); return }
-                askReason = disableSandbox ? "disableSandboxRequested" : command.contains("\\") ? "backslash"
-                    : policy.trustRejection(command) ?? "untrusted"
+                let command = input["command"].string ?? "", session = sessions[id]?.cwd
+                guard input["dangerouslyDisableSandbox"].bool == true else { await allow("sandboxed"); return }
+                if policy.trusts(command, cwd: session) { await allow("trusted"); return }
+                askReason = "disableSandboxRequested:" + (policy.trustRejection(command, cwd: session) ?? "untrusted")
                 guard attended else {
                     await deny(L10n.text("Команда вне песочницы; запуск без присмотра её не выполняет.", "A command outside the sandbox; an unattended run does not run it."),
                                reason: askReason); return

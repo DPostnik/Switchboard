@@ -318,9 +318,11 @@ private func interactiveFixture(_ root: URL) throws -> URL {
                 out({'type':'control_request','request_id':'late-read','request':{'subtype':'can_use_tool','tool_name':'Read','input':{'file_path':shot}}})
                 out({'type':'control_request','request_id':'late-write','request':{'subtype':'can_use_tool','tool_name':'Write','input':{'file_path':'/outside-project/file','content':'x'}}})
                 continue
-            if prompt.startswith('bash:'):
-                # One Bash question under the command sandbox; the command follows the prefix.
-                out({'type':'control_request','request_id':'bash-1','request':{'subtype':'can_use_tool','tool_name':'Bash','input':{'command':prompt[5:]}}})
+            if prompt.startswith('bash:') or prompt.startswith('bash!:'):
+                # One Bash question under the command sandbox; the command follows the prefix, `!` sets the CLI's flag.
+                command=prompt.split(':',1)[1]
+                bash_input={'command':command,'dangerouslyDisableSandbox':True} if prompt.startswith('bash!:') else {'command':command}
+                out({'type':'control_request','request_id':'bash-1','request':{'subtype':'can_use_tool','tool_name':'Bash','input':bash_input}})
                 continue
             if prompt=='sandbox':
                 # Bash requests under the command sandbox: inside it (asked for an env prefix), a trusted command
@@ -959,18 +961,23 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     #expect(answers.map { $0["request_id"].string } == ["sb-1", "sb-2", "sb-3", "sb-4"])
     #expect(answers.allSatisfy { $0["response"]["behavior"].string == "allow" })
     #expect(await events.capabilities().map { "\($0.tool):\($0.decision)" } == ["Bash:allowed", "Bash:allowed", "Bash:asked", "Write:allowed"])
-    // Why each Bash answer was given: the CLI asked about a command the app holds sandboxed, a trusted command,
-    // and a request to leave the sandbox, which the user's answer record repeats.
-    #expect(await events.capabilities().prefix(3).map(\.reason) == ["cliAskedSandboxed", "trusted", "disableSandboxRequested"])
+    // Why each Bash answer was given: two commands without the CLI's flag are sandboxed, the flagged one is not
+    // trusted; the user's answer record repeats that reason.
+    #expect(await events.capabilities().prefix(3).map(\.reason)
+            == ["sandboxed", "sandboxed", "disableSandboxRequested:unknownFilter"])
     let answered = await events.capabilities(includeLifecycle: true).filter { $0.requestID == asked.id.uuidString && $0.stage == .responded }
-    #expect(answered.map(\.reason) == ["disableSandboxRequested"])
+    #expect(answered.map(\.reason) == ["disableSandboxRequested:unknownFilter"])
     await adapter.disconnect()
 }
 
-/// A Bash question the app cannot answer records why it asked: a backslash, or a command substitution around a
-/// command that leaves the sandbox.
-@Test(arguments: [("python3 -c 'print(\"a\\nb\")'", "backslash"), ("gh pr view $(git branch --show-current)", "substitution")])
-func claudeBashQuestionRecordsWhyItAsked(_ command: String, _ reason: String) async throws {
+/// A Bash question under the command sandbox is answered by the CLI's own field: without `dangerouslyDisableSandbox`
+/// the command is sandboxed and allowed whatever its text; with it only a trusted command runs unasked, and the
+/// ledger records why the rest asked.
+@Test(arguments: [("printf 'a\\nb'", false, "sandboxed"), ("nice -n 1 swift build", false, "sandboxed"),
+                  ("swift build", true, "trusted"), ("echo hi", true, "disableSandboxRequested:noGrant"),
+                  ("gh pr view $(git branch --show-current)", true, "disableSandboxRequested:substitution"),
+                  ("cd /elsewhere && zsh scripts/test.sh", true, "disableSandboxRequested:cdBeforeScript")])
+func claudeBashUnderTheSandboxFollowsTheCLIFlag(_ command: String, _ flag: Bool, _ reason: String) async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
     let binary = try interactiveFixture(root)
@@ -979,27 +986,37 @@ func claudeBashQuestionRecordsWhyItAsked(_ command: String, _ reason: String) as
     defer { reader.cancel() }
     let descriptor = try await adapter.connect(.init(executable: binary, home: root.appendingPathComponent("home"))).value()
     var developer = AgentPermissionProfile.workspace(); developer.shell = .on; developer.network = true
-    developer.commandSandbox = .init(read: [root.path], write: [root.path], unsandboxed: ["gh"])
+    developer.commandSandbox = .init(read: [root.path], write: [root.path], unsandboxed: ["gh", "swift build", "zsh scripts/test.sh"])
     let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root, role: developer)).value()
-    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "bash:" + command, role: developer)).value()
-    try await waitFor { await events.interaction() != nil }
-    let asked = try #require(await events.interaction())
-    _ = try await adapter.answer(asked.id, session: session, context: descriptor.context, response: .deny).value()
+    let prompt = (flag ? "bash!:" : "bash:") + command
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: prompt, role: developer)).value()
+    let asks = reason.hasPrefix("disableSandboxRequested")
+    if asks {
+        try await waitFor { await events.interaction() != nil }
+        let asked = try #require(await events.interaction())
+        _ = try await adapter.answer(asked.id, session: session, context: descriptor.context, response: .deny).value()
+    }
     try await waitFor { await events.completion() != nil }
     let records = await events.capabilities()
-    #expect(records.map(\.decision) == [.asked] && records.first?.target == command)
-    #expect(records.first?.reason == reason)
+    #expect(records.map(\.decision) == [asks ? .asked : .allowed] && records.first?.target == command, "\(command)")
+    #expect(records.first?.reason == reason, "\(command)")
     let answered = await events.capabilities(includeLifecycle: true).filter { $0.stage == .responded }
-    #expect(answered.map(\.decision) == [.denied] && answered.first?.reason == reason)
+    #expect(answered.map(\.decision) == [asks ? .denied : .allowed] && answered.first?.reason == reason, "\(command)")
     await adapter.disconnect()
 }
 
-@Test func claudeTrustRejectionNamesTheCommandShape() {
-    #expect(ClaudeLaunchPolicy.trustRejectionShape("gh pr view $(git branch)") == "substitution")
-    #expect(ClaudeLaunchPolicy.trustRejectionShape("echo `date`") == "substitution")
-    #expect(ClaudeLaunchPolicy.trustRejectionShape("cd /p/proj && zsh scripts/test.sh") == "cdBeforeScript")
-    #expect(ClaudeLaunchPolicy.trustRejectionShape("FOO=1 cd x; ls") == "cdBeforeScript")
-    #expect(ClaudeLaunchPolicy.trustRejectionShape("echo cd here") == "untrusted")
+@Test func claudeTrustRejectionUsesTheSessionDirectory() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    var profile = AgentPermissionProfile.workspace(); profile.shell = .on
+    profile.commandSandbox = .init(read: [], write: [], unsandboxed: ["zsh scripts/test.sh"])
+    let policy = ClaudeLaunchPolicy(profile, scheduled: false, userChromeEnabled: false)
+    let command = "cd \(root.path) && zsh scripts/test.sh"
+    #expect(policy.trusts(command, cwd: root.path) && policy.trustRejection(command, cwd: root.path) == nil)
+    #expect(!policy.trusts(command, cwd: "/elsewhere") && policy.trustRejection(command, cwd: "/elsewhere") == "cdBeforeScript")
+    #expect(policy.trustRejection("zsh scripts/test.sh `id`", cwd: root.path) == "substitution")
+    #expect(policy.trustRejection("echo hi", cwd: root.path) == "noGrant")
 }
 
 @Test func claudeFullAccessLoadsAccountConnectorsAndAsksBeforeTheirActions() async throws {

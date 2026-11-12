@@ -82,8 +82,7 @@ struct ModelChip: View {
     /// A new chat with more than one installed agent chooses the provider with the toggle.
     private var showsToggle: Bool { newChat && model.selectableAgentIDs.count > 1 }
     private var mark: AgentMark? {
-        showsToggle ? nil : AgentMark(agent: model.currentAgent.agent, systemImage: model.profile(model.currentAgent)?.systemImage,
-                                      size: .ui(11))
+        showsToggle ? nil : AgentMark(profile: model.profile(model.currentAgent), size: .ui(11))
     }
 
     var body: some View {

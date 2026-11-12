@@ -146,7 +146,7 @@ public struct AgentCommandPolicy: Sendable {
         let command = Self.withoutDirectorySubstitutions(original)
         guard !command.contains("$("), !command.contains("`") else { return .substitution }
         // Comments and ANSI-C quoting (`$'\''`) would end or open quotes where the word parser does not see them.
-        guard command.range(of: #"(^|[\s;|&(){}])#"#, options: .regularExpression) == nil, !command.contains("$'") else { return .unknownFilter }
+        guard !Self.hasComment(command), !command.contains("$'") else { return .unknownFilter }
         // The segment parser splits at `&`: descriptor copies (`2>&1`) only route output and are dropped first, and
         // `&>` writes like `>`. Both only remove characters, so quoted text cannot gain a command this way.
         let normalized = command.replacingOccurrences(of: #"(^|\s)\d*>&\d+(?=\s|[;|&)]|$)"#, with: " ", options: .regularExpression)
@@ -236,6 +236,33 @@ public struct AgentCommandPolicy: Sendable {
         if path == "~" || path.hasPrefix("~/") { path = NSHomeDirectory() + path.dropFirst() }
         guard path.hasPrefix("/"), !path.utf8.contains(0) else { return nil }
         return URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+    }
+    /// Whether the command has a shell comment: an unquoted, unescaped `#` at the start of a word (line start, after
+    /// whitespace or after `;`, `|`, `&`, `(`, `)`, `{`, `}`). A `#` inside quotes or within a word is data.
+    static func hasComment(_ command: String) -> Bool {
+        let chars = Array(command)
+        var index = 0, wordStart = true
+        var quote: Character?
+        while index < chars.count {
+            let char = chars[index]
+            if quote == "'" {
+                if char == "'" { quote = nil }
+                wordStart = false
+            } else if quote == "\"" {
+                if char == "\\" { index += 1 } else if char == "\"" { quote = nil }
+                wordStart = false
+            } else if char == "\\" {
+                index += 1; wordStart = false
+            } else if char == "'" || char == "\"" {
+                quote = char; wordStart = false
+            } else if char == "#" {
+                if wordStart { return true }
+            } else {
+                wordStart = char.isWhitespace || ";|&(){}".contains(char)
+            }
+            index += 1
+        }
+        return false
     }
     /// No pipe (`|`, `|&`) or background `&` outside quotes; `||`, `&&`, `;` and newlines keep segments in order.
     static func isSequential(_ command: String) -> Bool {

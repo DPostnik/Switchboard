@@ -131,6 +131,8 @@ struct ClaudeLaunchPolicy: Equatable {
     /// The `sandbox` flag setting: the home folder is closed to commands except the chat's folder, the project's
     /// roots and presets and `extraReads` (the app's own files a command needs, such as skill scripts). Temporary
     /// folders stay writable. Commands outside the sandbox stay possible but reach `permission()` (see `trusts`).
+    /// No `excludedCommands`: Claude Code (2.1.292 `shouldUseSandbox`) then sandboxes every Bash command unless the
+    /// call sets `dangerouslyDisableSandbox`, so that input field alone is the CLI's own sandbox decision.
     func sandboxSettings(cwd: String?, extraReads: [String] = [], extraWrites: [String] = []) -> JSONValue? {
         guard let sandbox else { return nil }
         func unique(_ values: [String]) -> [String] { var seen = Set<String>(); return values.filter { !$0.isEmpty && seen.insert($0).inserted } }
@@ -139,35 +141,21 @@ struct ClaudeLaunchPolicy: Equatable {
         let filesystem: [String: JSONValue] = ["denyRead": .array([.string("~/")]),
                                                "allowRead": .array(read.map(JSONValue.string)),
                                                "allowWrite": .array(write.map(JSONValue.string))]
-        let excluded = AgentCommandPolicy(profile).trustedPrefixes.flatMap { [$0.command, $0.command + " *"] }
         // `*` keeps the network open for roles that have it; the CLI's proxy then passes every host.
         let network: [String: JSONValue] = ["allowedDomains": .array(profile.network ? [.string("*")] : []),
                                             "allowLocalBinding": .bool(profile.network)]
         return .object(["enabled": .bool(true), "failIfUnavailable": .bool(true), "autoAllowBashIfSandboxed": .bool(true),
-                        "allowUnsandboxedCommands": .bool(true), "excludedCommands": .array(excluded.map(JSONValue.string)),
+                        "allowUnsandboxedCommands": .bool(true),
                         "filesystem": .object(filesystem), "network": .object(network)])
     }
-    /// Whether a command runs inside the sandbox: not asked to leave it and no segment is an excluded command.
-    func runsSandboxed(_ command: String, disableSandbox: Bool) -> Bool {
-        guard sandbox != nil, !disableSandbox else { return false }
-        // The inspection scanner does not decode shell escapes. An escaped executable may still match a CLI
-        // exclusion, so a provider question about that command cannot be classified as confined from text alone.
-        guard !command.contains("\\") else { return false }
-        return !AgentCommandPolicy(profile).containsTrustedCommand(command)
-    }
-    /// Existing project command grants are evaluated by the shared deterministic policy.
-    func trusts(_ command: String) -> Bool { AgentCommandPolicy(profile).trusts(command) }
-    /// Ledger reason a command is not trusted, nil when it is. Interim heuristic: `substitution` for `$(` or a
-    /// backtick, `cdBeforeScript` for a `cd ` segment, otherwise `untrusted`. Diagnostic only, never decides;
-    /// the finer reasons are meant to come from `AgentCommandPolicy` later.
-    func trustRejection(_ command: String) -> String? {
-        guard !trusts(command) else { return nil }
-        return Self.trustRejectionShape(command)
-    }
-    static func trustRejectionShape(_ command: String) -> String {
-        if command.contains("$(") || command.contains("`") { return "substitution" }
-        if heads(command).contains(where: { $0 == "cd" || $0.hasPrefix("cd ") }) { return "cdBeforeScript" }
-        return "untrusted"
+    /// Existing project command grants are evaluated by the shared deterministic policy; `cwd` is the session's
+    /// working directory, the project that owns relative trusted scripts.
+    func trusts(_ command: String, cwd: String? = nil) -> Bool { AgentCommandPolicy(profile).trusts(command, cwd: cwd) }
+    /// Ledger reason a command is not trusted (`AgentCommandPolicy.TrustRejection`), nil when it is trusted.
+    func trustRejection(_ command: String, cwd: String? = nil) -> String? {
+        let policy = AgentCommandPolicy(profile)
+        if let reason = policy.trustRejection(command, cwd: cwd) { return reason }
+        return policy.trusts(command, cwd: cwd) ? nil : "untrusted"
     }
     enum CommandDecision: Equatable { case allow, ask, deny(String) }
     /// Inspection of one shell command against the role: deny-list first, then the network list, then the ask-list.

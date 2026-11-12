@@ -4,7 +4,9 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
-- Record why Claude's permission answers were given (for example a backslash, a deny-list hit or a sandboxed command the CLI still asked about) in the permissions ledger, and count denied commands an agent retried in the same turn.
+- Claude chats no longer ask about sandboxed shell commands that contain a backslash; a command leaves the sandbox only with the CLI's own flag, and then only trusted project commands run unasked.
+
+- Record why Claude's permission answers were given (for example a deny-list hit, a sandboxed command, or a request to leave the sandbox with the trust check's reason) in the permissions ledger, and count denied commands an agent retried in the same turn.
 
 - Trusted project commands accept more everyday shapes without a prompt: reading a log the same command just wrote with `cat`, `grep`, `sed -n` or `wc -l`, `date`/`pwd`/`printf`, and a `cd` to the chat's own project (also `"$(pwd)"` or `"$(git rev-parse --show-toplevel)"`) before its scripts; a `cd` anywhere else and every other substitution still ask.
 

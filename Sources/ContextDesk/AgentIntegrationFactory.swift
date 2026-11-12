@@ -36,7 +36,7 @@ enum AgentIntegrationFactory {
                       "Codex limits are shared across all apps on your account. Each chat’s context usage is shown next to the message field.")
         }, limitsSignIn: {
             L10n.text("Войди в ChatGPT в настройках приложения, чтобы увидеть лимиты.", "Sign in with ChatGPT in the app’s settings to see your limits.")
-        }, handoffSignIn: nil), modelCatalog: nil)
+        }, handoffSignIn: nil), modelCatalog: nil, brandMark: .openAI)
 
     static let claudeProfile = AgentProfile(
         connection: .appClaude, engine: .claude, name: "Claude", productName: "Claude Code",
@@ -65,7 +65,7 @@ enum AgentIntegrationFactory {
             L10n.text("Войди в Claude в настройках приложения, чтобы увидеть лимиты.", "Sign in to Claude in the app’s settings to see your limits.")
         }, handoffSignIn: {
             L10n.text("Сначала войди по подписке Claude в настройках.", "First sign in with your Claude subscription in settings.")
-        }), modelCatalog: { claudeCatalog })
+        }), modelCatalog: { claudeCatalog }, brandMark: .anthropic)
 
     /// Gemini CLI over ACP (stage D): one `gemini --acp` process serves every Gemini chat; models come from the session's
     /// model option; sign-in is the agent's own `authenticate` (Google account in the browser). Listed only when the CLI is

@@ -81,13 +81,13 @@ class AccessReviewTests(unittest.TestCase):
         rows = [self.row('C1', 'shell', 'swift build'), self.row('C2', 'shell', 'swift build --verbose'),
                 self.row('C2', 'shell', 'swift build -c release', decision='denied')]
         # Lifecycle rows: requested with a reason; the old row without one stays legacy.
-        reasons = ["UPDATE decisions SET request_id = 'r' || id, stage = 'requested', reason = 'backslash' WHERE id = 1",
+        reasons = ["UPDATE decisions SET request_id = 'r' || id, stage = 'requested', reason = 'sandboxed' WHERE id = 1",
                    "UPDATE decisions SET request_id = 'r' || id, stage = 'requested', reason = 'denyList' WHERE id = 3"]
         report = self.run_script(rows, LIFECYCLE, extra=reasons)
         group = next(g for g in report['groups'] if g['target'] == 'swift build')
-        self.assertEqual(group['reasons'], {'backslash': 1, 'denyList': 1})
+        self.assertEqual(group['reasons'], {'sandboxed': 1, 'denyList': 1})
         markdown = self.run_script(rows, LIFECYCLE, '--format', 'md', extra=reasons)
-        self.assertIn('reasons backslash 1, denyList 1', markdown)
+        self.assertIn('reasons sandboxed 1, denyList 1', markdown)
 
     def test_old_ledger_without_reason_column_reads_without_reasons(self):
         report = self.run_script([self.row('C1', 'shell', 'swift build'), self.row('C2', 'shell', 'swift build -v')])

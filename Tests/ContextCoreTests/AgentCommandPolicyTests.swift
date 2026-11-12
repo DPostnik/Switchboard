@@ -183,11 +183,17 @@ private func projectPolicy() -> AgentCommandPolicy {
         ("gh pr list; pwd /etc", .unknownFilter), ("printf x > ~/out; gh pr list", .redirection), ("echo ok; true", .noGrant),
         // Comments, ANSI-C quotes and escaped quotes cannot hide a separator or a redirection.
         ("gh pr list # it's\nrm -rf ~; echo '", .unknownFilter), ("gh x $'\\'' ; rm -rf ~ ; echo '\\''", .unknownFilter),
-        ("gh x \\' > ~/out \\'", .redirection),
+        ("gh x \\' > ~/out \\'", .redirection), ("gh pr list --search 'x' # note", .unknownFilter),
+        ("gh pr list;# note", .unknownFilter), ("gh pr list --search \"a\"\n# note", .unknownFilter),
     ]
     for (command, reason) in cases {
         #expect(!policy.trusts(command, cwd: cwd), "\(command)")
         #expect(policy.trustRejection(command, cwd: cwd) == reason.rawValue, "\(command)")
+    }
+    // A `#` inside quotes or within a word is data, not a comment.
+    for command in ["gh pr list --search \"label #3\"", "gh pr list --search 'label #3'", "gh pr list --search a#b",
+                    "gh pr list --search \"x \\\" #3\""] {
+        #expect(policy.trustRejection(command, cwd: cwd) == nil, "\(command)")
     }
     // Without a session directory every `cd` before a relative script keeps asking; absolute prefixes keep working.
     #expect(policy.trustRejection("cd /Users/me/app && zsh scripts/test.sh", cwd: nil) == "cdBeforeScript")
