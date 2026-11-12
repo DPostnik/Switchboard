@@ -334,6 +334,13 @@ Known gaps. Check this list before you treat a failure as a new defect.
   When everything the proposal adds is such a no-effect command, the continuation is the fixed `appliedWithoutEffect`
   text (do not retry; report the blocker or request the right access). Not checked live; the Claude token and Codex
   launch-info preconditions are not part of the review.
+- Project skills (2026-11-12, `ProjectSkills`): the app's link folder `project-skills/<project key>` in its data
+  directory (outside every provider home and project) is a read grant for both providers: Claude through
+  `sandboxReads` (CLI sandbox and the boundary's `extraReads`), Codex through the worker's `workflowDirectories`.
+  Each link points at a skill folder inside the project, which the chat already reads; skills whose folder,
+  `SKILL.md` or any inner link resolve outside the project, or whose front matter has keys beyond
+  `ProjectSkills.descriptiveKeys` (`allowed-tools`, `hooks`, `model`, ...), are not linked. The user's own
+  `~/.claude/skills` have no such front matter filter. Not checked live.
 - Grants carry no origin: the settings do not record when, by which chat and why a folder or command
   was added, and nothing reports a grant that is never used.
 - Roles without network stay on the native path (the proxy allowlist for model hosts is not wired).
@@ -431,3 +438,4 @@ per file, and are recorded in `docs/access-reviews.md`.
 | Ledger and review | `Sources/ContextCore/CapabilityLedger.swift`, `Sources/AgentContract/AgentRuntimeEvents.swift`, `.agents/skills/access-review/` |
 | Agent-facing instructions and refusal texts | `Sources/ContextCore/AgentAutonomy.swift`, `sandboxCommandInstructions` in `ClaudeIntegration.swift`, `boundaryCommandInstructions` and the refusal texts in `ClaudeBoundary.swift` |
 | Build under the boundary | `scripts/swift-task.py` (`SWITCHBOARD_EXTERNAL_SANDBOX`) |
+| Skills in chats (user and project) | `Sources/ContextCore/ProjectSkills.swift`, `Sources/ClaudeAdapter/ClaudeSkills.swift`, `CodexClient.swift` (`refreshProjectSkills`) |

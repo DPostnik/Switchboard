@@ -417,3 +417,59 @@ private func toolApproval(server: String, id: JSONValue, persist: JSONValue = .a
         #expect(records[1].outcome == .failed)
     }
 }
+
+/// Project skills (`ProjectSkills`) ride only on the chat's own worker, next to the app's workflows.
+@Test func codexWorkersRegisterTheirOwnProjectSkillsNextToTheWorkflows() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let links = root.appendingPathComponent("links"), workflows = root.appendingPathComponent("workflows")
+    try FileManager.default.createDirectory(at: workflows, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let executable = root.appendingPathComponent("engine.py")
+    try Data(#"""
+    #!\#(fixturePython)
+    import json, sys
+    log = []
+    for line in sys.stdin:
+        m = json.loads(line)
+        if 'id' not in m or 'method' not in m: continue
+        result = {}
+        if m['method'].startswith('skills/'): log.append({'method': m['method'], 'params': m.get('params')})
+        if m['method'] == 'test/log': result = log
+        print(json.dumps({'id': m['id'], 'result': result}), flush=True)
+    """#.utf8).write(to: executable)
+    try installFixtureExecutable(at: executable)
+    let project = try projectSkillFixture()
+    func sent(_ client: CodexClient) async throws -> [JSONValue] { try await client.transport.request("test/log").array }
+    func current() throws -> (folder: URL, skills: [ProjectSkills.Skill])? { try ProjectSkills.linkFolder(projectPath: project.path, root: links) }
+    let client = CodexClient(transport: CodexConnection())
+    try await client.start(executable: executable, home: root)
+    var worker: CodexClient?
+    do {
+        try await client.registerWorkflows(at: [workflows])
+        let skills = try #require(try current())
+        let chat = try await client.isolatedSibling(projectSkills: skills)
+        worker = chat
+        #expect(await chat.registeredSkillRoots == [workflows, skills.folder])
+        // The shared process (and so every other project's chat) does not get this project's skills.
+        #expect(await client.registeredSkillRoots == [workflows])
+        let start = try await sent(chat)
+        #expect(start.count == 1 && start[0]["params"]["extraRoots"] == .array([.string(workflows.path), .string(skills.folder.path)]))
+
+        // Nothing changed: nothing is sent, the process stays.
+        try await chat.refreshProjectSkills(try current(), projectPath: project.path)
+        #expect(try await sent(chat).count == 1)
+        // A new skill in the same folder: Codex rescans the project's skills.
+        try writeSkillFixture(skillHeader("new-skill", "Added later"), to: project.appendingPathComponent(".agents/skills/new-skill/SKILL.md"))
+        try await chat.refreshProjectSkills(try current(), projectPath: project.path)
+        let rescan = try await sent(chat)
+        #expect(rescan.count == 2 && rescan[1]["method"].string == "skills/list" && rescan[1]["params"]["forceReload"].bool == true)
+        // A later workflow registration keeps the project's folder on its worker.
+        try await chat.registerWorkflows(at: [workflows])
+        #expect(await chat.registeredSkillRoots == [workflows, skills.folder])
+        // No skill left: the folder leaves the roots.
+        for source in ProjectSkills.sources { try FileManager.default.removeItem(at: project.appendingPathComponent(source)) }
+        try await chat.refreshProjectSkills(try current(), projectPath: project.path)
+        #expect(await chat.registeredSkillRoots == [workflows])
+    } catch { await worker?.stop(); await client.stop(); throw error }
+    await worker?.stop(); await client.stop()
+}

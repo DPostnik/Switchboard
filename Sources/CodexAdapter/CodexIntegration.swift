@@ -21,6 +21,8 @@ public actor CodexIntegration: AgentIntegration {
         let route: AgentRoute
         let scheduled: Bool
         let chatDirectory: [String]?
+        /// The project's skill link folder (`ProjectSkills`); its appearance or removal changes the worker's grants.
+        let projectSkills: URL?
     }
     private var chromeWorkers: [AgentSessionReference: CodexClient] = [:]
     private var chromeObservers: [AgentSessionReference: Task<Void, Never>] = [:]
@@ -47,9 +49,11 @@ public actor CodexIntegration: AgentIntegration {
     private var knownModels: [AgentModelInfo] = []
     /// The user's own skill folder (`~/.codex/skills` in the app), registered read-only next to the app's workflows.
     private let userSkills: URL?
-    public init(client: CodexClient = CodexClient(), userSkills: URL? = nil,
+    /// Where the app keeps the projects' skill link folders (`ProjectSkills.directory`; tests use their own).
+    private let projectSkillLinks: URL
+    public init(client: CodexClient = CodexClient(), userSkills: URL? = nil, projectSkillLinks: URL = ProjectSkills.directory,
                 boundaryHelper: @escaping @Sendable () -> Result<ExternalSandboxHelper, ExternalSandboxHelper.Failure> = { ExternalSandboxHelper.bundled() }) {
-        self.client = client; self.userSkills = userSkills; self.boundaryHelper = boundaryHelper
+        self.client = client; self.userSkills = userSkills; self.projectSkillLinks = projectSkillLinks; self.boundaryHelper = boundaryHelper
         let pair = AsyncStream<AgentEvent>.makeStream(); events = pair.stream; sink = pair.continuation
     }
     deinit { for task in chromeObservers.values { task.cancel() }; observer?.cancel(); for task in providerObservers.values { task.cancel() }; sink.finish() }
@@ -269,7 +273,17 @@ public actor CodexIntegration: AgentIntegration {
     }
     private func chromeScope(_ request: AgentExecutionRequest) throws -> ChromeScope {
         ChromeScope(grant: request.userChromeGrant, project: request.projectPath, permissions: try access(request.permissions),
-                    route: request.route, scheduled: request.kind == .scheduled, chatDirectory: request.chatDirectory)
+                    route: request.route, scheduled: request.kind == .scheduled, chatDirectory: request.chatDirectory,
+                    projectSkills: projectSkills(request.projectPath)?.folder)
+    }
+    /// The project's skills from `.agents/skills` and `.claude/skills` as the app's link folder, read at every turn; a folder
+    /// the app cannot update leaves the chat without project skills rather than failing the turn.
+    private func projectSkills(_ project: String) -> (folder: URL, skills: [ProjectSkills.Skill])? {
+        do { return try ProjectSkills.linkFolder(projectPath: project, root: projectSkillLinks) }
+        catch {
+            ExternalSandboxLog.logger.error("Project skills for \(project, privacy: .public) unavailable: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
     private func bindChromeWorker(_ worker: CodexClient, session: AgentSessionReference, scope: ChromeScope) async {
         let old = chromeWorkers[session]
@@ -368,8 +382,10 @@ public actor CodexIntegration: AgentIntegration {
         let base = try worker(for: route)
         guard let launch = await base.launchInfo else { return (nil, nil) }
         let inbox = SettingsProposalInbox.chatFolder(inboxFolder)
+        // The project's skill link folder is read like the workflows; its links resolve inside the project, which is granted.
+        let skills = projectSkills(project).map { [$0.folder] } ?? []
         let input = Self.boundaryInput(project: project, permissions: permissions, home: launch.home, executable: launch.executable,
-                                       resources: resources, workflowDirectories: await base.registeredWorkflowDirectories, inbox: inbox)
+                                       resources: resources, workflowDirectories: await base.registeredWorkflowDirectories + skills, inbox: inbox)
         switch Self.boundaryDecision(input, inbox: inbox, helper: boundaryHelper) {
         case .success(let launch): return (launch, nil)
         case .failure(let reason):
@@ -393,7 +409,7 @@ public actor CodexIntegration: AgentIntegration {
                                           inboxFolder: Self.inboxFolderName(for: session))
         let fresh = try await worker(for: request.route).isolatedSibling(
             permissionArguments: scope.permissions.codexProcessArguments(projectPath: scope.project),
-            boundary: decision.launch)
+            boundary: decision.launch, projectSkills: projectSkills(scope.project))
         do {
             // The process that loaded the thread holds its writer lock; the cold worker cannot resume it until it is released.
             try await (chromeWorkers[session] ?? worker(for: request.route)).release(session)
@@ -420,7 +436,7 @@ public actor CodexIntegration: AgentIntegration {
                 let decision = try await self.boundary(project: request.projectPath, permissions: access, route: request.route, inboxFolder: folder)
                 let worker = try await chosen.isolatedSibling(
                     permissionArguments: access.codexProcessArguments(projectPath: request.projectPath),
-                    boundary: decision.launch)
+                    boundary: decision.launch, projectSkills: self.projectSkills(request.projectPath))
                 let session: AgentSessionReference
                 do {
                     session = try await worker.createSession(projectPath: request.projectPath, permissions: access, model: request.model.model, route: route,
@@ -448,6 +464,10 @@ public actor CodexIntegration: AgentIntegration {
                     session = existing
                 } else { session = try await self.prepare(request).value() }
                 try await self.refreshChromeWorker(request, session: session)
+                // A skill added, removed or edited away inside the same folder: the worker rescans, the process stays.
+                if let worker = self.chromeWorkers[session] {
+                    try? await worker.refreshProjectSkills(self.projectSkills(request.projectPath), projectPath: request.projectPath)
+                }
                 let turn = try await self.worker(for: session).send(request.prompt, to: session, projectPath: request.projectPath,
                     permissions: self.access(request.permissions), model: request.model.model, effort: request.model.effort ?? "", userChromeGrant: request.userChromeGrant)
                 guard let turn, !turn.isEmpty else { throw ClientFailure(L10n.text("Не получен ID запуска", "No turn ID received")) }

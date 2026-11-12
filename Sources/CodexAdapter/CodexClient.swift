@@ -35,6 +35,12 @@ public actor CodexClient {
     }
     var registeredWorkflowDirectories: [URL] { workflowDirectories }
     private var workflowDirectories: [URL] = []
+    /// This worker's project skills (`ProjectSkills` link folder) and the set it last registered; a worker serves one
+    /// project, so the folder rides along with every `skills/extraRoots/set` of this process only.
+    private(set) var projectSkillRoot: URL?
+    private var projectSkillSet: [ProjectSkills.Skill] = []
+    /// The roots `skills/extraRoots/set` last sent (tests).
+    private(set) var registeredSkillRoots: [URL] = []
     private var browserRoot = BrowserConfiguration.directory
     var interactions: [UUID: (pending: CodexPendingInteraction, generation: UUID, token: UUID)] = [:]
     var capabilityItems: [CodexCapabilityItemKey: AgentCapabilityRecord] = [:]
@@ -90,7 +96,8 @@ public actor CodexClient {
         boundary?.plan.removeWorkerFolder()
     }
     /// A cold worker applies thread MCP overrides without changing other chats or the account epoch.
-    func isolatedSibling(permissionArguments: [String] = [], boundary: ExternalSandboxLaunch? = nil) async throws -> CodexClient {
+    func isolatedSibling(permissionArguments: [String] = [], boundary: ExternalSandboxLaunch? = nil,
+                         projectSkills: (folder: URL, skills: [ProjectSkills.Skill])? = nil) async throws -> CodexClient {
         guard let launch else { throw ClientFailure(L10n.text("Codex не подключён", "Codex is not connected")) }
         let worker = CodexClient(transport: await transport.sibling(preservingAccountRevision: true))
         await worker.setHostBundle(hostBundle.bundle, executable: hostBundle.executable)
@@ -103,9 +110,23 @@ public actor CodexClient {
             throw ClientFailure(L10n.text("Версия Codex изменилась. Подключи движок заново.", "The Codex version changed. Reconnect the engine."))
         }
         do {
-            if !workflowDirectories.isEmpty { try await worker.registerWorkflows(at: workflowDirectories) }
+            await worker.setProjectSkills(projectSkills)
+            if !workflowDirectories.isEmpty || projectSkills != nil { try await worker.registerWorkflows(at: workflowDirectories) }
         } catch { await worker.stop(); throw error }
         return worker
+    }
+    private func setProjectSkills(_ value: (folder: URL, skills: [ProjectSkills.Skill])?) {
+        projectSkillRoot = value?.folder; projectSkillSet = value?.skills ?? []
+    }
+    /// Brings this worker's project skills up to date before a turn: a new or removed folder is registered again, a changed
+    /// set inside the same folder makes Codex rescan its skills for the project. Nothing is sent when nothing changed.
+    func refreshProjectSkills(_ value: (folder: URL, skills: [ProjectSkills.Skill])?, projectPath: String) async throws {
+        let skills = value?.skills ?? []
+        guard value?.folder != projectSkillRoot || skills != projectSkillSet else { return }
+        let rootChanged = value?.folder != projectSkillRoot
+        setProjectSkills(value)
+        if rootChanged { try await registerWorkflows(at: workflowDirectories) }
+        else { _ = try await transport.request("skills/list", params: .object(["cwds": .array([.string(projectPath)]), "forceReload": .bool(true)])) }
     }
     public func stop() async { resetInteractions(); await transport.stop(); await stopBoundary() }
     deinit { for task in subagentHistoryTasks.values { task.cancel() }; eventTask?.cancel(); eventSink.finish() }
@@ -141,8 +162,9 @@ public actor CodexClient {
     }
     public func registerWorkflows(at directory: URL) async throws { try await registerWorkflows(at: [directory]) }
     func registerWorkflows(at directories: [URL]) async throws {
-        _ = try await transport.request("skills/extraRoots/set", params: .object(["extraRoots": .array(directories.map { .string($0.path) })]))
-        workflowDirectories = directories
+        let roots = directories + (projectSkillRoot.map { directories.contains($0) ? [] : [$0] } ?? [])
+        _ = try await transport.request("skills/extraRoots/set", params: .object(["extraRoots": .array(roots.map { .string($0.path) })]))
+        workflowDirectories = directories; registeredSkillRoots = roots
     }
 
     public func createSession(projectPath: String, permissions: AgentPermissionProfile, model: String, route: RequestRoute,

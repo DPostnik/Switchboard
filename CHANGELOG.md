@@ -6,6 +6,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 - An access request that adds a trusted command now warns, before Apply, when the project's chats run under the external boundary: the command would still run inside it (with the access set that would help, if one does) or would move the chats off the boundary; after Apply such a chat is told not to retry the same step.
 
+- A project's own skills (`.agents/skills/*/SKILL.md` and `.claude/skills/*/SKILL.md`; the same name in both: `.agents/skills` wins) are available in its Claude chats as `project:<name>` and in its Codex chats by name, read-only and from one folder. Only skill folders are exposed (no settings, hooks, commands or MCP servers from `.claude/`); a skill that links outside the project or whose front matter declares anything beyond its name and description (such as `allowed-tools` or `hooks`) is left out. A skill added or removed shows from the chat's next message.
+
 - Each chat writes access requests into its own folder, so the app knows which chat asked and continues it after Apply or Reject even when the request names no chat; a request whose chat is unknown says so.
 
 - Codex chats apply the same trusted-command check as Claude before using the external boundary, get mediated `pgrep` there, and show a notice in the chat when they fall back to the Codex sandbox for a reason you can act on.

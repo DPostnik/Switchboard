@@ -33,6 +33,9 @@ public actor ClaudeIntegration: AgentIntegration {
     private var waiting: [String: UUID] = [:]
     /// Session -> launch arguments of its live CLI; a waiting CLI is reused only for an identical launch.
     private var wireArguments: [String: [String]] = [:]
+    /// Session -> the skill plugins its live CLI was started with; kept while background tasks run, so a changed
+    /// skill folder does not end them (the change applies at the next launch).
+    private var wirePlugins: [String: ClaudeSkills.Plugins?] = [:]
     /// Processes kept warm after a clean turn, like the native app's one live process per chat.
     /// The next turn with an identical launch is written to the same process instead of `--resume`.
     private var warm: [String: (token: UUID, since: Date, wire: ClaudeWire)] = [:]
@@ -301,8 +304,13 @@ public actor ClaudeIntegration: AgentIntegration {
             let policy = ClaudeLaunchPolicy(profile, scheduled: scheduled, userChromeEnabled: userChrome)
             // Read at every turn: an edited `.mcp.json` entry no longer matches its approval and changes the launch.
             let projectServers = ProjectMCPServers.approved(projectPath: record.cwd, approvals: profile.mcpServers)
-            // Also read at every turn: a skill folder created or removed since the last launch changes it.
-            let skills = try ClaudeSkills.pluginRoot(home: home, user: userSkills)?.path
+            // Also read at every turn: a skill folder created or removed since the last launch changes it. The project's
+            // skill set is part of the launch identity, so a changed set replaces the process once and an unchanged one never.
+            // A CLI still running background tasks keeps its own set until they end.
+            let fresh = try ClaudeSkills.plugins(home: home, user: userSkills, project: record.cwd)
+            let plugins = wires[id] != nil && !(backgroundTasks[id] ?? []).isEmpty ? (wirePlugins[id] ?? fresh) : fresh
+            let skills = plugins?.root
+            let projectSkills = !(plugins?.projectSkills.isEmpty ?? true)
             // This session's own settings proposal folder, named by its session ID: the app knows the author of every file in
             // it. Stable across turns, so it never changes the launch identity by itself.
             let inbox = SettingsProposalInbox.chatFolder(id, create: true)
@@ -312,11 +320,12 @@ public actor ClaudeIntegration: AgentIntegration {
             /// The launch identity: the CLI arguments and, under the boundary, the plan's authority.
             func identity(_ arguments: [String], _ boundary: ClaudeBoundaryLaunch?) -> [String] {
                 arguments + (boundary.map { ["--external-boundary"] + $0.plan.authority } ?? [])
+                    + (projectSkills ? ["--project-skills"] + (plugins?.projectSkills ?? []) : [])
             }
             let launch = identity(try Self.arguments(id: id, resumed: true, permissions: profile, model: request.model.model, effort: request.model.effort,
                                             advisor: request.model.advisor, chatDirectory: request.chatDirectory, scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                             projectAgents: ProjectAgents.argument(projectPath: record.cwd), projectServers: projectServers,
-                                            home: home, userChrome: userChrome, skills: skills, cwd: record.cwd, boundary: boundary != nil), boundary)
+                                            home: home, userChrome: userChrome, skills: skills, projectSkills: projectSkills, cwd: record.cwd, boundary: boundary != nil), boundary)
             // A worker's token cannot be refreshed inside the boundary: before it expires, the next turn starts a new process.
             if let current = wires[id], let state = boundaries[id], state.expiresAt.timeIntervalSinceNow <= ClaudeBoundaryToken.minimumLifetime {
                 wires.removeValue(forKey: id); abandonWait(id); await current.closeAndWait()
@@ -332,7 +341,7 @@ public actor ClaudeIntegration: AgentIntegration {
                     identity(try Self.arguments(id: id, resumed: true, permissions: profile, model: model ?? request.model.model, effort: effort ?? request.model.effort,
                                        advisor: advisor ?? request.model.advisor, chatDirectory: request.chatDirectory, scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                        projectAgents: ProjectAgents.argument(projectPath: record.cwd), projectServers: projectServers,
-                                       home: home, userChrome: userChrome, skills: skills, cwd: record.cwd, boundary: boundary != nil), boundary)
+                                       home: home, userChrome: userChrome, skills: skills, projectSkills: projectSkills, cwd: record.cwd, boundary: boundary != nil), boundary)
                 }
                 let live = try variant(scheduled: false, userChrome: false)
                 if scheduledWires.contains(id), wireArguments[id] == (try variant(scheduled: true, userChrome: userChrome)) {
@@ -401,7 +410,7 @@ public actor ClaudeIntegration: AgentIntegration {
                                                    chatDirectory: request.chatDirectory, scheduled: scheduled,
                                                    projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                                    projectAgents: ProjectAgents.argument(projectPath: record.cwd), browserServer: server,
-                                                   projectServers: projectServers, home: home, userChrome: userChrome, skills: skills, cwd: record.cwd,
+                                                   projectServers: projectServers, home: home, userChrome: userChrome, skills: skills, projectSkills: projectSkills, cwd: record.cwd,
                                                    boundary: boundary != nil)
                 var environment = ClaudeProfile.environment(home: home).merging(Self.sessionEnvironment) { _, new in new }
                 // Every descendant of this CLI (also after `setsid`) carries the chat label for the orphan sweeper.
@@ -427,7 +436,7 @@ public actor ClaudeIntegration: AgentIntegration {
                 }
                 noteFallback(fallback, session: id, project: record.cwd)
                 sessionEpochs[id] = UUID()
-                wires[id] = wire; backgroundTasks[id] = []; stopWaiting(id)
+                wires[id] = wire; backgroundTasks[id] = []; stopWaiting(id); wirePlugins[id] = plugins
                 if scheduled { scheduledWires.insert(id) } else { scheduledWires.remove(id) }
                 if let grant { wireGrants[id] = grant; try profiles.acknowledge(grant, session: reference(id)) }
                 seenRequests[id] = []
@@ -512,7 +521,7 @@ public actor ClaudeIntegration: AgentIntegration {
     static func arguments(id: String, resumed: Bool, permissions requested: AgentPermissionProfile, model: String, effort: String?, advisor: String? = nil, chatDirectory: [String]? = nil, scheduled: Bool = false,
                           projectInstructions: String? = nil, projectAgents: String? = nil, browserServer: [String]? = nil,
                           projectServers: [String: JSONValue] = [:], home: URL? = nil, userChrome: Bool = false, skills: String? = nil,
-                          cwd: String? = nil, boundary: Bool = false) throws -> [String] {
+                          projectSkills: Bool = false, cwd: String? = nil, boundary: Bool = false) throws -> [String] {
         let policy = ClaudeLaunchPolicy(requested, scheduled: scheduled, userChromeEnabled: userChrome, boundary: boundary)
         // Only roles with connectors load the account's claude.ai connectors such as Gmail.
         let connectors = policy.connectors
@@ -574,6 +583,7 @@ public actor ClaudeIntegration: AgentIntegration {
             ? sandboxCommandInstructions(trusted: AgentCommandPolicy(policy.profile).trustedPrefixes.map(\.command)) : nil
         args += ["--append-system-prompt", ([AgentAutonomy.instructions(), delegation, chrome ? userChromeInstructions() : nil, sandboxRules, proposals,
                                              home.flatMap { ClaudeProfile.instructions(home: $0) },
+                                             projectSkills && skills != nil ? ClaudeSkills.projectInstructions() : nil,
                                              projectInstructions].compactMap { $0 }).joined(separator: "\n\n")]
         return args
     }
