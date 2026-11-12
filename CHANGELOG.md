@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Access request cards label removals explicitly, and agents are told the length limit of the reason text.
+
 - Keep the sidebar and message composer visible when opening a chat with a project access request.
 
 - Fix git under the external boundary: the mediated command now runs the real git binary instead of Apple's `/usr/bin/git` shim, which could not start there.

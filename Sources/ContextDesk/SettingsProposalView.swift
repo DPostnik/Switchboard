@@ -74,17 +74,17 @@ struct SettingsProposalChanges: View {
                 line("+", L10n.text("Набор: ", "Set: ") + (AccessPresetCatalog.preset(id)?.title ?? id))
             }
             ForEach(diff.removePresets, id: \.self) { id in
-                line("−", L10n.text("Набор: ", "Set: ") + (AccessPresetCatalog.preset(id)?.title ?? id))
+                line("−", L10n.text("Убрать набор: ", "Remove set: ") + (AccessPresetCatalog.preset(id)?.title ?? id))
             }
             ForEach(diff.addFolders, id: \.path) { root in
                 line("+", L10n.text("Папка: ", "Folder: ") + root.path + (root.writable ? L10n.text(" — чтение и запись", " — read and write") : L10n.text(" — только чтение", " — read only")),
                      warning: root.writable)
             }
-            ForEach(diff.removeFolders, id: \.self) { line("−", L10n.text("Папка: ", "Folder: ") + $0) }
+            ForEach(diff.removeFolders, id: \.self) { line("−", L10n.text("Убрать папку: ", "Remove folder: ") + $0) }
             ForEach(diff.addCommands, id: \.self) { command in
                 line("+", L10n.text("Вне песочницы без вопроса (доступ ко всему Mac): ", "Outside the sandbox without a prompt (access to the whole Mac): ") + command, warning: true)
             }
-            ForEach(diff.removeCommands, id: \.self) { line("−", L10n.text("Команда вне песочницы: ", "Command outside the sandbox: ") + $0) }
+            ForEach(diff.removeCommands, id: \.self) { line("−", L10n.text("Убрать команду вне песочницы (доступ сужается): ", "Remove command outside the sandbox (access gets narrower): ") + $0) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, .ui(12)).padding(.vertical, .ui(10))

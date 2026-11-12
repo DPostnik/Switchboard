@@ -205,14 +205,14 @@ public enum SettingsProposalInbox {
         return L10n.text(
             """
             Настройки проектов в Switchboard (песочница команд, наборы доступа, папки вне проекта, команды вне песочницы) меняет только пользователь. Если задаче нужен доступ, которого нет, или пользователь просит изменить эти настройки, предложи изменение:
-            - Запиши один JSON-файл в папку "$\(environmentKey)" (она доступна на запись в песочнице), например "$\(environmentKey)/<короткое-имя>.json". Формат: \(format). Пропускай ненужные поля; в одном файле может быть несколько проектов.
+            - Запиши один JSON-файл в папку "$\(environmentKey)" (она доступна на запись в песочнице), например "$\(environmentKey)/<короткое-имя>.json". Формат: \(format). Пропускай ненужные поля; в одном файле может быть несколько проектов. Причина (`reason`) - до \(SettingsProposalReview.maximumText) символов, остальное обрезается.
             - Наборы: \(presets).
             - Приложение покажет пользователю список изменений в этом чате; применит их только он. Скажи пользователю, что предложение ждёт его решения. Предлагай только то, что нужно задаче; команды вне песочницы получают доступ ко всему Mac.
             - Когда пользователь решит, этот чат получит сообщение от приложения. До тех пор продолжай независимую часть задачи.
             """,
             """
             Project settings in Switchboard (the command sandbox, access sets, folders outside the project, commands outside the sandbox) are changed only by the user. When the task needs access that is missing, or the user asks to change these settings, propose the change:
-            - Write one JSON file into the folder "$\(environmentKey)" (writable inside the sandbox), for example "$\(environmentKey)/<short-name>.json". Format: \(format). Omit fields you do not need; one file may cover several projects.
+            - Write one JSON file into the folder "$\(environmentKey)" (writable inside the sandbox), for example "$\(environmentKey)/<short-name>.json". Format: \(format). Omit fields you do not need; one file may cover several projects. Keep `reason` within \(SettingsProposalReview.maximumText) characters; the rest is cut.
             - Sets: \(presets).
             - The app shows the user the list of changes in this chat; only the user applies them. Tell the user the proposal waits for their decision. Propose only what the task needs; commands outside the sandbox get access to the whole Mac.
             - When the user decides, this chat receives a message from the app. Until then continue the independent part of the task.
