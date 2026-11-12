@@ -6,6 +6,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 - Record why Claude's permission answers were given (for example a backslash, a deny-list hit or a sandboxed command the CLI still asked about) in the permissions ledger, and count denied commands an agent retried in the same turn.
 
+- Trusted project commands accept more everyday shapes without a prompt: reading a log the same command just wrote with `cat`, `grep`, `sed -n` or `wc -l`, `date`/`pwd`/`printf`, and a `cd` to the chat's own project (also `"$(pwd)"` or `"$(git rev-parse --show-toplevel)"`) before its scripts; a `cd` anywhere else and every other substitution still ask.
+
 - Switch the provider of a new chat with a Claude/ChatGPT toggle beside the model chip, and show each chat's provider mark in the sidebar.
 
 - Offer native session approval for Codex commands when supported by the engine.

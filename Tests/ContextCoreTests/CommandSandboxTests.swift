@@ -78,7 +78,10 @@ private func sandboxSettings(_ profile: AgentPermissionProfile, cwd: String) thr
                     "ps -axo pid,command | grep -E 'swift-task\\.py|xcodebuild' | grep -v grep",
                     "sysctl -n vm.loadavg hw.ncpu; { ps -ax; }", "swift build &>/dev/null; status=$?",
                     "zsh scripts/test.sh --filter X > \"$TMPDIR/test.log\" 2>&1; code=$?; tail -15 \"$TMPDIR/test.log\"; exit $code",
-                    "zsh scripts/test.sh > /tmp/claude-501/t.log 2>&1 && head -n 5 /tmp/claude-501/t.log", "swift build > \"${TMPDIR}/b.log\"; exit 0"] {
+                    "zsh scripts/test.sh > /tmp/claude-501/t.log 2>&1 && head -n 5 /tmp/claude-501/t.log", "swift build > \"${TMPDIR}/b.log\"; exit 0",
+                    "zsh scripts/test.sh > /tmp/claude-501/t.log 2>&1; code=$?; grep -E 'error|failed' /tmp/claude-501/t.log; exit $code",
+                    "swift build > /tmp/claude-501/b.log 2>&1; sed -n '1,40p' /tmp/claude-501/b.log; wc -l /tmp/claude-501/b.log",
+                    "date +%s; swift build; pwd"] {
         #expect(policy.trusts(trusted), "\(trusted)")
     }
     for asked in ["git pushx", "swift build && cat ~/.ssh/id", "gh api \"$(cat ~/.ssh/id)\"", "GIT_SSH_COMMAND=evil git push",
@@ -90,7 +93,10 @@ private func sandboxSettings(_ profile: AgentPermissionProfile, cwd: String) thr
                   "zsh scripts/test.sh >> /tmp/x; tail /tmp/x", "zsh scripts/test.sh > /tmp/x & tail /tmp/x",
                   "zsh scripts/test.sh > /tmp/x | tail /tmp/x",
                   "TMPDIR=~/.ssh; zsh scripts/test.sh > \"$TMPDIR/x\"", "export TMPDIR=/Users/me; swift build > $TMPDIR/x",
-                  "swift build > \"$TMPDIR/../x\"", "swift build > \"$TMPDIR/$HOME\"", "swift build; exit $(cat ~/.ssh/id)"] {
+                  "swift build > \"$TMPDIR/../x\"", "swift build > \"$TMPDIR/$HOME\"", "swift build; exit $(cat ~/.ssh/id)",
+                  // Without the session directory a `cd` before a relative script still asks.
+                  "cd /Users/me/app && zsh scripts/test.sh", "cd \"$(pwd)\" && zsh scripts/test.sh",
+                  "swift build > /tmp/claude-501/b.log | cat /tmp/claude-501/b.log", "swift build; cat ~/.ssh/id_ed25519"] {
         #expect(!policy.trusts(asked), "\(asked)")
     }
 }
