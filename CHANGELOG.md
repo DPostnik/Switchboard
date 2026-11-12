@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Fix git under the external boundary: the mediated command now runs the real git binary instead of Apple's `/usr/bin/git` shim, which could not start there.
+
 - Every chat's instructions now say what to do after a refusal: no workaround; use the app's own tool, or send one access request and continue the rest of the task. Claude's refusals for role-forbidden commands, unattended runs and roles without a shell name that route too.
 
 - An agent's access request now appears as a card in the chat that made it; after Apply or Reject that chat gets a message from the app and continues the task. Codex chats under the external boundary can send these requests too.

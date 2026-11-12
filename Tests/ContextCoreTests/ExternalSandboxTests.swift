@@ -363,3 +363,15 @@ private func claudeInput(_ root: URL, project: Project, workerID: String) -> Ext
     let reason = ExternalSandboxPlanner.Ineligible.trustedCommandOutside("/usr/bin/log show")
     #expect(reason.description(language: .english).contains("`/usr/bin/log show`") && reason.description(language: .russian).contains("`/usr/bin/log show`"))
 }
+
+/// Apple's `/usr/bin/git` is an `xcrun` shim that cannot start inside a mediated sandbox; the planner mediates the real binary.
+@Test func mediatedGitIsTheRealBinaryNotTheXcrunShim() throws {
+    let real = "/bin/sh"
+    #expect(ExternalSandboxPlanner.resolveGit(found: "/usr/bin/git", homebrew: nil, locate: { _ in real }) == real)
+    // Negative: another git stays as found; a missing or non-executable answer keeps the shim rather than inventing a path.
+    #expect(ExternalSandboxPlanner.resolveGit(found: "/opt/homebrew/bin/git", locate: { _ in real }) == "/opt/homebrew/bin/git")
+    #expect(ExternalSandboxPlanner.resolveGit(found: "/usr/bin/git", homebrew: nil, locate: { _ in nil }) == "/usr/bin/git")
+    #expect(ExternalSandboxPlanner.resolveGit(found: "/usr/bin/git", homebrew: nil, locate: { _ in "/nonexistent/git" }) == "/usr/bin/git")
+    #expect(ExternalSandboxPlanner.resolveGit(found: nil, locate: { _ in real }) == nil)
+    #expect(ExternalSandboxPlanner.resolveGit(found: "/usr/bin/git", homebrew: real, locate: { _ in nil }) == real)
+}

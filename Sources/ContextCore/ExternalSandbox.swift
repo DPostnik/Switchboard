@@ -401,7 +401,7 @@ public enum ExternalSandboxPlanner {
             if trusted.contains("gh"), let gh = resolveExecutable("gh") {
                 commands.append(.init(name: "gh", executable: gh, keychain: true, network: true))
             }
-            if trusted.contains(where: { $0.hasPrefix("git ") }), let git = resolveExecutable("git") {
+            if trusted.contains(where: { $0.hasPrefix("git ") }), let git = resolveGit() {
                 // git's own helpers (remote-https, credential-osxkeychain) by absolute path, and /bin/sh for hooks and helpers.
                 var trees = ["/bin"]
                 if let execPath = gitExecPath(git) { trees += [execPath, canonical(execPath)] }
@@ -461,7 +461,7 @@ public enum ExternalSandboxPlanner {
     static func canonical(_ path: String) -> String {
         URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
     }
-    static func resolveExecutable(_ name: String) -> String? {
+    public static func resolveExecutable(_ name: String) -> String? {
         let directories = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)
             + ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
         for directory in directories {
@@ -470,14 +470,25 @@ public enum ExternalSandboxPlanner {
         }
         return nil
     }
-    static func gitExecPath(_ git: String) -> String? {
+    static func gitExecPath(_ git: String) -> String? { absolutePathOutput(git, ["--exec-path"]) }
+    /// The git binary a mediated command runs. `/usr/bin/git` is Apple's `xcrun` shim: inside the mediated sandbox it cannot
+    /// read Xcode's `Info.plist` or write its cache, so git never starts (seen live 2026-11-12). The app resolves the real
+    /// binary once, outside the boundary; it lies in a toolchain tree the worker already reads.
+    public static func resolveGit(found: String? = resolveExecutable("git"), homebrew: String? = "/opt/homebrew/bin/git", locate: (String) -> String? = { absolutePathOutput("/usr/bin/xcrun", ["--find", $0]) }) -> String? {
+        guard found == "/usr/bin/git" else { return found }
+        // Homebrew's git first: that shape is the one `scripts/probe-nono-runtime.py` verifies under the real helper.
+        for real in [homebrew, locate("git")].compactMap({ $0 }) where real != found && FileManager.default.isExecutableFile(atPath: real) { return real }
+        return found
+    }
+    /// stdout of a fixed argv when it exits 0 and prints one absolute path.
+    public static func absolutePathOutput(_ executable: String, _ arguments: [String]) -> String? {
         let process = Process(), output = Pipe()
-        process.executableURL = URL(fileURLWithPath: git); process.arguments = ["--exec-path"]
+        process.executableURL = URL(fileURLWithPath: executable); process.arguments = arguments
         process.standardOutput = output; process.standardError = FileHandle.nullDevice
         guard (try? process.run()) != nil else { return nil }
         let data = output.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
         let path = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        return process.terminationStatus == 0 && path.hasPrefix("/") ? path : nil
+        return process.terminationStatus == 0 && path.hasPrefix("/") && !path.contains("\n") ? path : nil
     }
 }
 

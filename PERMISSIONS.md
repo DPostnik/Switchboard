@@ -259,6 +259,11 @@ disabled entries. Channel 3 only; no grant or retry behavior changes. Verificati
 
 Known gaps. Check this list before you treat a failure as a new defect.
 
+- Mediated `git` (2026-11-12): `/usr/bin/git` is Apple's `xcrun` shim and cannot start inside a
+  mediated sandbox (`couldn't stat Xcode's Info.plist`; seen live in this project, where every git
+  command failed under the boundary). The planner now mediates the real binary (`resolveGit`:
+  Homebrew's git, else `xcrun --find git`). The Homebrew shape is the one the runtime probe checks;
+  the live check of the fix under the boundary is pending.
 - Under nono `ps` cannot run (setuid) and `log show` cannot run in any sandbox: use
   `project_diagnostics` and `app_log`. `pgrep` sees only sandboxed processes unless mediated.
   `lsof -i` and `sysctl -n vm.loadavg` work.
