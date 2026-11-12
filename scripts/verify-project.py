@@ -256,18 +256,31 @@ def _confirm_live(queue, state_dir, batch_id, evidence_path):
     if bundle_digest(running.parents[2]) != archived['bundle_sha256'] or digest(running) != digest(executable) or not evidence.get('checks') or not evidence.get('verified_by'):
         raise ValueError('live evidence needs matching running artifact, checks and verifier')
     pid = int(evidence['pid'])
-    process = subprocess.check_output(['ps', '-p', str(pid), '-o', 'comm='], text=True).strip()
+    process, started = process_identity(pid)
     if Path(process).resolve() != running:
         raise ValueError('process does not run the evidenced executable')
-    # lstart is local host time. Require process launch after the verified artifact.
-    started = subprocess.check_output(['ps', '-p', str(pid), '-o', 'lstart='], text=True).strip()
-    if time.mktime(time.strptime(started, '%a %b %d %H:%M:%S %Y')) < executable.stat().st_mtime:
+    # Require process launch after the verified artifact (whole seconds, as `ps -o lstart` reported).
+    if started < int(executable.stat().st_mtime):
         raise ValueError('running process predates built artifact')
     destination = state_dir / 'batches' / batch_id / 'live-evidence.json'
     destination.write_text(json.dumps(evidence, indent=2))
     for task_id in batch['spec']['task_ids']:
         queue.transition(task_id, 'verified', 'Live evidence: ' + str(destination))
     return queue.projection()
+
+
+def process_identity(pid):
+    """Executable path and start time (epoch seconds) of a process, from libproc. `ps` is setuid and cannot run under
+    the external boundary; libproc answers in both cases."""
+    import ctypes
+    libproc = ctypes.CDLL('/usr/lib/libproc.dylib')
+    path = ctypes.create_string_buffer(4096)
+    if libproc.proc_pidpath(pid, path, len(path)) <= 0:
+        raise ValueError('process is not running: ' + str(pid))
+    info = ctypes.create_string_buffer(136)  # struct proc_bsdinfo; pbi_start_tvsec is the uint64 at offset 120
+    if libproc.proc_pidinfo(pid, 3, ctypes.c_uint64(0), info, len(info)) != len(info):
+        raise ValueError('process start time unavailable: ' + str(pid))
+    return path.value.decode(), int.from_bytes(info.raw[120:128], sys.byteorder)
 
 
 def clone_bundle(source, destination):

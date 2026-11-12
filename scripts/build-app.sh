@@ -113,13 +113,20 @@ replaced = Path('build/.replaced')
 backup = replaced / f'Switchboard-{time.time_ns()}.app'
 
 def running_executables():
-    # Not pgrep: it skips its own ancestors, and agents run this script under Switchboard.
+    # Not pgrep: it skips its own ancestors, and agents run this script under Switchboard. Not ps: it is setuid and
+    # cannot run under the external boundary. libproc lists every process in both cases.
     libproc = ctypes.CDLL('/usr/lib/libproc.dylib')
-    pids = subprocess.run(['/bin/ps', '-axo', 'pid='], capture_output=True, text=True, check=True).stdout.split()
+    count = libproc.proc_listallpids(None, 0)
+    if count <= 0:
+        raise OSError('process list unavailable')
+    pids = (ctypes.c_int * (count + 256))()
+    count = libproc.proc_listallpids(pids, ctypes.sizeof(pids))
+    if count <= 0:
+        raise OSError('process list unavailable')
     paths = set()
-    for pid in pids:
+    for pid in pids[:count]:
         buffer = ctypes.create_string_buffer(4096)
-        if libproc.proc_pidpath(int(pid), buffer, len(buffer)) > 0:
+        if libproc.proc_pidpath(pid, buffer, len(buffer)) > 0:
             paths.add(os.path.realpath(buffer.value.decode()))
     return paths
 
@@ -133,8 +140,13 @@ except BaseException:
         backup.rename(destination)
     raise
 if replaced.exists():
-    in_use = running_executables()
-    for bundle in replaced.iterdir():
+    try:
+        in_use = running_executables()
+    except OSError as error:
+        # Without the process list nothing is removed: a running app must keep its replaced bundle.
+        print(f'Kept replaced bundles: {error}')
+        in_use = None
+    for bundle in (replaced.iterdir() if in_use is not None else []):
         prefix = os.path.realpath(bundle) + os.sep
         if not any(path.startswith(prefix) for path in in_use):
             shutil.rmtree(bundle, ignore_errors=True)

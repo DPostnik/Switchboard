@@ -259,6 +259,9 @@ disabled entries. Channel 3 only; no grant or retry behavior changes. Verificati
 
 Known gaps. Check this list before you treat a failure as a new defect.
 
+- `scripts/build-app.sh` and the queue's `confirm-live` read the process list and a process's path and
+  start time through libproc instead of `ps` (2026-11-12): `ps` stopped the app build after a
+  successful compile under the boundary. libproc sees every process there.
 - Mediated `git` (2026-11-12): `/usr/bin/git` is Apple's `xcrun` shim and cannot start inside a
   mediated sandbox (`couldn't stat Xcode's Info.plist`; seen live in this project, where every git
   command failed under the boundary). The planner now mediates the real binary (`resolveGit`:
