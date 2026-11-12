@@ -206,14 +206,18 @@ My Chrome fallback notice. `scripts/probe-claude-nono.py` check 6 (sub-agent tea
 background Bash task in its own group. The plan and the brief are in
 `docs/handoffs/claude-boundary-2026-11-12/` and `docs/handoffs/permission-model-2026-11-12/`.
 
-Steps 2-4 of the permission-model handoff (commits `233be8b`, `6b14264`, `f0a8fde`,
-2026-11-12) are unit-tested only: tests were written but not run in the authoring chats,
-and nothing of them is checked live yet.
+Steps 2-4 of the permission-model handoff were published on 2026-11-12 (`3ace4fc`, `522d4a3`,
+`742d4ba`, `0f931ec`, then `429754a`, `a4a2e25`). Checked live in this project, from a Claude chat
+under the boundary: the request card with continuation and process replacement (three applied
+requests, both directions), `app_log`, `request_app_restart` with its continuation, mediated git
+(`status`, `fetch`, `push`), and a whole queue cycle (submit, build, codesign, tests, install,
+`confirm-live`, publish). Not checked live: Reject, a card during a running turn, the Codex
+proposal inbox, the new refusal texts, the mobile app.
 
 Rollback switch for the Claude boundary: `defaults write local.daniil.switchboard ClaudeExternalBoundaryOff -bool YES`,
 then restart the app; Claude chats return to the CLI sandbox.
 
-Delivered in steps 2-4 (each still waits for the live check):
+Delivered in steps 2-4 (live status in the paragraph above):
 
 - Verification queue under the boundary: `scripts/verify-project.py` reads the load from the kernel
   (`os.getloadavg`, `os.cpu_count`) and counts heavy jobs with `ps` only where `ps` runs; under the
@@ -231,7 +235,8 @@ Delivered in steps 2-4 (each still waits for the live check):
   credential-like text redacted. With it, this project's Claude chats can move under the boundary
   once the user removes `/usr/bin/log show` from the trusted commands (the only inventory blocker
   here) and `zsh scripts/request-app-restart.sh` (not a blocker, but useless under the boundary).
-  This is a settings proposal only the user applies; not applied on 2026-11-12.
+  The user applied this settings proposal on 2026-11-12: this project's Claude chats run under the
+  boundary and the "External boundary unavailable" notice no longer appears for it.
 - Settings proposal inbox for Codex chats under the boundary (writable grant, variable,
   instructions). The native Codex path still has none (it keeps its file roots, invariant 6).
 - Access request card in the requesting chat and continuation after Apply or Reject (table above).
@@ -265,8 +270,13 @@ Known gaps. Check this list before you treat a failure as a new defect.
 - Mediated `git` (2026-11-12): `/usr/bin/git` is Apple's `xcrun` shim and cannot start inside a
   mediated sandbox (`couldn't stat Xcode's Info.plist`; seen live in this project, where every git
   command failed under the boundary). The planner now mediates the real binary (`resolveGit`:
-  Homebrew's git, else `xcrun --find git`). The Homebrew shape is the one the runtime probe checks;
-  the live check of the fix under the boundary is pending.
+  Homebrew's git, else `xcrun --find git`). Checked live with Homebrew's git; the `xcrun` branch
+  is covered by a unit test only.
+- A checkout behind `origin/main` still has the old `scripts/verify-project.py` and
+  `scripts/build-app.sh`: from a chat under the boundary they fail on `ps` until the checkout is
+  updated (run the queue script of an updated worktree with `--repo` and `--state-dir`).
+- Two chats that install builds in the same period replace each other's bundle before
+  `confirm-live` (seen twice on 2026-11-12). The queue does not serialize install-to-publish.
 - Under nono `ps` cannot run (setuid) and `log show` cannot run in any sandbox: use
   `project_diagnostics` and `app_log`. `pgrep` sees only sandboxed processes unless mediated.
   `lsof -i` and `sysctl -n vm.loadavg` work.
