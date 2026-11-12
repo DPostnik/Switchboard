@@ -287,10 +287,14 @@ struct TurnChangesView: View {
                 Button(L10n.text("Перейти к сообщению", "Go to message")) { goToMessage() }
             }
             if let file = selectedFile, file.status != .deleted {
+                let path = viewer.absolutePath(file.path)
+                let exists = EditorLauncher.exists(path)
                 Button(EditorLauncher.openTitle) {
-                    EditorLauncher.open(viewer.absolutePath(file.path), line: firstChangedLine)
+                    EditorLauncher.open(path, line: firstChangedLine)
                 }
-                .help(L10n.text("Открыть файл на первом изменении", "Open the file at its first change"))
+                .disabled(!exists)
+                .help(exists ? L10n.text("Открыть файл на первом изменении", "Open the file at its first change")
+                             : EditorLauncher.missingFileHelp)
             }
             RestoreButton(viewer: viewer, model: model)
         }

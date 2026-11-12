@@ -764,8 +764,10 @@ private struct ChatChangeDiffView: View {
                 .help(file.absolutePath)
                 Spacer(minLength: 8)
                 if file.status != .deleted {
+                    let exists = EditorLauncher.exists(file.absolutePath)
                     Button(EditorLauncher.openTitle) { EditorLauncher.open(file.absolutePath) }
-                        .disabled(EditorLauncher.preferred == nil)
+                        .disabled(!exists)
+                        .help(exists ? "" : EditorLauncher.missingFileHelp)
                 }
             }
             .padding(.horizontal, 16).padding(.vertical, 10)

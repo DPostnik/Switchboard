@@ -69,6 +69,12 @@ import os
     /// "Open in VS Code", or "Open in Default App" without an editor.
     public static var openTitle: String { openTitle(preferred) }
 
+    /// Tooltip for an open button whose file was moved or deleted after the change.
+    public static let missingFileHelp = L10n.text("Файла больше нет на диске: его переместили или удалили после этого изменения",
+                                                  "The file is no longer on disk: it was moved or deleted after this change")
+
+    public static func exists(_ path: String) -> Bool { FileManager.default.fileExists(atPath: path) }
+
     public static func openTitle(_ editor: ExternalEditors.Installed?) -> String {
         guard let editor else { return L10n.text("Открыть в программе по умолчанию", "Open in Default App") }
         return openTitle(editor.title)
@@ -77,14 +83,18 @@ import os
     /// Opens a file at `line` (and `column`), or a folder as a workspace.
     public static func open(_ path: String, line: Int? = nil, column: Int? = nil, target: Target = .preferred) {
         var directory: ObjCBool = false
-        let exists = FileManager.default.fileExists(atPath: path, isDirectory: &directory)
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &directory) else {
+            // Neither an editor nor the default app reacts to a missing path, so the click must not pass silently.
+            log.error("Not opened: the file is no longer on disk")
+            NSSound.beep(); return
+        }
         let editor: ExternalEditors.Installed?
         switch target {
         case .preferred: editor = preferred
         case .editor(let chosen): editor = chosen
         case .defaultApp: editor = nil
         }
-        guard exists, let editor else {
+        guard let editor else {
             NSWorkspace.shared.open(URL(fileURLWithPath: path)); return
         }
         let arguments = directory.boolValue
