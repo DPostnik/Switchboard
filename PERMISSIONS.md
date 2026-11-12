@@ -298,9 +298,17 @@ Known gaps. Check this list before you treat a failure as a new defect.
   enforced on the Claude CLI-sandbox fallback or the Codex native sandbox (items work only under the boundary); Reader
   and Editor never; Routine operator (audit mode) and Operator unrestricted as before. An item without an account
   matches calls without `-a` only. The script must call `security` by name (`/usr/bin/security` exits 127 under
-  nono). Not checked live: the real read through the shim, nono's exact refusal text (the instruction quotes "command
-  policy denied security"), Keychain ACL behaviour for an item that `security` did not create (dialog, hang or
-  failure), the psy-wiki case, and the mobile card (its proposal lines live in another branch).
+  nono). Checked live 2026-11-13 (psy-wiki, Claude chat 1D20A230, build 502): the script's read failed, the agent
+  wrote one proposal with `addKeychainItems` (service and account), the user applied it on the card, the chat
+  continued by itself and the script read the key through the shim and completed the Deepgram transcription, with no
+  macOS dialog reported; signing still finds the Apple Development identity with `security` narrowed to
+  `find-identity`. Without any listed item and without signing `security` is not mediated, so the first failure is
+  the plain Keychain error, not a nono refusal. Not checked live: nono's refusal text for an unlisted item once
+  `security` is mediated, `dump-keychain` and other refused forms (run `scripts/probe-nono-runtime.py` outside any
+  sandbox), Codex, an item created by an app whose ACL excludes `security`, and the mobile card (its proposal lines
+  live in another branch).
+- Claude file tools (Write, Edit) cannot write into the chat's own proposal folder (denied `outsideBoundary`, and the
+  refusal text wrongly suggests `addFolders`); a shell write works. Seen twice on 2026-11-13.
 - Mediated `git` has Keychain read and runs its helpers: a github-set project can likely obtain internet passwords
   through `git credential-osxkeychain` (inferred, not run). Not narrowed here.
 
@@ -386,7 +394,9 @@ Known gaps. Check this list before you treat a failure as a new defect.
   Each link points at a skill folder inside the project, which the chat already reads; skills whose folder,
   `SKILL.md` or any inner link resolve outside the project, or whose front matter has keys beyond
   `ProjectSkills.descriptiveKeys` (`allowed-tools`, `hooks`, `model`, ...), are not linked. The user's own
-  `~/.claude/skills` have no such front matter filter. Not checked live.
+  `~/.claude/skills` have no such front matter filter. Checked live 2026-11-13: Claude lists and launches
+  `project:<name>` (psy-wiki `.claude/skills`, this project's `.agents/skills`), Codex lists the same skills by bare
+  name, no duplicates. Not checked live: a skill excluded for its front matter, a link out of the project.
 - Grants carry no origin: the settings do not record when, by which chat and why a folder or command
   was added, and nothing reports a grant that is never used.
 - Roles without network stay on the native path (the proxy allowlist for model hosts is not wired).
