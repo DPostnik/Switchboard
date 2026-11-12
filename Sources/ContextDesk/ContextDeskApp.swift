@@ -112,6 +112,11 @@ import UserNotifications
         let threadID = response.notification.request.content.userInfo["threadID"] as? String ?? ""
         let attention = response.notification.request.content.userInfo["attentionID"] != nil
         await MainActor.run { showMainWindow() }
+        if let value = response.notification.request.content.userInfo["jobID"] as? String,
+           let jobID = UUID(uuidString: value),
+           await model?.jobLedger.jobs.contains(where: { $0.id == jobID }) == true {
+            await model?.openScheduledJob(jobID); return
+        }
         if attention { await model?.openAttention(); return }
         await model?.focusAction(threadID: threadID)
     }

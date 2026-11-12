@@ -100,7 +100,15 @@ public actor CodexClient {
 
     public func account() async throws -> CodexAccount {
         let result = try await transport.request("account/read", params: .object(["refreshToken": .bool(false)]))
-        return CodexAccount(authenticated: result["account"] != .null, plan: result["account"]["planType"].string)
+        return Self.decodeAccount(result)
+    }
+    nonisolated static func decodeAccount(_ result: JSONValue) -> CodexAccount {
+        let account = result["account"]
+        let authenticated = account != .null
+        let fingerprint = authenticated ? ScheduledAccountIdentity.fingerprint(
+            provider: "codex", accountType: account["type"].string ?? "", accountID: account["email"].string) : nil
+        return CodexAccount(authenticated: authenticated, plan: account["planType"].string,
+                            identityFingerprint: fingerprint)
     }
     public func signInURL() async throws -> URL {
         let result = try await transport.request("account/login/start", params: .object(["type": .string("chatgpt")]))

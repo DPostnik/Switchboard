@@ -185,7 +185,10 @@ public actor ClaudeIntegration: AgentIntegration {
                 sink.yield(.init(session: nil, payload: .accountChanged(error: nil)))
             }
             accountIdentity = identity
-            return .success(.init(authenticated: signedIn, plan: nil))
+            let fingerprint = signedIn ? ScheduledAccountIdentity.fingerprint(
+                provider: "claude-code:firstParty", accountType: value["authMethod"].string ?? "",
+                accountID: value["email"].string, organizationID: value["orgId"].string) : nil
+            return .success(.init(authenticated: signedIn, plan: nil, identityFingerprint: fingerprint))
         } catch { signedIn = false; return failed(error) }
     }
     public func authenticate(_ action: AgentAuthenticationAction) async -> AgentResult<AgentAuthenticationStep> {

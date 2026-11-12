@@ -8,6 +8,10 @@ import ACPAdapter
 /// Composition root only; orchestration and UI depend on the common contract.
 /// A new agent is one more `AgentProfile` in `profiles` and a case in `registrations`; the app iterates them.
 enum AgentIntegrationFactory {
+    static func quotaProvider(_ engine: JobEngine) -> ScheduledLimitPolicy.Provider? {
+        switch engine { case .codex: .codex; case .claude: .claude; default: nil }
+    }
+
     static let claudeVersion = ClaudeJobRunner.version
     /// The user's own skill folders, loaded read-only in chats (user decision 2026-11-04).
     static func codex() -> any AgentIntegration { CodexIntegration(userSkills: SkillCatalog.codexRoots[0]) }

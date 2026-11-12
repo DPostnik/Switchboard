@@ -1213,6 +1213,7 @@ func claudeBashUnderTheSandboxFollowsTheCLIFlag(_ command: String, _ flag: Bool,
     var job = ManagedJob(); job.name = "Morning"; job.prompt = "hello"; job.engine = .claude; job.projectID = project.id
     job.model = "claude-test"; job.effort = ""; job.enabled = true
     #expect(await model.saveJob(job))
+    admitScheduledQuotaFixture(model, engine: job.engine)
     await model.launchJob(job.id)
     for task in Array(model.jobTasks.values) { await task.value }
     for _ in 0..<1500 where !(model.jobLedger.runs.first?.status == .completed) { try await Task.sleep(for: .milliseconds(10)) }

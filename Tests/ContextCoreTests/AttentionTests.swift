@@ -102,3 +102,36 @@ import Testing
     await #expect(throws: (any Error).self) { try await unknown.update(clear) }
     #expect(try String(contentsOf: file, encoding: .utf8) == #"{"version":2,"items":[]}"#)
 }
+
+@Test func quotaAttentionReconcilesOncePerRunAndAutomaticallyClears() throws {
+    var ledger = AttentionLedger()
+    let source = AttentionSource(jobID: UUID(), jobName: "Daily", runID: UUID(), threadID: nil)
+    let created = ledger.reconcileQuotaWaits([(source, "Check after 13:01")])
+    #expect(created.count == 1 && created[0].kind == .quotaWait && created[0].threadID == nil)
+    #expect(created[0].jobID == source.jobID)
+    // Relaunch and polling update the detail without issuing another notification.
+    ledger = try JSONDecoder().decode(AttentionLedger.self, from: JSONEncoder().encode(ledger))
+    let result1 = ledger.reconcileQuotaWaits([(source, "Check after 14:01")])
+    #expect(result1.isEmpty)
+    #expect(ledger.open.first?.detail == "Check after 14:01")
+    #expect(ledger.open.first?.occurrences == 1)
+    _ = ledger.reconcileQuotaWaits([])
+    #expect(ledger.open.isEmpty && ledger.resolved.first?.resolvedAutomatically == true)
+    let next = AttentionSource(jobID: source.jobID, jobName: source.jobName, runID: UUID(), threadID: "chat")
+    let result2 = ledger.reconcileQuotaWaits([(next, "Waiting")])
+    #expect(result2.count == 1)
+}
+
+@Test func manuallyResolvedQuotaAttentionDoesNotNotifyOnPoll() {
+    var ledger = AttentionLedger()
+    let source = AttentionSource(jobID: UUID(), jobName: "Daily", runID: UUID(), threadID: nil)
+    let item = ledger.reconcileQuotaWaits([(source, "Waiting")])[0]
+    let result3 = ledger.resolve(item.id)
+    #expect(result3)
+    let result4 = ledger.reconcileQuotaWaits([(source, "Waiting")])
+    #expect(result4.isEmpty)
+    #expect(ledger.open.isEmpty)
+    ledger.clearResolved()
+    let result5 = ledger.reconcileQuotaWaits([(source, "Waiting")])
+    #expect(result5.isEmpty)
+}

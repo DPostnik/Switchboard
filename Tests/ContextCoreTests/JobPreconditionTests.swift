@@ -69,6 +69,13 @@ private actor RecordingExecutorFixture: AgentScheduledExecutor {
         var job = ManagedJob(); job.name = "Mail"; job.prompt = "Check mail"; job.projectID = project.id; job.engine = .claude
         job.precondition = JobPrecondition(command: command)
         #expect(await model.saveJob(job))
+        // Executor-only fixture: no interactive profile is connected for account probing.
+        guard let agent = model.connection(for: job.engine) else { Issue.record("Missing fixture connection"); return JobRun(jobID: job.id, engine: job.engine, name: job.name, started: Date()) }; let now = Date()
+        model.scheduledQuota.cached[agent] = .init(accountID: "precondition-fixture", limits:
+            .init(buckets: [.init(id: "all", name: "All", windows: [
+                .init(id: "five_hour", remainingPercent: 80, durationMinutes: 300, resetsAt: nil)])],
+                ordinaryUsageAllowed: nil, fetchedAt: now),
+            context: model.agentState(agent).descriptor?.context, fetchedAt: now)
         await model.launchJob(job.id)
         for task in Array(model.jobTasks.values) { await task.value }
         return try #require(model.jobLedger.runs.first { $0.jobID == job.id })

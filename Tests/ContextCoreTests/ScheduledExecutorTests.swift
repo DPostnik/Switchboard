@@ -5,6 +5,18 @@ import ClaudeAdapter
 @testable import ContextCore
 @testable import ContextDesk
 
+// External print-run fixtures do not connect an interactive Claude profile. Supply fresh
+// account admission evidence separately so these tests keep exercising executor behavior.
+@MainActor private func admitClaudeExecutorFixture(_ model: DeskModel, engine: JobEngine) {
+    guard engine == .claude else { return }
+    guard let agent = model.connection(for: engine) else { Issue.record("Missing fixture connection"); return }; let now = Date()
+    model.scheduledQuota.cached[agent] = .init(accountID: "claude-executor-fixture", limits:
+        .init(buckets: [.init(id: "all", name: "All", windows: [
+            .init(id: "five_hour", remainingPercent: 80, durationMinutes: 300, resetsAt: nil)])],
+            ordinaryUsageAllowed: nil, fetchedAt: now),
+        context: model.agentState(agent).descriptor?.context, fetchedAt: now)
+}
+
 private func claudeFixture(_ root: URL, body: String) throws -> URL {
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     let file = root.appendingPathComponent("claude.py")
@@ -104,6 +116,7 @@ private func makeRequest(_ runner: any AgentScheduledExecutor, root: URL) async 
     let project = Project(path: root.path); model.state.projects = [project]; model.schedulerReady = true
     var job = ManagedJob(); job.name = "test"; job.prompt = "test"; job.engine = .claude; job.projectID = project.id; job.enabled = true
     #expect(await model.saveJob(job))
+    admitClaudeExecutorFixture(model, engine: job.engine)
     await model.launchJob(job.id)
     for task in Array(model.jobTasks.values) { await task.value }
     #expect(model.jobLedger.runs.first?.status == .blocked)
@@ -125,6 +138,8 @@ private func makeRequest(_ runner: any AgentScheduledExecutor, root: URL) async 
         m=json.loads(line)
         if 'id' not in m: continue
         method=m['method']; result={'userAgent':'codex/0.158.0-alpha.2.1 fixture'}
+        if method=='account/read': result={'account':{'type':'chatgpt','email':'executor@example.com','planType':'plus'}}
+        if method=='account/rateLimits/read': result={'rateLimits':{'limitId':'codex','primary':{'usedPercent':0}}}
         if method=='thread/start': result={'thread':{'id':'session-'+str(len(list(pathlib.Path('.').glob('sent-*'))))}}
         if method=='turn/start':
             ledger=json.loads(pathlib.Path('jobs.json').read_text())
@@ -160,6 +175,7 @@ private func makeRequest(_ runner: any AgentScheduledExecutor, root: URL) async 
     job.acceptsExternalPolicy = true; job.enabled = true
     #expect(await model.saveJob(job))
     let next = try #require(model.jobLedger.jobs.first?.nextRun)
+    admitClaudeExecutorFixture(model, engine: job.engine)
     await model.launchJob(job.id)
     for task in Array(model.jobTasks.values) { await task.value }
     if engine == .codex {
@@ -186,6 +202,7 @@ private func makeRequest(_ runner: any AgentScheduledExecutor, root: URL) async 
     #expect(model.jobLedger.runs.first?.status == .completed)
     #expect(model.chatID == "visible" && model.draft == "keep draft")
     try Data().write(to: root.appendingPathComponent("malformed"))
+    admitClaudeExecutorFixture(model, engine: job.engine)
     await model.launchJob(job.id)
     for task in Array(model.jobTasks.values) { await task.value }
     #expect(model.jobLedger.runs.first?.status == .uncertain)
@@ -196,6 +213,7 @@ private func makeRequest(_ runner: any AgentScheduledExecutor, root: URL) async 
     try FileManager.default.removeItem(at: root.appendingPathComponent("malformed"))
     try? FileManager.default.removeItem(at: root.appendingPathComponent("sent"))
     try Data().write(to: root.appendingPathComponent("wait"))
+    admitClaudeExecutorFixture(model, engine: job.engine)
     await model.launchJob(job.id)
     if engine == .codex {
         for task in Array(model.jobTasks.values) { await task.value }
@@ -300,6 +318,7 @@ private func makeRequest(_ runner: any AgentScheduledExecutor, root: URL) async 
     var job = ManagedJob(); job.name = "Morning"; job.prompt = "collect"; job.engine = .claude; job.projectID = project.id
     job.acceptsExternalPolicy = true; job.enabled = true
     #expect(await model.saveJob(job))
+    admitClaudeExecutorFixture(model, engine: job.engine)
     await model.launchJob(job.id)
     for task in Array(model.jobTasks.values) { await task.value }
     let run = try #require(model.jobLedger.runs.first)
@@ -336,6 +355,7 @@ private func makeRequest(_ runner: any AgentScheduledExecutor, root: URL) async 
 
     // Stopping from the chat stops the job; archive and delete need no engine and keep the run history.
     try Data().write(to: root.appendingPathComponent("wait"))
+    admitClaudeExecutorFixture(model, engine: job.engine)
     await model.launchJob(job.id)
     for _ in 0..<1500 {
         if FileManager.default.fileExists(atPath: root.appendingPathComponent("sent").path) { break }
@@ -374,6 +394,7 @@ private func makeRequest(_ runner: any AgentScheduledExecutor, root: URL) async 
     job.acceptsExternalPolicy = true
     #expect(await model.saveJob(job))
     for _ in 0..<2 {
+        admitClaudeExecutorFixture(model, engine: job.engine)
         await model.launchJob(job.id)
         for task in Array(model.jobTasks.values) { await task.value }
     }

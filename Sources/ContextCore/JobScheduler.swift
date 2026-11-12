@@ -120,12 +120,15 @@ public struct ManagedJob: Identifiable, Codable, Equatable, Sendable {
     }
 }
 public enum JobRunStatus: String, Codable, Sendable {
-    case starting, running, completed, failed, interrupted, uncertain, blocked, skipped
-    public var active: Bool { self == .starting || self == .running }
+    case starting, running, waitingForQuota, completed, failed, interrupted, uncertain, blocked, skipped
+    public var occupiesSlot: Bool { self == .starting || self == .running }
+    public var blocksDuplicate: Bool { occupiesSlot || self == .waitingForQuota }
+    public var active: Bool { occupiesSlot }
     public var title: String {
         switch self {
         case .starting: return L10n.text("Запускается", "Starting")
         case .running: return L10n.text("Выполняется", "Running")
+        case .waitingForQuota: return L10n.text("Ожидает восстановления лимита", "Waiting for quota reset")
         case .completed: return L10n.text("Завершено", "Completed")
         case .failed: return L10n.text("Ошибка", "Failed")
         case .interrupted: return L10n.text("Остановлено", "Stopped")
@@ -133,6 +136,21 @@ public enum JobRunStatus: String, Codable, Sendable {
         case .blocked: return L10n.text("Нужны разрешения", "Permissions needed")
         case .skipped: return L10n.text("Пропущено: нового нет", "Skipped: nothing new")
         }
+    }
+}
+/// Frozen execution binding; a wait never silently adopts edits or another account.
+public struct JobQuotaWait: Codable, Sendable {
+    public var resetAt: Date?
+    public var nextCheckAt: Date
+    public var checkCount: Int?
+    public var coalescedOccurrences: Int?
+    public var model: String
+    public var accountID: String?
+    public var suspendedTurnID: String?
+    public var job: ManagedJob
+    public init(resetAt: Date?, nextCheckAt: Date, model: String, accountID: String?, suspendedTurnID: String?, job: ManagedJob) {
+        self.resetAt = resetAt; self.nextCheckAt = nextCheckAt; self.model = model; self.accountID = accountID
+        self.suspendedTurnID = suspendedTurnID; self.job = job
     }
 }
 public struct JobRun: Identifiable, Codable, Sendable {
@@ -149,12 +167,17 @@ public struct JobRun: Identifiable, Codable, Sendable {
     public var turnID: String?
     public var output = ""
     public var routine: RoutineInvocation?
+    public var quotaWait: JobQuotaWait?
+    public var executionStartedAt: Date?
+    public var executionAccountID: String?
+    public var executionPermissions: AgentPermissionProfile?
+    public var executionModel: String?
 }
 extension JobRun {
     /// Longest a scheduled run may stay active before the watchdog stops it. The longest observed run took
     /// 113 minutes (2026-10-19), so this only catches hung runs.
     public static let deadline: TimeInterval = 3 * 3600
-    public func isOverdue(now: Date) -> Bool { status.active && now.timeIntervalSince(started) > Self.deadline }
+    public func isOverdue(now: Date) -> Bool { status.active && now.timeIntervalSince(executionStartedAt ?? started) > Self.deadline }
 }
 public struct JobLedger: Codable, Sendable {
     public var version = 1
@@ -212,6 +235,9 @@ public actor JobStore {
             guard expected.id == job.id, value.jobs.first(where: { $0.id == job.id }) == expected else { throw ScheduleControl.changed }
         }
         guard !value.runs.contains(where: { $0.jobID == job.id && $0.status.active }) else { throw Self.busy }
+        for i in value.runs.indices where value.runs[i].jobID == job.id && value.runs[i].status == .waitingForQuota {
+            value.runs[i].status = .interrupted; value.runs[i].finished = now
+        }
         var job = job
         job.nextRun = job.enabled ? try job.schedule.next(after: now) : nil
         if job.enabled && job.nextRun == nil { job.enabled = false }
@@ -253,16 +279,26 @@ public actor JobStore {
         value.jobs.removeAll { $0.id == id }; value.runs.removeAll { $0.jobID == id }
         try commit(value); return value
     }
-    public func claim(_ id: UUID, manual: Bool, now: Date = Date()) throws -> (ManagedJob, JobRun)? {
+    public func claim(_ id: UUID, manual: Bool, now: Date = Date(), accountID: String? = nil) throws -> (ManagedJob, JobRun)? {
         var value = try load()
-        guard let index = value.jobs.firstIndex(where: { $0.id == id }),
-              value.runs.filter({ $0.status.active }).count < 3,
-              !value.runs.contains(where: { $0.jobID == id && $0.status.active }) else { return nil }
+        guard let index = value.jobs.firstIndex(where: { $0.id == id }) else { return nil }
+        if !manual, value.jobs[index].enabled, value.jobs[index].nextRun.map({ $0 <= now }) == true,
+           value.runs.contains(where: { $0.jobID == id && $0.status == .waitingForQuota }) {
+            if let waiting = value.runs.firstIndex(where: { $0.jobID == id && $0.status == .waitingForQuota }) {
+                let count = (value.runs[waiting].quotaWait?.coalescedOccurrences ?? 0) + 1
+                value.runs[waiting].quotaWait?.coalescedOccurrences = count
+            }
+            value.jobs[index].nextRun = try value.jobs[index].schedule.next(after: now)
+            if value.jobs[index].nextRun == nil { value.jobs[index].enabled = false }
+            try commit(value); return nil
+        }
+        guard value.runs.filter({ $0.status.active }).count < 3,
+              !value.runs.contains(where: { $0.jobID == id && $0.status.blocksDuplicate }) else { return nil }
         let job = value.jobs[index]
         guard manual || (job.enabled && job.nextRun.map { $0 <= now } == true) else { return nil }
         try job.validate()
         var run = JobRun(jobID: id, engine: job.engine, name: job.name, started: now)
-        run.routine = job.routine
+        run.routine = job.routine; run.executionAccountID = accountID
         value.runs.insert(run, at: 0)
         // No backlog after sleep. Manual runs leave the scheduled occurrence intact.
         if !manual {
@@ -270,6 +306,106 @@ public actor JobStore {
             if value.jobs[index].nextRun == nil { value.jobs[index].enabled = false }
         }
         try commit(value); return (job, run)
+    }
+    /// Consume the occurrence without taking a concurrency slot. Persistence authorizes only waiting.
+    public func deferForQuota(_ id: UUID, manual: Bool, resetAt: Date?, nextCheckAt: Date, model: String,
+                              accountID: String?, now: Date = Date()) throws -> (ManagedJob, JobRun)? {
+        var value = try load()
+        guard let index = value.jobs.firstIndex(where: { $0.id == id }) else { return nil }
+        let job = value.jobs[index]
+        guard manual || (job.enabled && job.nextRun.map { $0 <= now } == true) else { return nil }
+        if value.runs.contains(where: { $0.jobID == id && $0.status.blocksDuplicate }) {
+            // Coalesce later occurrences into the outstanding wait; preserve the RRULE itself.
+            if !manual, value.runs.contains(where: { $0.jobID == id && $0.status == .waitingForQuota }) {
+                if let waiting = value.runs.firstIndex(where: { $0.jobID == id && $0.status == .waitingForQuota }) {
+                    let count = (value.runs[waiting].quotaWait?.coalescedOccurrences ?? 0) + 1
+                    value.runs[waiting].quotaWait?.coalescedOccurrences = count
+                }
+                value.jobs[index].nextRun = try job.schedule.next(after: now)
+                if value.jobs[index].nextRun == nil { value.jobs[index].enabled = false }
+                try commit(value)
+            }
+            return nil
+        }
+        try job.validate()
+        var run = JobRun(jobID: id, engine: job.engine, name: job.name, started: now)
+        run.routine = job.routine; run.executionAccountID = accountID; run.status = .waitingForQuota
+        var snapshot = job; snapshot.model = model
+        run.quotaWait = JobQuotaWait(resetAt: resetAt, nextCheckAt: nextCheckAt, model: model, accountID: accountID, suspendedTurnID: nil, job: snapshot)
+        value.runs.insert(run, at: 0)
+        if !manual {
+            value.jobs[index].nextRun = try job.schedule.next(after: now)
+            if value.jobs[index].nextRun == nil { value.jobs[index].enabled = false }
+        }
+        try commit(value); return (job, run)
+    }
+    /// Caller must confirm that the previous turn stopped before suspending it.
+    public func suspendForQuota(_ id: UUID, resetAt: Date?, nextCheckAt: Date, model: String, accountID: String?,
+                                now: Date = Date(), suspendedTurnID: String? = nil) throws -> JobLedger {
+        var value = try load()
+        guard let i = value.runs.firstIndex(where: { $0.id == id && $0.status.occupiesSlot }),
+              let job = value.jobs.first(where: { $0.id == value.runs[i].jobID }) else { return value }
+        let boundModel = value.runs[i].executionModel ?? model
+        var snapshot = job; snapshot.model = boundModel
+        value.runs[i].quotaWait = JobQuotaWait(resetAt: resetAt, nextCheckAt: nextCheckAt, model: boundModel, accountID: value.runs[i].executionAccountID ?? accountID,
+                                              suspendedTurnID: suspendedTurnID ?? value.runs[i].turnID, job: snapshot)
+        value.runs[i].status = .waitingForQuota; value.runs[i].finished = nil
+        try commit(value); return value
+    }
+    /// Write the send intent first. A crash or ambiguous dispatch can never reclaim this wait.
+    public func claimQuotaResume(_ id: UUID, now: Date = Date(), accountID: String? = nil) throws -> (ManagedJob, JobRun)? {
+        var value = try load()
+        guard value.runs.filter({ $0.status.occupiesSlot }).count < 3,
+              let i = value.runs.firstIndex(where: { $0.id == id && $0.status == .waitingForQuota }),
+              let wait = value.runs[i].quotaWait,
+              wait.nextCheckAt <= now,
+              value.jobs.contains(where: { $0.id == value.runs[i].jobID }) else { return nil }
+        // A wait before first dispatch may not yet know its account. Bind the first
+        // confirmed admission atomically; an existing binding can never be replaced.
+        if let original = wait.accountID, let accountID, original != accountID { return nil }
+        // Resume and recurrence admission share one transaction: a due occurrence
+        // joins the existing wait even when the scheduler checks recovery first.
+        if let jobIndex = value.jobs.firstIndex(where: { $0.id == value.runs[i].jobID }),
+           value.jobs[jobIndex].enabled, value.jobs[jobIndex].nextRun.map({ $0 <= now }) == true {
+            value.jobs[jobIndex].nextRun = try value.jobs[jobIndex].schedule.next(after: now)
+            if value.jobs[jobIndex].nextRun == nil { value.jobs[jobIndex].enabled = false }
+            let count = (value.runs[i].quotaWait?.coalescedOccurrences ?? 0) + 1
+            value.runs[i].quotaWait?.coalescedOccurrences = count
+        }
+        let binding = wait.accountID ?? accountID
+        value.runs[i].executionAccountID = binding
+        value.runs[i].quotaWait?.accountID = binding
+        value.runs[i].status = .starting; value.runs[i].executionStartedAt = now
+        value.runs[i].turnID = nil
+        let run = value.runs[i]
+        try commit(value); return (wait.job, run)
+    }
+    public func updateQuotaWait(_ id: UUID, resetAt: Date?, nextCheckAt: Date, output: String? = nil, countCheck: Bool = true) throws -> JobLedger {
+        var value = try load()
+        if let i = value.runs.firstIndex(where: { $0.id == id && $0.status == .waitingForQuota }) {
+            if countCheck {
+                let count = (value.runs[i].quotaWait?.checkCount ?? 0) + 1
+                value.runs[i].quotaWait?.checkCount = count
+            }
+            value.runs[i].quotaWait?.resetAt = resetAt; value.runs[i].quotaWait?.nextCheckAt = nextCheckAt
+            if let output { value.runs[i].output = output }
+        }
+        try commit(value); return value
+    }
+    public func cancelQuotaWait(_ id: UUID) throws -> JobLedger {
+        var value = try load()
+        if let i = value.runs.firstIndex(where: { $0.id == id && $0.status == .waitingForQuota }) {
+            value.runs[i].status = .interrupted; value.runs[i].finished = Date()
+        }
+        try commit(value); return value
+    }
+    /// Persist the resolved execution settings before a request can leave the process.
+    public func bindExecution(_ id: UUID, model: String, permissions: AgentPermissionProfile) throws -> JobLedger {
+        var value = try load()
+        if let i = value.runs.firstIndex(where: { $0.id == id && $0.status.occupiesSlot }) {
+            value.runs[i].executionModel = model; value.runs[i].executionPermissions = permissions
+        }
+        try commit(value); return value
     }
     public func attach(_ id: UUID, thread: String? = nil, turn: String? = nil) throws -> JobLedger {
         var value = try load()
@@ -280,7 +416,7 @@ public actor JobStore {
     }
     public func finish(_ id: UUID, status: JobRunStatus, output: String = "") throws -> JobLedger {
         var value = try load()
-        if let i = value.runs.firstIndex(where: { $0.id == id && $0.status.active }) {
+        if let i = value.runs.firstIndex(where: { $0.id == id && $0.status.blocksDuplicate }) {
             value.runs[i].status = status; value.runs[i].output = output; value.runs[i].finished = Date()
             // A run's outcome does not change the user's recurring schedule.
         }

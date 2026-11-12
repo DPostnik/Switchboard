@@ -111,12 +111,39 @@ struct JobsView: View {
     /// Why "Run now" is unavailable, or nil when the task can start.
     private func runBlocker(_ job: ManagedJob, active: Bool) -> String? {
         if active { return L10n.text("Задание уже выполняется", "The task is already running") }
+        if model.jobLedger.runs.contains(where: { $0.jobID == job.id && $0.status.blocksDuplicate }) {
+            return L10n.text("Задание ожидает восстановления лимита. Проверь лимит или отмени ожидание.",
+                             "The task is waiting for quota. Check quota or cancel the wait.")
+        }
         if !model.schedulerReady { return L10n.text("Планировщик недоступен", "The scheduler is unavailable") }
         if let issue = model.routineIssue(job) { return issue }
         if model.jobLedger.runs.filter({ $0.status.active }).count >= 3 {
             return L10n.text("Уже выполняются три задания. Дождись, пока одно закончится.", "Three tasks are already running. Wait for one to finish.")
         }
         return nil
+    }
+    @ViewBuilder private func quotaWaitDetails(_ run: JobRun, wait: JobQuotaWait, zone: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let reset = wait.resetAt {
+                LabeledContent(L10n.text("Восстановление лимита", "Quota reset"), value: jobDate(reset, zone: zone))
+            } else {
+                Text(L10n.text("Время восстановления лимита неизвестно", "Quota reset time is unknown"))
+                    .foregroundStyle(.secondary)
+            }
+            LabeledContent(L10n.text("Следующая проверка", "Next check"), value: jobDate(wait.nextCheckAt, zone: zone))
+            if let count = wait.coalescedOccurrences, count > 0 {
+                Text(L10n.text("Объединено следующих запусков: \(count)", "Later occurrences coalesced: \(count)"))
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                Button(L10n.text("Проверить лимит", "Check quota")) {
+                    Task { await model.checkScheduledQuotaWait(run.id, manual: true) }
+                }.disabled(!model.schedulerReady || model.scheduledQuota.checking.contains(run.id) || model.scheduledQuota.cleanup.contains(run.id))
+                Button(L10n.text("Отменить ожидание", "Cancel wait")) {
+                    Task { await model.stopJob(run) }
+                }.disabled(!model.schedulerReady)
+            }
+        }.font(.ui(.caption))
     }
     private func managedDetail(_ job: ManagedJob) -> some View {
         let active = model.jobLedger.runs.first { $0.jobID == job.id && $0.status.active }
@@ -168,6 +195,9 @@ struct JobsView: View {
                             if let id = run.threadID, let chat = model.state.chats.first(where: { $0.id == id }) {
                                 Button(L10n.text("Открыть чат", "Open chat")) { Task { await model.openChat(chat) } }
                             }
+                        }
+                        if run.status == .waitingForQuota, let wait = run.quotaWait {
+                            quotaWaitDetails(run, wait: wait, zone: job.schedule.timeZone)
                         }
                         if run.threadID == nil && [.blocked, .failed].contains(run.status) {
                             Text(L10n.text("Запуск остановился до создания чата. Подробности доступны в результате запуска; повторить можно кнопкой «Запустить сейчас».", "This run stopped before a chat was created. See the run output for details; use Run now to try again."))

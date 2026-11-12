@@ -7,6 +7,8 @@ public struct AttentionItem: Identifiable, Codable, Equatable, Sendable {
         case blocker
         /// A scheduled run that failed, was blocked or has an unconfirmed outcome.
         case runProblem
+        /// A scheduled run paused until provider quota becomes available.
+        case quotaWait
     }
     public var id = UUID()
     public var kind: Kind
@@ -44,6 +46,8 @@ public struct AttentionSource: Sendable {
 public struct AttentionLedger: Codable, Equatable, Sendable {
     public var version = 1
     public var items: [AttentionItem] = []
+    /// Retains notification deduplication even when the user clears resolved history.
+    public var quotaWaitReportedRunIDs: [UUID]?
     public init() {}
     public static let resolvedLimit = 100
 
@@ -81,8 +85,37 @@ public struct AttentionLedger: Codable, Equatable, Sendable {
                 items[index].resolved = now; items[index].resolvedAutomatically = true
             }
         // A skipped run found nothing to do; it neither raises nor clears problems.
-        case .starting, .running, .interrupted, .skipped: break
+        case .starting, .running, .waitingForQuota, .interrupted, .skipped: break
         }
+        prune()
+        return created
+    }
+
+    /// One notification per run, including after restart or manual dismissal.
+    public mutating func reconcileQuotaWaits(_ sources: [(AttentionSource, String)], now: Date = Date()) -> [AttentionItem] {
+        let waiting = Set(sources.map { $0.0.runID })
+        let reported = Set(quotaWaitReportedRunIDs ?? [])
+            .union(items.filter { $0.kind == .quotaWait }.compactMap(\.runID))
+        for index in items.indices where items[index].kind == .quotaWait && items[index].isOpen
+            && !waiting.contains(items[index].runID ?? UUID()) {
+            items[index].resolved = now
+            items[index].resolvedAutomatically = true
+        }
+        var created: [AttentionItem] = []
+        for (source, detail) in sources {
+            if let index = items.firstIndex(where: { $0.kind == .quotaWait && $0.runID == source.runID }) {
+                items[index].detail = detail
+                items[index].threadID = source.threadID
+                items[index].jobName = source.jobName
+            } else if !reported.contains(source.runID) {
+                let item = AttentionItem(kind: .quotaWait,
+                    text: L10n.text("Задание ожидает доступного лимита", "Task is waiting for available quota"),
+                    detail: detail, jobID: source.jobID, jobName: source.jobName,
+                    runID: source.runID, threadID: source.threadID, now: now)
+                items.append(item); created.append(item)
+            }
+        }
+        quotaWaitReportedRunIDs = waiting.sorted { $0.uuidString < $1.uuidString }
         prune()
         return created
     }

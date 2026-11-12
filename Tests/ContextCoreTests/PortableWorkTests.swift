@@ -121,6 +121,7 @@ private actor RoutineExecutorFixture: AgentScheduledExecutor {
     var job = ManagedJob(); job.name = "Routine"; job.projectID = project.id; job.engine = .claude
     job.routine = .init(definition: definition); job.prompt = try #require(job.routine).prompt()
     #expect(await model.saveJob(job)) // Unsupported definitions may be retained paused for editing.
+    admitScheduledQuotaFixture(model, engine: job.engine)
     await model.launchJob(job.id)
     for task in Array(model.jobTasks.values) { await task.value }
     #expect(await fixture.executions == 0)
@@ -130,6 +131,7 @@ private actor RoutineExecutorFixture: AgentScheduledExecutor {
     definition.requirements = []; definition.revision = UUID()
     job.routine = .init(definition: definition); job.prompt = try #require(job.routine).prompt()
     #expect(await model.saveJob(job))
+    admitScheduledQuotaFixture(model, engine: job.engine)
     await model.launchJob(job.id)
     for task in Array(model.jobTasks.values) { await task.value }
     #expect(await fixture.executions == 1)

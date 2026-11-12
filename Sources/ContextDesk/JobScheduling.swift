@@ -19,6 +19,7 @@ import ContextCore
             }
         }
         catch { schedulerReady = false; self.error = error.localizedDescription; return }
+        await reconcileQuotaAttention()
         schedulerTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.watchScheduler()
@@ -61,6 +62,8 @@ import ContextCore
         guard schedulerReady, !schedulerStopping else { return }
         await processScheduleControl(directory: controlDirectory)
         guard schedulerReady, !schedulerStopping else { return }
+        await reconcileQuotaAttention()
+        await checkScheduledQuotaWaits(now: now)
         for job in jobLedger.jobs where job.enabled && job.nextRun.map({ $0 <= now }) == true {
             // Offline Codex work remains due; no network call has been made and no run is claimed.
             guard AgentIntegrationFactory.scheduledReadiness[job.engine]?(self) == true else { continue }
@@ -69,7 +72,7 @@ import ContextCore
     }
     func saveJob(_ job: ManagedJob) async -> Bool {
         if job.enabled, let issue = routineIssue(job) { error = issue; return false }
-        do { jobLedger = try await jobStore.save(job); return true }
+        do { jobLedger = try await jobStore.save(job); await reconcileQuotaAttention(); return true }
         catch { self.error = error.localizedDescription; return false }
     }
     func routineIssue(_ job: ManagedJob) -> String? {
@@ -82,74 +85,110 @@ import ContextCore
         return invocation.definition.mappingIssue(capabilities: capabilities, agent: job.engine.agentID)
     }
     func deleteJob(_ id: UUID) async {
-        do { jobLedger = try await jobStore.remove(id) } catch { self.error = error.localizedDescription }
+        do { jobLedger = try await jobStore.remove(id); await reconcileQuotaAttention() } catch { self.error = error.localizedDescription }
     }
     func toggleJob(_ job: ManagedJob) async {
         var updated = job; updated.enabled.toggle(); _ = await saveJob(updated)
     }
     func launchJob(_ id: UUID, manual: Bool = true, now: Date = Date()) async {
-        guard schedulerReady, !schedulerStopping else { return }
+        guard schedulerReady, !schedulerStopping, scheduledQuota.launching.insert(id).inserted else { return }
+        defer { scheduledQuota.launching.remove(id) }
+        guard let job = jobLedger.jobs.first(where: { $0.id == id }) else { return }
         do {
-            guard let (job, run) = try await jobStore.claim(id, manual: manual, now: now) else { return }
+            if jobLedger.runs.contains(where: { $0.jobID == id && $0.status.blocksDuplicate }) {
+                _ = try await jobStore.claim(id, manual: manual, now: now)
+                jobLedger = try await jobStore.load()
+                return
+            }
+            let snapshot = await scheduledQuotaSnapshot(connection(for: job.engine))
+            guard schedulerReady, !schedulerStopping, jobLedger.jobs.first(where: { $0.id == id }) == job else { return }
+            let decision = scheduledQuotaDecision(job, snapshot: snapshot, now: Date())
+            guard decision == .allowed else {
+                let reset: Date?
+                if case .wait(let value) = decision { reset = value } else { reset = nil }
+                if let (_, run) = try await jobStore.deferForQuota(id, manual: manual, resetAt: reset,
+                    nextCheckAt: quotaNextCheck(reset: reset, now: now), model: job.model, accountID: snapshot.accountID, now: now) {
+                    jobLedger = try await jobStore.updateQuotaWait(run.id, resetAt: reset,
+                        nextCheckAt: quotaNextCheck(reset: reset, now: now), output: quotaWaitingText(reset: reset), countCheck: false)
+                } else { jobLedger = try await jobStore.load() }
+                await reconcileQuotaAttention()
+                return
+            }
+            guard let (claimedJob, run) = try await jobStore.claim(id, manual: manual, now: now, accountID: snapshot.accountID) else { return }
             jobLedger = try await jobStore.load()
-            guard let project = state.projects.first(where: { $0.id == job.projectID }),
-                  FileManager.default.fileExists(atPath: project.path) else {
-                await finishJob(run.id, status: .failed, output: L10n.text("Проект недоступен. Проверь папку задания.", "Project unavailable. Check the task folder.")); return
-            }
-            guard let makeExecutor = jobExecutorFactories[job.engine] else {
-                await finishJob(run.id, status: .blocked, output: L10n.text("Исполнитель недоступен", "The agent is unavailable")); return
-            }
-            guard !schedulerStopping else { await finishJob(run.id, status: .interrupted); return }
-            jobTasks[run.id] = Task { [weak self] in
-                guard let self else { return }
-                defer {
-                    jobTasks.removeValue(forKey: run.id)
-                    if jobLedger.runs.first(where: { $0.id == run.id })?.status.active != true {
-                        jobExecutors.removeValue(forKey: run.id)
-                    }
-                }
-                do {
-                    var runJob = job
-                    if let check = job.precondition, !check.isEmpty {
-                        switch await check.evaluate(in: project.path, label: "precondition-" + run.id.uuidString.lowercased()) {
-                        case .skip: await finishJob(run.id, status: .skipped); return
-                        case .broken(let reason): await finishJob(run.id, status: .blocked, output: reason); return
-                        case .run(let output): runJob.prompt = JobPrecondition.prompt(job.prompt, output: output)
-                        }
-                        guard !Task.isCancelled, !schedulerStopping else { await finishJob(run.id, status: .interrupted); return }
-                    }
-                    // Bind validation and chat delivery to the same prompt, including precondition output.
-                    let executor = makeExecutor(self, runJob, run, project)
-                    jobExecutors[run.id] = executor
-                    let descriptor = try await executor.descriptor().value()
-                    if let routine = job.routine {
-                        do {
-                            try routine.validate(descriptor: descriptor)
-                            guard try routine.prompt() == job.prompt else { throw ConversationIdentity.invalidStorage }
-                        } catch {
-                            await finishJob(run.id, status: .blocked, output: error.localizedDescription); return
-                        }
-                    }
-                    let request = runJob.executionRequest(runID: run.id, project: project, descriptor: descriptor, sharedRoots: sharedRoots)
-                    let result = try await executor.execute(request) { [weak self] in
-                        guard let self else { throw CancellationError() }
-                        // A print run (installed CLI) has no engine session; its chat is a local read-only record.
-                        if descriptor.identityMode == .externalCLI {
-                            try await self.attachScheduledRecord(run, job: job, prompt: request.prompt, project: project)
-                        } else { try await self.attachScheduledRun(run.id) }
-                    }.value()
-                    if case .finished(let outcome, let output) = result {
-                        await finishJob(run.id, status: JobRunStatus(outcome), output: output)
-                    }
-                } catch {
-                    let status: JobRunStatus
-                    if let failure = error as? AgentOperationFailure {
-                        status = failure.uncertain ? .uncertain : failure.rejection != nil ? .blocked : .failed
-                    } else { status = error is CancellationError ? .interrupted : .failed }
-                    await finishJob(run.id, status: status, output: error.localizedDescription)
-                }
-            }
+            await executeClaimedJob(claimedJob, run: run)
         } catch { self.error = error.localizedDescription; schedulerReady = false }
+    }
+    func executeClaimedJob(_ savedJob: ManagedJob, run: JobRun) async {
+        var resolvedJob = savedJob
+        resolvedJob.model = modelCatalog(connection(for: savedJob.engine))?.resolveModel(savedJob.model) ?? savedJob.model
+        let job = resolvedJob
+        guard let project = state.projects.first(where: { $0.id == job.projectID }),
+              FileManager.default.fileExists(atPath: project.path) else {
+            await finishJob(run.id, status: .failed, output: L10n.text("Проект недоступен. Проверь папку задания.", "Project unavailable. Check the task folder.")); return
+        }
+        guard let makeExecutor = jobExecutorFactories[job.engine] else {
+            await finishJob(run.id, status: .blocked, output: L10n.text("Исполнитель недоступен", "The agent is unavailable")); return
+        }
+        guard !schedulerStopping else { await finishJob(run.id, status: .interrupted); return }
+        do {
+            jobLedger = try await jobStore.bindExecution(run.id, model: job.model,
+                permissions: job.role(project: project, catalog: roleCatalog).profile(for: project, sharedRoots: sharedRoots))
+        } catch { schedulerReady = false; self.error = error.localizedDescription; return }
+        jobTasks[run.id] = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                jobTasks.removeValue(forKey: run.id)
+                if jobLedger.runs.first(where: { $0.id == run.id })?.status.active != true {
+                    jobExecutors.removeValue(forKey: run.id)
+                }
+            }
+            do {
+                var runJob = job
+                if let check = job.precondition, !check.isEmpty {
+                    switch await check.evaluate(in: project.path, label: "precondition-" + run.id.uuidString.lowercased()) {
+                    case .skip: await finishJob(run.id, status: .skipped); return
+                    case .broken(let reason): await finishJob(run.id, status: .blocked, output: reason); return
+                    case .run(let output): runJob.prompt = JobPrecondition.prompt(job.prompt, output: output)
+                    }
+                    guard !Task.isCancelled, !schedulerStopping else { await finishJob(run.id, status: .interrupted); return }
+                }
+                let admission = await scheduledQuotaSnapshot(connection(for: job.engine))
+                guard admission.accountID == run.executionAccountID, admission.accountID != nil,
+                      admission.context == agentState(connection(for: job.engine)).descriptor?.context else {
+                    await finishJob(run.id, status: .interrupted, output: L10n.text("Аккаунт запуска больше не подтверждён. Запуск отменён.", "The run's account is no longer confirmed. The run was cancelled.")); return
+                }
+                // Bind validation and chat delivery to the same prompt, including precondition output.
+                let executor = makeExecutor(self, runJob, run, project)
+                jobExecutors[run.id] = executor
+                let descriptor = try await executor.descriptor().value()
+                if let routine = job.routine {
+                    do {
+                        try routine.validate(descriptor: descriptor)
+                        guard try routine.prompt() == job.prompt else { throw ConversationIdentity.invalidStorage }
+                    } catch {
+                        await finishJob(run.id, status: .blocked, output: error.localizedDescription); return
+                    }
+                }
+                let request = runJob.executionRequest(runID: run.id, project: project, descriptor: descriptor, sharedRoots: sharedRoots)
+                let result = try await executor.execute(request) { [weak self] in
+                    guard let self else { throw CancellationError() }
+                    // A print run (installed CLI) has no engine session; its chat is a local read-only record.
+                    if descriptor.identityMode == .externalCLI {
+                        try await self.attachScheduledRecord(run, job: job, prompt: request.prompt, project: project)
+                    } else { try await self.attachScheduledRun(run.id) }
+                }.value()
+                if case .finished(let outcome, let output) = result {
+                    await finishJob(run.id, status: JobRunStatus(outcome), output: output)
+                }
+            } catch {
+                let status: JobRunStatus
+                if let failure = error as? AgentOperationFailure {
+                    status = failure.uncertain ? .uncertain : failure.rejection != nil ? .blocked : .failed
+                } else { status = error is CancellationError ? .interrupted : .failed }
+                await finishJob(run.id, status: status, output: error.localizedDescription)
+            }
+        }
     }
     func attachScheduledRun(_ id: UUID) async throws {
         try Task.checkCancellation()
@@ -157,17 +196,23 @@ import ContextCore
         jobLedger = try await jobStore.attach(id)
     }
     func finishJob(_ id: UUID, status: JobRunStatus, output: String = "") async {
-        let wasActive = jobLedger.runs.first { $0.id == id }?.status.active == true
+        let wasActive = jobLedger.runs.first { $0.id == id }?.status.blocksDuplicate == true
         do { jobLedger = try await jobStore.finish(id, status: status, output: output); jobExecutors.removeValue(forKey: id) }
         catch { schedulerReady = false; self.error = error.localizedDescription }
+        await reconcileQuotaAttention()
         if wasActive {
             await finishScheduledRecord(id, status: status, output: output)
             if let run = jobLedger.runs.first(where: { $0.id == id }) { await recordAttention(run, status: status, output: output) }
         }
     }
     func stopJob(_ run: JobRun) async {
+        if run.status == .waitingForQuota {
+            await finishJob(run.id, status: .interrupted, output: L10n.text("Ожидание лимита отменено.", "Quota wait cancelled."))
+            return
+        }
         jobTasks[run.id]?.cancel()
-        await jobExecutors[run.id]?.stop()
+        if let executor = jobExecutors[run.id] { await executor.stop() }
+        else if let thread = run.threadID { await interruptThread(thread) }
     }
 
     func stopScheduler() async {

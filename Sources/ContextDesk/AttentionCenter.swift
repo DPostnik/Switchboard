@@ -32,6 +32,30 @@ import ContextCore
         refreshDockBadge()
     }
 
+    /// Uses persisted run state only; a preflight wait may have no chat or agent history.
+    func reconcileQuotaAttention() async {
+        let sources = jobLedger.runs.filter { $0.status == .waitingForQuota }.map {
+            let nextCheck = $0.quotaWait.map {
+                L10n.text("Следующая проверка: ", "Next check: ") + LimitResume.timeText($0.nextCheckAt, now: Date())
+            } ?? ""
+            let noChat = $0.threadID == nil
+                ? L10n.text("Агент ещё не запущен; чат появится после восстановления лимита.",
+                            "The agent has not started; a chat will appear after quota becomes available.") : ""
+            return (AttentionSource(jobID: $0.jobID, jobName: $0.name, runID: $0.id, threadID: $0.threadID),
+                    [nextCheck, noChat].filter { !$0.isEmpty }.joined(separator: "\n"))
+        }
+        do {
+            let (ledger, created) = try await attentionStore.update { $0.reconcileQuotaWaits(sources) }
+            let closed = attention.open.filter { old in !ledger.open.contains { $0.id == old.id } }.map(\.id)
+            attention = ledger
+            removeAttentionNotifications(closed)
+            created.forEach(postAttentionNotification)
+            refreshDockBadge()
+        } catch {
+            self.error = L10n.text("Не удалось сохранить важные сообщения: ", "Could not save important messages: ") + error.localizedDescription
+        }
+    }
+
     private func finalAnswer(threadID: String, turnID: String?) async -> String? {
         guard let turns = try? await clientForChat(threadID).history(sessionForChat(threadID)) else { return nil }
         let turn = turns.last { turnID != nil && $0.id == turnID } ?? turns.last
@@ -75,16 +99,21 @@ import ContextCore
     private func postAttentionNotification(_ item: AttentionItem) {
         guard Bundle.main.bundleURL.pathExtension == "app" else { return }
         let content = UNMutableNotificationContent()
-        content.title = item.kind == .blocker
-            ? L10n.text("Блокер: \(item.jobName)", "Blocker: \(item.jobName)")
-            : L10n.text("Проблема с заданием: \(item.jobName)", "Task problem: \(item.jobName)")
+        switch item.kind {
+        case .blocker: content.title = L10n.text("Блокер: \(item.jobName)", "Blocker: \(item.jobName)")
+        case .runProblem: content.title = L10n.text("Проблема с заданием: \(item.jobName)", "Task problem: \(item.jobName)")
+        case .quotaWait: content.title = L10n.text("Ожидание лимита: \(item.jobName)", "Waiting for quota: \(item.jobName)")
+        }
         content.body = item.kind == .blocker ? item.text : [item.text, item.detail].compactMap { $0 }.joined(separator: " — ")
         content.sound = .default
         content.userInfo = ["attentionID": item.id.uuidString]
+        if item.kind == .quotaWait, let jobID = item.jobID { content.userInfo["jobID"] = jobID.uuidString }
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "attention:" + item.id.uuidString, content: content, trigger: nil), withCompletionHandler: nil)
     }
     private func removeAttentionNotifications(_ ids: [UUID]) {
         guard Bundle.main.bundleIdentifier != nil else { return }
-        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids.map { "attention:" + $0.uuidString })
+        let identifiers = ids.map { "attention:" + $0.uuidString }
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: identifiers)
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: identifiers)
     }
 }

@@ -143,10 +143,10 @@ struct AttentionView: View {
     private func card(_ item: AttentionItem) -> some View {
         let tint = item.kind == .blocker ? AttentionPalette.accent : AttentionPalette.problem
         return HStack(alignment: .top, spacing: 12) {
-            Image(systemName: item.kind == .blocker ? "exclamationmark.triangle.fill" : "xmark.octagon.fill")
+            Image(systemName: item.kind == .quotaWait ? "hourglass" : item.kind == .blocker ? "exclamationmark.triangle.fill" : "xmark.octagon.fill")
                 .font(.ui(.title3)).foregroundStyle(item.isOpen ? tint : .secondary)
             VStack(alignment: .leading, spacing: 6) {
-                Text(item.kind == .blocker ? L10n.text("Блокер", "Blocker") : L10n.text("Проблема запуска", "Run problem"))
+                Text(item.kind == .quotaWait ? L10n.text("Ожидание лимита", "Waiting for quota") : item.kind == .blocker ? L10n.text("Блокер", "Blocker") : L10n.text("Проблема запуска", "Run problem"))
                     .font(.ui(.caption).weight(.semibold)).foregroundStyle(item.isOpen ? tint : .secondary)
                 Text(item.text).font(.ui(.body).weight(.medium)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                 if let detail = item.detail {

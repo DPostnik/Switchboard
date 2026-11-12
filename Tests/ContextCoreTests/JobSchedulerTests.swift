@@ -217,6 +217,7 @@ func schedulerRecoveryPreservesNextOccurrenceWithoutReplaying(activeStatus: JobR
     model.schedulerReady = true
     var job = jobFixture(); job.projectID = project.id; job.model = "selected-model"; job.effort = "low"
     #expect(await model.saveJob(job))
+    admitScheduledQuotaFixture(model, engine: job.engine)
     await model.launchJob(job.id)
     for task in Array(model.jobTasks.values) { await task.value }
     #expect(model.chatID == "visible-chat" && model.draft == "Keep my draft")
@@ -230,6 +231,7 @@ func schedulerRecoveryPreservesNextOccurrenceWithoutReplaying(activeStatus: JobR
     let conversation = try #require(model.state.chats.first { $0.nativeSession?.nativeID == "scheduled-thread" })
     #expect(model.jobLedger.runs.first?.threadID == conversation.id)
     #expect(conversation.id != "scheduled-thread")
+    admitScheduledQuotaFixture(model, engine: job.engine)
     await model.launchJob(job.id)
     #expect(model.jobLedger.runs.count == 1)
     model.finishActiveTurn(threadID: conversation.id, turnID: "scheduled-turn", status: .completed, hasError: false)
@@ -311,6 +313,7 @@ func schedulerRecoveryPreservesNextOccurrenceWithoutReplaying(activeStatus: JobR
     #expect(await model.saveJob(job))
     let control = root.appendingPathComponent("schedule-control")
     let due = try #require(model.jobLedger.jobs.first?.nextRun)
+    admitScheduledQuotaFixture(model, engine: job.engine)
     await model.tickJobs(now: due, controlDirectory: control)
     for task in Array(model.jobTasks.values) { await task.value }
     #expect(model.jobLedger.runs.first?.status == .uncertain)
@@ -318,6 +321,7 @@ func schedulerRecoveryPreservesNextOccurrenceWithoutReplaying(activeStatus: JobR
     let first = try #require(model.jobLedger.runs.first?.id)
     let next = try #require(model.jobLedger.jobs.first?.nextRun)
     #expect(next == due.addingTimeInterval(3600))
+    admitScheduledQuotaFixture(model, engine: job.engine)
     await model.tickJobs(now: due, controlDirectory: control)
     await model.tickJobs(now: next.addingTimeInterval(-1), controlDirectory: control)
     #expect(try await connection.request("test/count")["starts"].int == 1)
@@ -432,6 +436,7 @@ private actor HangingExecutorFixture: AgentScheduledExecutor {
     let project = Project(path: root.path); model.state.projects = [project]; model.schedulerReady = true
     var job = ManagedJob(); job.name = "Hangs"; job.prompt = "work"; job.projectID = project.id; job.engine = .claude
     #expect(await model.saveJob(job))
+    admitScheduledQuotaFixture(model, engine: job.engine)
     await model.launchJob(job.id)
     for _ in 0..<200 where model.jobLedger.runs.first?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
     let run = try #require(model.jobLedger.runs.first)
@@ -470,4 +475,152 @@ private actor HangingExecutorFixture: AgentScheduledExecutor {
     #expect(!model.schedulerReady)
     await model.watchScheduler(now: now.addingTimeInterval(301))
     #expect(model.schedulerReady)
+}
+
+@Test func schedulerQuotaWaitSurvivesRestartAndConsumesNoSlot() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("jobs.json"), store = JobStore(file: root.appendingPathComponent("jobs.json"))
+    let now = instant("2026-11-12T08:00:00Z"), job = jobFixture()
+    _ = try await store.save(job, now: now)
+    let (_, waiting) = try #require(await store.deferForQuota(job.id, manual: false, resetAt: now.addingTimeInterval(7200),
+        nextCheckAt: now.addingTimeInterval(7200), model: "bound-model", accountID: "bound-account", now: now.addingTimeInterval(3600)))
+    #expect(!waiting.status.occupiesSlot && waiting.status.blocksDuplicate)
+    #expect(!waiting.isOverdue(now: now.addingTimeInterval(86400)))
+    #expect(try await store.claim(job.id, manual: true, now: now) == nil)
+    #expect(try await store.claim(job.id, manual: false, now: now.addingTimeInterval(14400)) == nil)
+    #expect(try await store.load().jobs.first?.nextRun == now.addingTimeInterval(18000))
+    for _ in 0..<3 {
+        let other = jobFixture(); _ = try await store.save(other, now: now)
+        #expect(try await store.claim(other.id, manual: true, now: now) != nil)
+    }
+    await store.release()
+    let reopened = JobStore(file: file)
+    let saved = try #require(await reopened.load().runs.first { $0.id == waiting.id })
+    #expect(saved.status == .waitingForQuota)
+    #expect(saved.quotaWait?.model == "bound-model" && saved.quotaWait?.accountID == "bound-account")
+    #expect(try await reopened.claimQuotaResume(waiting.id, now: now.addingTimeInterval(7199)) == nil)
+    let (snapshot, resumed) = try #require(await reopened.claimQuotaResume(waiting.id, now: now.addingTimeInterval(7200)))
+    #expect(snapshot.id == job.id && snapshot.prompt == job.prompt)
+    #expect(resumed.id == waiting.id && resumed.status == .starting)
+    #expect(!resumed.isOverdue(now: now.addingTimeInterval(7201)))
+    #expect(try await reopened.claimQuotaResume(waiting.id, now: now.addingTimeInterval(7200)) == nil)
+    await reopened.release()
+    let crashed = JobStore(file: file)
+    #expect(try await crashed.load().runs.first { $0.id == waiting.id }?.status == .uncertain)
+    #expect(try await crashed.claimQuotaResume(waiting.id, now: now.addingTimeInterval(86400)) == nil)
+    await crashed.release()
+}
+
+@Test func schedulerQuotaSuspendPreservesChatAndEditsCancelWait() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = JobStore(file: root.appendingPathComponent("jobs.json"))
+    let now = Date(); var job = jobFixture()
+    _ = try await store.save(job, now: now)
+    let (_, run) = try #require(await store.claim(job.id, manual: true, now: now))
+    _ = try await store.attach(run.id, thread: "original-chat", turn: "quota-turn")
+    let ledger = try await store.suspendForQuota(run.id, resetAt: nil, nextCheckAt: now, model: "m", accountID: "a", now: now)
+    #expect(ledger.runs.first?.threadID == "original-chat")
+    #expect(ledger.runs.first?.quotaWait?.suspendedTurnID == "quota-turn")
+    let later = now.addingTimeInterval(300)
+    _ = try await store.updateQuotaWait(run.id, resetAt: later, nextCheckAt: later, output: "waiting")
+    #expect(try await store.claimQuotaResume(run.id, now: now) == nil)
+    job.enabled = false
+    let edited = try await store.save(job, now: now)
+    #expect(edited.runs.first?.status == .interrupted)
+    #expect(try await store.claimQuotaResume(run.id, now: later) == nil)
+    await store.release()
+}
+
+@Test func schedulerLegacyRunDecodesWithoutQuotaFields() throws {
+    let run = JobRun(jobID: UUID(), engine: .codex, name: "legacy", started: Date())
+    let data = try JSONEncoder().encode(run)
+    let decoded = try JSONDecoder().decode(JobRun.self, from: data)
+    #expect(decoded.quotaWait == nil && decoded.executionStartedAt == nil)
+}
+
+@Test func schedulerOneShotQuotaWaitResumesAfterNaturalDisableAndCancelIsFinal() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = JobStore(file: root.appendingPathComponent("jobs.json"))
+    let now = Date(), due = now.addingTimeInterval(60)
+    var job = jobFixture(); job.schedule = JobSchedule(once: due)
+    _ = try await store.save(job, now: now)
+    let (_, wait) = try #require(await store.deferForQuota(job.id, manual: false, resetAt: nil,
+        nextCheckAt: due, model: "m", accountID: "original", now: due))
+    #expect(try await store.load().jobs.first?.enabled == false)
+    let (_, resumed) = try #require(await store.claimQuotaResume(wait.id, now: due))
+    #expect(resumed.executionAccountID == "original")
+    _ = try await store.attach(wait.id, thread: "chat", turn: "turn")
+    _ = try await store.suspendForQuota(wait.id, resetAt: nil, nextCheckAt: due, model: "m", accountID: "replacement", now: due)
+    #expect(try await store.load().runs.first?.quotaWait?.accountID == "original")
+    _ = try await store.cancelQuotaWait(wait.id)
+    #expect(try await store.claimQuotaResume(wait.id, now: due) == nil)
+    await store.release()
+}
+
+@Test func schedulerQuotaResumeBindsFirstConfirmedAccountAndResolvedModel() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = JobStore(file: root.appendingPathComponent("jobs.json")), now = Date()
+    let job = jobFixture(); _ = try await store.save(job, now: now)
+    let (_, waiting) = try #require(await store.deferForQuota(job.id, manual: true, resetAt: nil,
+        nextCheckAt: now, model: "resolved-model", accountID: nil, now: now))
+    let (snapshot, resumed) = try #require(await store.claimQuotaResume(waiting.id, now: now, accountID: "first-confirmed"))
+    #expect(snapshot.model == "resolved-model")
+    #expect(resumed.executionAccountID == "first-confirmed")
+    #expect(resumed.quotaWait?.accountID == "first-confirmed")
+    _ = try await store.suspendForQuota(waiting.id, resetAt: nil, nextCheckAt: now, model: "resolved-model", accountID: "other", now: now)
+    #expect(try await store.claimQuotaResume(waiting.id, now: now, accountID: "other") == nil)
+    let (_, sameAccount) = try #require(await store.claimQuotaResume(waiting.id, now: now, accountID: "first-confirmed"))
+    #expect(sameAccount.executionAccountID == "first-confirmed")
+    // The completion can precede attach; its turn ID still guards against late duplicate events.
+    _ = try await store.suspendForQuota(waiting.id, resetAt: nil, nextCheckAt: now,
+        model: "resolved-model", accountID: "first-confirmed", now: now, suspendedTurnID: "early-completion")
+    _ = try await store.updateQuotaWait(waiting.id, resetAt: nil, nextCheckAt: now, output: "cleanup", countCheck: false)
+    let preserved = try #require(await store.load().runs.first)
+    #expect(preserved.quotaWait?.suspendedTurnID == "early-completion")
+    #expect(preserved.quotaWait?.checkCount == nil)
+    await store.release()
+}
+
+@Test func schedulerQuotaWaitPreservesBoundExecutionPermissionsAndModel() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("jobs.json"), store = JobStore(file: root.appendingPathComponent("jobs.json"))
+    let now = Date(), job = jobFixture()
+    _ = try await store.save(job, now: now)
+    let (_, run) = try #require(await store.claim(job.id, manual: true, now: now, accountID: "account"))
+    let permissions = AgentPermissionProfile.workspace()
+    _ = try await store.bindExecution(run.id, model: "actual-model", permissions: permissions)
+    _ = try await store.suspendForQuota(run.id, resetAt: nil, nextCheckAt: now, model: "changed-default", accountID: "account", now: now)
+    await store.release()
+    let reopened = JobStore(file: file)
+    let (snapshot, resumed) = try #require(await reopened.claimQuotaResume(run.id, now: now, accountID: "account"))
+    #expect(snapshot.model == "actual-model")
+    #expect(resumed.quotaWait?.model == "actual-model")
+    #expect(resumed.executionModel == "actual-model")
+    #expect(resumed.executionPermissions == permissions)
+    await reopened.release()
+}
+
+@Test func schedulerQuotaResumeAtomicallyCoalescesOverdueRecurrence() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = JobStore(file: root.appendingPathComponent("jobs.json"))
+    let now = instant("2026-11-12T08:00:00Z"), job = jobFixture()
+    _ = try await store.save(job, now: now)
+    let (_, waiting) = try #require(await store.deferForQuota(job.id, manual: false, resetAt: nil,
+        nextCheckAt: now, model: "m", accountID: "a", now: now.addingTimeInterval(3600)))
+    let resumeAt = now.addingTimeInterval(14400)
+    let (_, resumed) = try #require(await store.claimQuotaResume(waiting.id, now: resumeAt, accountID: "a"))
+    #expect(resumed.quotaWait?.coalescedOccurrences == 1)
+    let ledger = try await store.load()
+    #expect(ledger.jobs.first?.schedule == job.schedule)
+    #expect(ledger.jobs.first?.nextRun == resumeAt.addingTimeInterval(3600))
+    _ = try await store.finish(waiting.id, status: .completed)
+    #expect(try await store.claim(job.id, manual: false, now: resumeAt) == nil)
+    #expect(try await store.claim(job.id, manual: false, now: resumeAt.addingTimeInterval(3600)) != nil)
+    await store.release()
 }

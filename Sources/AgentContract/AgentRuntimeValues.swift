@@ -5,9 +5,14 @@ public struct AgentAccountInfo: Sendable {
     public let plan: String?
     /// False when the agent offers no sign-out (an ACP agent that does not advertise `logout`); the app then hides it.
     public let canSignOut: Bool
-    public init(authenticated: Bool, plan: String?, canSignOut: Bool = true) {
+    /// Stable across reconnects; nil when the supported account response has no nonsecret account identity.
+    public let identityFingerprint: String?
+    public init(authenticated: Bool, plan: String?, canSignOut: Bool = true, identityFingerprint: String? = nil) {
         self.authenticated = authenticated; self.plan = plan; self.canSignOut = canSignOut
+        self.identityFingerprint = identityFingerprint
     }
+
+
 }
 
 public struct AgentModelInfo: Hashable, Sendable {

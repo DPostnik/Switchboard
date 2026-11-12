@@ -154,6 +154,7 @@ import ContextCore
     var job = ManagedJob(); job.name = "Scheduled fixture"; job.prompt = "Run fixture"
     job.projectID = project.id; job.model = "scheduled-model"; job.effort = "xhigh"; job.enabled = true
     #expect(await model.saveJob(job))
+    admitScheduledQuotaFixture(model, engine: job.engine)
     await model.launchJob(job.id)
     for task in Array(model.jobTasks.values) { await task.value }
     let run = try #require(model.jobLedger.runs.first)

@@ -105,6 +105,7 @@ private struct ChatRunState: Equatable {
     let orphanProcesses = OrphanProcessController()
     /// Wall-clock checks for armed "continue after limit reset" requests (`LimitResumeScheduling`).
     let limitResumeClock = LimitResumeClock()
+    let scheduledQuota = ScheduledQuotaState()
     /// Checks for sub-agents that stopped reporting (`SubagentWatching`).
     let subagentWatch = SubagentWatchClock()
     var remoteDeliveryResults: [String: Bool] = [:]
@@ -2026,7 +2027,7 @@ private struct ChatRunState: Equatable {
     }
     func send() async {
         guard canSend, let project = selectedProject else { return }
-        if let thread = chatID { dropLimitResume(thread) } // The user's own message replaces a planned continuation.
+        if let thread = chatID { await cancelScheduledQuota(in: thread); dropLimitResume(thread) } // The user's own message replaces a planned continuation.
         if let record = selectedChat, record.isScheduledRecord {
             await followUpScheduledRecord(record, text: composer.text, project: project); return
         }
@@ -2063,11 +2064,25 @@ private struct ChatRunState: Equatable {
                          selectedModel: String, selectedEffort: String, scheduledRun: UUID? = nil, scheduledRoute: RequestRoute? = nil, scheduledBrowserImport: ChromeSessionImportPolicy? = nil,
                          scheduledAgent: AgentConnectionID? = nil, scheduledRole: AgentRole? = nil, afterInterrupt: Bool = false,
                          worktree: ChatWorktree? = nil) async {
+        var cleanupFence: String?
+        defer {
+            if let thread = cleanupFence {
+                runs[thread, default: ChatRunState()].sending = false
+                scheduleQueue(threadID: thread)
+            }
+        }
+        if let threadID, let cleanup = scheduledQuota.cleanupTasks[threadID] {
+            cleanupFence = threadID
+            runs[threadID, default: ChatRunState()].sending = true
+            await cleanup.value
+        }
+        if scheduledRun == nil, let threadID { await cancelScheduledQuota(in: threadID) }
+        if let scheduledRun, !jobLedger.runs.contains(where: { $0.id == scheduledRun && $0.status.occupiesSlot }) { return }
         let selection = selectionGeneration
         let visible = scheduledRun == nil && threadID == chatID && project.id == projectID
         if scheduledRun == nil, let threadID, !localID.hasPrefix(LimitResume.messageIDPrefix) { dropLimitResume(threadID) }
         if visible { items.append(TranscriptItem(id: localID, kind: "user", text: text, phase: L10n.text("Отправляется…", "Sending…"))) }
-        let initialKey = scheduledRun.map { "job:" + $0.uuidString } ?? threadID ?? currentRunKey
+        let initialKey = threadID ?? scheduledRun.map { "job:" + $0.uuidString } ?? currentRunKey
         var runKey = initialKey
         let priorTurn = runs[runKey]?.turnID
         runs[runKey, default: ChatRunState()].running = true
@@ -2190,6 +2205,21 @@ private struct ChatRunState: Equatable {
             let jobNote = scheduledRun == nil ? state.chats.first(where: { $0.id == id })?.job?.pendingNote : nil
             if let jobNote { outgoing = ChatJobNote.applying(ChatJob.noteText(jobNote), to: outgoing) }
             await prepareTurnCheckpoint(chatID: id, projectPath: workingDirectory)
+            if let scheduledRun {
+                try Task.checkCancellation()
+                let scheduledConnection = try sessionForChat(id).connection
+                guard !schedulerStopping,
+                      let bound = jobLedger.runs.first(where: { $0.id == scheduledRun && $0.status.occupiesSlot }),
+                      let definition = bound.quotaWait?.job ?? jobLedger.jobs.first(where: { $0.id == bound.jobID }),
+                      let currentProject = state.projects.first(where: { $0.id == project.id }),
+                      bound.executionPermissions == access,
+                      definition.role(project: currentProject, catalog: roleCatalog).profile(for: currentProject, sharedRoots: sharedRoots) == access,
+                      let admission = scheduledQuota.cached[scheduledConnection],
+                      admission.accountID == bound.executionAccountID, admission.accountID != nil,
+                      admission.context == agentState(scheduledConnection).descriptor?.context else {
+                    throw ClientFailure(L10n.text("Условия фонового запуска изменились. Отправка отменена.", "Scheduled execution conditions changed. Delivery was cancelled."))
+                }
+            }
             let submittedTurn = try await client.send(outgoing, to: sessionForChat(id), projectPath: workingDirectory,
                                                           permissions: access, model: selectedModel, effort: selectedEffort,
                                                           advisor: modelCatalog(threadID.flatMap { connectionOfChat($0) } ?? newConnection)?.advisor(state.claudeAdvisor, selectedModel),
@@ -2279,7 +2309,7 @@ private struct ChatRunState: Equatable {
         guard let threadID, let turnID else { return }
         completedTurns[threadID + ":" + turnID] = (status, hasError)
         refreshGitStatus(afterTurnIn: threadID)
-        if let run = jobLedger.runs.first(where: { $0.threadID == threadID && $0.status.active && ($0.turnID == nil || $0.turnID == turnID) }) {
+        if let run = jobLedger.runs.first(where: { $0.threadID == threadID && $0.status.active && $0.quotaWait?.suspendedTurnID != turnID && ($0.turnID == nil || $0.turnID == turnID) }) {
             let outcome: JobRunStatus = status == .uncertain ? .uncertain : status == .completed && !hasError ? .completed : status == .cancelled ? .interrupted : .failed
             Task { await finishJob(run.id, status: outcome) }
         }
@@ -2321,7 +2351,7 @@ private struct ChatRunState: Equatable {
         persist()
         if !done, isBusy(threadID: chatID) { await interruptThread(chatID) }
     }
-    private func interruptThread(_ thread: String) async {
+    func interruptThread(_ thread: String) async {
         // Stopping a scheduled-run record stops its job; no engine turn exists to interrupt.
         if let runID = state.chats.first(where: { $0.id == thread })?.scheduledRecord {
             if let run = jobLedger.runs.first(where: { $0.id == runID && $0.status.active }) { await stopJob(run) }
@@ -3039,6 +3069,12 @@ private struct ChatRunState: Equatable {
                                               agent: agent, record: record, audit: role.profile.audit)
             Task { [capabilityLedger] in await capabilityLedger.record(decision) }
         case .accountChanged(let issue):
+            scheduledQuota.cached[id] = nil
+            if let engine = profile(id)?.engine {
+                for run in jobLedger.runs where run.engine == engine && run.status == .waitingForQuota {
+                    await finishJob(run.id, status: .interrupted, output: L10n.text("Аккаунт изменился; ожидание отменено.", "The account changed; quota wait cancelled."))
+                }
+            }
             if traits.contains(.sharedEngine) {
                 // Titles of this connection's chats (and of chats no registered connection owns) ran on the old account.
                 for (chatID, task) in titleTasks {
@@ -3152,7 +3188,9 @@ private struct ChatRunState: Equatable {
                 let title = completion.hasError || (status != .completed && status != .cancelled) ? L10n.text("Ошибка в разговоре", "Conversation error") : status == .cancelled ? L10n.text("Ответ остановлен", "Response stopped") : L10n.text("Ответ готов", "Response ready")
                 let completionID = "turn:" + threadID + ":" + turnID
                 recordRecap(threadID: threadID, failed: completion.hasError || (status != .completed && status != .cancelled), error: completion.error)
-                noteLimitStop(threadID: threadID, completion: completion)
+                if !(await suspendScheduledQuota(threadID: threadID, completion: completion)) {
+                    noteLimitStop(threadID: threadID, completion: completion)
+                }
                 recordUnreadCompletion(threadID: threadID, completionID: completionID)
                 postNotice(threadID: threadID, title: title, identifier: completionID, completionID: completionID,
                            body: state.chats.first { $0.id == threadID }?.recap)
