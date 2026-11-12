@@ -123,7 +123,10 @@ struct SettingsProposalBoundarySummary: View {
 
     var body: some View {
         if let text = Self.text(notes) {
-            Label { Text(text).fixedSize(horizontal: false, vertical: true) } icon: { Image(systemName: "exclamationmark.octagon.fill") }
+            // This summary also sits outside the card's bounded scroll view. Let it accept
+            // the proposed height: fixedSize would wrap it at the split view's zero-width
+            // minimum-size probe and push the sidebar/composer outside the window again.
+            Label { Text(text) } icon: { Image(systemName: "exclamationmark.octagon.fill") }
                 .font(.ui(.callout).weight(.semibold)).foregroundStyle(DeskPalette.attention)
         }
     }
