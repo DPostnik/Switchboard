@@ -169,7 +169,12 @@ extension ClaudeIntegration {
             - Bash, files and sub-agents run inside the project's boundary (the project's folders and settings). Nothing inside is asked; the `dangerouslyDisableSandbox` flag changes nothing.
             - A path or action outside the boundary fails (often `Operation not permitted`). Do not look for a workaround: use the app's tool when one exists (for example `project_diagnostics` for load and processes), otherwise write one settings proposal with the exact folder, access set or command and the reason, continue the independent part of the task and report the request.
             - In the project of the running Switchboard app, read the app's log with the `app_log` tool (not `log show`) and request a restart after a successful build and tests once with the `request_app_restart` tool (not `scripts/request-app-restart.sh`); then end the turn and wait.
-            """, language: language)
+            """, language: language) + "\n" + SettingsProposalInbox.boundaryCommandRule(language: language)
+    }
+    /// Whether a chat of this profile is a candidate for the boundary before the planner decides: the user's Chrome keeps it
+    /// on the CLI sandbox (`boundaryPlan`). Shared with the settings proposal review, so the rule lives in one place.
+    public static func boundaryCandidate(_ profile: AgentPermissionProfile, userChromeEnabled: Bool) -> Bool {
+        !ClaudeLaunchPolicy(profile, scheduled: false, userChromeEnabled: userChromeEnabled).userChrome
     }
     /// The refusal of a file tool outside the boundary, naming the standard route.
     static func outsideBoundaryRefusal(_ path: String, language: AppLanguage = L10n.language) -> String {

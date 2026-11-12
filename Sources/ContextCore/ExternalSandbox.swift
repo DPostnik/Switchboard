@@ -444,10 +444,8 @@ public enum ExternalSandboxPlanner {
             return grants.contains { $0.mode != .unixSocket && (path == $0.path || path.hasPrefix($0.path + "/")) }
         }
         for command in trusted where !base.contains(command) {
-            let tokens = command.split(whereSeparator: { $0 == " " || $0 == "\t" })
-                .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "\"'")) }.filter { !$0.isEmpty }
-            guard let first = tokens.first else { continue }
-            let head = (first as NSString).lastPathComponent
+            let tokens = commandTokens(command)
+            guard let head = commandHead(command) else { continue }
             if mediated.contains(head) { continue }
             if unrunnableHeads.contains(head) { return command }
             for token in tokens where token.hasPrefix("/") || token.hasPrefix("~/") || token == "~" {
@@ -456,6 +454,12 @@ public enum ExternalSandboxPlanner {
         }
         return nil
     }
+    static func commandTokens(_ command: String) -> [String] {
+        command.split(whereSeparator: { $0 == " " || $0 == "\t" }).map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "\"'")) }.filter { !$0.isEmpty }
+    }
+    /// The executable name of a trusted command (`/usr/bin/security find-identity` -> `security`), the name a mediated
+    /// command matches.
+    public static func commandHead(_ command: String) -> String? { commandTokens(command).first.map { ($0 as NSString).lastPathComponent } }
 
     static func isGroupOrWorldWritable(_ path: String, manager: FileManager) -> Bool {
         guard let permissions = (try? manager.attributesOfItem(atPath: path))?[.posixPermissions] as? Int else { return true }

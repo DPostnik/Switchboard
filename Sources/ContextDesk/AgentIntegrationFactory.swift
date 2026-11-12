@@ -19,7 +19,30 @@ enum AgentIntegrationFactory {
     /// `defaults write local.daniil.switchboard ClaudeExternalBoundaryOff -bool YES` keeps Claude on the CLI sandbox (rollback switch).
     static func claude() -> any AgentIntegration {
         ClaudeIntegration(userSkills: SkillCatalog.claudeRoots[0],
-                          boundary: UserDefaults.standard.bool(forKey: "ClaudeExternalBoundaryOff") ? nil : .live)
+                          boundary: UserDefaults.standard.bool(forKey: claudeBoundaryOffKey) ? nil : .live)
+    }
+    static let claudeBoundaryOffKey = "ClaudeExternalBoundaryOff"
+    /// One provider's chats for the settings proposal review (`SettingsProposalBoundary`): the adapter's own planner input
+    /// and the checks it makes before planning (Claude: the rollback switch and the user's Chrome). Nil for a provider
+    /// without the external boundary.
+    static func proposalBoundaryKind(_ profile: AgentProfile, home: URL, executable: URL?, resources: URL?, userChromeEnabled: Bool,
+                                     permissions: @escaping (Project) -> AgentPermissionProfile) -> SettingsProposalBoundary.Kind? {
+        let executable = executable ?? URL(fileURLWithPath: "/usr/bin/true")
+        if profile.engine == .codex {
+            return .init(provider: profile.name) { project in
+                CodexIntegration.boundaryInput(project: project.path, permissions: permissions(project), home: home, executable: executable,
+                                               resources: resources, workflowDirectories: [], inbox: nil)
+            }
+        }
+        guard profile.engine == .claude, !UserDefaults.standard.bool(forKey: claudeBoundaryOffKey) else { return nil }
+        return .init(provider: profile.name) { project in
+            let permissions = permissions(project)
+            guard ClaudeIntegration.boundaryCandidate(permissions, userChromeEnabled: userChromeEnabled) else { return nil }
+            var input = ExternalSandboxPlanner.Input(project: project.path, profile: permissions, providerHome: home,
+                                                     providerExecutable: executable, resources: resources)
+            input.settingsFile = true
+            return input
+        }
     }
     static func gemini() -> any AgentIntegration { ACPIntegration(profile: GeminiProfile.profile) }
 

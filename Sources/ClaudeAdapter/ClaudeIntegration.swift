@@ -936,7 +936,7 @@ public actor ClaudeIntegration: AgentIntegration {
     private func boundaryPlan(profile: AgentPermissionProfile, cwd: String, skills: String?, scheduled: Bool, inbox: URL?) -> Result<ClaudeBoundaryLaunch, ClaudeBoundaryFallback>? {
         guard let runtime = boundaryRuntime, let home, let executable else { return nil }
         if let reason = ExternalSandboxPlanner.eligibility(profile) { return .failure(.planner(reason)) }
-        if ClaudeLaunchPolicy(profile, scheduled: scheduled, userChromeEnabled: userChrome).userChrome { return .failure(.userChrome) }
+        if !scheduled, !Self.boundaryCandidate(profile, userChromeEnabled: userChrome) { return .failure(.userChrome) }
         let helper = runtime.helper()
         var input = ExternalSandboxPlanner.Input(project: cwd, profile: profile, providerHome: home, providerExecutable: executable,
                                                  resources: resources, home: runtime.home)

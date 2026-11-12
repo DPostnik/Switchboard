@@ -332,7 +332,7 @@ public actor CodexIntegration: AgentIntegration {
     /// proposal folder is writable (only it, not the whole inbox), so "one refusal, one request" works inside the boundary
     /// and the app knows the author; `pgrep` is mediated (inside, it sees only sandboxed processes); a trusted project
     /// command the boundary cannot run keeps the worker on the native sandbox.
-    static func boundaryInput(project: String, permissions: AgentPermissionProfile, home: URL, executable: URL, resources: URL?,
+    public static func boundaryInput(project: String, permissions: AgentPermissionProfile, home: URL, executable: URL, resources: URL?,
                               workflowDirectories: [URL], inbox: URL?) -> ExternalSandboxPlanner.Input {
         var input = ExternalSandboxPlanner.Input(project: project, profile: permissions, providerHome: home, providerExecutable: executable,
                                                  resources: resources, workflowDirectories: workflowDirectories)

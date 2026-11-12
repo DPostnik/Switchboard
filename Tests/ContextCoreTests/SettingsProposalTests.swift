@@ -437,3 +437,158 @@ private func writeProposal(_ name: String, chat: String, reason: String, change:
     #expect(relaunched.notices.isEmpty && relaunched.settingsProposals.map(\.id) == ["pending.json"])
     #expect(relaunched.queuedMessages.map(\.text) == [SettingsProposalOutcome.rejected.message()])
 }
+
+// MARK: - Added trusted commands under the external boundary (defect of 2026-11-12, psy-wiki chat 9D550E53)
+
+/// A project, the boundary runtime files the planner checks and a helper value: the review plans like the adapters do.
+private func boundaryFixture() throws -> (root: URL, project: Project, helper: ExternalSandboxHelper) {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root.appendingPathComponent("project/scripts"), withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: root.appendingPathComponent("resources/SandboxRuntime"), withIntermediateDirectories: true)
+    try Data().write(to: root.appendingPathComponent("resources/SandboxRuntime/mcp_relay.py"))
+    try FileManager.default.createDirectory(at: root.appendingPathComponent("home"), withIntermediateDirectories: true)
+    var project = Project(path: root.appendingPathComponent("project").path)
+    project.accessPresets = []; project.chatRoleID = AgentRoleID.developer
+    return (root, project, ExternalSandboxHelper(executable: URL(fileURLWithPath: "/usr/bin/true"), version: "fixture"))
+}
+
+/// Both providers' review kinds, built by the app's factory from the adapters' own planner inputs.
+@MainActor private func boundaryKinds(_ root: URL, role: String = AgentRoleID.developer, addOns: Set<RoleAddOn> = []) -> [SettingsProposalBoundary.Kind] {
+    let permissions: (Project) -> AgentPermissionProfile = { AgentRoleCatalog.preset(role).profile(for: $0, addOns: addOns) }
+    return [AgentIntegrationFactory.claudeProfile, AgentIntegrationFactory.codexProfile].compactMap {
+        AgentIntegrationFactory.proposalBoundaryKind($0, home: root.appendingPathComponent("provider"), executable: nil,
+                                                     resources: root.appendingPathComponent("resources"), userChromeEnabled: true, permissions: permissions)
+    }
+}
+
+private func commandReview(_ commands: [String], project: Project, folders: [AgentPermissionProfile.Root] = []) -> (SettingsProposalReview, SavedState) {
+    var state = SavedState(); state.projects = [project]
+    var change = SettingsProposal.Change(project: project.path); change.addCommands = commands
+    if !folders.isEmpty { change.addFolders = folders }
+    return (SettingsProposalReview(id: "p.json", proposal: .init(changes: [change]), state: state), state)
+}
+
+@Test @MainActor func aTrustedCommandUnderTheBoundaryIsShownAsGainingNothingAndContinuesTruthfully() throws {
+    let (root, project, helper) = try boundaryFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    // The live case: a project script that reads the Keychain. Under the boundary it runs inside either way.
+    let (review, state) = commandReview(["scripts/transcribe-audio"], project: project)
+    let notes = SettingsProposalBoundary.notes(review, state: state, kinds: boundaryKinds(root), helper: .success(helper))
+    #expect(notes.map(\.provider) == ["Claude", "Codex"])
+    #expect(notes.allSatisfy { $0.command == "scripts/transcribe-audio" && $0.effect == .noExtraAccess(set: nil) && $0.projectID == project.id })
+    let english = notes.first?.text(language: .english) ?? "", russian = notes.first?.text(language: .russian) ?? ""
+    #expect(english == "Claude chats of this project run under the external boundary: this command will still run inside it and gets no extra access there. Instead: an app-owned tool, a folder grant, or a Keychain item grant (planned).")
+    #expect(russian.contains("всё равно выполнится внутри неё") && russian.contains("элементу Связки ключей (планируется)"))
+    #expect(SettingsProposalBoundarySummary.text(notes, language: .english)?.contains("gets no extra access") == true)
+    // The continuation does not claim new access; it is fixed app text in both languages.
+    let outcome = SettingsProposalOutcome.afterApply(review, notes: notes)
+    #expect(outcome == .appliedWithoutEffect)
+    #expect(outcome.message(language: .english).contains("Do not retry the same step") && !outcome.message(language: .english).contains("Retry the step"))
+    #expect(outcome.message(language: .russian).contains("Не повторяй тот же шаг"))
+    #expect(!outcome.message(language: .english).contains("transcribe"))
+    // Negative: together with a folder the proposal does grant something, so the normal continuation stays.
+    let (mixed, mixedState) = commandReview(["scripts/transcribe-audio"], project: project, folders: [.init(path: root.appendingPathComponent("home").path, writable: false)])
+    let mixedNotes = SettingsProposalBoundary.notes(mixed, state: mixedState, kinds: boundaryKinds(root), helper: .success(helper))
+    #expect(mixedNotes.count == 2 && SettingsProposalOutcome.afterApply(mixed, notes: mixedNotes) == .applied)
+}
+
+@Test @MainActor func aCommandAnAccessSetMediatesNamesTheSetAndAnUnrunnableCommandWarnsAboutLeavingTheBoundary() throws {
+    let (root, project, helper) = try boundaryFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    func notes(_ commands: [String], in project: Project) -> [SettingsProposalBoundaryNote] {
+        let (review, state) = commandReview(commands, project: project)
+        return SettingsProposalBoundary.notes(review, state: state, kinds: boundaryKinds(root), helper: .success(helper))
+    }
+    // `codesign` with arguments is not the `codesign` entry the planner mediates; the Apple signing set is.
+    let signing = notes(["codesign --sign X app"], in: project)
+    #expect(signing.count == 2 && signing.allSatisfy { $0.effect == .noExtraAccess(set: "apple-signing") })
+    #expect(signing.first?.text(language: .english).contains("Instead: the access set “Apple code signing” (its mediated command runs this with the Keychain or network), an app-owned tool") == true)
+    #expect(signing.first?.text(language: .russian).contains("набор доступа «Подпись приложений Apple»") == true)
+    // The inventory: `security` cannot run inside unless mediated, so applying moves the chats off the boundary.
+    let keychain = notes(["security find-generic-password -s api"], in: project)
+    #expect(keychain.count == 2 && keychain.allSatisfy { $0.effect == .leavesBoundary(set: "apple-signing") })
+    #expect(keychain.map { $0.text(language: .english) } == [
+        "The external boundary cannot run this command: applying it moves this project's Claude chats off the boundary to the provider's own sandbox with approval prompts. Instead: the access set “Apple code signing” runs it as a mediated command.",
+        "The external boundary cannot run this command: applying it moves this project's Codex chats off the boundary to the provider's own sandbox with approval prompts. Instead: the access set “Apple code signing” runs it as a mediated command."])
+    #expect(keychain.first?.text(language: .russian).contains("уйдут с границы в собственную песочницу провайдера") == true)
+    let log = notes(["/usr/bin/log show"], in: project)
+    #expect(log.count == 2 && log.allSatisfy { $0.effect == .leavesBoundary(set: nil) })
+    #expect(SettingsProposalBoundarySummary.text(log, language: .english)?.contains("off the external boundary") == true)
+    // Leaving the boundary gives the command its native meaning, so the normal continuation is truthful.
+    let (logReview, _) = commandReview(["/usr/bin/log show"], project: project)
+    #expect(SettingsProposalOutcome.afterApply(logReview, notes: log) == .applied)
+    // Negative: the exact entry the planner mediates (`codesign`) does take effect; no note.
+    #expect(notes(["codesign"], in: project).isEmpty)
+    // With the set already ticked, `security` is mediated: no note.
+    var signed = project; signed.accessPresets = ["apple-signing"]
+    #expect(notes(["security find-generic-password -s api"], in: signed).isEmpty)
+}
+
+@Test @MainActor func noBoundaryNoWarningAndTheNormalContinuation() throws {
+    let (root, project, helper) = try boundaryFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let script = ["scripts/transcribe-audio"]
+    func notes(_ project: Project, kinds: [SettingsProposalBoundary.Kind]? = nil,
+               helper result: Result<ExternalSandboxHelper, ExternalSandboxHelper.Failure>? = nil) -> [SettingsProposalBoundaryNote] {
+        let (review, state) = commandReview(script, project: project)
+        return SettingsProposalBoundary.notes(review, state: state, kinds: kinds ?? boundaryKinds(root), helper: result ?? .success(helper))
+    }
+    // Command sandbox off, no verified helper, a role without network, Operator: the chats are not under the boundary.
+    var off = project; off.commandSandbox = false
+    #expect(notes(off).isEmpty)
+    #expect(notes(project, helper: .failure(.missing("/x/nono"))).isEmpty)
+    #expect(notes(project, kinds: boundaryKinds(root, role: AgentRoleID.editor)).isEmpty)
+    #expect(notes(project, kinds: boundaryKinds(root, role: AgentRoleID.fullOperator)).isEmpty)
+    // Already off the boundary through another trusted command (the inventory): the new one keeps its native meaning.
+    var ineligible = project; ineligible.sandboxCommands = ["/usr/bin/log show"]
+    #expect(notes(ineligible).isEmpty)
+    // Claude with the user's Chrome stays on the CLI sandbox; Codex is still under the boundary.
+    #expect(notes(project, kinds: boundaryKinds(root, addOns: [.userChrome])).map(\.provider) == ["Codex"])
+    let (review, _) = commandReview(script, project: off)
+    #expect(SettingsProposalOutcome.afterApply(review, notes: []) == .applied)
+    #expect(SettingsProposalBoundarySummary.text([]) == nil)
+}
+
+/// The desk: the card's notes for the requesting chat's provider and role, and the continuation chosen from them.
+@Test @MainActor func applyingANoEffectCommandSendsTheNoEffectContinuationAndAPlainProjectTheNormalOne() async throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let (model, connection, inbox) = try await proposalDesk(folder)
+    let (root, base, helper) = try boundaryFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    model.proposalBoundaryHelper = { .success(helper) }
+    model.proposalBoundaryResources = root.appendingPathComponent("resources")
+    var off = Project(path: folder.path); off.accessPresets = []; off.chatRoleID = AgentRoleID.developer; off.commandSandbox = false
+    model.state.projects = [base, off]
+    var chat = Chat(id: "a", projectID: base.id, title: "A", model: ""); chat.roleID = AgentRoleID.developer
+    var plain = Chat(id: "b", projectID: off.id, title: "B", model: ""); plain.roleID = AgentRoleID.developer
+    model.state.chats = [chat, plain]
+    var change = SettingsProposal.Change(project: base.path); change.addCommands = ["scripts/transcribe-audio"]
+    try writeProposal("p1.json", chat: "a", reason: "run this script outside the sandbox", change: change, to: inbox)
+    var offChange = SettingsProposal.Change(project: off.path); offChange.addCommands = ["scripts/transcribe-audio"]
+    try writeProposal("p2.json", chat: "b", reason: "same", change: offChange, to: inbox)
+    model.refreshSettingsProposals()
+    // Only the requesting chat's provider (a Codex chat here) is reviewed.
+    #expect(model.settingsProposalBoundaryNotes["p1.json"]?.map(\.provider) == ["Codex"])
+    #expect(model.settingsProposalBoundaryNotes["p2.json"] == nil)
+    model.applySettingsProposal("p1.json")
+    #expect(model.state.projects[0].sandboxCommands == ["scripts/transcribe-audio"])
+    var texts = try await waitForTurns(connection, 1)
+    #expect(texts == [SettingsProposalOutcome.appliedWithoutEffect.message()])
+    // Negative: a project whose chats are not under the boundary gets the normal continuation.
+    model.applySettingsProposal("p2.json")
+    texts = try await waitForTurns(connection, 2)
+    #expect(texts == [SettingsProposalOutcome.appliedWithoutEffect.message(), SettingsProposalOutcome.applied.message()])
+}
+
+@Test func agentInstructionsSayATrustedCommandDoesNotLeaveTheBoundary() {
+    for language in [AppLanguage.english, .russian] {
+        let rule = SettingsProposalInbox.boundaryCommandRule(language: language)
+        #expect(SettingsProposalInbox.instructions(language: language).contains(rule))
+        #expect(ClaudeIntegration.boundaryCommandInstructions(language: language).contains(rule))
+        #expect(CodexClient.settingsProposalInstructions(boundary: true, language: language)?.contains(rule) == true)
+    }
+    #expect(SettingsProposalInbox.boundaryCommandRule(language: .english).contains("`addCommands` does not take a command outside"))
+    #expect(SettingsProposalInbox.boundaryCommandRule(language: .russian).contains("`addCommands` не выводит команду наружу"))
+}

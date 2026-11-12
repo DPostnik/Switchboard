@@ -463,6 +463,11 @@ private struct ChatRunState: Equatable {
     var settingsProposalDirectory = SettingsProposalInbox.directory
     /// The first listing seeds the known proposals without announcing them (a restart re-derives the cards silently).
     private var settingsProposalsLoaded = false
+    /// Warnings for added trusted commands under the external boundary, by proposal id; recomputed when the proposals change.
+    @Published private(set) var settingsProposalBoundaryNotes: [String: [SettingsProposalBoundaryNote]] = [:]
+    /// The helper and resources the review plans with: the bundled ones, as both adapters use; tests inject fixtures.
+    var proposalBoundaryHelper: () -> Result<ExternalSandboxHelper, ExternalSandboxHelper.Failure> = { ExternalSandboxHelper.bundled() }
+    var proposalBoundaryResources = Bundle.main.resourceURL
     /// The queued message being edited in place, at most one at a time.
     @Published private(set) var queueEdit: QueueEditSession?
     @Published var notificationStatus = L10n.text("Уведомления не включены", "Notifications are off")
@@ -1607,6 +1612,7 @@ private struct ChatRunState: Equatable {
         guard current != settingsProposals else { return }
         let known = Set(settingsProposals.map(\.id))
         settingsProposals = current
+        settingsProposalBoundaryNotes = Dictionary(uniqueKeysWithValues: current.map { ($0.id, proposalBoundaryNotes($0)) }.filter { !$0.1.isEmpty })
         if announce {
             for review in current where !known.contains(review.id) {
                 guard let chat = review.requestingChat(in: state.chats) else { continue }
@@ -1630,11 +1636,13 @@ private struct ChatRunState: Equatable {
             SettingsProposalInbox.remove(id, directory: settingsProposalDirectory); refreshSettingsProposals(); return
         }
         let chat = review.requestingChat(in: state.chats)?.id
+        // Decided before the change, for the requesting chat's kind only: app-side facts, never the proposal's text.
+        let outcome = SettingsProposalOutcome.afterApply(review, notes: chat == nil ? [] : proposalBoundaryNotes(review))
         if state.apply(review) {
             persist()
             AppLog.lifecycle.notice("Applied settings proposal \(id, privacy: .public) for \(review.projects.count, privacy: .public) projects")
         }
-        finishSettingsProposal(id, chat: chat, outcome: .applied)
+        finishSettingsProposal(id, chat: chat, outcome: outcome)
     }
     func rejectSettingsProposal(_ id: String) {
         refreshSettingsProposals()
@@ -1673,6 +1681,29 @@ private struct ChatRunState: Equatable {
     var currentSettingsProposal: SettingsProposalReview? {
         guard let chatID else { return nil }
         return settingsProposals.first { $0.requestingChat(in: state.chats)?.id == chatID }
+    }
+    /// What each added trusted command does under the external boundary, for the requesting chat's provider and role (or,
+    /// without a known author, for every provider with the project's default role). Decided by the adapters' planner input
+    /// for the project as it would be after the proposal (`SettingsProposalBoundary`).
+    func proposalBoundaryNotes(_ review: SettingsProposalReview) -> [SettingsProposalBoundaryNote] {
+        guard review.projects.contains(where: { !$0.addCommands.isEmpty }) else { return [] }
+        let chat = review.requestingChat(in: state.chats)
+        let connections = chat.map { [$0.nativeSession?.connection].compactMap { $0 } } ?? agentIDs
+        let catalog = roleCatalog, shared = sharedRoots
+        let permissions: (Project) -> AgentPermissionProfile = { project in
+            if let chat, chat.projectID == project.id {
+                return chat.resolvedRole(in: project, catalog: catalog).profile(for: project, addOns: chat.resolvedAddOns(in: project), sharedRoots: shared)
+            }
+            let addOns = Set((project.chatRoleAddOns ?? []).compactMap(RoleAddOn.init(rawValue:)))  // `projectAddOns`, outside the main actor
+            return project.chatRole(catalog).profile(for: project, addOns: addOns, sharedRoots: shared)
+        }
+        let kinds = connections.compactMap { connection -> SettingsProposalBoundary.Kind? in
+            guard let registration = registration(connection) else { return nil }
+            return AgentIntegrationFactory.proposalBoundaryKind(registration.profile, home: registration.home, executable: registration.generationExecutable,
+                                                                resources: proposalBoundaryResources, userChromeEnabled: state.userChromeEnabled != false,
+                                                                permissions: permissions)
+        }
+        return SettingsProposalBoundary.notes(review, state: state, kinds: kinds, helper: proposalBoundaryHelper())
     }
     /// The chat a proposal names, when it is one of this app's chats.
     func proposalChatTitle(_ label: String?) -> String? {

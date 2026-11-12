@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- An access request that adds a trusted command now warns, before Apply, when the project's chats run under the external boundary: the command would still run inside it (with the access set that would help, if one does) or would move the chats off the boundary; after Apply such a chat is told not to retry the same step.
+
 - Each chat writes access requests into its own folder, so the app knows which chat asked and continues it after Apply or Reject even when the request names no chat; a request whose chat is unknown says so.
 
 - Codex chats apply the same trusted-command check as Claude before using the external boundary, get mediated `pgrep` there, and show a notice in the chat when they fall back to the Codex sandbox for a reason you can act on.

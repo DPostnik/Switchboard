@@ -30,8 +30,9 @@ struct SettingsProposalView: View {
                         Text(L10n.text("Ничего не изменится, пока ты не нажмёшь «Применить». Агент не может применить это сам.",
                                        "Nothing changes until you press Apply. The agent cannot apply this itself."))
                             .font(.ui(.caption)).foregroundStyle(DeskPalette.muted).fixedSize(horizontal: false, vertical: true)
+                        SettingsProposalBoundarySummary(notes: model.settingsProposalBoundaryNotes[review.id] ?? [])
                     }
-                    SettingsProposalChanges(review: review)
+                    SettingsProposalChanges(review: review, notes: model.settingsProposalBoundaryNotes[review.id] ?? [])
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, .ui(22)).padding(.vertical, .ui(20))
@@ -56,6 +57,8 @@ struct SettingsProposalView: View {
 /// project names are shown as data.
 struct SettingsProposalChanges: View {
     let review: SettingsProposalReview
+    /// `DeskModel.settingsProposalBoundaryNotes` for this review.
+    var notes: [SettingsProposalBoundaryNote] = []
 
     var body: some View {
         ForEach(review.projects, id: \.projectID) { diff in projectCard(diff) }
@@ -88,6 +91,14 @@ struct SettingsProposalChanges: View {
             ForEach(diff.removeFolders, id: \.self) { line("−", L10n.text("Убрать папку: ", "Remove folder: ") + $0) }
             ForEach(diff.addCommands, id: \.self) { command in
                 line("+", L10n.text("Вне песочницы без вопроса (доступ ко всему Mac): ", "Outside the sandbox without a prompt (access to the whole Mac): ") + command, warning: true)
+                // Under the external boundary the command gains nothing or moves the chats off it: said before Apply, not after.
+                ForEach(notes.filter { $0.projectID == diff.projectID && $0.command == command }, id: \.provider) { note in
+                    Label { Text(note.text()).fixedSize(horizontal: false, vertical: true) } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                    }
+                    .font(.ui(.callout).weight(.semibold)).foregroundStyle(DeskPalette.attention)
+                    .padding(.leading, .ui(14)).accessibilityLabel(note.text())
+                }
             }
             ForEach(diff.removeCommands, id: \.self) { line("−", L10n.text("Убрать команду вне песочницы (доступ сужается): ", "Remove command outside the sandbox (access gets narrower): ") + $0) }
         }
@@ -102,6 +113,29 @@ struct SettingsProposalChanges: View {
             Text(text).font(.ui(.callout)).foregroundStyle(warning ? DeskPalette.attention : DeskPalette.ink)
                 .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+/// One bold line above the decision when an added trusted command gains nothing under the external boundary or moves the
+/// project's chats off it; the per-command lines in the list say which and what to request instead. Apply stays enabled.
+struct SettingsProposalBoundarySummary: View {
+    let notes: [SettingsProposalBoundaryNote]
+
+    var body: some View {
+        if let text = Self.text(notes) {
+            Label { Text(text).fixedSize(horizontal: false, vertical: true) } icon: { Image(systemName: "exclamationmark.octagon.fill") }
+                .font(.ui(.callout).weight(.semibold)).foregroundStyle(DeskPalette.attention)
+        }
+    }
+
+    static func text(_ notes: [SettingsProposalBoundaryNote], language: AppLanguage = L10n.language) -> String? {
+        if notes.contains(where: { if case .leavesBoundary = $0.effect { true } else { false } }) {
+            return L10n.text("Внимание: после применения чаты этого проекта уйдут с внешней границы (подробности рядом с командой).",
+                             "Warning: applying this moves this project's chats off the external boundary (details next to the command).", language: language)
+        }
+        guard !notes.isEmpty else { return nil }
+        return L10n.text("Внимание: под внешней границей добавленная команда не получит дополнительного доступа, и повтор шага не поможет (подробности рядом с командой).",
+                         "Warning: under the external boundary the added command gets no extra access, so retrying the step will not help (details next to the command).", language: language)
     }
 }
 
@@ -124,10 +158,12 @@ struct SettingsProposalCard: View {
                     if let reason = review.reason {
                         Text(reason).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                     }
-                    SettingsProposalChanges(review: review)
+                    SettingsProposalChanges(review: review, notes: model.settingsProposalBoundaryNotes[review.id] ?? [])
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }.frame(height: 180)
+            // Outside the scroll view, so the consequence is seen without scrolling to the command.
+            SettingsProposalBoundarySummary(notes: model.settingsProposalBoundaryNotes[review.id] ?? [])
             Text(L10n.text("Изменятся настройки проекта для всех его чатов. Ничего не изменится, пока ты не нажмёшь «Применить»; после этого чат продолжит задачу с новыми правами.",
                            "This changes the project settings for all its chats. Nothing changes until you press Apply; then the chat continues the task with the new access."))
                 .font(.ui(.caption)).foregroundStyle(.secondary)

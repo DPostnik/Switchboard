@@ -324,6 +324,16 @@ Known gaps. Check this list before you treat a failure as a new defect.
   (`decline`, `cancel`) that carry no text, and an engine refusal under `approvalPolicy: never`
   has no app text. A nono OS refusal carries no text for either provider. These paths are covered
   only by the `AgentAutonomy` rule. ACP (Gemini) refusals are unchanged.
+- `addCommands` under the boundary (2026-11-12, defect: psy-wiki Claude chat 9D550E53 applied a trusted
+  `scripts/transcribe-audio` that reads the Keychain; nothing changed and the chat retried). The review (card and
+  sheet) now plans the requesting chat's provider and role (unknown author: every provider, project default role) for
+  the project as it would be after the proposal, with the adapters' planner inputs (`SettingsProposalBoundary`,
+  `AgentIntegrationFactory.proposalBoundaryKind`). Per added command it says either "runs inside, no extra access"
+  (naming an access set whose mediated command would cover it; else an app-owned tool, a folder, a Keychain item grant,
+  planned) or "the boundary cannot run it: the chats move to the provider's sandbox with prompts". Apply stays enabled.
+  When everything the proposal adds is such a no-effect command, the continuation is the fixed `appliedWithoutEffect`
+  text (do not retry; report the blocker or request the right access). Not checked live; the Claude token and Codex
+  launch-info preconditions are not part of the review.
 - Grants carry no origin: the settings do not record when, by which chat and why a folder or command
   was added, and nothing reports a grant that is never used.
 - Roles without network stay on the native path (the proxy allowlist for model hosts is not wired).

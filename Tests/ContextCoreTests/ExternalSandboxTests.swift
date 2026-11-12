@@ -435,6 +435,15 @@ private func claudeInput(_ root: URL, project: Project, workerID: String) -> Ext
             && russian.contains("убери её из настроек проекта") && russian.contains("песочницей Codex"))
 }
 
+/// The name a mediated command matches, shared by the inventory and the settings proposal review.
+@Test func commandHeadIsTheExecutableNameOfATrustedCommand() {
+    #expect(ExternalSandboxPlanner.commandHead("/usr/bin/security find-identity") == "security")
+    #expect(ExternalSandboxPlanner.commandHead("  'codesign' --sign X") == "codesign")
+    #expect(ExternalSandboxPlanner.commandHead("scripts/transcribe-audio") == "transcribe-audio")
+    // Negative: nothing to run has no head.
+    #expect(ExternalSandboxPlanner.commandHead(" \t ") == nil && ExternalSandboxPlanner.commandHead("") == nil)
+}
+
 /// Apple's `/usr/bin/git` is an `xcrun` shim that cannot start inside a mediated sandbox; the planner mediates the real binary.
 @Test func mediatedGitIsTheRealBinaryNotTheXcrunShim() throws {
     let real = "/bin/sh"

@@ -164,12 +164,18 @@ extension SavedState {
 /// The user's decision on a proposal, and the one fixed message the requesting chat receives for it. The message never
 /// carries text from the proposal (paths, commands, reason): any chat can name another chat in its proposal.
 public enum SettingsProposalOutcome: Sendable {
-    case applied, rejected
+    /// `appliedWithoutEffect`: applied, but every added trusted command stays inside this chat's external boundary
+    /// (`SettingsProposalOutcome.afterApply(_:notes:)`), so nothing new applies and a retry would fail the same way.
+    case applied, appliedWithoutEffect, rejected
     public func message(language: AppLanguage = L10n.language) -> String {
         switch self {
         case .applied: L10n.text(
             "Switchboard: пользователь применил твой запрос на изменение настроек проекта. Новые права действуют с этого сообщения. Повтори шаг, которому не хватало доступа, и продолжай задачу.",
             "Switchboard: the user applied your project settings request. The new access applies from this message. Retry the step that lacked access and continue the task.",
+            language: language)
+        case .appliedWithoutEffect: L10n.text(
+            "Switchboard: пользователь применил твой запрос на изменение настроек проекта, но этот чат работает под внешней границей: добавленная доверенная команда всё равно выполняется внутри неё и не получает дополнительного доступа. Не повторяй тот же шаг. Сообщи, что задача заблокирована, или запроси правильный доступ: набор доступа с командой-посредником, папку или инструмент приложения.",
+            "Switchboard: the user applied your project settings request, but this chat runs under the external boundary: the added trusted command still runs inside it and gets no extra access. Do not retry the same step. Report that the task is blocked, or request the right access: an access set with a mediated command, a folder or an app-owned tool.",
             language: language)
         case .rejected: L10n.text(
             "Switchboard: пользователь отклонил твой запрос на изменение настроек проекта. Не ищи другой способ получить тот же доступ. Продолжай независимую часть задачи или сообщи, что без этого доступа задача заблокирована.",
@@ -306,6 +312,7 @@ public enum SettingsProposalInbox {
             - Запиши один JSON-файл в папку "$\(environmentKey)" (она доступна на запись в песочнице), например "$\(environmentKey)/<короткое-имя>.json". Формат: \(format). Пропускай ненужные поля; в одном файле может быть несколько проектов. Причина (`reason`) - до \(SettingsProposalReview.maximumText) символов, остальное обрезается.
             \(author)
             - Наборы: \(presets).
+            \(boundaryCommandRule(language: .russian))
             - Приложение покажет пользователю список изменений в этом чате; применит их только он. Скажи пользователю, что предложение ждёт его решения. Предлагай только то, что нужно задаче; команды вне песочницы получают доступ ко всему Mac.
             - Когда пользователь решит, этот чат получит сообщение от приложения. До тех пор продолжай независимую часть задачи.
             """,
@@ -314,9 +321,17 @@ public enum SettingsProposalInbox {
             - Write one JSON file into the folder "$\(environmentKey)" (writable inside the sandbox), for example "$\(environmentKey)/<short-name>.json". Format: \(format). Omit fields you do not need; one file may cover several projects. Keep `reason` within \(SettingsProposalReview.maximumText) characters; the rest is cut.
             \(author)
             - Sets: \(presets).
+            \(boundaryCommandRule(language: .english))
             - The app shows the user the list of changes in this chat; only the user applies them. Tell the user the proposal waits for their decision. Propose only what the task needs; commands outside the sandbox get access to the whole Mac.
             - When the user decides, this chat receives a message from the app. Until then continue the independent part of the task.
             """, language: language)
+    }
+    /// Under the external boundary a trusted command stays inside (PERMISSIONS.md, section 1); shared with the Claude
+    /// boundary instructions.
+    public static func boundaryCommandRule(language: AppLanguage = L10n.language) -> String {
+        L10n.text("- Под внешней границей (`SWITCHBOARD_EXTERNAL_SANDBOX=1`) `addCommands` не выводит команду наружу: она всё равно выполняется внутри. Для Связки ключей, учётных данных или сетевой идентичности запрашивай набор доступа с командой-посредником (`addPresets`), а не доверенную команду.",
+                  "- Under the external boundary (`SWITCHBOARD_EXTERNAL_SANDBOX=1`) `addCommands` does not take a command outside: it still runs inside. For the Keychain, a credential or a network identity request an access set with a mediated command (`addPresets`), not a trusted command.",
+                  language: language)
     }
     private static func date(_ file: URL) -> Date? { try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate }
 }
