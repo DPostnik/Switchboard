@@ -81,8 +81,8 @@ public actor AgentClient {
     }
     public func createSession(projectPath: String, permissions: AgentPermissionProfile, model: String, route: RequestRoute,
                               context: AgentContext? = nil, browserProfile: AgentBrowserProfile? = nil,
-                              kind: AgentExecutionRequest.Kind = .interactive, userChromeGrant: AgentUserChromeGrant? = nil) async throws -> AgentSessionReference {
-        let request = try await request(prompt: "", session: nil, projectPath: projectPath, permissions: permissions, model: model, route: route, kind: kind, context: context, browserProfile: browserProfile, userChromeGrant: userChromeGrant)
+                              kind: AgentExecutionRequest.Kind = .interactive, userChromeGrant: AgentUserChromeGrant? = nil, chatDirectory: [String]? = nil) async throws -> AgentSessionReference {
+        let request = try await request(prompt: "", session: nil, projectPath: projectPath, permissions: permissions, model: model, route: route, kind: kind, context: context, browserProfile: browserProfile, chatDirectory: chatDirectory, userChromeGrant: userChromeGrant)
         let session = try await integration.prepare(request).value(); sessionRoutes[session] = route; sessionContexts[session] = request.model.context; return session
     }
     public func resume(_ session: AgentSessionReference, projectPath: String, permissions: AgentPermissionProfile, route: RequestRoute,

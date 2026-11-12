@@ -4,6 +4,10 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Configure chat tools before creating a Codex conversation so its first message does not try to resume an unsaved thread.
+
+- Allow deleting a Codex chat when the agent confirms its saved conversation is already absent.
+
 - Fix Codex configuration loading when referenced chat inspection disables the duplicate diagnostics server.
 
 - Let Codex inspect Switchboard chats explicitly referenced by the user, using the same scoped chat tools as Claude.

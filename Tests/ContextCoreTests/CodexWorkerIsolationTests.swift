@@ -40,11 +40,15 @@ private func workerFixture() throws -> (URL, URL) {
             chrome=p.get('config',{}).get('mcp_servers.switchboard_user_chrome',{}).get('enabled',False)
             tid='chrome' if chrome else 'ordinary';loaded.add(tid);r={'thread':{'id':tid}}
             if chrome:emit('account/updated',{})
-        if method=='thread/resume':loaded.add(tid);r={'thread':{'id':tid}}
+        if method=='thread/resume':
+            if (root/'require-rollout').exists() and not (root/('rollout-'+tid)).exists():
+                print(json.dumps({'id':m['id'],'error':{'code':-32600,'message':'no rollout found for thread id '+tid}}),flush=True);continue
+            loaded.add(tid);r={'thread':{'id':tid}}
         if method=='thread/unsubscribe':loaded.discard(tid);r={'status':'unsubscribed'}
         if method=='mcpServerStatus/list':r={'data':[{'name':'switchboard_user_chrome','tools':{'status':{'name':'status'}}}]}
         if method=='thread/loaded/list':r={'data':list(loaded)}
         if method=='turn/start':
+            (root/('rollout-'+tid)).touch()
             mode=p.get('input',[{}])[0].get('text','');r={'turn':{'id':'turn-'+tid}}
             emit('turn/started',{'threadId':tid,'turn':r['turn']})
             if mode=='children':
@@ -239,5 +243,25 @@ func explicitSignOutStopsDedicatedWorkerWithoutAccountNotification(mode: String)
     #expect(resumes.count == 2)
     #expect(resumes[0]["params"]["config"]["mcp_servers.switchboard_chats"]["args"].array == (["-I"] + arguments).map(JSONValue.string))
     #expect(resumes[1]["params"]["config"]["mcp_servers.switchboard_chats"]["enabled"] == .bool(false))
+    await app.stop()
+}
+
+@Test func firstTurnKeepsPreparedChatDirectoryWorkerWithoutResumingEmptyThread() async throws {
+    let (root, executable) = try workerFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try Data().write(to: root.appendingPathComponent("require-rollout"))
+    let app = AgentClient(integration: CodexIntegration())
+    _ = try await app.start(.init(executable: executable, home: root))
+    let scope = ["/app/server.py", "--chat", "reserved", "--diagnostics-project", root.path]
+    let session = try await app.createSession(projectPath: root.path, permissions: .unrestricted,
+                                              model: "", route: .direct, chatDirectory: scope)
+    _ = try await app.send("children", to: session, projectPath: root.path, permissions: .unrestricted,
+                           model: "", effort: "", chatDirectory: scope)
+    let calls = try String(contentsOf: root.appendingPathComponent("calls.jsonl"), encoding: .utf8)
+        .split(separator: "\n").map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+    let start = try #require(calls.first { $0["method"].string == "thread/start" })
+    let turn = try #require(calls.first { $0["method"].string == "turn/start" })
+    #expect(start["pid"] == turn["pid"])
+    #expect(!calls.contains { ["thread/resume", "thread/unsubscribe"].contains($0["method"].string ?? "") })
     await app.stop()
 }

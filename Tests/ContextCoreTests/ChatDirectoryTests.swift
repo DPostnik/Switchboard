@@ -255,3 +255,23 @@ private func writeState(_ rows: [String: Any], to url: URL) throws {
     #expect(text(replies[2])["cores"] as? Int != nil)
     for id in [3, 4, 5] { #expect((replies[id]?["result"] as? [String: Any])?["isError"] as? Bool == true) }
 }
+
+@Test(arguments: [AgentConnectionID.appClaude, .originalCodex]) @MainActor
+func reservedChatToolScopeMatchesItsFirstSend(connection: AgentConnectionID) throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let model = DeskModel(store: AppStore(file: root.appendingPathComponent("store.sqlite")), summaryResources: nil)
+    let project = Project(path: root.path)
+    let other = Chat(session: .init(connection: connection, nativeID: UUID().uuidString), projectID: project.id, title: "Other", model: "")
+    var caller = Chat(session: .init(connection: connection, nativeID: UUID().uuidString), projectID: project.id, title: "New", model: "")
+    caller.inheritsProjectAccess = true
+    model.state.projects = [project]; model.state.chats = [other]
+    defer { ChatReferences.remove(chat: caller.id) }
+    let permissions = caller.resolvedRole(in: project, catalog: model.roleCatalog).profile(for: project, addOns: caller.resolvedAddOns(in: project), sharedRoots: model.sharedRoots)
+    model.noteChatReferences(chatID: caller.id, text: "Inspect switchboard-chat:" + other.id)
+    let initial = try #require(model.initialChatDirectoryArguments(id: caller.id, agent: connection, projectPath: root.path, permissions: permissions, script: directoryServer))
+    model.state.chats.append(caller)
+    #expect(initial == model.chatDirectoryArguments(for: caller.id, script: directoryServer))
+    #expect(initial.contains("--references") && !initial.contains("--snapshot"))
+}

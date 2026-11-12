@@ -207,6 +207,10 @@ Codex chat inspection (2026-11-12, implementation pending verification): channel
 `ChatDirectoryRuntime` reference allowlist as Claude. Directory arguments are part of the dedicated
 worker scope; adding or revoking the server replaces only that worker before submission.
 No role, root or automatic approval grant changes. See `docs/codex-chat-inspection.md`.
+First-turn scope follow-up (2026-11-12): reserve the chat ID and its diagnostics/reference-only
+server arguments before creating a provider session. Both providers receive the same scope at
+creation and first submission; Codex must not release an unsaved empty thread merely to attach
+those tools. Channel 3, unchanged allowlist and boundary; no replay of failed messages.
 Follow-up (2026-11-12): disabling the duplicate diagnostics server must retain a valid stdio
 transport (`/usr/bin/false`, empty arguments, disabled and not required); Codex validates even
 disabled entries. Channel 3 only; no grant or retry behavior changes. Verification pending.

@@ -143,6 +143,12 @@ private func parallelChatFixture() throws -> (URL, URL) {
                 threading.Timer(0.15, emit, args=(m, result)).start()
             continue
         if method == 'thread/delete':
+            thread = m['params']['threadId']
+            if thread == 'lost-delete': sys.exit(0)
+            if thread in ['missing-rollout', 'wrong-rollout']:
+                target = thread if thread == 'missing-rollout' else 'another-thread'
+                print(json.dumps({'id': m['id'], 'error': {'code': -32600, 'message': 'no rollout found for thread id ' + target}}), flush=True)
+                continue
             if m['params']['threadId'] == 'failed-delete':
                 with lock:
                     print(json.dumps({'id': m['id'], 'error': {'code': -32000, 'message': 'Deletion rejected'}}), flush=True)
@@ -732,4 +738,36 @@ private func parallelChatFixture() throws -> (URL, URL) {
     #expect(try await sentTexts(connection, model, count: 4).last == "Quiet")
     #expect(model.queueEdit == nil && model.error == nil && model.draft == "")
     await connection.stop()
+}
+
+@Test @MainActor func deletingMissingCodexRolloutRemovesLocalChatButKeepsUncertainFailures() async throws {
+    let (folder, executable) = try parallelChatFixture()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let wire = CodexConnection()
+    // Use one captured transport for both the adapter and dispatch assertions.
+    let captured = CodexClient(transport: wire)
+    try await captured.start(executable: executable, home: folder)
+    let store = AppStore(file: folder.appendingPathComponent("state.sqlite"))
+    let model = DeskModel(connection: CodexIntegration(client: captured), store: store)
+    let project = Project(path: folder.path)
+    model.state.projects = [project]; model.projectID = project.id
+    model.connected = true; model.authenticated = true
+    let ids = ["missing-rollout", "wrong-rollout", "lost-delete"]
+    model.state.chats = ids.map { Chat(id: $0, projectID: project.id, title: $0, model: "") }
+    model.state.queuedMessages = ids.map { QueuedMessage(id: "q-" + $0, threadID: $0, projectID: project.id, text: "keep", model: "", effort: "") }
+    try await store.save(model.state)
+    for id in ids {
+        model.chatID = id
+        await model.deleteChat(id)
+        let shouldRemain = id != "missing-rollout"
+        #expect(model.state.chats.contains { $0.id == id } == shouldRemain)
+        #expect(model.queuedMessages.contains { $0.threadID == id } == shouldRemain)
+        let saved = try await store.load()
+        #expect(saved.chats.contains { $0.id == id } == shouldRemain)
+        if shouldRemain { #expect(model.queuePaused && model.error != nil) }
+    }
+    let calls = try String(contentsOf: folder.appendingPathComponent("calls.jsonl"), encoding: .utf8)
+        .split(separator: "\n").map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+    #expect(calls.filter { $0["method"].string == "thread/delete" }.map { $0["params"]["threadId"].string } == ids)
+    await wire.stop()
 }

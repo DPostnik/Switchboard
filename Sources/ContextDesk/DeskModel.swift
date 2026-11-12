@@ -1288,8 +1288,10 @@ private struct ChatRunState: Equatable {
             let permissions = resolvedRole.profile(for: current, addOns: Self.projectAddOns(current), sharedRoots: sharedRoots)
             let chromeGrant = try await UserChromeControl.shared.grant(chat: reservedID, projectRoot: project.path,
                 allowed: state.userChromeEnabled != false && permissions.effective.browser == .appAndUserChrome)
+            noteChatReferences(chatID: reservedID, text: prompt)
             let session = try await client.createSession(projectPath: project.path, permissions: permissions,
-                                                             model: selectedModel, route: route, context: descriptor.context, userChromeGrant: chromeGrant)
+                                                             model: selectedModel, route: route, context: descriptor.context, userChromeGrant: chromeGrant,
+                                                             chatDirectory: initialChatDirectoryArguments(id: reservedID, agent: agent, projectPath: project.path, permissions: permissions))
             var chat = Chat(session: session, projectID: project.id, title: title ?? String(handoff.goal.prefix(100)), model: selectedModel)
             chat.id = reservedID
             chat.route = route; chat.handoffOrigin = handoff.origin; chat.effort = effort
@@ -1848,15 +1850,26 @@ private struct ChatRunState: Equatable {
         let permissions = project.map { chat.resolvedRole(in: $0, catalog: roleCatalog).profile(for: $0, addOns: chat.resolvedAddOns(in: $0), sharedRoots: sharedRoots) }
         let diagnostics = permissions?.shell != nil && permissions?.shell != .off ? workingDirectory(forChat: id) : nil
         guard chat.chatDirectoryAccess == true else {
-            if !ChatReferences.load(chat: id).isEmpty, let references = ChatReferences.file(chat: id) {
-                return ChatDirectory.serverArguments(script: script.path, snapshot: nil, chat: id, root: root,
-                                                     references: references.path, diagnosticsProject: diagnostics)
-            }
-            guard let diagnostics else { return nil }
-            return ChatDirectory.serverArguments(script: script.path, snapshot: nil, chat: id, diagnosticsProject: diagnostics)
+            return scopedChatDirectoryArguments(id: id, script: script, diagnostics: diagnostics)
         }
         return ChatDirectory.serverArguments(script: script.path, snapshot: chatDirectoryFile.path, chat: id, index: chatSearchIndexFile.path,
                                              recipe: chat.chatSearch == true ? chatSearchRecipe.path : nil, root: root, diagnosticsProject: diagnostics)
+    }
+    /// Reserve the final tool scope before Codex creates an in-memory-only empty thread.
+    func initialChatDirectoryArguments(id: String, agent: AgentConnectionID, projectPath: String,
+                                       permissions: AgentPermissionProfile,
+                                       script: URL? = Bundle.main.resourceURL?.appendingPathComponent("ChatDirectoryRuntime/server.py")) -> [String]? {
+        guard traits(agent).contains(.chatDirectory), let script,
+              FileManager.default.fileExists(atPath: script.path) else { return nil }
+        return scopedChatDirectoryArguments(id: id, script: script, diagnostics: permissions.shell == .off ? nil : projectPath)
+    }
+    private func scopedChatDirectoryArguments(id: String, script: URL, diagnostics: String?) -> [String]? {
+        if !ChatReferences.load(chat: id).isEmpty, let references = ChatReferences.file(chat: id) {
+            return ChatDirectory.serverArguments(script: script.path, snapshot: nil, chat: id, root: Locations.root.path,
+                                                 references: references.path, diagnosticsProject: diagnostics)
+        }
+        guard let diagnostics else { return nil }
+        return ChatDirectory.serverArguments(script: script.path, snapshot: nil, chat: id, diagnosticsProject: diagnostics)
     }
     /// Remembers the chats the user names in a message to this chat (`switchboard-chat:<ID>`, a chat ID or its agent
     /// session ID), so this chat may inspect them. IDs of unknown chats are ignored.
@@ -2125,6 +2138,7 @@ private struct ChatRunState: Equatable {
             let reservedChatID = threadID ?? UUID().uuidString
             let userChromeGrant = try await UserChromeControl.shared.grant(chat: reservedChatID, projectRoot: workingDirectory,
                 allowed: state.userChromeEnabled != false && scheduledRun == nil && access.effective.browser == .appAndUserChrome)
+            if scheduledRun == nil { noteChatReferences(chatID: reservedChatID, text: text) }
             var id = threadID
             if id == nil {
                 // Browser profiles belong to the folder they were made in, so a worktree chat starts with its own.
@@ -2132,7 +2146,8 @@ private struct ChatRunState: Equatable {
                     ? newChatBrowserProfiles[project.id].map { AgentBrowserProfile(id: $0) } : nil
                 let session = try await client.createSession(projectPath: workingDirectory, permissions: access,
                                                                  model: selectedModel, route: route, browserProfile: browserProfile,
-                                                                 kind: scheduledRun == nil ? .interactive : .scheduled, userChromeGrant: userChromeGrant)
+                                                                 kind: scheduledRun == nil ? .interactive : .scheduled, userChromeGrant: userChromeGrant,
+                                                                 chatDirectory: initialChatDirectoryArguments(id: reservedChatID, agent: newConnection, projectPath: workingDirectory, permissions: access))
                 if let browserProfile, newChatBrowserProfiles[project.id] == browserProfile.id {
                     newChatBrowserProfiles.removeValue(forKey: project.id)
                 }
@@ -2752,8 +2767,10 @@ private struct ChatRunState: Equatable {
         let permissions = role.profile(for: project, addOns: explicitAddOns ?? Self.projectAddOns(project), sharedRoots: sharedRoots)
         let chromeGrant = try await UserChromeControl.shared.grant(chat: command.chat, projectRoot: project.path,
             allowed: state.userChromeEnabled != false && permissions.effective.browser == .appAndUserChrome)
+        noteChatReferences(chatID: command.chat, text: command.text)
         let session = try await client.createSession(projectPath: project.path, permissions: permissions,
-                                                     model: model, route: route, userChromeGrant: chromeGrant)
+                                                     model: model, route: route, userChromeGrant: chromeGrant,
+                                                     chatDirectory: initialChatDirectoryArguments(id: command.chat, agent: agent, projectPath: project.path, permissions: permissions))
         guard !state.chats.contains(where: { $0.id == command.chat }),
               ConversationIdentity.appID(for: session.nativeID, in: state, connection: session.connection) == nil else { throw RemoteFailure.invalidCommand }
         var chat = Chat(session: session, projectID: project.id, title: ChatTitle.placeholder(), model: model)

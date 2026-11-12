@@ -354,7 +354,13 @@ public actor CodexClient {
                                        params: .object(["threadId": .string(try nativeID(session))]))
     }
     public func delete(_ session: AgentSessionReference) async throws {
-        _ = try await transport.request("thread/delete", params: .object(["threadId": .string(try nativeID(session))]))
+        let id = try nativeID(session)
+        do {
+            _ = try await transport.request("thread/delete", params: .object(["threadId": .string(id)]))
+        } catch let failure as ClientFailure where failure.message == "no rollout found for thread id \(id)" {
+            // Codex confirms there is no persisted thread to delete (including an unused new chat).
+            // Match only this thread's exact response; transport failures and other errors still fail closed.
+        }
     }
     public func history(_ session: AgentSessionReference) async throws -> [CodexHistoryTurn] {
         let turns = try await read(session)["turns"].array
