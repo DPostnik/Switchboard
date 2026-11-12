@@ -110,18 +110,22 @@ struct SettingsProposalCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: .ui(10)) {
             Label { Text(L10n.text("Агент просит доступ", "The agent asks for access")).foregroundStyle(DeskPalette.ink) } icon: {
-                Image(systemName: "exclamationmark.diamond.fill").foregroundStyle(DeskPalette.attention)
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(DeskPalette.attention)
             }.font(.ui(.headline))
-            if let reason = review.reason {
-                Text(reason).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-            }
+            // Bound the entire review body. A vertically fixed reason outside the scroll view
+            // wraps at the split view's minimum-width probe and inflates the whole window.
             ScrollView {
-                VStack(alignment: .leading, spacing: .ui(8)) { SettingsProposalChanges(review: review) }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }.frame(maxHeight: 220).fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: .ui(8)) {
+                    if let reason = review.reason {
+                        Text(reason).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    }
+                    SettingsProposalChanges(review: review)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(height: 180)
             Text(L10n.text("Изменятся настройки проекта для всех его чатов. Ничего не изменится, пока ты не нажмёшь «Применить»; после этого чат продолжит задачу с новыми правами.",
                            "This changes the project settings for all its chats. Nothing changes until you press Apply; then the chat continues the task with the new access."))
-                .font(.ui(.caption)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                .font(.ui(.caption)).foregroundStyle(.secondary)
             HStack {
                 Spacer(minLength: 0)
                 Button(L10n.text("Отклонить", "Reject")) { model.rejectSettingsProposal(review.id) }.buttonStyle(DeskButtonStyle())
