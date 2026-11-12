@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Record why Claude's permission answers were given (for example a backslash, a deny-list hit or a sandboxed command the CLI still asked about) in the permissions ledger, and count denied commands an agent retried in the same turn.
+
 - Switch the provider of a new chat with a Claude/ChatGPT toggle beside the model chip, and show each chat's provider mark in the sidebar.
 
 - Offer native session approval for Codex commands when supported by the engine.

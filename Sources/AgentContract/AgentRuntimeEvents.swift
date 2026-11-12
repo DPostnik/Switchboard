@@ -70,11 +70,16 @@ public struct AgentCapabilityRecord: Codable, Hashable, Sendable {
     public var outcome: Outcome?
     /// Stable app-owned rule identifier when a policy supplies one.
     public var ruleID: String?
+    /// Why the app asked, allowed or denied: a plain ASCII identifier such as `backslash`, `denyList` or `trusted`.
+    /// Diagnostic evidence only; never shown as product copy and never used to decide.
+    public var reason: String?
     public init(tool: String, capability: Capability, target: String? = nil, decision: Decision, turn: String? = nil,
-                requestID: String? = nil, source: String? = nil, stage: Stage? = nil, outcome: Outcome? = nil, ruleID: String? = nil) {
+                requestID: String? = nil, source: String? = nil, stage: Stage? = nil, outcome: Outcome? = nil, ruleID: String? = nil,
+                reason: String? = nil) {
         self.tool = tool; self.capability = capability; self.target = target.map { String($0.prefix(200)) }; self.decision = decision; self.turn = turn
         self.requestID = requestID.map { String($0.prefix(200)) }; self.source = source.map { String($0.prefix(200)) }
         self.stage = stage; self.outcome = outcome; self.ruleID = ruleID.map { String($0.prefix(200)) }
+        self.reason = reason.map { String($0.prefix(64)) }
     }
 }
 

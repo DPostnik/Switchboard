@@ -111,7 +111,7 @@ struct PermissionsLedgerView: View {
     }
 
     static func evidence(_ decision: CapabilityDecision) -> String {
-        var lines = [decision.source, decision.requestID, decision.ruleID].compactMap { $0 }
+        var lines = [decision.source, decision.requestID, decision.ruleID, decision.reason].compactMap { $0 }
         if let outcome = decision.outcome {
             let title: String = switch outcome {
             case .succeeded: L10n.text("Успешно", "Succeeded")

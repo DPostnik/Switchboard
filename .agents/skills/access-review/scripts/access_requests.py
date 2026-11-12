@@ -172,7 +172,7 @@ def collect(args):
         since = args.since or datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=args.days)
         # Nullable additions let this version read old and migrated databases.
         audit_select = ', '.join(name if name in found else 'NULL AS ' + name
-                                 for name in ('request_id', 'source', 'stage', 'outcome', 'rule_id'))
+                                 for name in ('request_id', 'source', 'stage', 'outcome', 'rule_id', 'reason'))
         connection.row_factory = sqlite3.Row
         rows = [dict(row) for row in connection.execute(
             'SELECT id, date, chat, run, turn, project, role, agent, tool, capability, target, decision, audit, '
@@ -211,7 +211,7 @@ def collect(args):
             'decisions': collections.Counter(), 'roles': collections.Counter(), 'chats': {}, 'chained': collections.Counter(),
             'count': 0, 'records': 0, 'interruptions': 0, 'legacy': 0, 'stages': collections.Counter(),
             'sources': collections.Counter(), 'outcomes': collections.Counter(), 'rules': collections.Counter(),
-            'last': 0, 'covered': collections.Counter()})
+            'reasons': collections.Counter(), 'last': 0, 'covered': collections.Counter()})
         if check and (source := coverage(capability, tool, check, project, catalog)):
             group['covered'][source] += 1
         group['count'] += 1
@@ -223,7 +223,8 @@ def collect(args):
         group['tools'][tool] += 1
         for event in events:
             group['decisions'][event['decision'] + (' (audit)' if event['audit'] else '')] += 1
-            for key, field in [('stages', 'stage'), ('sources', 'source'), ('outcomes', 'outcome'), ('rules', 'rule_id')]:
+            for key, field in [('stages', 'stage'), ('sources', 'source'), ('outcomes', 'outcome'), ('rules', 'rule_id'),
+                               ('reasons', 'reason')]:
                 if event[field]:
                     group[key][event[field]] += 1
         group['roles'][role] += 1
@@ -240,6 +241,8 @@ def collect(args):
             'records': group['records'], 'interruptions': group['interruptions'], 'legacyRequests': group['legacy'],
             'stages': dict(group['stages']), 'sources': dict(group['sources']),
             'outcomes': dict(group['outcomes']), 'rules': dict(group['rules']),
+            # Why the app asked, allowed or denied (ledger column `reason`, absent before 2026-11-12).
+            'reasons': dict(group['reasons'].most_common()),
             'decisions': dict(group['decisions'].most_common()), 'tools': dict(group['tools'].most_common(3)),
             'roles': dict(group['roles'].most_common()),
             **({'chained': [h for h, _ in group['chained'].most_common(4)]} if group['chained'] else {}),
@@ -340,6 +343,7 @@ def markdown(report):
                      + (f"; sources {', '.join(group['sources'])}" if group['sources'] else '')
                      + (f"; outcomes {group['outcomes']}" if group['outcomes'] else '')
                      + (f"; rules {', '.join(group['rules'])}" if group['rules'] else '')
+                     + (f"; reasons {', '.join(f'{k} {v}' for k, v in group['reasons'].items())}" if group['reasons'] else '')
                      + (f"; chained {', '.join(group['chained'])}" if group.get('chained') else '')
                      + (f"; ALREADY OPEN BY {group['alreadyOpenBy']}" if group.get('alreadyOpenBy') else ''))
         for example in group['examples']:

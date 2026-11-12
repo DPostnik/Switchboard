@@ -318,6 +318,10 @@ private func interactiveFixture(_ root: URL) throws -> URL {
                 out({'type':'control_request','request_id':'late-read','request':{'subtype':'can_use_tool','tool_name':'Read','input':{'file_path':shot}}})
                 out({'type':'control_request','request_id':'late-write','request':{'subtype':'can_use_tool','tool_name':'Write','input':{'file_path':'/outside-project/file','content':'x'}}})
                 continue
+            if prompt.startswith('bash:'):
+                # One Bash question under the command sandbox; the command follows the prefix.
+                out({'type':'control_request','request_id':'bash-1','request':{'subtype':'can_use_tool','tool_name':'Bash','input':{'command':prompt[5:]}}})
+                continue
             if prompt=='sandbox':
                 # Bash requests under the command sandbox: inside it (asked for an env prefix), a trusted command
                 # outside it, then a command that asks to leave it.
@@ -500,6 +504,7 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     }
     let refusals = await events.capabilities().filter { $0.tool == "SendMessage" }
     #expect(refusals.map(\.decision) == [.hookDenied, .hookDenied, .hookDenied] && refusals.first?.target == "my-terminal")
+    #expect(refusals.allSatisfy { $0.reason == "notOwnSubagent" })
     let launch = try String(contentsOf: home.appendingPathComponent("submitted"), encoding: .utf8)
     #expect(launch.contains("acceptEdits") && launch.contains("Grep,Write,Edit,Bash,WebFetch") && !launch.contains("--restricted"))
     #expect(launch.contains("Agent,SendMessage,Skill,AskUserQuestion"))
@@ -511,6 +516,7 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     #expect(initialize["request"]["hooks"]["PreToolUse"].array.last?["matcher"].string == "SendMessage")
     let recorded = await events.capabilities().filter { $0.capability == .shell }
     #expect(recorded.map(\.decision) == [.hookDenied, .hookAsked] && recorded.first?.target == "sudo ls")
+    #expect(recorded.map(\.reason) == ["denyList", "askList"])
     // The editor role registers no hook at all.
     let editor = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
     _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: editor)).value()
@@ -953,7 +959,47 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     #expect(answers.map { $0["request_id"].string } == ["sb-1", "sb-2", "sb-3", "sb-4"])
     #expect(answers.allSatisfy { $0["response"]["behavior"].string == "allow" })
     #expect(await events.capabilities().map { "\($0.tool):\($0.decision)" } == ["Bash:allowed", "Bash:allowed", "Bash:asked", "Write:allowed"])
+    // Why each Bash answer was given: the CLI asked about a command the app holds sandboxed, a trusted command,
+    // and a request to leave the sandbox, which the user's answer record repeats.
+    #expect(await events.capabilities().prefix(3).map(\.reason) == ["cliAskedSandboxed", "trusted", "disableSandboxRequested"])
+    let answered = await events.capabilities(includeLifecycle: true).filter { $0.requestID == asked.id.uuidString && $0.stage == .responded }
+    #expect(answered.map(\.reason) == ["disableSandboxRequested"])
     await adapter.disconnect()
+}
+
+/// A Bash question the app cannot answer records why it asked: a backslash, or a command substitution around a
+/// command that leaves the sandbox.
+@Test(arguments: [("python3 -c 'print(\"a\\nb\")'", "backslash"), ("gh pr view $(git branch --show-current)", "substitution")])
+func claudeBashQuestionRecordsWhyItAsked(_ command: String, _ reason: String) async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root)
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: root.appendingPathComponent("home"))).value()
+    var developer = AgentPermissionProfile.workspace(); developer.shell = .on; developer.network = true
+    developer.commandSandbox = .init(read: [root.path], write: [root.path], unsandboxed: ["gh"])
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root, role: developer)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "bash:" + command, role: developer)).value()
+    try await waitFor { await events.interaction() != nil }
+    let asked = try #require(await events.interaction())
+    _ = try await adapter.answer(asked.id, session: session, context: descriptor.context, response: .deny).value()
+    try await waitFor { await events.completion() != nil }
+    let records = await events.capabilities()
+    #expect(records.map(\.decision) == [.asked] && records.first?.target == command)
+    #expect(records.first?.reason == reason)
+    let answered = await events.capabilities(includeLifecycle: true).filter { $0.stage == .responded }
+    #expect(answered.map(\.decision) == [.denied] && answered.first?.reason == reason)
+    await adapter.disconnect()
+}
+
+@Test func claudeTrustRejectionNamesTheCommandShape() {
+    #expect(ClaudeLaunchPolicy.trustRejectionShape("gh pr view $(git branch)") == "substitution")
+    #expect(ClaudeLaunchPolicy.trustRejectionShape("echo `date`") == "substitution")
+    #expect(ClaudeLaunchPolicy.trustRejectionShape("cd /p/proj && zsh scripts/test.sh") == "cdBeforeScript")
+    #expect(ClaudeLaunchPolicy.trustRejectionShape("FOO=1 cd x; ls") == "cdBeforeScript")
+    #expect(ClaudeLaunchPolicy.trustRejectionShape("echo cd here") == "untrusted")
 }
 
 @Test func claudeFullAccessLoadsAccountConnectorsAndAsksBeforeTheirActions() async throws {

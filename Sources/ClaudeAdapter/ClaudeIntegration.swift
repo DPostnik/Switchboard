@@ -71,6 +71,8 @@ public actor ClaudeIntegration: AgentIntegration {
         let epoch: UUID
         /// The call the request is about (`can_use_tool` `tool_use_id`); its transcript status follows the answer.
         let toolUseID: String?
+        /// Ledger reason the app asked; carried to the record of the user's answer.
+        var reason: String? = nil
     }
     private var interactions: [UUID: Interaction] = [:]
     /// Session -> tools the user allowed for the rest of the named turn ("allow for this turn"). Cleared when the turn ends.
@@ -665,7 +667,7 @@ public actor ClaudeIntegration: AgentIntegration {
         do {
             try await respond(wire, requestID: interaction.requestID, response: result)
             record(.init(tool: tool, capability: capability, decision: decision, turn: interaction.turn,
-                         requestID: id.uuidString, source: "can_use_tool", stage: .responded), session: interaction.session)
+                         requestID: id.uuidString, source: "can_use_tool", stage: .responded, reason: interaction.reason), session: interaction.session)
             if case .allowTurn = response, let turn = interaction.turn {
                 var grant = turnGrants[interaction.session].flatMap { $0.turn == turn ? $0 : nil } ?? (turn: turn, tools: [])
                 grant.tools.insert(interaction.tool)
@@ -676,7 +678,7 @@ public actor ClaudeIntegration: AgentIntegration {
             sink.yield(.init(session: session, payload: .resolved(id))); return .success(())
         } catch {
             record(.init(tool: tool, capability: capability, decision: decision, turn: interaction.turn,
-                         requestID: id.uuidString, source: "can_use_tool", stage: .resolved, outcome: .unknown), session: interaction.session)
+                         requestID: id.uuidString, source: "can_use_tool", stage: .resolved, outcome: .unknown, reason: interaction.reason), session: interaction.session)
             await wire.close(); return failed(error, uncertain: true)
         }
     }
@@ -919,23 +921,26 @@ public actor ClaudeIntegration: AgentIntegration {
                 try? await respond(wire, requestID: requestID, response: output("allow", nil)); return
             }
             let audit = auditPolicy(id) != nil
-            record(.init(tool: "SendMessage", capability: .subagent, target: target, decision: audit ? .wouldDeny : .hookDenied, turn: turn), session: id)
+            record(.init(tool: "SendMessage", capability: .subagent, target: target, decision: audit ? .wouldDeny : .hookDenied, turn: turn,
+                         reason: "notOwnSubagent"), session: id)
             try? await respond(wire, requestID: requestID, response: audit ? .object([:]) : output("deny", Self.sendRefusal())); return
         }
         let command = request["input"]["tool_input"]["command"].string ?? ""
         if let audit = auditPolicy(id) {
-            if case .deny = audit.inspect(command: command, cwd: sessions[id]?.cwd) {
-                record(.init(tool: "Bash", capability: .shell, target: command, decision: .wouldDeny, turn: turn), session: id)
+            let inspection = audit.inspection(command: command, cwd: sessions[id]?.cwd)
+            if case .deny = inspection.decision {
+                record(.init(tool: "Bash", capability: .shell, target: command, decision: .wouldDeny, turn: turn, reason: inspection.reason), session: id)
             }
             try? await respond(wire, requestID: requestID, response: .object([:])); return
         }
-        switch policy(id).inspect(command: command, cwd: sessions[id]?.cwd) {
+        let inspection = policy(id).inspection(command: command, cwd: sessions[id]?.cwd)
+        switch inspection.decision {
         case .allow: try? await respond(wire, requestID: requestID, response: .object([:]))
         case .ask:
-            record(.init(tool: "Bash", capability: .shell, target: command, decision: .hookAsked, turn: turn), session: id)
+            record(.init(tool: "Bash", capability: .shell, target: command, decision: .hookAsked, turn: turn, reason: inspection.reason), session: id)
             try? await respond(wire, requestID: requestID, response: output("ask", L10n.text("Роль требует подтверждения", "The role asks for approval")))
         case .deny(let reason):
-            record(.init(tool: "Bash", capability: .shell, target: command, decision: .hookDenied, turn: turn), session: id)
+            record(.init(tool: "Bash", capability: .shell, target: command, decision: .hookDenied, turn: turn, reason: inspection.reason), session: id)
             try? await respond(wire, requestID: requestID, response: output("deny", reason))
         }
     }
@@ -955,30 +960,31 @@ public actor ClaudeIntegration: AgentIntegration {
         let capability = Self.capability(tool: name, input: input, cwd: cwd), target = Self.target(tool: name, input: input)
         let toolUseID = request["tool_use_id"].string
         let token = UUID()
-        func sendDecision(_ response: JSONValue, decision: AgentCapabilityRecord.Decision) async {
+        // `reason` is the ledger's plain identifier for why the app answered this way; it never decides.
+        func sendDecision(_ response: JSONValue, decision: AgentCapabilityRecord.Decision, reason: String?) async {
             do {
                 try await respond(wire, requestID: requestID, response: response)
                 record(.init(tool: name, capability: capability, decision: decision, turn: turn,
-                             requestID: token.uuidString, source: "can_use_tool", stage: .responded), session: id)
+                             requestID: token.uuidString, source: "can_use_tool", stage: .responded, reason: reason), session: id)
             } catch {
                 record(.init(tool: name, capability: capability, decision: decision, turn: turn,
-                             requestID: token.uuidString, source: "can_use_tool", stage: .resolved, outcome: .unknown), session: id)
+                             requestID: token.uuidString, source: "can_use_tool", stage: .resolved, outcome: .unknown, reason: reason), session: id)
                 await wire.close()
             }
         }
-        func deny(_ message: String, _ decision: AgentCapabilityRecord.Decision = .denied) async {
+        func deny(_ message: String, _ decision: AgentCapabilityRecord.Decision = .denied, reason: String?) async {
             record(.init(tool: name, capability: capability, target: target, decision: decision, turn: turn,
-                         requestID: token.uuidString, source: "can_use_tool", stage: .requested), session: id)
-            await sendDecision(.object(["behavior": .string("deny"), "message": .string(message)]), decision: decision)
+                         requestID: token.uuidString, source: "can_use_tool", stage: .requested, reason: reason), session: id)
+            await sendDecision(.object(["behavior": .string("deny"), "message": .string(message)]), decision: decision, reason: reason)
             updateCall(toolUseID, session: id, status: .rejected)
         }
-        func allow() async {
+        func allow(_ reason: String) async {
             record(.init(tool: name, capability: capability, target: target, decision: .allowed, turn: turn,
-                         requestID: token.uuidString, source: "can_use_tool", stage: .requested), session: id)
-            await sendDecision(.object(["behavior": .string("allow"), "updatedInput": input]), decision: .allowed)
+                         requestID: token.uuidString, source: "can_use_tool", stage: .requested, reason: reason), session: id)
+            await sendDecision(.object(["behavior": .string("allow"), "updatedInput": input]), decision: .allowed, reason: reason)
         }
         guard policy.permits(tool: name) else {
-            await deny(L10n.text("Неподдерживаемый запрос", "Unsupported request"), .unsupportedTool); return
+            await deny(L10n.text("Неподдерживаемый запрос", "Unsupported request"), .unsupportedTool, reason: "unsupportedTool"); return
         }
         // An unattended run never waits: anything the engine asks about is outside the role and is refused.
         // A request outside an active turn (a background sub-agent or task after the turn ended) gets the role's own
@@ -987,6 +993,8 @@ public actor ClaudeIntegration: AgentIntegration {
         let outside = L10n.text("Действие выходит за разрешённые границы роли", "Outside the role's permitted scope")
         /// A command that leaves the sandbox: asked on its own, never covered by "allow for this turn".
         var unsandboxed = false
+        /// Ledger reason recorded when the request reaches the user.
+        var askReason = "roleAsks"
         switch name {
         case "Read", "Glob", "Grep", "Write", "Edit":
             let writing = ["Write", "Edit"].contains(name)
@@ -1000,54 +1008,64 @@ public actor ClaudeIntegration: AgentIntegration {
                 if writing, profile.filesystem == .readOnly {
                     inside = profile.scratch.map { Self.isWithinProject(path, cwd: cwd + "/" + $0) } ?? false
                 }
-                guard inside else { if attended && !policy.restricted { break } else { await deny(outside); return } }
+                guard inside else {
+                    if attended && !policy.restricted { askReason = "outsideRoots"; break } else { await deny(outside, reason: "outsideRoots"); return }
+                }
                 // Silent inside the role when the role says so; the editor role still asks like the old standard mode.
-                if profile.projectWrites == .silent || !writing { await allow(); return }
-                guard attended else { await deny(outside); return }
-            } else if !attended, profile.filesystem != .unrestricted { await deny(outside); return }
+                let onlyTemporary = temporary && !inProject && !roots.contains { Self.isWithinProject(path, cwd: $0) }
+                if profile.projectWrites == .silent || !writing { await allow(onlyTemporary ? "sandboxed" : "roleAllows"); return }
+                askReason = "roleAsksWrites"
+                guard attended else { await deny(outside, reason: "unattended"); return }
+            } else if !attended, profile.filesystem != .unrestricted { await deny(outside, reason: "unattended"); return }
         case "Bash":
-            guard profile.shell == .on || profile.filesystem == .unrestricted else { await deny(outside); return }
+            guard profile.shell == .on || profile.filesystem == .unrestricted else { await deny(outside, reason: "shellOff"); return }
             if policy.sandbox != nil {
                 // Inside the sandbox the OS holds the role's folders, so the CLI's other questions need no prompt.
                 // Outside it, only trusted commands run unasked; the rest is the user's call, one command at a time.
-                let command = input["command"].string ?? ""
-                if policy.runsSandboxed(command, disableSandbox: input["dangerouslyDisableSandbox"].bool == true) || policy.trusts(command) {
-                    await allow(); return
-                }
+                let command = input["command"].string ?? "", disableSandbox = input["dangerouslyDisableSandbox"].bool == true
+                // The app's heuristic says sandboxed, yet the CLI asked: evidence for step A2 of the boundary plan.
+                if policy.runsSandboxed(command, disableSandbox: disableSandbox) { await allow("cliAskedSandboxed"); return }
+                if policy.trusts(command) { await allow("trusted"); return }
+                askReason = disableSandbox ? "disableSandboxRequested" : command.contains("\\") ? "backslash"
+                    : policy.trustRejection(command) ?? "untrusted"
                 guard attended else {
-                    await deny(L10n.text("Команда вне песочницы; запуск без присмотра её не выполняет.", "A command outside the sandbox; an unattended run does not run it.")); return
+                    await deny(L10n.text("Команда вне песочницы; запуск без присмотра её не выполняет.", "A command outside the sandbox; an unattended run does not run it."),
+                               reason: askReason); return
                 }
                 unsandboxed = true
                 break
             }
-            guard attended else { await deny(outside); return }
+            askReason = "noSandbox"
+            guard attended else { await deny(outside, reason: "unattended"); return }
         case "WebFetch", "WebSearch":
-            if profile.network || (name == "WebSearch" && profile.webSearch) { await allow(); return }
-            await deny(outside); return
+            if profile.network || (name == "WebSearch" && profile.webSearch) { await allow("roleAllows"); return }
+            await deny(outside, reason: "network"); return
         case "AskUserQuestion": break
         case "SendMessage":
             // Normally the send hook answers first; this covers a CLI that asks anyway.
-            if Self.ownSubagent(input["to"].string ?? "", started: subagents[id]?.startedIDs ?? []) { await allow(); return }
-            await deny(Self.sendRefusal()); return
+            if Self.ownSubagent(input["to"].string ?? "", started: subagents[id]?.startedIDs ?? []) { await allow("roleAllows"); return }
+            await deny(Self.sendRefusal(), reason: "notOwnSubagent"); return
         default:
-            if name.hasPrefix("mcp__switchboard_browser__") || name.hasPrefix("mcp__claude-in-chrome__") { await allow(); return }
+            if name.hasPrefix("mcp__switchboard_browser__") || name.hasPrefix("mcp__claude-in-chrome__") { await allow("roleAllows"); return }
             // The chat directory only reads the app's snapshot; it is attached only to chats the user opted in.
-            if name.hasPrefix("mcp__" + ChatDirectory.serverName + "__") { await allow(); return }
+            if name.hasPrefix("mcp__" + ChatDirectory.serverName + "__") { await allow("roleAllows"); return }
             // The user approved this project server in the project's permissions; its tools run without a prompt.
-            if policy.projectServer(of: name) != nil { await allow(); return }
+            if policy.projectServer(of: name) != nil { await allow("roleAllows"); return }
             if name.hasPrefix(Self.connectorToolPrefix) {
                 let write = capability == .connectorWrite
                 switch profile.connectors {
-                case .off: await deny(outside); return
-                case .read: if write { await deny(outside); return }; await allow(); return
+                case .off: await deny(outside, reason: "connectorScope"); return
+                case .read: if write { await deny(outside, reason: "connectorScope"); return }; await allow("roleAllows"); return
                 case .askWrites, .all:
-                    if !write { await allow(); return }
-                    guard !policy.scheduled else { await deny(outside); return }
+                    if !write { await allow("roleAllows"); return }
+                    askReason = "connectorWrite"
+                    guard !policy.scheduled else { await deny(outside, reason: "unattended"); return }
                 }
-            } else if !attended { await deny(outside); return }
+            } else if !attended { await deny(outside, reason: "unattended"); return }
         }
         guard let turn else {
-            await deny(L10n.text("Ход завершён: действие вне роли некому подтвердить", "The turn has ended: nobody can approve an action outside the role")); return
+            await deny(L10n.text("Ход завершён: действие вне роли некому подтвердить", "The turn has ended: nobody can approve an action outside the role"),
+                       reason: "turnEnded"); return
         }
         var questions: Set<String>?
         let kind: AgentInteraction.Kind
@@ -1061,19 +1079,20 @@ public actor ClaudeIntegration: AgentIntegration {
                 return .init(id: text, text: text, options: options, secret: false, required: true, header: question["header"].string)
             }
             guard !fields.isEmpty, fields.count <= 16, fields.count == input["questions"].array.count, Set(fields.map(\.id)).count == fields.count else {
-                await deny(L10n.text("Неподдерживаемая схема вопроса", "Unsupported question schema")); return
+                await deny(L10n.text("Неподдерживаемая схема вопроса", "Unsupported question schema"), reason: "unsupportedSchema"); return
             }
             questions = Set(fields.map(\.id)); kind = .questions(fields)
         } else {
             // "Allow for this turn" answered earlier in the same turn covers later requests of the same tool.
-            if !unsandboxed, let grant = turnGrants[id], grant.turn == turn, grant.tools.contains(name) { await allow(); return }
+            if !unsandboxed, let grant = turnGrants[id], grant.turn == turn, grant.tools.contains(name) { await allow("turnGrant"); return }
             kind = .approval(canAllow: true)
             record(.init(tool: name, capability: capability, target: target, decision: .asked, turn: turn,
-                         requestID: token.uuidString, source: "can_use_tool", stage: .requested), session: id)
+                         requestID: token.uuidString, source: "can_use_tool", stage: .requested, reason: askReason), session: id)
         }
         // The grant key of a command outside the sandbox never matches a tool name, so it cannot widen later requests.
         interactions[token] = .init(session: id, requestID: requestID, tool: unsandboxed ? Self.unsandboxedGrant : name, turn: turn, input: input,
-                                    questions: questions, epoch: context.accountRevision, toolUseID: toolUseID)
+                                    questions: questions, epoch: context.accountRevision, toolUseID: toolUseID,
+                                    reason: questions == nil ? askReason : nil)
         updateCall(toolUseID, session: id, status: .awaitingApproval)
         let reason = unsandboxed ? L10n.text("Bash вне песочницы: команда получит доступ ко всему Mac", "Bash outside the sandbox: the command gets access to the whole Mac") : name
         sink.yield(.init(session: reference(id), payload: .interaction(.init(id: token, session: reference(id), turn: turn,

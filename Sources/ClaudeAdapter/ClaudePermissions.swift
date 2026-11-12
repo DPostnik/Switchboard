@@ -157,23 +157,38 @@ struct ClaudeLaunchPolicy: Equatable {
     }
     /// Existing project command grants are evaluated by the shared deterministic policy.
     func trusts(_ command: String) -> Bool { AgentCommandPolicy(profile).trusts(command) }
+    /// Ledger reason a command is not trusted, nil when it is. Interim heuristic: `substitution` for `$(` or a
+    /// backtick, `cdBeforeScript` for a `cd ` segment, otherwise `untrusted`. Diagnostic only, never decides;
+    /// the finer reasons are meant to come from `AgentCommandPolicy` later.
+    func trustRejection(_ command: String) -> String? {
+        guard !trusts(command) else { return nil }
+        return Self.trustRejectionShape(command)
+    }
+    static func trustRejectionShape(_ command: String) -> String {
+        if command.contains("$(") || command.contains("`") { return "substitution" }
+        if heads(command).contains(where: { $0 == "cd" || $0.hasPrefix("cd ") }) { return "cdBeforeScript" }
+        return "untrusted"
+    }
     enum CommandDecision: Equatable { case allow, ask, deny(String) }
     /// Inspection of one shell command against the role: deny-list first, then the network list, then the ask-list.
     /// A recursive delete whose every target stays inside the project, a writable root or a temporary folder is not asked.
-    func inspect(command: String, cwd: String? = nil) -> CommandDecision {
+    func inspect(command: String, cwd: String? = nil) -> CommandDecision { inspection(command: command, cwd: cwd).decision }
+    /// `inspect` with the ledger reason of a non-allow answer: `denyList`, `network` or `askList`
+    /// (an ask-list hit refused in an unattended run keeps `askList`).
+    func inspection(command: String, cwd: String? = nil) -> (decision: CommandDecision, reason: String?) {
         let text = command.trimmingCharacters(in: .whitespacesAndNewlines) + " "
         if let hit = profile.commandInspection.deny.first(where: { Self.matches(text, $0) }) {
-            return .deny(L10n.text("Команда запрещена ролью: \(hit.trimmingCharacters(in: .whitespaces))", "The role forbids this command: \(hit.trimmingCharacters(in: .whitespaces))"))
+            return (.deny(L10n.text("Команда запрещена ролью: \(hit.trimmingCharacters(in: .whitespaces))", "The role forbids this command: \(hit.trimmingCharacters(in: .whitespaces))")), "denyList")
         }
         if !profile.network, let hit = Self.networkCommands.first(where: { Self.matches(text, $0) }) {
-            return .deny(L10n.text("Роль без сети: \(hit.trimmingCharacters(in: .whitespaces))", "The role has no network: \(hit.trimmingCharacters(in: .whitespaces))"))
+            return (.deny(L10n.text("Роль без сети: \(hit.trimmingCharacters(in: .whitespaces))", "The role has no network: \(hit.trimmingCharacters(in: .whitespaces))")), "network")
         }
         for head in Self.heads(text) {
             guard let pattern = profile.commandInspection.ask.first(where: { (head + " ").hasPrefix($0) }) else { continue }
             if pattern.hasPrefix("rm "), let cwd, safeRemoval(head, cwd: cwd) { continue }
-            return profile.approvals == .ask && !scheduled ? .ask : .deny(L10n.text("Действие вне роли; запуск без присмотра не ждёт.", "Outside the role; an unattended run does not wait."))
+            return (profile.approvals == .ask && !scheduled ? .ask : .deny(L10n.text("Действие вне роли; запуск без присмотра не ждёт.", "Outside the role; an unattended run does not wait.")), "askList")
         }
-        return .allow
+        return (.allow, nil)
     }
     /// `rm` targets that are plain paths inside the project, a writable extra root or a temporary folder.
     /// Variables, `~`, globs at the root and `..` are never considered safe.
