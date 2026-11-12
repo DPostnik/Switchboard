@@ -73,6 +73,10 @@ HOST = ROOT / 'SandboxRuntime/mcp_host.py'
 DEVELOPER = pathlib.Path(subprocess.check_output(['xcode-select', '-p'], text=True).strip())
 TOOLCHAIN_TREES = ['/Applications/Xcode.app/Contents/Developer', '/Library/Developer/CommandLineTools', '/opt/homebrew']
 LAUNCHER = ['/usr/bin/python3', '-I', '-c', 'import os,sys\ntry:\n    os.setsid()\nexcept PermissionError:\n    pass\nos.execv(sys.argv[1], sys.argv[1:])']
+# nono 0.81.0 closes every inherited descriptor above 2 (the CLI saw EBADF on /dev/fd/N). Inside the sandbox this launcher
+# reads the token as the first stdin line, hands it to the CLI on fd 3 through a pipe (zsh process substitution, nothing
+# on disk, nothing in argv or the environment) and execs the CLI, which then reads the stream-json protocol from stdin.
+FD_LAUNCHER = ['/bin/zsh', '-f', '-c', 'IFS= read -r t; exec 3< <(print -r -- "$t"); unset t; exec "$@"', 'zsh']
 PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
 STARTED = time.time()
 START_TEXT = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -261,6 +265,9 @@ if [[ -r "$CLAUDE_CONFIG_DIR/.credentials.json" ]]; then n=$(grep -c accessToken
 echo "env_sk_values=$(env | grep -c 'sk-ant-')" >> "$f"
 echo "env_oauth_names=$(env | cut -d= -f1 | grep -ci oauth)" >> "$f"
 echo "proc=$(python3 -I "${0:A:h}/proc.py" "%(marker)s" 2>&1 | tail -1)" >> "$f"
+echo "bash_fd_list=$(ls /dev/fd 2>/dev/null | tr '\n' ' ')" >> "$f"
+cli=$(pgrep -f -- "--session-id" 2>/dev/null | head -1)
+echo "lsof_cli_fd3=$(lsof -a -p "${cli:-0}" -d 3 2>/dev/null | tail -n +2 | awk '{print $5}' | head -1)" >> "$f"
 echo "boundary-done"
 '''
 
@@ -431,14 +438,10 @@ class Session:
                'XDG_STATE_HOME': str(SANDBOX_ROOT / 'state'), 'XDG_CONFIG_HOME': str(SANDBOX_ROOT / 'config'),
                'SWITCHBOARD_EXTERNAL_SANDBOX': '1', 'SSL_CERT_FILE': '/etc/ssl/cert.pem', 'SB_PROBE_ENV_MARKER': self.marker}
         env.update(credential_env or {})
-        pass_fds = ()
         if token_for_pipe is not None:
-            read_end, write_end = os.pipe()
-            os.write(write_end, token_for_pipe.encode())
-            os.close(write_end)
-            env['CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR'] = str(read_end)
-            pass_fds = (read_end,)
-            self.token_pipe = read_end
+            env['CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR'] = '3'
+            split = command.index('--')
+            command = command[:split + 1] + FD_LAUNCHER + command[split + 1:]
         if mcp:
             self.host = subprocess.Popen(['/usr/bin/python3', '-I', str(HOST), '--socket', str(self.socket), '--spec', str(self.worker / 'servers.json'),
                                           '--log', str(self.host_log)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -446,9 +449,11 @@ class Session:
             if self.host.stdout.readline().strip() != 'ready':
                 raise RuntimeError('MCP host did not start')
         self.proc = subprocess.Popen(LAUNCHER + command, env=env, cwd=str(self.project), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE, text=True, bufsize=1, pass_fds=pass_fds)
-        if self.token_pipe is not None:
-            os.close(self.token_pipe)
+                                     stderr=subprocess.PIPE, text=True, bufsize=1)
+        if token_for_pipe is not None:
+            with self.lock:
+                self.proc.stdin.write(token_for_pipe + '\n')
+                self.proc.stdin.flush()
         threading.Thread(target=self._read_out, daemon=True).start()
         threading.Thread(target=self._read_err, daemon=True).start()
         self.control({'subtype': 'initialize', 'hooks': None}, timeout=60)
@@ -666,7 +671,7 @@ OPTIONS = {
     'a': 'mediated security with keychain_access read (Keychain item through a PATH shim)',
     'b': '.credentials.json in CLAUDE_CONFIG_DIR (scratch profile copy without the refresh token)',
     'c': 'CLAUDE_CODE_OAUTH_TOKEN in the environment',
-    'd': 'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR pipe filled by the app, CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH=1',
+    'd': 'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3: token as the first stdin line, moved to fd 3 by a zsh launcher inside the sandbox; CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH=1',
     'e': 'as d with a stale token: the CLI must ask the host for a fresh one (oauth_token_refresh over stdio)',
 }
 qualifying = []
@@ -742,6 +747,8 @@ if '1' in GROUPS:
                                                'items_listed': values.get('keychain_items_listed')}
                     facts['proc'] = values.get('proc')
                     facts['env_oauth_names'] = values.get('env_oauth_names')
+                    facts['bash_fd_list'] = values.get('bash_fd_list')
+                    facts['cli_fd3_type'] = values.get('lsof_cli_fd3')
                 if option == 'a':
                     facts['refresh_write'] = 'not measured: keychain_access read only; a write test would need readwrite on the app login item'
                 if option in ('b', 'c', 'd'):
