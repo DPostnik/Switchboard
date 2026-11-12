@@ -211,11 +211,30 @@ private func settings(_ args: [String]) throws -> JSONValue {
         #expect(developer.inspect(command: risky, cwd: "/p/proj") == .ask, "\(risky)")
     }
     #expect(developer.inspect(command: "git push origin main", cwd: "/p/proj") == .allow)
-    #expect(developer.inspect(command: "cd /tmp && sudo rm -rf /") == .deny(L10n.text("Команда запрещена ролью: sudo", "The role forbids this command: sudo")))
+    #expect(developer.inspect(command: "cd /tmp && sudo rm -rf /") == .deny(ClaudeIntegration.roleDenyRefusal("sudo")))
+    // The deny list stays a denial; its text rules out a workaround and names the app's tool where one exists.
+    #expect(ClaudeIntegration.roleDenyRefusal("sudo", language: .russian).hasPrefix("Команда запрещена ролью: sudo. Обход не допускается")
+            && ClaudeIntegration.roleDenyRefusal("sudo", language: .english).hasPrefix("The role forbids this command: sudo. No workaround is allowed"))
+    #expect(developer.inspect(command: "osascript -e 'tell app \"Safari\" to quit'") == .deny(ClaudeIntegration.roleDenyRefusal("osascript")))
+    #expect(ClaudeIntegration.roleDenyRefusal("osascript", language: .english).contains("browser tools")
+            && ClaudeIntegration.roleDenyRefusal("osascript", language: .russian).contains("инструменты браузера"))
+    #expect(ClaudeIntegration.roleDenyRefusal("launchctl", language: .english).contains("`request_app_restart`")
+            && ClaudeIntegration.roleDenyRefusal("launchctl", language: .russian).contains("`request_app_restart`"))
+    #expect(!ClaudeIntegration.roleDenyRefusal("diskutil", language: .english).contains("request_app_restart"))
     #expect(developer.inspect(command: "pseudo tool") == .allow && developer.inspect(command: "FOO=1 sudo ls") != .allow && developer.inspect(command: "echo hi; sudo ls") != .allow)
     #expect(developer.inspect(command: "git push --force origin main") != .allow)
     let unattended = ClaudeLaunchPolicy(preset(AgentRoleID.developer).profile, scheduled: true, userChromeEnabled: false)
-    if case .deny = unattended.inspect(command: "rm -rf build") {} else { Issue.record("An unattended run must not wait") }
+    #expect(unattended.inspect(command: "rm -rf build") == .deny(ClaudeIntegration.unattendedRefusal()), "An unattended run must not wait")
+    // Refusals that cannot ask name the route: one settings proposal when the inbox exists, the blocker in the final message.
+    for outsideSandbox in [false, true] {
+        let ru = ClaudeIntegration.unattendedRefusal(outsideSandbox: outsideSandbox, language: .russian)
+        let en = ClaudeIntegration.unattendedRefusal(outsideSandbox: outsideSandbox, language: .english)
+        #expect(ru.contains("Не ищи обход") && ru.contains("одно предложение настроек") && ru.contains("$SWITCHBOARD_SETTINGS_PROPOSALS") && ru.contains("блокер"))
+        #expect(en.contains("Do not look for a workaround") && en.contains("one settings proposal") && en.contains("$SWITCHBOARD_SETTINGS_PROPOSALS") && en.contains("blocker"))
+    }
+    #expect(ClaudeIntegration.unattendedRefusal(outsideSandbox: true, language: .english).hasPrefix("A command outside the sandbox"))
+    #expect(ClaudeIntegration.shellOffRefusal(language: .english).contains("only the user changes the chat's role")
+            && ClaudeIntegration.shellOffRefusal(language: .russian).contains("роль чата меняет только он"))
     var offline = preset(AgentRoleID.developer).profile; offline.network = false
     let noNetwork = ClaudeLaunchPolicy(offline, scheduled: false, userChromeEnabled: false)
     if case .deny = noNetwork.inspect(command: "curl https://example.com") {} else { Issue.record("Network command must be denied") }

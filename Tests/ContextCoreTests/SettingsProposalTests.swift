@@ -81,7 +81,8 @@ private func sampleState() -> SavedState {
     // Without a sandbox (the editor has no shell) there is nothing to propose from.
     let editor = try ClaudeIntegration.arguments(id: UUID().uuidString, resumed: false, permissions: AgentRoleCatalog.preset(AgentRoleID.editor).profile(for: project),
                                                  model: "", effort: nil, cwd: project.path)
-    #expect(!(editor.firstIndex(of: "--append-system-prompt").map { editor[$0 + 1] } ?? "").contains(SettingsProposalInbox.environmentKey))
+    // The shared refusal rule names the variable only conditionally ("when it is set"); the format text is absent.
+    #expect(!(editor.firstIndex(of: "--append-system-prompt").map { editor[$0 + 1] } ?? "").contains("addPresets"))
 }
 
 @Test func aProposalCardBelongsOnlyToAnExistingUnarchivedInteractiveChat() {

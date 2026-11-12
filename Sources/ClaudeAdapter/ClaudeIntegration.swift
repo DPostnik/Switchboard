@@ -1144,10 +1144,10 @@ public actor ClaudeIntegration: AgentIntegration {
                     await allow(policy.boundary ? "boundary" : onlyTemporary ? "sandboxed" : "roleAllows"); return
                 }
                 askReason = "roleAsksWrites"
-                guard attended else { await deny(outside, reason: "unattended"); return }
-            } else if !attended, profile.filesystem != .unrestricted { await deny(outside, reason: "unattended"); return }
+                guard attended else { await deny(Self.unattendedRefusal(), reason: "unattended"); return }
+            } else if !attended, profile.filesystem != .unrestricted { await deny(Self.unattendedRefusal(), reason: "unattended"); return }
         case "Bash":
-            guard profile.shell == .on || profile.filesystem == .unrestricted else { await deny(outside, reason: "shellOff"); return }
+            guard profile.shell == .on || profile.filesystem == .unrestricted else { await deny(Self.shellOffRefusal(), reason: "shellOff"); return }
             // Under the boundary the OS holds the whole process tree; the hook already applied the deny, network and ask lists.
             // `dangerouslyDisableSandbox` changes nothing there, so it is not a question either.
             if policy.boundary { await allow("boundary"); return }
@@ -1161,14 +1161,13 @@ public actor ClaudeIntegration: AgentIntegration {
                 if policy.trusts(command, cwd: session) { await allow("trusted"); return }
                 askReason = "disableSandboxRequested:" + (policy.trustRejection(command, cwd: session) ?? "untrusted")
                 guard attended else {
-                    await deny(L10n.text("Команда вне песочницы; запуск без присмотра её не выполняет.", "A command outside the sandbox; an unattended run does not run it."),
-                               reason: askReason); return
+                    await deny(Self.unattendedRefusal(outsideSandbox: true), reason: askReason); return
                 }
                 unsandboxed = true
                 break
             }
             askReason = "noSandbox"
-            guard attended else { await deny(outside, reason: "unattended"); return }
+            guard attended else { await deny(Self.unattendedRefusal(), reason: "unattended"); return }
         case "WebFetch", "WebSearch":
             if profile.network || (name == "WebSearch" && profile.webSearch) { await allow("roleAllows"); return }
             await deny(outside, reason: "network"); return
@@ -1191,9 +1190,9 @@ public actor ClaudeIntegration: AgentIntegration {
                 case .askWrites, .all:
                     if !write { await allow("roleAllows"); return }
                     askReason = "connectorWrite"
-                    guard !policy.scheduled else { await deny(outside, reason: "unattended"); return }
+                    guard !policy.scheduled else { await deny(Self.unattendedRefusal(), reason: "unattended"); return }
                 }
-            } else if !attended { await deny(outside, reason: "unattended"); return }
+            } else if !attended { await deny(Self.unattendedRefusal(), reason: "unattended"); return }
         }
         guard let turn else {
             await deny(L10n.text("Ход завершён: действие вне роли некому подтвердить", "The turn has ended: nobody can approve an action outside the role"),

@@ -64,9 +64,10 @@ Decided by the user on 2026-11-12. A refusal must cost one step, not twenty minu
    workaround is a boundary bypass, even when it succeeds.
 3. The agent continues the independent part of the task while the request waits, and reports the
    request in its final message if it is still open.
-4. The user answers once. The grant is a project setting, so no later chat asks again. After the
-   answer the app replaces the provider process with the new rights and continues the same task
-   (planned, see section 5).
+4. The user answers once, on the request card in the requesting chat. The grant is a project
+   setting, so no later chat asks again. After the answer the app queues one fixed message to that
+   chat; its next turn starts the provider process with the new rights and continues the same task
+   (built, unit-tested; see section 5).
 5. A request that repeats across projects for a safe standard resource becomes a default (an access
    set or a role default), found by the review in section 7. It must not stay a per-project grant.
 
@@ -184,24 +185,65 @@ Do not reopen these without the user.
 
 | | Codex | Claude |
 | --- | --- | --- |
-| Enforcement for eligible Developer chats | External boundary (nono), since 2026-11-11, commit 2cddfce | External boundary (nono), phase B2 (built and unit-tested; live check and probes pending) + the role's command hook; the phase A CLI sandbox remains the fallback |
+| Enforcement for eligible Developer chats | External boundary (nono), since 2026-11-11, commit 2cddfce | External boundary (nono), phase B2+B3 (commit 524ba0e, verified live in super-wiki 2026-11-12) + the role's command hook; the phase A CLI sandbox remains the fallback |
 | Prompts for commands | None: `externalSandbox`, `approvalPolicy: never` | Under the boundary none except the role's ask list (hook); ledger reason `boundary`. On the fallback: as phase A (CLI sandbox, `trusts`, ask or deny) |
 | File tools | Share the session union (approximation: access-set paths are writable to them) | Answered by roots in `permission()` (inner check, stricter than the session union); under the boundary a path outside is denied without a prompt, reason `outsideBoundary`, text names the settings proposal |
 | Leaving the sandbox | Not possible; mediated commands and relay tools only | Under the boundary not possible (`dangerouslyDisableSandbox` changes nothing); mediated `pgrep`, `codesign`/`security`, `gh`, `git` by access set. On the fallback: flag + trusted command |
-| App-owned tools | Through the relay | Under the boundary through the relay (`switchboard_browser`, chat directory); project `.mcp.json` servers inside. On the fallback: direct |
+| App-owned tools | Through the relay. `project_diagnostics` (diagnostics server) for every role with a shell; `app_log` and `request_app_restart` only where the running app bundle lies inside the project | Under the boundary through the relay (`switchboard_browser`, chat directory with `project_diagnostics`, `app_log`, `request_app_restart` under the same gates); project `.mcp.json` servers inside. On the fallback: direct |
+| Access requests (channel 4) | Under the boundary: the inbox is a writable grant, `$SWITCHBOARD_SETTINGS_PROPOSALS` is set, the format instructions are given, `chat` = `CODEX_THREAD_ID`. Native path: none | Inbox writable in the CLI sandbox and under the boundary, `chat` = `SWITCHBOARD_CHAT_ID` |
+| Request card and continuation | A proposal whose `chat` names an existing, unarchived, non-scheduled chat is a card in that chat (Apply, Reject; waiting state in the sidebar, Needs you, palette, dock, notch and Fringe). Apply saves the settings, removes the file, queues one fixed message; Reject removes the file, queues one fixed rejection. Only a removed file continues its chat, once. Other proposals keep the global sheet | Same (shared code in `DeskModel`) |
 | Credentials | `CODEX_HOME` auth file inside the provider home | The app reads its profile's Keychain item with `/usr/bin/security` outside; the bare token goes as the first stdin line to a zsh launcher that moves it to fd 3 (option d). The CLI cannot refresh it: a live worker is replaced at the next turn once less than 30 minutes remain; a launch with a missing or expiring token falls back to the CLI sandbox, whose CLI renews the Keychain item itself (assumption, unverified live) |
 | Ineligible cases | Operator role, role without network, command sandbox off, helper not verified: native sandbox with prompts | Codex's cases, plus: a trusted project command the boundary cannot run (inventory), the user's Chrome (`--chrome`) enabled, token missing or expiring. Visible RU/EN chat notice, once per session and reason; role-defined cases (unrestricted, no network) only logged (`externalSandbox`) |
 | Revocation | A changed scope replaces the worker at the next send | A changed plan authority or launch replaces the process at the next turn: process group SIGTERM, wait up to 3 s, SIGKILL, relay host stopped, worker folder removed, then the new process; per-session epoch for pending interactions. A running turn is not stopped by a settings change (both providers) |
 
-Claude phase B2 is built in branch `worktree-agent-ad8e13a56d490bfda` (2026-11-12) and covered by
-`ExternalSandboxTests` and `ClaudeInteractiveTests` with a fake helper and a fake CLI. Pending: the
-probes against the real helper and CLI 2.1.322 (the launch flags `--settings <file>`,
-`--mcp-config`, `--strict-mcp-config`, `--plugin-dir` were not re-read from the 2.1.322 `--help`),
-sub-agent teardown (B1 check 6), the live B4 scenarios and the ledger comparison. The plan and the
-brief are in `docs/handoffs/claude-boundary-2026-11-12/`.
+Claude phases B2+B3 were published as `524ba0e` (with the relay fix: app-owned servers start in the
+project folder, for both providers) and verified live in super-wiki on 2026-11-12: environment
+marker, project writes without a prompt, a read outside refused with reason `outsideBoundary` and
+the route text, resume after an app restart, browser tools through the relay. Not yet run: the live
+scenarios with five parallel chats, a settings change during a chat, a token-expiry relaunch and the
+My Chrome fallback notice. `scripts/probe-claude-nono.py` check 6 (sub-agent teardown) reports
+`fail`: it matches tracked processes by the launcher's process group, but the CLI starts each
+background Bash task in its own group. The plan and the brief are in
+`docs/handoffs/claude-boundary-2026-11-12/` and `docs/handoffs/permission-model-2026-11-12/`.
+
+Steps 2-4 of the permission-model handoff (commits `233be8b`, `6b14264`, `f0a8fde`,
+2026-11-12) are unit-tested only: tests were written but not run in the authoring chats,
+and nothing of them is checked live yet.
 
 Rollback switch for the Claude boundary: `defaults write local.daniil.switchboard ClaudeExternalBoundaryOff -bool YES`,
 then restart the app; Claude chats return to the CLI sandbox.
+
+Delivered in steps 2-4 (each still waits for the live check):
+
+- Verification queue under the boundary: `scripts/verify-project.py` reads the load from the kernel
+  (`os.getloadavg`, `os.cpu_count`) and counts heavy jobs with `ps` only where `ps` runs; under the
+  boundary it skips the count and says so, and the shared build lock still runs builds one at a
+  time. Under the boundary `install` does not run the restart script: it records the attempt and
+  tells the agent to call `request_app_restart` once. Builds and tests stay in channel 1.
+- `request_app_restart` (`ChatDirectoryRuntime/server.py`): posts the app's own restart notification
+  once per chat server, no arguments, no retry, also after an error; the continuation goes to the
+  requesting chat by its Switchboard chat ID (both providers, when the chat directory server is
+  attached) or, on Codex's diagnostics-only server, by its Codex thread ID. It never starts the
+  app binary (the bundle lies in an agent-writable project). `scripts/request-app-restart.sh`
+  remains for chats without the tool; under the boundary it cannot reach the running app.
+- `app_log`: a fixed `log show` argv run by the server outside the boundary, predicate on the app's
+  subsystem, category from a fixed list, 5 to 60 minutes, up to 300 lines, long lines cut,
+  credential-like text redacted. With it, this project's Claude chats can move under the boundary
+  once the user removes `/usr/bin/log show` from the trusted commands (the only inventory blocker
+  here) and `zsh scripts/request-app-restart.sh` (not a blocker, but useless under the boundary).
+  This is a settings proposal only the user applies; not applied on 2026-11-12.
+- Settings proposal inbox for Codex chats under the boundary (writable grant, variable,
+  instructions). The native Codex path still has none (it keeps its file roots, invariant 6).
+- Access request card in the requesting chat and continuation after Apply or Reject (table above).
+- The "After a refusal" rule is in `AgentAutonomy`, which every chat of every project gets (Claude
+  chats, Claude scheduled jobs, Codex threads), RU and EN. The heavy-work rule there names
+  `project_diagnostics` first and no longer tells Claude to leave the sandbox for `sysctl`.
+- Refusal texts that name the route (Claude): the role deny list (`denyList`: no workaround; the
+  browser tools for `osascript`, `request_app_restart` for `launchctl`; report to the user), every
+  `unattended` refusal including the hook's unattended ask-list hit and the unattended unsandboxed
+  command (one settings proposal when the inbox exists, the blocker in the final message), and
+  `shellOff` (no other way; only the user changes the role). Decisions and ledger reasons did not
+  change.
 
 Codex chat inspection (2026-11-12, implementation pending verification): channel 3 uses the same
 `ChatDirectoryRuntime` reference allowlist as Claude. Directory arguments are part of the dedicated
@@ -217,38 +259,37 @@ disabled entries. Channel 3 only; no grant or retry behavior changes. Verificati
 
 Known gaps. Check this list before you treat a failure as a new defect.
 
-- Under nono `ps` cannot run (setuid) and `log show` cannot run in any sandbox. `pgrep` sees only
-  sandboxed processes unless mediated. `lsof -i` and `sysctl -n vm.loadavg` work.
-- `scripts/verify-project.py` calls `ps` and `sysctl` itself, so the verification queue fails from a
-  chat under the boundary (`Operation not permitted: 'ps'`, 2026-11-12). Intended fix, not built:
-  the queue takes load and process facts from the app's diagnostics (channel 3); build and tests
-  stay in channel 1.
-- `scripts/request-app-restart.sh` starts a second app instance and needs `NSWorkspace`; under the
-  boundary this is unverified. Intended fix, not built: a restart request as an app-owned tool.
-  `AGENTS.md` still tells Codex to use `require_escalated`, which a chat under the boundary does not
-  have.
-- This project's trusted `/usr/bin/log show` needs an app-owned tool before Claude can move under
-  the boundary: until then the command inventory keeps this project's Claude chats on the CLI
-  sandbox, with the notice naming the command. The same applies to job-search (`launchctl`, `cp …
-  ~/Library/LaunchAgents/`).
+- Under nono `ps` cannot run (setuid) and `log show` cannot run in any sandbox: use
+  `project_diagnostics` and `app_log`. `pgrep` sees only sandboxed processes unless mediated.
+  `lsof -i` and `sysctl -n vm.loadavg` work.
+- `app_log` and `request_app_restart` reach only chats whose project contains the running app
+  bundle. A chat in a separate worktree (also `.claude/worktrees/*` of this project) does not get
+  them: the bundle is not inside the worktree. Such a chat uses the script and `/usr/bin/log show`
+  where its sandbox allows them, otherwise it reports the blocker.
+- A new Codex thread has no thread ID when its diagnostics server starts, so its restart request
+  restarts the app but continues nothing; after the thread is resumed (its next server start) it
+  carries the ID.
+- `scripts/request-app-restart.sh`, `scripts/prepare-nono.py` (needs the certificate chain; run it
+  outside a sandbox) and so `scripts/build-app.sh` as a whole are unverified under the boundary.
+- job-search's trusted `launchctl` and `cp … ~/Library/LaunchAgents/` keep its Claude chats on the
+  CLI sandbox (inventory); no app-owned tool covers them.
 - The command inventory (`ExternalSandboxPlanner.unrunnableTrustedCommand`) is used by Claude only.
   Codex does not apply it yet (invariant 14 gap, waiting for the user's decision): it would take
   this project's Codex chats off the boundary they use today because of the trusted `log show`.
   The base entries `ps` and `sysctl -n` are exempt for both.
-- Mediated `pgrep` and the settings proposal inbox as a writable grant are Claude planner inputs
-  only; Codex chats under the boundary do not have them (invariant 14 gap: a Codex chat cannot
-  write a settings proposal from inside the boundary).
+- Mediated `pgrep` is a Claude planner input only; Codex chats under the boundary do not have it.
 - Codex shows no chat notice when it falls back to the native sandbox; the reason is only logged.
 - Claude's own Claude in Chrome bridge (`--chrome`) is not verified under nono, so chats with the
   user's Chrome stay on the CLI sandbox.
-- Access requests are files today (`SettingsProposalInbox`). `applySettingsProposal` saves the
-  settings and nothing else: no card in the chat, no process replacement, no continuation of the
-  task. Planned, not built: a request card in the chat, one click, relaunch at a turn boundary,
-  automatic continuation.
-- The "one refusal, one request, no workaround" rule is not in the instructions the app gives every
-  chat (`AgentAutonomy`); only this file, `AGENTS.md` and the boundary instructions of Claude chats
-  (`boundaryCommandInstructions`) state it. Only Claude's `outsideBoundary` refusal names the
-  standard route; other refusal texts do not yet, and a nono OS refusal carries no text at all.
+- Access requests: the card does not reach the mobile app. A proposal without a valid chat (none,
+  unknown, archived, a scheduled run) keeps the global sheet and continues nothing. A running turn
+  is not interrupted: the new rights apply from the next turn.
+- Refusal texts without the route: Claude `outsideRoots` on the CLI-sandbox path, `network` (role
+  without network, in `permission()` and the hook), `connectorScope`, `turnEnded`,
+  `unsupportedTool`, `notOwnSubagent`. Codex: the app answers approvals with protocol decisions
+  (`decline`, `cancel`) that carry no text, and an engine refusal under `approvalPolicy: never`
+  has no app text. A nono OS refusal carries no text for either provider. These paths are covered
+  only by the `AgentAutonomy` rule. ACP (Gemini) refusals are unchanged.
 - Grants carry no origin: the settings do not record when, by which chat and why a folder or command
   was added, and nothing reports a grant that is never used.
 - Roles without network stay on the native path (the proxy allowlist for model hosts is not wired).
@@ -340,9 +381,9 @@ per file, and are recorded in `docs/access-reviews.md`.
 | Relay for app-owned MCP servers | `SandboxRuntime/` |
 | Codex wiring | `Sources/CodexAdapter/CodexIntegration.swift` (`boundary`), `CodexClient.swift`, `CodexConnection.swift`, `CodexConfiguration.swift` |
 | Claude wiring | `Sources/ClaudeAdapter/ClaudePermissions.swift` (`ClaudeLaunchPolicy`), `ClaudeIntegration.swift` (`permission()`, `hook()`) |
-| App-owned tools | `ChatDirectoryRuntime/server.py` (`inspect_chat`, `project_diagnostics`), `BrowserRuntime/`, `UserChromeRuntime/` |
-| Settings proposals | `Sources/ContextCore/SettingsProposals.swift`, `Sources/ContextDesk/SettingsProposalView.swift` |
+| App-owned tools | `ChatDirectoryRuntime/server.py` (`inspect_chat`, `project_diagnostics`, `app_log`, `request_app_restart`; gate `ChatDirectory.hostApplication`, restart continuation `AppRestart.swift`), `BrowserRuntime/`, `UserChromeRuntime/` |
+| Settings proposals | `Sources/ContextCore/SettingsProposals.swift` (inbox, shared instructions, `SettingsProposalOutcome`), `Sources/ContextDesk/SettingsProposalView.swift` (card and sheet), `DeskModel.swift` (apply, reject, continuation) |
 | Settings UI | `Sources/ContextDesk/ProjectSettingsView.swift`, `ProjectPermissionsView.swift`, `SharedRootsSettings.swift` |
 | Ledger and review | `Sources/ContextCore/CapabilityLedger.swift`, `Sources/AgentContract/AgentRuntimeEvents.swift`, `.agents/skills/access-review/` |
-| Agent-facing instructions | `Sources/ContextCore/AgentAutonomy.swift`, `sandboxCommandInstructions` in `ClaudeIntegration.swift` |
+| Agent-facing instructions and refusal texts | `Sources/ContextCore/AgentAutonomy.swift`, `sandboxCommandInstructions` in `ClaudeIntegration.swift`, `boundaryCommandInstructions` and the refusal texts in `ClaudeBoundary.swift` |
 | Build under the boundary | `scripts/swift-task.py` (`SWITCHBOARD_EXTERNAL_SANDBOX`) |

@@ -179,4 +179,33 @@ extension ClaudeIntegration {
                   "Outside the project's boundary: \(path). Do not look for a workaround: if the task needs it, write one settings proposal (addFolders) with the exact folder and the reason.",
                   language: language)
     }
+    /// The refusal of a role deny-list command (`denyList`). It stays denied; the text names the app's tool where one
+    /// covers the usual purpose, and rules out a workaround.
+    static func roleDenyRefusal(_ command: String, language: AppLanguage = L10n.language) -> String {
+        let hint: (ru: String, en: String)
+        switch command {
+        case "osascript": hint = (" Для браузера используй инструменты браузера Switchboard.", " For a browser, use Switchboard's browser tools.")
+        case "launchctl": hint = (" Перезапуск Switchboard запрашивай инструментом `request_app_restart`, если он подключён.",
+                                  " To restart Switchboard, use the `request_app_restart` tool when it is attached.")
+        default: hint = ("", "")
+        }
+        return L10n.text("Команда запрещена ролью: \(command). Обход не допускается: не ищи другую команду, интерпретатор, путь или флаг с тем же действием.\(hint.ru) Если без неё задача не решается, сообщи об этом пользователю.",
+                         "The role forbids this command: \(command). No workaround is allowed: do not look for another command, interpreter, path or flag with the same effect.\(hint.en) If the task cannot be done without it, report this to the user.",
+                         language: language)
+    }
+    /// The refusal in a run that cannot ask (`unattended`, and an unattended ask-list hit): no wait, the standard route.
+    static func unattendedRefusal(outsideSandbox: Bool = false, language: AppLanguage = L10n.language) -> String {
+        let inbox = "`$" + SettingsProposalInbox.environmentKey + "`"
+        return L10n.text((outsideSandbox ? "Команда вне песочницы; запуск без присмотра её не выполняет." : "Действие вне роли; запуск без присмотра не ждёт подтверждения.")
+                         + " Не ищи обход. Если доступ нужен задаче, запиши одно предложение настроек с точным доступом и причиной (если задан \(inbox)) и назови блокер в итоговом сообщении.",
+                         (outsideSandbox ? "A command outside the sandbox; an unattended run does not run it." : "Outside the role; an unattended run does not wait for approval.")
+                         + " Do not look for a workaround. If the task needs this access, write one settings proposal with the exact access and the reason (when \(inbox) is set) and name the blocker in the final message.",
+                         language: language)
+    }
+    /// The refusal of a shell command in a role without one (`shellOff`). Only the user changes a chat's role.
+    static func shellOffRefusal(language: AppLanguage = L10n.language) -> String {
+        L10n.text("Роль этого чата не разрешает команды. Не выполняй команду другим способом; работай файловыми инструментами. Если задаче нужна командная строка, сообщи об этом пользователю: роль чата меняет только он.",
+                  "This chat's role does not allow shell commands. Do not run the command another way; use the file tools. If the task needs a shell, report it to the user: only the user changes the chat's role.",
+                  language: language)
+    }
 }

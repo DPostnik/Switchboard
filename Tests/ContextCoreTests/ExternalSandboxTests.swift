@@ -281,8 +281,8 @@ private func claudeInput(_ root: URL, project: Project, workerID: String) -> Ext
 }
 
 /// The Switchboard project's own trusted commands once `/usr/bin/log show` and `zsh scripts/request-app-restart.sh` are
-/// replaced by the app-owned `app_log` and `request_app_restart`: the Claude inventory accepts the rest, and each of
-/// the two still makes the project ineligible on its own.
+/// replaced by the app-owned `app_log` and `request_app_restart`: the Claude inventory accepts the rest. Only
+/// `log show` makes the project ineligible; the restart script still plans but cannot reach the app from inside.
 @Test func switchboardProjectPassesTheInventoryWithoutLogShowAndTheRestartScript() throws {
     let root = try fixtureProject()
     defer { try? FileManager.default.removeItem(at: root) }
