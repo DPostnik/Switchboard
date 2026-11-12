@@ -8,13 +8,15 @@ extension ManagedJob {
         guard let own = catalog.role(roleID), own.rank <= projectRole.rank else { return projectRole }
         return own
     }
-    public func executionRequest(runID: UUID, project: Project, descriptor: AgentDescriptor, catalog: AgentRoleCatalog = AgentRoleCatalog()) -> AgentExecutionRequest {
+    /// `sharedRoots` are the folders for every project as the user set them (`SavedState.sharedRoots`).
+    public func executionRequest(runID: UUID, project: Project, descriptor: AgentDescriptor, catalog: AgentRoleCatalog = AgentRoleCatalog(),
+                                 sharedRoots: [AgentPermissionProfile.Root] = []) -> AgentExecutionRequest {
         let permissions: AgentPermissionIntent
         let role = role(project: project, catalog: catalog)
         if descriptor.identityMode == .externalCLI, acceptsExternalPolicy == true, role.legacyAccessMode == .fullAccess {
             permissions = .externalPolicyDenyPrompts
         } else {
-            permissions = .profile(role.profile(for: project), root: project.path)
+            permissions = .profile(role.profile(for: project, sharedRoots: sharedRoots), root: project.path)
         }
         // Legacy direct means no app optimizer. External CLI routing is explicitly disclosed.
         let route: AgentRoute = descriptor.identityMode == .externalCLI && self.route == .direct

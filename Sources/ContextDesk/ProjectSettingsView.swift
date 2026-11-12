@@ -184,28 +184,10 @@ struct ProjectSettingsView: View {
     }
 
     private var folderEditor: some View {
-        VStack(alignment: .leading, spacing: .ui(8)) {
-            if extraRoots.isEmpty {
-                hint(L10n.text("Роли «Разработчик» и «Оператор рутин» видят только папку проекта. Добавь папки, которые нужны без подтверждений.",
-                               "The Developer and Routine operator roles see only the project folder. Add the folders they need without prompts."))
-            }
-            ForEach(extraRoots.indices, id: \.self) { index in
-                HStack(spacing: .ui(10)) {
-                    Image(systemName: "folder").foregroundStyle(DeskPalette.muted).accessibilityHidden(true)
-                    Text(extraRoots[index].path).font(.ui(.callout)).lineLimit(1).truncationMode(.middle).help(extraRoots[index].path)
-                    Spacer()
-                    Toggle(L10n.text("Запись", "Write"), isOn: $extraRoots[index].writable).toggleStyle(.checkbox)
-                    Button { extraRoots.remove(at: index) } label: { Image(systemName: "minus.circle") }
-                        .buttonStyle(PointerButtonStyle(base: .plain))
-                        .accessibilityLabel(L10n.text("Убрать папку", "Remove folder"))
-                        .help(L10n.text("Убрать папку", "Remove folder"))
-                }
-                .padding(.horizontal, .ui(10)).padding(.vertical, .ui(7))
-                .background(DeskPalette.subtle, in: RoundedRectangle(cornerRadius: 8))
-            }
-            Button(L10n.text("Добавить папку…", "Add folder…")) { chooseFolder() }
-                .buttonStyle(DeskButtonStyle(kind: .text))
-        }
+        FolderRootsEditor(roots: $extraRoots,
+                          emptyHint: L10n.text("Роли «Разработчик» и «Оператор рутин» видят только папку проекта. Добавь папки, которые нужны без подтверждений.",
+                                               "The Developer and Routine operator roles see only the project folder. Add the folders they need without prompts."),
+                          add: chooseFolder)
     }
 
     struct ModelOption: Identifiable { let id: String; let title: String }
@@ -461,12 +443,7 @@ struct ProjectSettingsView: View {
     }
 
     private func chooseFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
-        panel.prompt = L10n.text("Добавить", "Add")
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        let path = url.standardizedFileURL.path
-        guard !extraRoots.contains(where: { $0.path == path }), path != project.path else { return }
+        guard let path = FolderRootsEditor.chooseFolder(), !extraRoots.contains(where: { $0.path == path }), path != project.path else { return }
         extraRoots.append(.init(path: path, writable: false))
     }
 

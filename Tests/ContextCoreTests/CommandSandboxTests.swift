@@ -100,3 +100,22 @@ private func sandboxSettings(_ profile: AgentPermissionProfile, cwd: String) thr
         #expect(!policy.trusts(asked), "\(asked)")
     }
 }
+
+@Test func claudeLaunchCarriesTheFoldersForEveryProject() throws {
+    var project = Project(path: "/Users/me/app")
+    project.accessPresets = []
+    let shared: [AgentPermissionProfile.Root] = [.init(path: "/Users/me/Public/self-projects", writable: true), .init(path: "/Users/me/notes", writable: false)]
+    let profile = AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: project, sharedRoots: shared)
+    let settings = try sandboxSettings(profile, cwd: project.path)
+    let filesystem = settings["sandbox"]["filesystem"]
+    let read = filesystem["allowRead"].array.compactMap(\.string), write = filesystem["allowWrite"].array.compactMap(\.string)
+    #expect(write.contains("/Users/me/Public/self-projects") && !write.contains("/Users/me/notes"))
+    #expect(read.contains("/Users/me/Public/self-projects") && read.contains("/Users/me/notes"))
+    #expect(settings["permissions"]["additionalDirectories"].array == [.string("/Users/me/Public/self-projects")])
+    // The file tools' answers in `permission()` use the same roots.
+    let policy = ClaudeLaunchPolicy(profile, scheduled: false, userChromeEnabled: false)
+    #expect(policy.writableRoots == ["/Users/me/Public/self-projects"] && policy.readableRoots.contains("/Users/me/notes"))
+    // The Editor stays inside the project.
+    let editor = AgentRoleCatalog.preset(AgentRoleID.editor).profile(for: project, sharedRoots: shared)
+    #expect(ClaudeLaunchPolicy(editor, scheduled: false, userChromeEnabled: false).readableRoots.isEmpty)
+}

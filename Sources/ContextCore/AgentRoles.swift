@@ -27,10 +27,12 @@ public struct AgentRole: Codable, Hashable, Identifiable, Sendable {
     public var rank: Int { AgentRoleID.order.firstIndex(of: id) ?? AgentRoleID.order.count }
 
     /// The profile for one project: extra roots, cookie sites and approved MCP servers come from the project, never from the agent.
-    public func profile(for project: Project) -> AgentPermissionProfile {
+    /// `sharedRoots` are the app-level folders for every project (`SavedState.sharedRoots`); they join the project's own
+    /// folders for roles that accept extra roots and never reach the Editor or the Reader.
+    public func profile(for project: Project, sharedRoots: [AgentPermissionProfile.Root] = []) -> AgentPermissionProfile {
         var result = profile
         if case .project = result.filesystem {
-            let roots = acceptsExtraRoots ? (project.extraRoots ?? []).filter { $0.path.hasPrefix("/") } : []
+            let roots = acceptsExtraRoots ? SharedRoots.merged(project: project, shared: sharedRoots) : []
             result.filesystem = .project(extraRoots: roots)
             // Commands of a role with a shell are confined to the project, its folders and its presets.
             if result.shell == .on { result.commandSandbox = project.commandSandbox(extraRoots: roots) }
@@ -42,8 +44,8 @@ public struct AgentRole: Codable, Hashable, Identifiable, Sendable {
         return result
     }
     /// The project profile widened by the chat's add-ons; the rest of the role stays as it is.
-    public func profile(for project: Project, addOns: Set<RoleAddOn>) -> AgentPermissionProfile {
-        var result = profile(for: project)
+    public func profile(for project: Project, addOns: Set<RoleAddOn>, sharedRoots: [AgentPermissionProfile.Root] = []) -> AgentPermissionProfile {
+        var result = profile(for: project, sharedRoots: sharedRoots)
         guard !result.audit else { return result }
         for addOn in addOns { addOn.apply(to: &result) }
         return result
@@ -207,5 +209,73 @@ extension SavedState {
         }
         roleMigration = RoleMigrationRecord(date: now, chats: chatCounts, projects: projectCounts, jobs: jobCounts)
         return true
+    }
+}
+
+/// Folders the user grants to every project (Settings → Advanced → Folders for every project). They behave exactly like a
+/// project's own folders; the app's data folder, any folder containing it and the home folder itself are refused.
+public enum SharedRoots {
+    public enum Refusal: Equatable, Sendable {
+        case notAbsolute, home, dataFolder
+        public func message(_ path: String, language: AppLanguage = L10n.language) -> String {
+            switch self {
+            case .notAbsolute:
+                L10n.text("Папка «\(path)» не добавлена: нужен полный путь.", "The folder “\(path)” was not added: a full path is required.", language: language)
+            case .home:
+                L10n.text("Домашнюю папку целиком нельзя открыть всем проектам. Выбери папку внутри неё.",
+                          "The whole home folder cannot be opened to every project. Choose a folder inside it.", language: language)
+            case .dataFolder:
+                L10n.text("Папка «\(path)» содержит данные приложения или лежит внутри них, поэтому её нельзя открыть всем проектам.",
+                          "The folder “\(path)” holds or lies inside the app's data, so it cannot be opened to every project.", language: language)
+            }
+        }
+    }
+    /// The suggested first entry shown as a hint; nothing is granted until the user adds a folder.
+    public static let suggestedPath = "~/Public/self-projects"
+
+    /// The stored form: `~` expanded, `.`/`..` and a trailing slash removed, like project folders.
+    public static func canonical(_ path: String, home: String = NSHomeDirectory()) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let expanded = trimmed == "~" ? home : trimmed.hasPrefix("~/") ? home + trimmed.dropFirst() : trimmed
+        guard expanded.hasPrefix("/") else { return expanded }
+        return URL(fileURLWithPath: expanded).standardizedFileURL.path
+    }
+
+    /// Why a folder cannot be shared with every project, or nil when it can.
+    public static func refusal(_ path: String, home: String = NSHomeDirectory(), dataRoots: [String]? = nil) -> Refusal? {
+        let candidate = canonical(path, home: home)
+        guard candidate.hasPrefix("/") else { return .notAbsolute }
+        func resolved(_ value: String) -> String { URL(fileURLWithPath: value).standardizedFileURL.resolvingSymlinksInPath().path }
+        let forms = Set([candidate, resolved(candidate)])
+        if forms.contains(canonical(home)) || forms.contains(resolved(home)) { return .home }
+        let protected = (dataRoots ?? defaultDataRoots(home: home)).flatMap { [canonical($0, home: home), resolved($0)] }
+        func related(_ a: String, _ b: String) -> Bool { a == b || a == "/" || b.hasPrefix(a + "/") || a.hasPrefix(b + "/") }
+        if forms.contains(where: { form in protected.contains { related(form, $0) } }) { return .dataFolder }
+        return nil
+    }
+    /// The app's data folder (also when the test runner moves it) and the pre-rename alias.
+    public static func defaultDataRoots(home: String = NSHomeDirectory()) -> [String] {
+        let support = home + "/Library/Application Support"
+        return [Locations.root.path, Locations.legacyRoot.path, support + "/Switchboard", support + "/Context Desk"]
+    }
+    /// The stored folders that may be applied: canonical, refused ones dropped, one entry per path.
+    public static func usable(_ roots: [AgentPermissionProfile.Root], home: String = NSHomeDirectory(), dataRoots: [String]? = nil) -> [AgentPermissionProfile.Root] {
+        var result: [AgentPermissionProfile.Root] = []
+        for root in roots where refusal(root.path, home: home, dataRoots: dataRoots) == nil {
+            let path = canonical(root.path, home: home)
+            if let index = result.firstIndex(where: { $0.path == path }) { result[index].writable = result[index].writable || root.writable }
+            else { result.append(.init(path: path, writable: root.writable)) }
+        }
+        return result
+    }
+    /// The project's own folders followed by the shared ones; a folder in both keeps write access if either grants it.
+    static func merged(project: Project, shared: [AgentPermissionProfile.Root]) -> [AgentPermissionProfile.Root] {
+        var result = (project.extraRoots ?? []).filter { $0.path.hasPrefix("/") }
+        let projectPath = canonical(project.path)
+        for root in usable(shared) where root.path != projectPath {
+            if let index = result.firstIndex(where: { canonical($0.path) == root.path }) { result[index].writable = result[index].writable || root.writable }
+            else { result.append(root) }
+        }
+        return result
     }
 }

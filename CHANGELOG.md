@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Add Settings → Advanced → Folders for every project: folders added there apply like a project folder to Developer and operator chats and scheduled jobs in every project (Claude and Codex), never to Editor or Reader; the home folder and the app's data folder are refused.
+
 - Record why Claude's permission answers were given (for example a backslash, a deny-list hit or a sandboxed command the CLI still asked about) in the permissions ledger, and count denied commands an agent retried in the same turn.
 
 - Trusted project commands accept more everyday shapes without a prompt: reading a log the same command just wrote with `cat`, `grep`, `sed -n` or `wc -l`, `date`/`pwd`/`printf`, and a `cd` to the chat's own project (also `"$(pwd)"` or `"$(git rev-parse --show-toplevel)"`) before its scripts; a `cd` anywhere else and every other substitution still ask.

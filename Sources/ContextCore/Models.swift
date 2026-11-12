@@ -192,6 +192,9 @@ public struct SavedState: Codable, Sendable {
     public var roles: AgentRoleCatalog?
     /// Set once the legacy access modes were mapped to roles.
     public var roleMigration: RoleMigrationRecord?
+    /// Folders for every project (`SharedRoots`), applied like a project's own folders to roles that accept them.
+    /// Absent means none; older saved states decode without the key.
+    public var sharedRoots: [AgentPermissionProfile.Root]?
     public var projects: [Project] = []
     public var chats: [Chat] = []
     public var model: String = CodexModelDefaults.model
