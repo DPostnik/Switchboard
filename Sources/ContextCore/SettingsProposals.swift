@@ -17,7 +17,8 @@ public struct SettingsProposal: Codable, Sendable {
         public var removeCommands: [String]?
         public init(project: String) { self.project = project }
     }
-    /// The proposing chat's `SWITCHBOARD_CHAT_ID`; informative only.
+    /// The proposing chat's session ID (`SWITCHBOARD_CHAT_ID` for Claude, `CODEX_THREAD_ID` for Codex). Agent-written: it only
+    /// chooses where the request card is shown; the message that chat later receives is fixed app text.
     public var chat: String?
     public var reason: String?
     public var changes: [Change]
@@ -102,6 +103,16 @@ public struct SettingsProposalReview: Identifiable, Equatable, Sendable {
         self.skipped = skipped
     }
 
+    /// The app chat the proposal names: an existing, unarchived, interactive chat whose agent session ID (or app chat ID)
+    /// equals `chat`. Nil otherwise; such a proposal stays a global review. The label is agent-written, so it only picks
+    /// where the card is shown: the chat later receives fixed app text (`SettingsProposalOutcome.message`), never its strings.
+    public func requestingChat(in chats: [Chat]) -> Chat? {
+        guard let label = chat, !label.isEmpty else { return nil }
+        return chats.first { chat in
+            !chat.isArchived && !chat.isScheduledRecord && (chat.nativeSession?.nativeID == label || chat.id == label)
+        }
+    }
+
     /// `~/` expanded, standardized; nil for relative paths and `..` components.
     static func absolute(_ raw: String, home: String) -> String? {
         var path = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -134,6 +145,24 @@ extension SavedState {
     }
 }
 
+/// The user's decision on a proposal, and the one fixed message the requesting chat receives for it. The message never
+/// carries text from the proposal (paths, commands, reason): any chat can name another chat in its proposal.
+public enum SettingsProposalOutcome: Sendable {
+    case applied, rejected
+    public func message(language: AppLanguage = L10n.language) -> String {
+        switch self {
+        case .applied: L10n.text(
+            "Switchboard: пользователь применил твой запрос на изменение настроек проекта. Новые права действуют с этого сообщения. Повтори шаг, которому не хватало доступа, и продолжай задачу.",
+            "Switchboard: the user applied your project settings request. The new access applies from this message. Retry the step that lacked access and continue the task.",
+            language: language)
+        case .rejected: L10n.text(
+            "Switchboard: пользователь отклонил твой запрос на изменение настроек проекта. Не ищи другой способ получить тот же доступ. Продолжай независимую часть задачи или сообщи, что без этого доступа задача заблокирована.",
+            "Switchboard: the user rejected your project settings request. Do not look for another way to get the same access. Continue the independent part of the task, or report that the task is blocked without this access.",
+            language: language)
+        }
+    }
+}
+
 /// The folder agents write proposals to (writable inside every command sandbox) and its reader.
 public enum SettingsProposalInbox {
     public static let environmentKey = "SWITCHBOARD_SETTINGS_PROPOSALS"
@@ -160,9 +189,34 @@ public enum SettingsProposalInbox {
         }
         return result
     }
-    public static func remove(_ id: String, directory: URL = directory) {
-        guard !id.contains("/"), !id.hasPrefix(".") else { return }
-        try? FileManager.default.removeItem(at: directory.appendingPathComponent(id))
+    /// Removes one proposal file; true when it is gone afterwards. A decided proposal is continued only after its file
+    /// is gone, so a restart can never show it again and a continuation is sent at most once.
+    @discardableResult public static func remove(_ id: String, directory: URL = directory) -> Bool {
+        guard !id.contains("/"), !id.hasPrefix(".") else { return false }
+        let file = directory.appendingPathComponent(id)
+        try? FileManager.default.removeItem(at: file)
+        return !FileManager.default.fileExists(atPath: file.path)
+    }
+    /// How a chat writes a proposal, shared by every provider whose sessions can write to the inbox. `chatVariable` is the
+    /// environment variable that holds the chat's own session ID in its commands (`SWITCHBOARD_CHAT_ID`, `CODEX_THREAD_ID`).
+    public static func instructions(chatVariable: String, language: AppLanguage = L10n.language) -> String {
+        let presets = AccessPresetCatalog.all.map(\.id).joined(separator: ", ")
+        let format = #"{"chat": "<$"# + chatVariable + #">", "reason": "...", "changes": [{"project": "<project path or name>", "addPresets": ["vercel"], "removePresets": [], "addFolders": [{"path": "~/path", "writable": false}], "removeFolders": [], "addCommands": ["zsh scripts/build.sh"], "removeCommands": [], "sandbox": true}]}"#
+        return L10n.text(
+            """
+            Настройки проектов в Switchboard (песочница команд, наборы доступа, папки вне проекта, команды вне песочницы) меняет только пользователь. Если задаче нужен доступ, которого нет, или пользователь просит изменить эти настройки, предложи изменение:
+            - Запиши один JSON-файл в папку "$\(environmentKey)" (она доступна на запись в песочнице), например "$\(environmentKey)/<короткое-имя>.json". Формат: \(format). Пропускай ненужные поля; в одном файле может быть несколько проектов.
+            - Наборы: \(presets).
+            - Приложение покажет пользователю список изменений в этом чате; применит их только он. Скажи пользователю, что предложение ждёт его решения. Предлагай только то, что нужно задаче; команды вне песочницы получают доступ ко всему Mac.
+            - Когда пользователь решит, этот чат получит сообщение от приложения. До тех пор продолжай независимую часть задачи.
+            """,
+            """
+            Project settings in Switchboard (the command sandbox, access sets, folders outside the project, commands outside the sandbox) are changed only by the user. When the task needs access that is missing, or the user asks to change these settings, propose the change:
+            - Write one JSON file into the folder "$\(environmentKey)" (writable inside the sandbox), for example "$\(environmentKey)/<short-name>.json". Format: \(format). Omit fields you do not need; one file may cover several projects.
+            - Sets: \(presets).
+            - The app shows the user the list of changes in this chat; only the user applies them. Tell the user the proposal waits for their decision. Propose only what the task needs; commands outside the sandbox get access to the whole Mac.
+            - When the user decides, this chat receives a message from the app. Until then continue the independent part of the task.
+            """, language: language)
     }
     private static func date(_ file: URL) -> Date? { try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate }
 }

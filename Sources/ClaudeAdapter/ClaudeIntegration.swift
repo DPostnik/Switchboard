@@ -594,21 +594,7 @@ public actor ClaudeIntegration: AgentIntegration {
     }
     /// How a sandboxed chat proposes project settings; only the user applies them in the app.
     static func settingsProposalInstructions(language: AppLanguage = L10n.language) -> String {
-        let presets = AccessPresetCatalog.all.map(\.id).joined(separator: ", ")
-        let format = #"{"chat": "<$SWITCHBOARD_CHAT_ID>", "reason": "...", "changes": [{"project": "<project path or name>", "addPresets": ["vercel"], "removePresets": [], "addFolders": [{"path": "~/path", "writable": false}], "removeFolders": [], "addCommands": ["zsh scripts/build.sh"], "removeCommands": [], "sandbox": true}]}"#
-        return L10n.text(
-            """
-            Настройки проектов в Switchboard (песочница команд, наборы доступа, папки вне проекта, команды вне песочницы) меняет только пользователь. Если задаче нужен доступ, которого нет, или пользователь просит изменить эти настройки, предложи изменение:
-            - Запиши один JSON-файл в папку "$\(SettingsProposalInbox.environmentKey)" (она доступна на запись в песочнице), например "$\(SettingsProposalInbox.environmentKey)/<короткое-имя>.json". Формат: \(format). Пропускай ненужные поля; в одном файле может быть несколько проектов.
-            - Наборы: \(presets).
-            - Приложение покажет пользователю список изменений; применит их только он. Скажи пользователю, что предложение ждёт его решения. Предлагай только то, что нужно задаче; команды вне песочницы получают доступ ко всему Mac.
-            """,
-            """
-            Project settings in Switchboard (the command sandbox, access sets, folders outside the project, commands outside the sandbox) are changed only by the user. When the task needs access that is missing, or the user asks to change these settings, propose the change:
-            - Write one JSON file into the folder "$\(SettingsProposalInbox.environmentKey)" (writable inside the sandbox), for example "$\(SettingsProposalInbox.environmentKey)/<short-name>.json". Format: \(format). Omit fields you do not need; one file may cover several projects.
-            - Sets: \(presets).
-            - The app shows the user the list of changes; only the user applies them. Tell the user the proposal waits for their decision. Propose only what the task needs; commands outside the sandbox get access to the whole Mac.
-            """, language: language)
+        SettingsProposalInbox.instructions(chatVariable: ProcessLabels.chatKey, language: language)
     }
     /// When to reach for the user's own Chrome rather than the app's isolated browser.
     static func userChromeInstructions(language: AppLanguage = L10n.language) -> String {

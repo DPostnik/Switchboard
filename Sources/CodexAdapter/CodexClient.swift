@@ -27,6 +27,13 @@ public actor CodexClient {
     private var boundaryHost: ExternalSandboxHost?
     var launchInfo: (executable: URL, home: URL)? { launch.map { ($0.executable, $0.home) } }
     var runsUnderExternalBoundary: Bool { boundary != nil }
+    /// The variable Codex exports to the commands of a thread with its own thread ID.
+    static let threadEnvironmentKey = "CODEX_THREAD_ID"
+    /// How a chat under the boundary writes a settings proposal: only there the inbox is writable and in the environment
+    /// (`CodexConnection`, `CodexIntegration.boundaryInput`). The native path keeps its file roots (invariant 6), so it gets no text.
+    static func settingsProposalInstructions(boundary: Bool, language: AppLanguage = L10n.language) -> String? {
+        boundary ? SettingsProposalInbox.instructions(chatVariable: threadEnvironmentKey, language: language) : nil
+    }
     var registeredWorkflowDirectories: [URL] { workflowDirectories }
     private var workflowDirectories: [URL] = []
     private var browserRoot = BrowserConfiguration.directory
@@ -156,7 +163,8 @@ public actor CodexClient {
         params["config"] = try relayed(params["config"] ?? .object([:]))
         params["cwd"] = .string(projectPath)
         params["modelProvider"] = .string(route.providerID)
-        params["developerInstructions"] = .string(AgentAutonomy.instructions() + (UserChromeConfiguration.allowed(enabled: userChromeEnabled, permissions: permissions, scheduled: scheduled, grant: userChromeGrant) ? "\n" + UserChromeConfiguration.instructions : ""))
+        params["developerInstructions"] = .string(AgentAutonomy.instructions() + (UserChromeConfiguration.allowed(enabled: userChromeEnabled, permissions: permissions, scheduled: scheduled, grant: userChromeGrant) ? "\n" + UserChromeConfiguration.instructions : "")
+            + (Self.settingsProposalInstructions(boundary: boundary != nil).map { "\n" + $0 } ?? ""))
         if !model.isEmpty { params["model"] = .string(model) }
         let result = try await transport.request("thread/start", params: .object(params))
         guard let id = result["thread"]["id"].string, !id.isEmpty else {
@@ -185,7 +193,8 @@ public actor CodexClient {
         params["config"] = try relayed(params["config"] ?? .object([:]))
         params["cwd"] = .string(projectPath)
         params["modelProvider"] = .string(route.providerID)
-        params["developerInstructions"] = .string(AgentAutonomy.instructions() + (UserChromeConfiguration.allowed(enabled: userChromeEnabled, permissions: permissions, scheduled: scheduled, grant: userChromeGrant) ? "\n" + UserChromeConfiguration.instructions : ""))
+        params["developerInstructions"] = .string(AgentAutonomy.instructions() + (UserChromeConfiguration.allowed(enabled: userChromeEnabled, permissions: permissions, scheduled: scheduled, grant: userChromeGrant) ? "\n" + UserChromeConfiguration.instructions : "")
+            + (Self.settingsProposalInstructions(boundary: boundary != nil).map { "\n" + $0 } ?? ""))
         // The reply is not read. Without turns it stays small: a long chat's full history can exceed the line limit.
         params["excludeTurns"] = .bool(true)
         _ = try await transport.request("thread/resume", params: .object(params))

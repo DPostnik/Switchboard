@@ -459,6 +459,10 @@ private struct ChatRunState: Equatable {
     @Published var error: String?
     /// Project settings changes agents proposed (`SettingsProposalInbox`), waiting for the user's decision.
     @Published private(set) var settingsProposals: [SettingsProposalReview] = []
+    /// The inbox the proposals are read from; tests point it at a folder of their own.
+    var settingsProposalDirectory = SettingsProposalInbox.directory
+    /// The first listing seeds the known proposals without announcing them (a restart re-derives the cards silently).
+    private var settingsProposalsLoaded = false
     /// The queued message being edited in place, at most one at a time.
     @Published private(set) var queueEdit: QueueEditSession?
     @Published var notificationStatus = L10n.text("Уведомления не включены", "Notifications are off")
@@ -1594,23 +1598,81 @@ private struct ChatRunState: Equatable {
             }
         }
     }
+    /// Re-derives the pending proposals from the inbox files. Cards and markers come only from the files, so a restart shows
+    /// the same requests again and sends nothing by itself; a request that appears while the app runs is announced once.
     func refreshSettingsProposals() {
-        let current = SettingsProposalInbox.load(state: state)
-        if current != settingsProposals { settingsProposals = current }
+        let current = SettingsProposalInbox.load(state: state, directory: settingsProposalDirectory)
+        let announce = settingsProposalsLoaded
+        settingsProposalsLoaded = true
+        guard current != settingsProposals else { return }
+        let known = Set(settingsProposals.map(\.id))
+        settingsProposals = current
+        if announce {
+            for review in current where !known.contains(review.id) {
+                guard let chat = review.requestingChat(in: state.chats) else { continue }
+                postNotice(threadID: chat.id, title: L10n.text("Агент просит доступ", "The agent asks for access"),
+                           identifier: Self.settingsProposalNoticeID(review.id), actionID: Self.settingsProposalNoticeID(review.id))
+            }
+        }
+        let open = Set(current.map { Self.settingsProposalNoticeID($0.id) })
+        let decided = Set(notices.compactMap(\.actionID).filter { $0.hasPrefix(Self.settingsProposalNoticePrefix) && !open.contains($0) })
+        if !decided.isEmpty {
+            notices.removeAll { notice in notice.actionID.map { decided.contains($0) } == true }
+            if Bundle.main.bundleURL.pathExtension == "app" { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: Array(decided)) }
+        }
+        refreshDockBadge()
     }
-    /// Applies a proposal as it reads against the current settings, then removes its file.
+    /// Applies a proposal as it reads against the current settings, then removes its file and continues the chat that
+    /// asked. Only the user's click gets here (channel 4); the next send replaces that chat's provider process.
     func applySettingsProposal(_ id: String) {
         refreshSettingsProposals()
-        if let review = settingsProposals.first(where: { $0.id == id }), state.apply(review) {
+        guard let review = settingsProposals.first(where: { $0.id == id }) else {
+            SettingsProposalInbox.remove(id, directory: settingsProposalDirectory); refreshSettingsProposals(); return
+        }
+        let chat = review.requestingChat(in: state.chats)?.id
+        if state.apply(review) {
             persist()
             AppLog.lifecycle.notice("Applied settings proposal \(id, privacy: .public) for \(review.projects.count, privacy: .public) projects")
         }
-        SettingsProposalInbox.remove(id)
-        refreshSettingsProposals()
+        finishSettingsProposal(id, chat: chat, outcome: .applied)
     }
     func rejectSettingsProposal(_ id: String) {
-        SettingsProposalInbox.remove(id)
         refreshSettingsProposals()
+        let chat = settingsProposals.first { $0.id == id }?.requestingChat(in: state.chats)?.id
+        finishSettingsProposal(id, chat: chat, outcome: .rejected)
+    }
+    /// Exactly once: the file goes first, and only a proposal whose file is gone continues its chat, so a second click,
+    /// a second window or a restart never sends again. The fixed message waits in the chat's queue for the turn boundary;
+    /// a running turn is never interrupted. Delivery failures follow the queue's rules (no retry after an uncertain send).
+    private func finishSettingsProposal(_ id: String, chat: String?, outcome: SettingsProposalOutcome) {
+        let removed = SettingsProposalInbox.remove(id, directory: settingsProposalDirectory)
+        refreshSettingsProposals()
+        guard removed else {
+            error = L10n.text("Не удалось удалить файл предложения настроек; чату ничего не отправлено.",
+                              "Could not remove the settings proposal file; nothing was sent to the chat.")
+            return
+        }
+        guard let chat else { return }
+        if queueContinuation(chat, text: outcome.message()) {
+            AppLog.lifecycle.notice("Settings proposal \(id, privacy: .public) decided; continuation queued for chat \(chat, privacy: .public)")
+        } else {
+            AppLog.lifecycle.notice("Settings proposal \(id, privacy: .public) decided; chat \(chat, privacy: .public) is unavailable, nothing sent")
+        }
+    }
+    static let settingsProposalNoticePrefix = "settings-proposal:"
+    static func settingsProposalNoticeID(_ id: String) -> String { settingsProposalNoticePrefix + id }
+    /// Pending proposals that have a card in their chat, by chat ID; the others stay global reviews (`globalSettingsProposals`).
+    var settingsProposalsByChat: [String: [SettingsProposalReview]] {
+        var result: [String: [SettingsProposalReview]] = [:]
+        for review in settingsProposals { if let chat = review.requestingChat(in: state.chats) { result[chat.id, default: []].append(review) } }
+        return result
+    }
+    /// Proposals without a valid chat: reviewed in the global sheet, as before.
+    var globalSettingsProposals: [SettingsProposalReview] { settingsProposals.filter { $0.requestingChat(in: state.chats) == nil } }
+    /// The open chat's oldest request card.
+    var currentSettingsProposal: SettingsProposalReview? {
+        guard let chatID else { return nil }
+        return settingsProposals.first { $0.requestingChat(in: state.chats)?.id == chatID }
     }
     /// The chat a proposal names, when it is one of this app's chats.
     func proposalChatTitle(_ label: String?) -> String? {
@@ -2409,11 +2471,11 @@ private struct ChatRunState: Equatable {
     }
     /// Chats that wait for the user: approvals and questions first, then failed and unread results.
     var attentionChats: [(chat: Chat, attention: ChatAttention)] {
-        let hidden = Set(state.projects.filter(\.isHidden).map(\.id))
+        let hidden = Set(state.projects.filter(\.isHidden).map(\.id)), proposals = settingsProposalsByChat
         return state.chats.compactMap { chat -> (Chat, ChatAttention)? in
             guard !chat.isArchived, !hidden.contains(chat.projectID) else { return nil }
             let requests = pending.filter { $0.threadID == chat.id }
-            let approval = requests.contains { if case .approval = $0.interaction.kind { true } else { false } }
+            let approval = requests.contains { if case .approval = $0.interaction.kind { true } else { false } } || proposals[chat.id] != nil
             guard let attention = ChatAttention.of(approval: approval, question: !requests.isEmpty && !approval, running: isBusy(threadID: chat.id),
                                                    unread: chat.hasUnreadResponse && chat.limitResume?.isArmed != true,
                                                    failed: chat.lastTurnFailed == true) else { return nil }
@@ -2426,6 +2488,7 @@ private struct ChatRunState: Equatable {
             let reason = (request.interaction.reason ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             return reason.isEmpty ? request.title : request.title + ": " + reason
         }
+        if settingsProposalsByChat[chat.id] != nil { return L10n.text("Агент просит доступ", "The agent asks for access") }
         return chat.recap
     }
     private func postNotice(threadID: String, title: String, identifier: String, completionID: String? = nil, actionID: String? = nil, body: String? = nil) {

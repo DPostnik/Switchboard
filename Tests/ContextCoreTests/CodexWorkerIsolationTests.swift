@@ -102,6 +102,67 @@ private func workerFixture() throws -> (URL, URL) {
     await app.stop()
 }
 
+@Test func appliedSettingsProposalReplacesTheWorkerAtTheNextSend() async throws {
+    let (root, executable) = try workerFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let app = AgentClient(integration: CodexIntegration())
+    let log = WorkerEventLog()
+    let observer = Task { for await event in app.events { await log.append(event) } }
+    defer { observer.cancel() }
+    _ = try await app.start(.init(executable: executable, home: root))
+    var state = SavedState()
+    var project = Project(path: root.path); project.accessPresets = []
+    state.projects = [project]
+    func rights() -> AgentPermissionProfile { AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: state.projects[0]) }
+    let session = try await app.createSession(projectPath: root.path, permissions: rights(), model: "", route: .direct)
+    func send() async throws {
+        let marker = await log.events.count
+        _ = try await app.send("children", to: session, projectPath: root.path, permissions: rights(), model: "", effort: "")
+        _ = try await log.wait(after: marker) { if case .completed = $0.payload { return $0.session == session }; return false }
+    }
+    try await send()
+    try await send()
+    // The user applies a proposal from the request card: a folder for this project.
+    let notes = root.appendingPathComponent("notes")
+    try FileManager.default.createDirectory(at: notes, withIntermediateDirectories: true)
+    var change = SettingsProposal.Change(project: root.path); change.addFolders = [.init(path: notes.path, writable: true)]
+    let applied = state.apply(SettingsProposalReview(id: "p.json", proposal: .init(chat: session.nativeID, changes: [change]), state: state))
+    #expect(applied)
+    try await send()
+    // Negative: re-reading the same proposal changes nothing; the worker stays.
+    let appliedAgain = state.apply(SettingsProposalReview(id: "p.json", proposal: .init(changes: [change]), state: state))
+    #expect(!appliedAgain)
+    try await send()
+    let calls = try String(contentsOf: root.appendingPathComponent("calls.jsonl"), encoding: .utf8)
+        .split(separator: "\n").map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+    let pids = calls.filter { $0["method"].string == "turn/start" }.compactMap { $0["pid"].int }
+    #expect(pids.count == 4)
+    // Same rights share a worker; the grant moves the same thread to a new process, which then keeps it.
+    #expect(pids[0] == pids[1] && pids[2] != pids[1] && pids[3] == pids[2])
+    #expect(calls.filter { $0["method"].string == "thread/start" }.count == 1)
+    let last = try #require(calls.last { $0["method"].string == "turn/start" })
+    #expect(last["thread"].string == session.nativeID && last["params"]["sandboxPolicy"]["writableRoots"].array.contains { $0.string?.hasSuffix("/notes") == true })
+    await app.stop()
+}
+
+/// The Codex worker under the boundary gets the same settings proposal inbox as Claude: a writable grant and the variable.
+@Test func codexBoundaryInputCarriesTheSettingsProposalInbox() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let inbox = root.appendingPathComponent("inbox", isDirectory: true)
+    let project = Project(path: root.appendingPathComponent("project").path)
+    let profile = AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: project)
+    let input = CodexIntegration.boundaryInput(project: project.path, permissions: profile, home: root.appendingPathComponent("codex-home"),
+                                               executable: root.appendingPathComponent("codex"), resources: nil, workflowDirectories: [], inbox: inbox)
+    #expect(input.extraWrites == [inbox.path] && FileManager.default.fileExists(atPath: inbox.path))
+    // Only the inbox: no settings file, no mediated pgrep, no command inventory (Codex behavior unchanged otherwise).
+    #expect(input.extraReads.isEmpty && !input.settingsFile && !input.mediateProcessList && !input.commandInventory)
+    // Negative: the native path's file roots stay the project's own (invariant 6).
+    let native = try #require(profile.codexTurnParameters(projectPath: project.path)["sandboxPolicy"])
+    #expect(!native["writableRoots"].array.contains(.string(inbox.path)))
+    #expect(!native["writableRoots"].array.contains(.string(SettingsProposalInbox.directory.path)))
+}
+
 @Test(arguments: ["reset", "crash"])
 func dedicatedWorkerResetDoesNotClearOtherChatApproval(mode: String) async throws {
     let (root, executable) = try workerFixture()
