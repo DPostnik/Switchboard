@@ -192,3 +192,24 @@ private func sha256(_ data: Data) -> String {
     #expect(entry["command"] as? String == "/usr/bin/python3" && entry["args"] as? [String] == ["-I", "/app/server.py"])
     #expect((entry["env"] as? [String: String])?["LANG"] == "ru")
 }
+
+@Test func plannerGrantsTheFoldersForEveryProjectToCodex() throws {
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    let shared = root.appendingPathComponent("self-projects"), notes = root.appendingPathComponent("notes")
+    try FileManager.default.createDirectory(at: shared, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: notes, withIntermediateDirectories: true)
+    let project = Project(path: root.appendingPathComponent("project").path)
+    let profile = AgentRoleCatalog.preset(AgentRoleID.developer)
+        .profile(for: project, sharedRoots: [.init(path: shared.path, writable: true), .init(path: notes.path, writable: false)])
+    let input = ExternalSandboxPlanner.Input(project: project.path, profile: profile, providerHome: root.appendingPathComponent("codex-home"),
+                                             providerExecutable: root.appendingPathComponent("codex"), resources: root.appendingPathComponent("resources"),
+                                             workerID: "share123", home: root.appendingPathComponent("home"))
+    let plan = try ExternalSandboxPlanner.plan(input, helper: .success(helper)).get()
+    #expect(plan.grants.contains(.init(.allow, shared.resolvingSymlinksInPath().path)))
+    #expect(plan.grants.contains(.init(.read, notes.resolvingSymlinksInPath().path)))
+    // The Codex turn's own writable roots carry the writable shared folder too.
+    let policy = try #require(profile.codexTurnParameters(projectPath: project.path)["sandboxPolicy"])
+    #expect(policy["writableRoots"].array.contains(.string(shared.path)) && !policy["writableRoots"].array.contains(.string(notes.path)))
+}

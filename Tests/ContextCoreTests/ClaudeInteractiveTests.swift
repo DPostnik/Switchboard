@@ -305,8 +305,8 @@ private func interactiveFixture(_ root: URL) throws -> URL {
                 out({'type':'result','subtype':'success','session_id':sid,'is_error':False,'stop_reason':'max_tokens',
                      'usage':{'input_tokens':1,'cache_creation_input_tokens':0,'cache_read_input_tokens':0,'output_tokens':1}})
                 continue
-            if prompt in ['approval-call','outside-call']:
-                path=str(pathlib.Path.cwd()/'fixture.txt') if prompt=='approval-call' else '/outside-project/file'
+            if prompt in ['approval-call','outside-call'] or prompt.startswith('write-call:'):
+                path=str(pathlib.Path.cwd()/'fixture.txt') if prompt=='approval-call' else prompt[len('write-call:'):] if prompt.startswith('write-call:') else '/outside-project/file'
                 out({'type':'assistant','session_id':sid,'parent_tool_use_id':None,'message':{'id':'w-'+sid,'content':[{'type':'tool_use','id':'w1','name':'Write','input':{'file_path':path,'content':'x'}}]}})
                 out({'type':'control_request','request_id':'permission','request':{'subtype':'can_use_tool','tool_name':'Write','input':{'file_path':path,'content':'x'},'tool_use_id':'w1'}})
                 continue
@@ -412,6 +412,32 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     #expect(lifecycle.first?.requestID != nil && lifecycle.first?.requestID == lifecycle.last?.requestID)
     let launch = try String(contentsOf: home.appendingPathComponent("submitted"), encoding: .utf8)
     #expect(launch.contains("acceptEdits") && launch.contains("--restricted"))
+    await adapter.disconnect()
+}
+
+@Test func claudeDeveloperWritesIntoASharedFolderWithoutAsking() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = try interactiveFixture(root), home = root.appendingPathComponent("home")
+    let shared = root.appendingPathComponent("shared")
+    try FileManager.default.createDirectory(at: shared, withIntermediateDirectories: true)
+    let adapter = ClaudeIntegration(), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
+    // The folder for every project reaches `permission()` through the Developer profile, like a project folder.
+    let developer = AgentRoleCatalog.preset(AgentRoleID.developer)
+        .profile(for: Project(path: root.path), sharedRoots: [.init(path: shared.path, writable: true)])
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root, role: developer)).value()
+    let target = shared.appendingPathComponent("notes.md").path
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "write-call:" + target, role: developer)).value()
+    try await waitFor { FileManager.default.fileExists(atPath: home.appendingPathComponent("answer").path) }
+    let reply = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: home.appendingPathComponent("answer")))["response"]["response"]
+    #expect(reply["behavior"].string == "allow")
+    try await waitFor { await events.capabilities().contains { $0.source == "can_use_tool" } }
+    #expect(await events.interaction() == nil)
+    let answers = await events.capabilities().filter { $0.source == "can_use_tool" }
+    #expect(answers.map(\.decision) == [.allowed] && answers.first?.target == target)
     await adapter.disconnect()
 }
 

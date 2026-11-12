@@ -28,7 +28,7 @@ import ContextCore
         consumed = true
         do {
             let descriptor = try await descriptor().value()
-            guard request.permissions == job.executionRequest(runID: run.id, project: project, descriptor: descriptor).permissions else {
+            guard request.permissions == job.executionRequest(runID: run.id, project: project, descriptor: descriptor, sharedRoots: model.sharedRoots).permissions else {
                 return .rejected(.unsupportedPermissions)
             }
             if let rejection = descriptor.validate(request) { return .rejected(rejection) }
