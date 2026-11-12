@@ -6,13 +6,15 @@ import ContextCore
 struct ChipMenu<Content: View>: View {
     let title: String
     var systemImage: String? = nil
+    /// A provider mark in place of the symbol.
+    var mark: AgentMark? = nil
     /// Small symbols after the title, such as the role's add-ons.
     var badges: [String] = []
     @ViewBuilder var content: Content
 
     var body: some View {
         Menu { content } label: {
-            ChipLabel(title: title, systemImage: systemImage, chevron: true, badges: badges)
+            ChipLabel(title: title, systemImage: systemImage, mark: mark, chevron: true, badges: badges)
         }
         .menuStyle(.button).buttonStyle(ChipButtonStyle()).menuIndicator(.hidden).fixedSize()
         .pointingHandCursor()
@@ -22,12 +24,14 @@ struct ChipMenu<Content: View>: View {
 struct ChipLabel: View {
     let title: String
     var systemImage: String? = nil
+    var mark: AgentMark? = nil
     var chevron = false
     var badges: [String] = []
 
     var body: some View {
         HStack(spacing: .ui(5)) {
-            if let systemImage { Image(systemName: systemImage).font(.ui(size: 11, weight: .medium)) }
+            if let mark { mark }
+            else if let systemImage { Image(systemName: systemImage).font(.ui(size: 11, weight: .medium)) }
             Text(title).lineLimit(1)
             ForEach(badges, id: \.self) { Image(systemName: $0).font(.ui(size: 11, weight: .medium)) }
             if chevron { Image(systemName: "chevron.down").font(.ui(size: 8, weight: .bold)).foregroundStyle(.tertiary) }

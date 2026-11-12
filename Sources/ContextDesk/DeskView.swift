@@ -720,9 +720,16 @@ struct DeskView: View {
             return HStack(spacing: .ui(8)) {
                 if !favorite && list.selection.contains(chat.id) {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(DeskPalette.accent)
+                        .frame(width: .ui(16))
                         .accessibilityLabel(L10n.text("Выбран", "Selected"))
                 } else if chat.isArchived {
                     Image(systemName: "archivebox").foregroundStyle(.secondary)
+                } else {
+                    // The provider's mark holds the place of the selection check, so selecting a row does not shift its title.
+                    let connection = chat.nativeSession?.connection
+                    AgentMark(agent: connection?.agent, systemImage: model.profile(connection)?.systemImage, size: .ui(12))
+                        .foregroundStyle(.secondary)
+                        .frame(width: .ui(16))
                 }
                 VStack(alignment: .leading, spacing: .ui(3)) {
                     ChatRowTitle(title: chat.title, branch: favorite || row.busy ? nil

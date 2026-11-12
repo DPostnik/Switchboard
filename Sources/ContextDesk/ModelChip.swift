@@ -1,7 +1,8 @@
 import SwiftUI
 import ContextCore
 
-/// One composer chip for the model, the reasoning effort and, in a new chat, the agent.
+/// One composer chip for the model and the reasoning effort; in a new chat with several agents a provider toggle
+/// (`AgentToggle`) precedes it, else the chip carries the provider's mark.
 ///
 /// Claude: the CLI performs no model discovery, so the model list is a catalog of suggestions over
 /// the same configured model string; an identifier outside the catalog can still be entered and is
@@ -78,7 +79,21 @@ struct ModelChip: View {
         return lines.joined(separator: "\n")
     }
 
+    /// A new chat with more than one installed agent chooses the provider with the toggle.
+    private var showsToggle: Bool { newChat && model.selectableAgentIDs.count > 1 }
+    private var mark: AgentMark? {
+        showsToggle ? nil : AgentMark(agent: model.currentAgent.agent, systemImage: model.profile(model.currentAgent)?.systemImage,
+                                      size: .ui(11))
+    }
+
     var body: some View {
+        HStack(spacing: .ui(4)) {
+            if showsToggle && !entering { AgentToggle(model: model) }
+            chip
+        }
+    }
+
+    private var chip: some View {
         Group {
             if entering {
                 TextField(L10n.text("Модель Claude", "Claude model"), text: $draft,
@@ -89,12 +104,14 @@ struct ModelChip: View {
                     .focused($fieldFocused)
                     .onAppear { fieldFocused = true }
                     .accessibilityLabel(L10n.text("Модель Claude", "Claude model"))
-            } else if showsModels || newChat {
-                ChipMenu(title: Self.title(model: modelTitle, effort: effortTitle), systemImage: "sparkle") { menu }
+            } else if showsModels {
+                ChipMenu(title: Self.title(model: modelTitle, effort: effortTitle), mark: mark) { menu }
+                    // A menu's label may keep its old text when only the text changes; a new agent rebuilds it.
+                    .id(model.currentAgent)
                     .accessibilityLabel(L10n.text("Модель и рассуждение", "Model and reasoning"))
             } else {
-                // An existing Codex chat before the model list arrives: nothing to choose.
-                ChipLabel(title: modelTitle, systemImage: "sparkle")
+                // Codex before the model list arrives: nothing to choose.
+                ChipLabel(title: modelTitle, mark: mark)
                     .font(.ui(.callout)).foregroundStyle(.secondary).padding(.horizontal, .ui(9))
             }
         }
@@ -154,17 +171,6 @@ struct ModelChip: View {
                     model.saveCurrentModelAsDefault(projectOnly: false)
                 }
             } header: { Text(L10n.text("Для новых чатов", "For new chats")) }
-        }
-        // The agent is fixed once the chat exists.
-        if newChat {
-            Section {
-                Picker(L10n.text("Агент", "Agent"), selection: Binding(get: { model.currentAgent }, set: { model.selectAgent($0) })) {
-                    ForEach(model.selectableAgentIDs, id: \.self) { id in
-                        if let symbol = model.profile(id)?.systemImage { Label(model.agentName(id), systemImage: symbol).tag(id) }
-                        else { Text(model.agentName(id)).tag(id) }
-                    }
-                }.pickerStyle(.inline).labelsHidden()
-            } header: { Text(L10n.text("Агент", "Agent")) }
         }
     }
 
