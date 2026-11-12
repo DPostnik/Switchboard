@@ -79,6 +79,21 @@ import ContextCore
     #expect(RestartContinuation.chatID(requestedBy: [RestartContinuation.claudeSessionKey: "claude-2"], in: chats) == nil)
     #expect(RestartContinuation.chatID(requestedBy: nil, in: chats) == nil)
     #expect(RestartContinuation.requesterInfo(environment: ["CLAUDE_CODE_SESSION_ID": String(repeating: "a", count: 129)]).isEmpty)
+    // The app-owned restart tool names the chat by its Switchboard ID; unknown, archived and oversized IDs continue nothing.
+    #expect(RestartContinuation.chatID(requestedBy: [RestartContinuation.chatKey: codex.id], in: chats) == codex.id)
+    #expect(RestartContinuation.chatID(requestedBy: [RestartContinuation.chatKey: archived.id], in: chats) == nil)
+    #expect(RestartContinuation.chatID(requestedBy: [RestartContinuation.chatKey: UUID().uuidString], in: chats) == nil)
+    #expect(RestartContinuation.chatID(requestedBy: [RestartContinuation.chatKey: "claude-1"], in: chats) == nil)
+    #expect(RestartContinuation.chatID(requestedBy: [RestartContinuation.chatKey: String(repeating: "a", count: 129)], in: chats) == nil)
+}
+
+/// The chat directory server posts the app's own restart notification; the name and the requester keys must match.
+@Test @MainActor func restartToolUsesTheAppRestartChannel() throws {
+    let server = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent().appendingPathComponent("ChatDirectoryRuntime/server.py"), encoding: .utf8)
+    #expect(server.contains("RESTART_NOTIFICATION = \"\(RestartCommand.notification.rawValue)\""))
+    #expect(server.contains("{\"\(RestartContinuation.chatKey)\": chat}"))
+    #expect(server.contains("{\"\(RestartContinuation.codexThreadKey)\": thread}"))
 }
 
 @Test func restartContinuationIsConsumedOnceAndExpires() throws {

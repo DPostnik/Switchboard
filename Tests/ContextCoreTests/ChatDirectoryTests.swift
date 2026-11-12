@@ -275,3 +275,145 @@ func reservedChatToolScopeMatchesItsFirstSend(connection: AgentConnectionID) thr
     #expect(initial == model.chatDirectoryArguments(for: caller.id, script: directoryServer))
     #expect(initial.contains("--references") && !initial.contains("--snapshot"))
 }
+
+/// A fake running app: `<project>/build/Switchboard.app` with an executable fixture.
+private func fakeHostApp(in project: URL) throws -> (bundle: URL, executable: URL) {
+    let bundle = project.appendingPathComponent("build/Switchboard.app")
+    let executable = bundle.appendingPathComponent("Contents/MacOS/Switchboard")
+    try FileManager.default.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+    try installFixtureExecutable(at: executable)
+    return (bundle, executable)
+}
+private func toolNames(_ reply: [String: Any]?) -> [String] {
+    ((reply?["result"] as? [String: Any])?["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String } ?? []
+}
+private func isError(_ reply: [String: Any]?) -> Bool { (reply?["result"] as? [String: Any])?["isError"] as? Bool == true }
+
+@Test func hostApplicationNeedsTheAppBundleInsideTheProject() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let project = root.appendingPathComponent("project")
+    let (bundle, executable) = try fakeHostApp(in: project)
+    let host = try #require(ChatDirectory.hostApplication(bundle: bundle, executable: executable, project: project.path))
+    #expect(host.executable == bundle.standardizedFileURL.appendingPathComponent("Contents/MacOS/Switchboard").path)
+    #expect(host.subsystem == "local.daniil.switchboard" && host.arguments.first == "--host-app")
+    // Outside the project, a sibling folder with the same prefix, the root itself, not an app, no executable,
+    // an executable outside the bundle: none of them is the host.
+    #expect(ChatDirectory.hostApplication(bundle: bundle, executable: executable, project: root.appendingPathComponent("other").path) == nil)
+    #expect(ChatDirectory.hostApplication(bundle: bundle, executable: executable, project: project.path + "-sibling") == nil)
+    #expect(ChatDirectory.hostApplication(bundle: bundle, executable: executable, project: bundle.path) == nil)
+    #expect(ChatDirectory.hostApplication(bundle: bundle, executable: executable, project: "/") == nil)
+    #expect(ChatDirectory.hostApplication(bundle: project, executable: executable, project: root.path) == nil)
+    #expect(ChatDirectory.hostApplication(bundle: bundle, executable: nil, project: project.path) == nil)
+    #expect(ChatDirectory.hostApplication(bundle: bundle, executable: URL(fileURLWithPath: "/bin/sh"), project: project.path) == nil)
+    #expect(ChatDirectory.hostApplication(bundle: Bundle.main.bundleURL, executable: Bundle.main.executableURL, project: project.path) == nil)
+    // Only the app's arguments carry the host; without a diagnostics project nothing is passed.
+    let arguments = ChatDirectory.serverArguments(script: "/s.py", snapshot: nil, chat: "c", diagnosticsProject: project.path, host: host)
+    #expect(arguments.suffix(4) == ["--host-app", host.executable, "--log-subsystem", "local.daniil.switchboard"])
+    #expect(!ChatDirectory.serverArguments(script: "/s.py", snapshot: nil, chat: "c", root: "/r", host: host).contains("--host-app"))
+}
+
+@Test @MainActor func hostToolsReachOnlyChatsOfTheRunningAppsProject() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let model = DeskModel(store: AppStore(file: root.appendingPathComponent("store.sqlite")), pluginDirectory: root.appendingPathComponent("plugins"), summaryResources: nil)
+    let project = Project(path: root.path), elsewhere = Project(path: root.appendingPathComponent("plugins").path)
+    try FileManager.default.createDirectory(atPath: elsewhere.path, withIntermediateDirectories: true)
+    let chat = Chat(session: .init(connection: .appClaude, nativeID: UUID().uuidString), projectID: project.id, title: "App", model: "claude")
+    let other = Chat(session: .init(connection: .appClaude, nativeID: UUID().uuidString), projectID: elsewhere.id, title: "Other", model: "claude")
+    model.state.projects = [project, elsewhere]; model.state.chats = [chat, other]
+    defer { ChatReferences.remove(chat: chat.id) }
+    // The test runner is not an app bundle: no host tools.
+    #expect(try #require(model.chatDirectoryArguments(for: chat.id, script: directoryServer)).contains("--host-app") == false)
+    let (bundle, executable) = try fakeHostApp(in: root)
+    model.hostBundle = (bundle: bundle, executable: Optional(executable))
+    let arguments = try #require(model.chatDirectoryArguments(for: chat.id, script: directoryServer))
+    #expect(arguments.contains("--host-app") && arguments.contains("--log-subsystem") && arguments.contains(AppLog.subsystem))
+    #expect(Array(arguments.drop(while: { $0 != "--chat" }).prefix(2)) == ["--chat", chat.id])
+    #expect(ChatDirectory.logSubsystem == AppLog.subsystem)
+    // Another project gets project_diagnostics without the host tools; a role without a shell gets neither.
+    let otherArguments = try #require(model.chatDirectoryArguments(for: other.id, script: directoryServer))
+    #expect(otherArguments.contains("--diagnostics-project") && !otherArguments.contains("--host-app"))
+    model.state.chats[0].roleID = AgentRoleID.reader
+    #expect(model.chatDirectoryArguments(for: chat.id, script: directoryServer) == nil)
+    model.state.chats[0].roleID = nil
+    // Chat access and references keep the host tools beside the other tools.
+    model.toggleChatDirectory(chat.id)
+    #expect(try #require(model.chatDirectoryArguments(for: chat.id, script: directoryServer)).contains("--host-app"))
+}
+
+@Test func appLogAndRestartToolsNeedAValidHostAndTypedArguments() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let project = root.appendingPathComponent("project"), outside = root.appendingPathComponent("outside")
+    let (_, executable) = try fakeHostApp(in: project)
+    let (_, foreign) = try fakeHostApp(in: outside)
+    let list: [[String: Any]] = [["jsonrpc": "2.0", "id": 1, "method": "tools/list"]]
+    let valid = ["--diagnostics-project", project.path, "--host-app", executable.path, "--log-subsystem", "local.daniil.switchboard"]
+    #expect(toolNames(try serve(list, arguments: valid)[1]) == ["project_diagnostics", "app_log", "request_app_restart"])
+    // Each invalid launch keeps project_diagnostics and drops the host tools.
+    for arguments in [
+        ["--diagnostics-project", project.path, "--host-app", foreign.path, "--log-subsystem", "local.daniil.switchboard"],
+        ["--diagnostics-project", project.path, "--host-app", executable.path, "--log-subsystem", "local.daniil.switchboard\" OR 1"],
+        ["--diagnostics-project", project.path, "--host-app", executable.path, "--log-subsystem", "Local Switchboard"],
+        ["--diagnostics-project", project.path, "--host-app", executable.path],
+        ["--diagnostics-project", project.path, "--host-app", "/bin/sh", "--log-subsystem", "local.daniil.switchboard"],
+        ["--diagnostics-project", project.path, "--host-app", project.path + "/build/../build/Switchboard.app/Contents/MacOS/Switchboard",
+         "--log-subsystem", "local.daniil.switchboard"],
+        ["--diagnostics-project", project.path, "--host-app", project.appendingPathComponent("build/Switchboard.app/Contents/MacOS/Missing").path,
+         "--log-subsystem", "local.daniil.switchboard"],
+    ] {
+        #expect(toolNames(try serve(list, arguments: arguments)[1]) == ["project_diagnostics"])
+    }
+    // Without a diagnostics project the host arguments offer nothing.
+    #expect(toolNames(try serve(list, arguments: Array(valid.dropFirst(2)) + ["--chat", "c"])[1]).isEmpty)
+    // Invalid calls fail before anything runs: extra keys, wrong types, values out of range, unknown enums, restart arguments.
+    func call(_ id: Int, _ name: String, _ arguments: Any) -> [String: Any] {
+        ["jsonrpc": "2.0", "id": id, "method": "tools/call", "params": ["name": name, "arguments": arguments] as [String: Any]]
+    }
+    let rejected = try serve([
+        call(1, "app_log", ["minutes": 5, "predicate": "1 == 1"] as [String: Any]), call(2, "app_log", ["minutes": 0]), call(3, "app_log", ["minutes": 61]),
+        call(4, "app_log", ["minutes": "5"]), call(5, "app_log", ["limit": 301]), call(6, "app_log", ["limit": 0]),
+        call(7, "app_log", ["category": "model"]), call(8, "app_log", ["level": "error"]), call(9, "app_log", ["minutes": 5.5]),
+        call(10, "app_log", ["minutes": true]), call(11, "app_log", ["category": "lifecycle\" OR 1"]), call(12, "app_log", ["command": "log show"]),
+        call(13, "request_app_restart", ["force": true]), call(14, "request_app_restart", ["chat": "other"]), call(15, "app_log", "minutes=5"),
+    ], arguments: valid + ["--chat", "c"])
+    for id in 1...15 { #expect(isError(rejected[id]), "call \(id)") }
+    // Without a valid host the tools are unknown.
+    let absent = try serve([call(1, "app_log", [:]), call(2, "request_app_restart", [:])], arguments: ["--diagnostics-project", project.path])
+    #expect(isError(absent[1]) && isError(absent[2]))
+}
+
+/// `app_log` accepts exactly the app's log categories; this fails when the Python list and the Swift loggers drift.
+@Test func appLogCategoriesMatchTheSources() throws {
+    let checkout = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    let server = try String(contentsOf: directoryServer, encoding: .utf8)
+    let block = try #require(server.range(of: #"LOG_CATEGORIES = \[[^\]]*\]"#, options: .regularExpression).map { String(server[$0]) })
+    let quoted = try NSRegularExpression(pattern: #""([^"]+)""#)
+    let python = Set(quoted.matches(in: block, range: NSRange(block.startIndex..., in: block)).compactMap { Range($0.range(at: 1), in: block).map { String(block[$0]) } })
+    let logger = try NSRegularExpression(pattern: #"Logger\(subsystem: ([^,]+), category: "([^"]+)"\)"#)
+    var swift = Set<String>()
+    let files = FileManager.default.enumerator(at: checkout.appendingPathComponent("Sources"), includingPropertiesForKeys: nil)
+    while let file = files?.nextObject() as? URL {
+        guard file.pathExtension == "swift" else { continue }
+        let source = try String(contentsOf: file, encoding: .utf8)
+        for match in logger.matches(in: source, range: NSRange(source.startIndex..., in: source)) {
+            guard let subsystem = Range(match.range(at: 1), in: source), let category = Range(match.range(at: 2), in: source) else { continue }
+            #expect(["\"local.daniil.switchboard\"", "subsystem", "AppLog.subsystem"].contains(String(source[subsystem])), "\(file.lastPathComponent)")
+            swift.insert(String(source[category]))
+        }
+    }
+    #expect(swift.count > 10)
+    #expect(python == swift)
+}
+
+@Test func claudeCommandInstructionsNameTheHostToolsInBothLanguages() {
+    for language in [AppLanguage.russian, .english] {
+        for text in [ClaudeIntegration.boundaryCommandInstructions(language: language),
+                     ClaudeIntegration.sandboxCommandInstructions(trusted: ["swift build"], language: language)] {
+            #expect(text.contains("`app_log`") && text.contains("`request_app_restart`"))
+        }
+    }
+}

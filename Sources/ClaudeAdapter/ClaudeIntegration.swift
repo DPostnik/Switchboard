@@ -583,11 +583,13 @@ public actor ClaudeIntegration: AgentIntegration {
             Песочница команд в этом чате:
             - Каждая команда Bash идёт внутри песочницы, если в вызове не указан `dangerouslyDisableSandbox: true`. Вне песочницы без вопроса пользователю идут только доверенные команды проекта; любую другую команду с этим флагом подтверждает пользователь.
             - Доверенные команды проекта (\(list)) выходят из песочницы только с `dangerouslyDisableSandbox: true`; запускай их так с первой попытки, отдельно или только с чтением их вывода.
+            - Если подключены инструменты `app_log` и `request_app_restart` (проект работающего приложения Switchboard), журнал приложения читай через `app_log`, а перезапуск запрашивай один раз через `request_app_restart`, а не командами `log show` и `scripts/request-app-restart.sh`.
             """,
             """
             Command sandbox in this chat:
             - Every Bash command runs inside the sandbox unless the call sets `dangerouslyDisableSandbox: true`. Outside the sandbox only the project's trusted commands run without asking the user; any other command with that flag waits for the user.
             - Project trusted commands (\(list)) leave the CLI sandbox only with `dangerouslyDisableSandbox: true`; run them that way on the first attempt, on their own or followed only by reads of their output.
+            - When the `app_log` and `request_app_restart` tools are attached (the project of the running Switchboard app), read the app's log with `app_log` and request a restart once with `request_app_restart` instead of the `log show` and `scripts/request-app-restart.sh` commands.
             """, language: language)
     }
     /// How a sandboxed chat proposes project settings; only the user applies them in the app.

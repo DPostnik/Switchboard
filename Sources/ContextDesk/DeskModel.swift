@@ -237,6 +237,9 @@ private struct ChatRunState: Equatable {
     var schedulerRecoveryAfter = Date.distantPast
     var jobTasks: [UUID: Task<Void, Never>] = [:]
     var jobExecutorFactories = AgentIntegrationFactory.scheduled
+    /// The running app's bundle and executable; decides which chats get `app_log` and `request_app_restart`.
+    /// Tests replace it; at runtime nothing an agent controls changes it.
+    var hostBundle: (bundle: URL, executable: URL?) = (Bundle.main.bundleURL, Bundle.main.executableURL)
     var jobExecutors: [UUID: any AgentScheduledExecutor] = [:]
     var schedulerStopping = false
     @Published var archiveSummaries: [String: ArchiveSummaryRecord] = [:]
@@ -1849,11 +1852,13 @@ private struct ChatRunState: Equatable {
         let project = state.projects.first { $0.id == chat.projectID }
         let permissions = project.map { chat.resolvedRole(in: $0, catalog: roleCatalog).profile(for: $0, addOns: chat.resolvedAddOns(in: $0), sharedRoots: sharedRoots) }
         let diagnostics = permissions?.shell != nil && permissions?.shell != .off ? workingDirectory(forChat: id) : nil
+        // `app_log` and `request_app_restart` only where the running app bundle lies inside the diagnostics project.
+        let host = diagnostics.flatMap { ChatDirectory.hostApplication(bundle: hostBundle.bundle, executable: hostBundle.executable, project: $0) }
         guard chat.chatDirectoryAccess == true else {
-            return scopedChatDirectoryArguments(id: id, script: script, diagnostics: diagnostics)
+            return scopedChatDirectoryArguments(id: id, script: script, diagnostics: diagnostics, host: host)
         }
         return ChatDirectory.serverArguments(script: script.path, snapshot: chatDirectoryFile.path, chat: id, index: chatSearchIndexFile.path,
-                                             recipe: chat.chatSearch == true ? chatSearchRecipe.path : nil, root: root, diagnosticsProject: diagnostics)
+                                             recipe: chat.chatSearch == true ? chatSearchRecipe.path : nil, root: root, diagnosticsProject: diagnostics, host: host)
     }
     /// Reserve the final tool scope before Codex creates an in-memory-only empty thread.
     func initialChatDirectoryArguments(id: String, agent: AgentConnectionID, projectPath: String,
@@ -1861,15 +1866,17 @@ private struct ChatRunState: Equatable {
                                        script: URL? = Bundle.main.resourceURL?.appendingPathComponent("ChatDirectoryRuntime/server.py")) -> [String]? {
         guard traits(agent).contains(.chatDirectory), let script,
               FileManager.default.fileExists(atPath: script.path) else { return nil }
-        return scopedChatDirectoryArguments(id: id, script: script, diagnostics: permissions.shell == .off ? nil : projectPath)
+        let diagnostics = permissions.shell == .off ? nil : projectPath
+        let host = diagnostics.flatMap { ChatDirectory.hostApplication(bundle: hostBundle.bundle, executable: hostBundle.executable, project: $0) }
+        return scopedChatDirectoryArguments(id: id, script: script, diagnostics: diagnostics, host: host)
     }
-    private func scopedChatDirectoryArguments(id: String, script: URL, diagnostics: String?) -> [String]? {
+    private func scopedChatDirectoryArguments(id: String, script: URL, diagnostics: String?, host: ChatDirectory.HostApplication?) -> [String]? {
         if !ChatReferences.load(chat: id).isEmpty, let references = ChatReferences.file(chat: id) {
             return ChatDirectory.serverArguments(script: script.path, snapshot: nil, chat: id, root: Locations.root.path,
-                                                 references: references.path, diagnosticsProject: diagnostics)
+                                                 references: references.path, diagnosticsProject: diagnostics, host: host)
         }
         guard let diagnostics else { return nil }
-        return ChatDirectory.serverArguments(script: script.path, snapshot: nil, chat: id, diagnosticsProject: diagnostics)
+        return ChatDirectory.serverArguments(script: script.path, snapshot: nil, chat: id, diagnosticsProject: diagnostics, host: host)
     }
     /// Remembers the chats the user names in a message to this chat (`switchboard-chat:<ID>`, a chat ID or its agent
     /// session ID), so this chat may inspect them. IDs of unknown chats are ignored.

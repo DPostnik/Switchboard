@@ -273,6 +273,33 @@ private func claudeInput(_ root: URL, project: Project, workerID: String) -> Ext
     #expect(!codex.commands.contains { $0.name == "pgrep" } && !codex.grants.contains { $0.path == codex.settingsFile.path })
 }
 
+/// The Switchboard project's own trusted commands once `/usr/bin/log show` and `zsh scripts/request-app-restart.sh` are
+/// replaced by the app-owned `app_log` and `request_app_restart`: the Claude inventory accepts the rest, and each of
+/// the two still makes the project ineligible on its own.
+@Test func switchboardProjectPassesTheInventoryWithoutLogShowAndTheRestartScript() throws {
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    let remaining = ["ps", "sysctl -n", "gh", "git push", "git pull", "git fetch", "git clone", "git ls-remote", "git worktree",
+                     "swift build", "swift test", "swift run", "swift package", "xcodebuild", "codesign",
+                     "zsh scripts/build-app.sh", "zsh scripts/test.sh"]
+    var project = Project(path: root.appendingPathComponent("project").path)
+    project.accessPresets = ["github", "swift", "apple-signing"]
+    project.sandboxCommands = remaining
+    let trusted = try #require(AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: project).commandSandbox?.unsandboxed)
+    #expect(Set(remaining).isSubset(of: Set(trusted)))
+    let plan = try ExternalSandboxPlanner.plan(claudeInput(root, project: project, workerID: "sb1"), helper: .success(helper)).get()
+    #expect(plan.commands.contains { $0.name == "codesign" } && plan.commands.contains { $0.name == "pgrep" })
+    // Also without any mediated command (gh or git not installed): none of them is an unrunnable head or names a path.
+    #expect(ExternalSandboxPlanner.unrunnableTrustedCommand(trusted, mediated: [], grants: plan.grants, home: root.appendingPathComponent("home")) == nil)
+    for removed in ["/usr/bin/log show", "zsh scripts/request-app-restart.sh"] {
+        project.sandboxCommands = remaining + [removed]
+        let result = ExternalSandboxPlanner.plan(claudeInput(root, project: project, workerID: "sb2"), helper: .success(helper))
+        if removed.hasPrefix("/usr/bin/log") { #expect(result == .failure(.trustedCommandOutside(removed))) }
+        else { #expect((try? result.get()) != nil, "a project script runs inside the boundary; only the restart it requests needs the app") }
+    }
+}
+
 @Test func commandInventoryRefusesTrustedCommandsTheBoundaryCannotRun() throws {
     let root = try fixtureProject()
     defer { try? FileManager.default.removeItem(at: root) }

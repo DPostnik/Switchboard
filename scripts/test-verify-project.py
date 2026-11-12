@@ -142,5 +142,69 @@ sys.exit(result.returncode)
             result = module.run_check([sys.executable, '-c', 'raise SystemExit(7)'], lease_fd=lock.fileno())
         self.assertEqual(result.returncode, 7)
 
+
+class BoundaryTests(unittest.TestCase):
+    """The queue under Switchboard's external boundary: no ps, no restart script; builds stay where they are."""
+
+    def setUp(self):
+        sys.path.insert(0, str(Path(__file__).parent))
+        self.addCleanup(sys.path.remove, str(Path(__file__).parent))
+        from verification_queue import VerificationDeferred
+        self.deferred = VerificationDeferred
+
+    def preflight(self, load, ps):
+        with patch.object(module.platform, 'system', return_value='Darwin'), \
+             patch.object(module.os, 'getloadavg', return_value=(load, 0.0, 0.0)), \
+             patch.object(module.os, 'cpu_count', return_value=8), \
+             patch.object(module.subprocess, 'check_output', side_effect=ps) as check, \
+             patch('sys.stderr') as stderr:
+            module.preflight()
+        return check, ''.join(str(call.args[0]) for call in stderr.write.call_args_list)
+
+    def test_load_comes_from_the_kernel_and_ps_is_optional(self):
+        idle = lambda argv, **kwargs: '1 /usr/bin/python3 scripts/swift-task.py test\n2 codex xcodebuild prompt\n'
+        check, note = self.preflight(1.0, idle)
+        self.assertEqual([call.args[0] for call in check.call_args_list], [['ps', '-axo', 'pid,command']])
+        self.assertEqual(note, '')
+        for failure in (PermissionError(1, 'Operation not permitted', 'ps'), FileNotFoundError('ps'),
+                        subprocess.CalledProcessError(1, ['ps'])):
+            _, note = self.preflight(1.0, failure)
+            self.assertIn('heavy jobs not counted', note)
+            self.assertIn('build lock', note)
+
+    def test_busy_host_defers_with_or_without_ps(self):
+        two = lambda argv, **kwargs: '1 python3 scripts/swift-task.py build\n2 /usr/bin/xcodebuild -scheme x\n'
+        with self.assertRaisesRegex(self.deferred, 'heavy jobs 2'):
+            self.preflight(1.0, two)
+        with self.assertRaisesRegex(self.deferred, 'load 9.50, cores 8, heavy jobs not counted'):
+            self.preflight(9.5, PermissionError(1, 'Operation not permitted', 'ps'))
+        with self.assertRaisesRegex(self.deferred, 'heavy jobs 0'):
+            self.preflight(9.5, lambda argv, **kwargs: '')
+
+    def test_install_under_the_boundary_leaves_the_restart_to_the_app_tool(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / 'restart-attempt.json'
+            with patch.object(module.subprocess, 'run') as run, patch('sys.stderr') as stderr:
+                result = module.request_restart(Path(directory), record, environ={'SWITCHBOARD_EXTERNAL_SANDBOX': '1'})
+            run.assert_not_called()
+            self.assertIn('request_app_restart', result['restart'])
+            self.assertIn('exactly once', ''.join(str(call.args[0]) for call in stderr.write.call_args_list))
+            self.assertIn('tool_required', record.read_text())
+            # The recorded attempt blocks a second install from asking again.
+            with self.assertRaises(FileExistsError):
+                module.request_restart(Path(directory), record, environ={'SWITCHBOARD_EXTERNAL_SANDBOX': '1'})
+
+    def test_install_outside_the_boundary_runs_the_restart_script_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / 'restart-attempt.json'
+            for environ in ({}, {'SWITCHBOARD_EXTERNAL_SANDBOX': '0'}):
+                record.unlink(missing_ok=True)
+                with patch.object(module.subprocess, 'run') as run:
+                    self.assertEqual(module.request_restart(Path(directory), record, environ=environ), {'restart': 'requested'})
+                run.assert_called_once_with(['zsh', 'scripts/request-app-restart.sh'], cwd=Path(directory), check=True)
+            with patch.object(module.subprocess, 'run') as run, self.assertRaises(FileExistsError):
+                module.request_restart(Path(directory), record, environ={})
+            run.assert_not_called()
+
 if __name__ == '__main__':
     unittest.main()

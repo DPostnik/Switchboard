@@ -164,11 +164,13 @@ extension ClaudeIntegration {
             Внешняя граница в этом чате:
             - Bash, файлы и подагенты работают внутри границы проекта (папки проекта и его настроек). Внутри ничего не подтверждается; флаг `dangerouslyDisableSandbox` ничего не меняет.
             - Путь или действие вне границы завершаются ошибкой (часто `Operation not permitted`). Не ищи обход: используй инструмент приложения, если он есть (например `project_diagnostics` для нагрузки и процессов), иначе запиши одно предложение настроек с точной папкой, набором или командой и причиной, продолжи независимую часть задачи и сообщи о запросе.
+            - В проекте работающего приложения Switchboard журнал приложения читай инструментом `app_log` (не `log show`), а перезапуск после успешной сборки и тестов запрашивай один раз инструментом `request_app_restart` (не `scripts/request-app-restart.sh`); после него заверши ход и жди.
             """,
             """
             External boundary in this chat:
             - Bash, files and sub-agents run inside the project's boundary (the project's folders and settings). Nothing inside is asked; the `dangerouslyDisableSandbox` flag changes nothing.
             - A path or action outside the boundary fails (often `Operation not permitted`). Do not look for a workaround: use the app's tool when one exists (for example `project_diagnostics` for load and processes), otherwise write one settings proposal with the exact folder, access set or command and the reason, continue the independent part of the task and report the request.
+            - In the project of the running Switchboard app, read the app's log with the `app_log` tool (not `log show`) and request a restart after a successful build and tests once with the `request_app_restart` tool (not `scripts/request-app-restart.sh`); then end the turn and wait.
             """, language: language)
     }
     /// The refusal of a file tool outside the boundary, naming the standard route.

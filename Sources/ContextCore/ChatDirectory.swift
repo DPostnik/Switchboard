@@ -71,9 +71,37 @@ public enum ChatDirectory {
     /// full-text search tools; `recipe` makes the server hand its search instructions to a chat-search chat; `root`
     /// (the app's data folder) adds `inspect_chat`, limited to the chats in `references` when that file is given.
     public static func serverArguments(script: String, snapshot: String?, chat: String, index: String? = nil, recipe: String? = nil,
-                                       root: String? = nil, references: String? = nil, diagnosticsProject: String? = nil) -> [String] {
-        [script] + (snapshot.map { ["--snapshot", $0] } ?? []) + ["--chat", chat] + (index.map { ["--index", $0] } ?? [])
-            + (diagnosticsProject.map { ["--diagnostics-project", $0, "--language", L10n.language.rawValue] } ?? [])
+                                       root: String? = nil, references: String? = nil, diagnosticsProject: String? = nil,
+                                       host: HostApplication? = nil) -> [String] {
+        var diagnostics: [String] = []
+        if let diagnosticsProject { diagnostics = ["--diagnostics-project", diagnosticsProject, "--language", L10n.language.rawValue] + (host?.arguments ?? []) }
+        return [script] + (snapshot.map { ["--snapshot", $0] } ?? []) + ["--chat", chat] + (index.map { ["--index", $0] } ?? []) + diagnostics
             + (recipe.map { ["--recipe", $0] } ?? []) + (root.map { ["--root", $0] } ?? []) + (references.map { ["--references", $0] } ?? [])
+    }
+
+    /// The running app as the diagnostics server sees it: its executable and log subsystem. Present only when the app
+    /// bundle lies inside the chat's project, so `app_log` and `request_app_restart` reach only chats that work on the
+    /// running app itself. Decided by the app from its own bundle, never from agent input; the server checks it again.
+    public struct HostApplication: Equatable, Sendable {
+        public let executable: String
+        public let subsystem: String
+        public var arguments: [String] { ["--host-app", executable, "--log-subsystem", subsystem] }
+    }
+    /// The app's unified-log subsystem (`AppLog.subsystem`).
+    public static let logSubsystem = Perf.subsystem
+
+    /// `bundle` and `executable` are the running app's (`Bundle.main.bundleURL`, `Bundle.main.executableURL`); injected
+    /// so tests can pass their own. The executable path keeps the bundle path as the app sees it: the restart request
+    /// names that path, and the running app listens for exactly it.
+    public static func hostApplication(bundle: URL, executable: URL?, project: String, subsystem: String = logSubsystem) -> HostApplication? {
+        guard bundle.isFileURL, bundle.pathExtension == "app", let executable, executable.isFileURL, !project.isEmpty else { return nil }
+        let standardized = bundle.standardizedFileURL
+        let name = executable.lastPathComponent
+        guard !name.isEmpty, name != ".", name != "..",
+              executable.standardizedFileURL.path == standardized.appendingPathComponent("Contents/MacOS/\(name)").path else { return nil }
+        let root = URL(fileURLWithPath: project).resolvingSymlinksInPath().standardizedFileURL.path
+        let real = standardized.resolvingSymlinksInPath().path
+        guard root != "/", real.hasPrefix(root + "/") else { return nil }
+        return HostApplication(executable: standardized.appendingPathComponent("Contents/MacOS/\(name)").path, subsystem: subsystem)
     }
 }
