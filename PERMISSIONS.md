@@ -211,8 +211,11 @@ Steps 2-4 of the permission-model handoff were published on 2026-11-12 (`3ace4fc
 under the boundary: the request card with continuation and process replacement (three applied
 requests, both directions), `app_log`, `request_app_restart` with its continuation, mediated git
 (`status`, `fetch`, `push`), and a whole queue cycle (submit, build, codesign, tests, install,
-`confirm-live`, publish). Not checked live: Reject, a card during a running turn, the Codex
-proposal inbox, the new refusal texts, the mobile app.
+`confirm-live`, publish). A Codex Developer chat under the boundary (chat 4DA55008, build 495):
+marker `1`, mediated `pgrep` and git with no prompt, `ls ~/Documents` refused by the OS, one
+proposal written through `$CODEX_THREAD_ID`, the card shown, Reject delivered the fixed message and
+the agent stopped with no workaround (0 denied-then-retried). Not checked live: a card during a
+running turn, the new refusal texts, the mobile app.
 
 Rollback switch for the Claude boundary: `defaults write local.daniil.switchboard ClaudeExternalBoundaryOff -bool YES`,
 then restart the app; Claude chats return to the CLI sandbox.
@@ -295,7 +298,8 @@ Known gaps. Check this list before you treat a failure as a new defect.
 - The command inventory (`ExternalSandboxPlanner.unrunnableTrustedCommand`) and mediated `pgrep` apply
   to both providers through the same planner inputs (Codex since 2026-11-12, after the user removed
   this project's trusted `/usr/bin/log show`). The base entries `ps` and `sysctl -n` are exempt for
-  both. Not checked live for Codex: a project with an unrunnable trusted command, the notice, `pgrep`.
+  both. Not checked live for Codex: a project with an unrunnable trusted command and its notice
+  (`pgrep` is checked).
 - The Codex fallback notice appears when a worker starts (new chat, scope change), not on every
   turn: a chat whose worker is kept shows it once. Claude shows a notice for "command sandbox off";
   Codex treats it as role-defined and only logs it, as the brief of 2026-11-12 asked.
