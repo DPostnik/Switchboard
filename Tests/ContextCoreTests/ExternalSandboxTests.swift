@@ -346,6 +346,17 @@ private func claudeInput(_ root: URL, project: Project, workerID: String) -> Ext
     #expect(environment["TMPDIR"] == plan.temporary.path && environment["SWITCHBOARD_EXTERNAL_SANDBOX"] == "1")
     // Negative: a launch without a folder exports no variable.
     #expect(CodexConnection.boundaryEnvironment(ExternalSandboxLaunch(plan: plan, helper: helper))[SettingsProposalInbox.environmentKey] == nil)
+    // PATH: Claude's base list first, then the other inherited entries once each, order kept; relative entries dropped.
+    let path = CodexConnection.boundaryEnvironment(ExternalSandboxLaunch(plan: plan, helper: helper),
+                                                   inheritedPath: "/usr/bin:/Users/x/.local/bin:/bin:relative:/opt/homebrew/bin:/Users/x/.local/bin::/opt/tools")["PATH"]
+    #expect(path == "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/x/.local/bin:/opt/tools")
+    #expect(CodexConnection.boundaryEnvironment(ExternalSandboxLaunch(plan: plan, helper: helper), inheritedPath: nil)["PATH"]
+            == "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+    // Commands under the boundary run in a non-login shell, so path_helper cannot move nono's shims behind /usr/bin.
+    let arguments = CodexConnection.boundaryArguments(ExternalSandboxLaunch(plan: plan, helper: helper))
+    #expect(arguments == ["-c", "allow_login_shell=false"])
+    // Negative: the native launch gets no extra argument.
+    #expect(CodexConnection.boundaryArguments(nil).isEmpty)
     // Negative: without the inbox input no grant appears for it.
     var bare = input; bare.extraWrites = []; bare.workerID = "cx2"
     let barePlan = try ExternalSandboxPlanner.plan(bare, helper: .success(helper)).get()

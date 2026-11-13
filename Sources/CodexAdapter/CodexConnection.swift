@@ -64,8 +64,27 @@ struct CodexReplyTooLarge: LocalizedError, Sendable {
 
     /// What a provider under the boundary adds to its environment: the plan's own variables and the worker's own settings
     /// proposal folder (`SettingsProposalInbox.instructions`, writable in the plan by `CodexIntegration.boundaryInput`).
-    static func boundaryEnvironment(_ boundary: ExternalSandboxLaunch) -> [String: String] {
-        boundary.plan.environment.merging(boundary.settingsInbox.map { [SettingsProposalInbox.environmentKey: $0.path] } ?? [:]) { _, new in new }
+    /// Also PATH: the base list Claude gets (`ClaudeProfile.environment`), then the app's other inherited entries once each.
+    /// Lookup order only, it grants nothing; nono prepends its mediation shims to the PATH it passes on. A PATH the plan
+    /// sets itself wins.
+    static func boundaryEnvironment(_ boundary: ExternalSandboxLaunch,
+                                    inheritedPath: String? = ProcessInfo.processInfo.environment["PATH"]) -> [String: String] {
+        ["PATH": boundaryPath(inherited: inheritedPath)]
+            .merging(boundary.plan.environment) { _, new in new }
+            .merging(boundary.settingsInbox.map { [SettingsProposalInbox.environmentKey: $0.path] } ?? [:]) { _, new in new }
+    }
+    static let boundaryBasePath = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+    static func boundaryPath(inherited: String?) -> String {
+        var seen = Set<String>()
+        let entries = boundaryBasePath + (inherited ?? "").split(separator: ":").map(String.init).filter { $0.hasPrefix("/") }
+        return entries.filter { seen.insert($0).inserted }.joined(separator: ":")
+    }
+    /// Config overrides only a worker under the boundary gets. Codex 0.167.0 runs commands as `zsh -lc` by default; a
+    /// login zsh runs `path_helper` from `/etc/zprofile`, which puts the system folders before nono's shim folder, so
+    /// mediated git, gh, pgrep and security ran unmediated (seen live 2026-11-13). `allow_login_shell=false` makes every
+    /// command a non-login `zsh -c` (no login shell snapshot either), so the PATH passed on by nono stays as it is.
+    static func boundaryArguments(_ boundary: ExternalSandboxLaunch?) -> [String] {
+        boundary == nil ? [] : ["-c", "allow_login_shell=false"]
     }
     public func start(executable: URL, home: URL, extraArguments: [String] = [], boundary: ExternalSandboxLaunch? = nil) async throws {
         guard process == nil else { return }
@@ -80,7 +99,7 @@ struct CodexReplyTooLarge: LocalizedError, Sendable {
         verifiedInstallVersion = CodexVerifiedInstall.version(of: binary, selected: executable)
         // A thread's writer lock belongs to one process. With no unload delay, `CodexClient.release` hands it to another at once.
         let serverArguments = ["app-server", "--listen", "stdio://", "-c", "cli_auth_credentials_store=\"file\"",
-                               "-c", "analytics.enabled=false", "-c", "thread_unload_delay_secs=0"] + extraArguments
+                               "-c", "analytics.enabled=false", "-c", "thread_unload_delay_secs=0"] + extraArguments + Self.boundaryArguments(boundary)
         if let boundary {
             // The whole tree (launcher, helper, Codex, its tools) forms one process group under the external boundary.
             let launch = boundary.command(provider: binary, arguments: serverArguments)

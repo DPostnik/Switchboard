@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Codex chats under the external boundary run commands in a non-login shell, so `git`, `gh`, `pgrep` and `security` go through the boundary's mediation again (private `git fetch` and `push` work); PATH additions from your `.zprofile` and `.zshrc` no longer apply there.
+
 - A Terminal button in the chat toolbar (Control-Command-T) opens a terminal window in the chat's folder or worktree; Ghostty, iTerm, Warp and Terminal are supported, and the last choice is remembered.
 
 - Under the external boundary, git gets the Keychain only for `push`, `fetch` and `ls-remote` (with the repository's hooks, aliases and credential helpers switched off); other git commands run without Keychain or network, `git pull` and `git credential` are refused with the route, and `gh` refuses `auth token`, extensions and aliases. Your global git identity stays in effect. Rollback: `defaults write local.daniil.switchboard ExternalBoundaryGitNarrowingOff -bool YES`.

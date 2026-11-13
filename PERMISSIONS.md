@@ -425,6 +425,22 @@ Known gaps. Check this list before you treat a failure as a new defect.
   chain (`tool 'gh' is not allowed to call git`); with `-R owner/repo` it gets HTTP 401 (gh finds no login: `~/.config/gh`
   is not a grant of the mediated command). No evidence that gh ever authenticated under the boundary; not verified as a
   regression of the narrowing. `gh auth token` and `gh extension` are refused as intended.
+- Codex commands bypassed the mediation shims (found live 2026-11-13, Codex chat D12755A8, arena-hw-bench, build 508).
+  Codex 0.167.0 runs shell commands as `zsh -lc` (codex-rs/core/src/shell.rs `derive_exec_args`, login on by default),
+  and its shell snapshot is also taken in a login shell and applied only to `-lc` commands
+  (core/src/tools/runtimes/mod.rs `maybe_wrap_shell_lc_with_snapshot`). A login zsh reads `/etc/zprofile`, whose
+  `path_helper -s` puts the `/etc/paths` folders first, so `/usr/bin/git` came before nono's shim folder and mediated
+  `git`, `gh`, `pgrep`, `security` ran unmediated, without the Keychain (private https fetch failed). Claude chats under
+  the boundary showed the shim folder first (nono prepends it to the PATH it passes on). Fix
+  (`CodexConnection.boundaryArguments`, `boundaryEnvironment`): under the boundary the app-server gets
+  `-c allow_login_shell=false` (core/config.schema.json: login requests are rejected and an omitted `login` means a
+  non-login shell; the snapshot warm-up is skipped, core/src/unified_exec/shell_snapshot.rs), so commands run as
+  `zsh -c` with the PATH nono passed on, shims first. The provider's PATH under the boundary is Claude's base list
+  (`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`) followed by the app's other inherited absolute
+  entries, once each. PATH is lookup order only; no right changes. Side effect: Codex commands under the boundary no
+  longer read the user's login profile, so PATH additions from `.zprofile` and `.zshrc` are absent (`.zshenv` is still
+  read). The native path is unchanged. A worker started before the update keeps the old arguments until it is replaced.
+  Unit-tested; not yet checked live.
 - Under nono `ps` cannot run (setuid) and `log show` cannot run in any sandbox: use
   `project_diagnostics` and `app_log`. `pgrep` sees only sandboxed processes unless mediated.
   `lsof -i` and `sysctl -n vm.loadavg` work.
