@@ -184,6 +184,10 @@ Do not reopen these without the user.
   the mediated `/usr/bin/security` (exact `find-generic-password` forms, default deny), not an app
   helper or an approval backend. The whole Keychain is never granted. Only the project settings fill the
   list (`Project.commandSandbox(extraRoots:)`), so Reader and Editor never get it.
+- Mediated git and gh (2026-11-13): the Keychain only for `push`, `fetch`, `ls-remote` in the exact shapes of section 5;
+  agents lose their own command aliases, custom credential helpers, `GIT_SSH_COMMAND`, `GIT_CONFIG_*` injection,
+  non-https protocols, `git pull` (use fetch and merge) and `gh auth token`/extensions/aliases. The user's global git
+  config stays effective (commit identity). Remote-host pinning is a later step.
 - For Claude Bash the CLI's own `dangerouslyDisableSandbox` flag is the sandbox decision. No text
   heuristic (the removed `runsSandboxed`) comes back.
 - Under the boundary an action outside the roots fails; the command itself is never asked about.
@@ -233,6 +237,10 @@ running turn, the new refusal texts, the mobile app.
 
 Rollback switch for the Claude boundary: `defaults write local.daniil.switchboard ClaudeExternalBoundaryOff -bool YES`,
 then restart the app; Claude chats return to the CLI sandbox.
+
+Rollback switch for the narrowed mediated git and gh (both providers):
+`defaults write local.daniil.switchboard ExternalBoundaryGitNarrowingOff -bool YES`; read when a chat's process is planned,
+no app restart needed (known gaps below).
 
 Delivered in steps 2-4 (live status in the paragraph above):
 
@@ -313,8 +321,57 @@ Known gaps. Check this list before you treat a failure as a new defect.
   out keep the old answer, and under the boundary their refusal names `$SWITCHBOARD_SETTINGS_PROPOSALS` instead of
   `addFolders` (2026-11-13, unit-tested, not checked live). Codex needs nothing: under the boundary its edits are not
   asked (`externalSandbox`, `approvalPolicy: never`) and nono holds the granted folder.
-- Mediated `git` has Keychain read and runs its helpers: a github-set project can likely obtain internet passwords
-  through `git credential-osxkeychain` (inferred, not run). Not narrowed here.
+- Mediated `git` and `gh` narrowed (2026-11-13, user decision; `ExternalSandboxPlanner.gitCommand`, `ghCommand`). Before,
+  mediated git had Keychain read, network, every `GIT_*` from the caller and no argument filter, so an agent could read
+  internet passwords (`git credential fill`), run shell code with the Keychain (`git -c alias.x='!…'`) and inject config
+  (`GIT_CONFIG_COUNT`). Now:
+  - git's own sandbox has neither Keychain nor network (`GIT_ALLOW_PROTOCOL=file`). Only `push`, `fetch`, `ls-remote` as the
+    first argument, or after `-C <root>` where the root is the project or one of its folders (the queue's
+    `git -C <repo> push --force-with-lease=…` and `ls-remote --refs`), run in a nono intercept sandbox with Keychain read and
+    network: `GIT_ALLOW_PROTOCOL=https`, editors `:`, the caller's `GIT_*` dropped, and nono prepends `--no-pager -c
+    core.hooksPath=/dev/null -c core.fsmonitor=false -c core.askPass= -c core.alternateRefsCommand=exit 0 -c
+    credential.helper= -c credential.helper=osxkeychain -c gpg.format=openpgp -c gpg.program=gpg`. Any other shape (`-c`,
+    `--config-env`, `--git-dir`, `--work-tree`, `--exec-path`, `--no-pager`, an alias, another or relative `-C` path) runs
+    in the local sandbox, so its network fails with `transport 'https' not allowed`. `clone` gets network without the
+    Keychain (its own `--config` can install filters): a private clone is `git init`, `git remote add`, `git fetch`,
+    `git checkout`. `pull` (merge drivers and filters from the repository config would run with the Keychain) and
+    `credential` are refused by nono with a text that names the route (`git fetch`, then `git merge --ff-only` or
+    `git rebase`).
+  - Environment: the local sandbox passes `PATH HOME USER LOGNAME LANG LC_* TERM TMPDIR SSL_CERT_FILE` and
+    `GIT_AUTHOR_*`, `GIT_COMMITTER_*` (name, email, date), `GIT_INDEX_FILE`, `GIT_DIR`, `GIT_WORK_TREE`, `GIT_EDITOR`,
+    `GIT_SEQUENCE_EDITOR`, `GIT_MERGE_AUTOEDIT`, `GIT_OPTIONAL_LOCKS`; the Keychain sandbox only the plain list. Never
+    passed: `GIT_CONFIG_*`, `GIT_SSH*`, `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_PROXY_COMMAND`, `GIT_EXTERNAL_DIFF`, `GIT_PAGER`,
+    `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`, `XDG_CONFIG_HOME`. Both force `GIT_TERMINAL_PROMPT=0` and `HOME` (the real home),
+    so the user's `~/.gitconfig` (identity, LFS filters, `http.postbuffer`) and Homebrew's system config (the
+    `osxkeychain` helper) stay effective and cannot be replaced; `GIT_CONFIG_GLOBAL`/`NOSYSTEM` are not set.
+    `GIT_EDITOR=true` and `false` now run in the local sandbox (exec of those two files allowed); `:` works everywhere.
+  - gh: Keychain and network as before, argument allow-list (default deny): `pr`, `issue`, `repo`, `api`, `run`,
+    `workflow`, `release`, `search`, `label`, `status`, `cache`, help and version, exact `auth status` (`--active`,
+    `--hostname github.com`); refused with a reason: `auth token`, `--show-token`, `auth git-credential`, `extension`,
+    `ext`, `alias`, `config set`; extensions and aliases run by name fall to the default deny. No `GH_*`/`GIT_*` from the
+    caller (`GH_HOST`, `GH_CONFIG_DIR`, `GH_TOKEN`, `GH_ENTERPRISE_TOKEN` would redirect host, config or token); forced
+    `GH_PROMPT_DISABLED=1`, `GH_NO_UPDATE_NOTIFIER=1`, `GH_PAGER=cat`, `HOME`.
+  - Both providers (same planner input). Plan authority carries the sandboxes, routes, refusal forms and prepended
+    arguments, so a change replaces the process (Claude: launch identity; Codex: next worker).
+  - Rollback: `defaults write local.daniil.switchboard ExternalBoundaryGitNarrowingOff -bool YES` gives git and gh the
+    previous policy from the next planned process of a chat (Claude: next turn, the authority changes; Codex: the next
+    new worker). Delete the key to return.
+  - Verified: the emitted document with the pinned helper (`nono profile validate`, unit test
+    `narrowedGitPolicyIsAcceptedByThePinnedHelper` when `.build/nono/nono` exists): Keychain only in the intercepts;
+    `nono why` for the refusals and, with each route's matchers replayed as an allow-list (`why` does not report
+    intercepts), for the accepted and refused shapes. Not verified live: that an intercept sandbox really replaces the
+    selection at run time and that `argv_prepend` reaches git, a real push with the neutral environment, LFS. The probes
+    (`probe-nono-runtime.py`, `probe-codex-nono.py`) have the checks but were not run.
+  - Remains: inside the Keychain sandbox `/bin/sh` must run (git runs every credential helper through the shell), so
+    anything the prepended config does not cover could still run there; known uncovered: none for `push`/`fetch`/
+    `ls-remote` over https. The remote URL, `url.*.insteadOf`, `http.*.proxy` and `http.*.sslVerify` are
+    repository-controlled (URL-scoped `http.*` keys beat a command-line value): with a local proxy and TLS verification
+    off an agent could make `credential-osxkeychain` answer for a host of its choosing. Closing it needs remote-host
+    pinning (later step, not built). gh: `gh api`/`release upload` can upload any file gh reads, the Keychain database
+    file included (encrypted); a proxy credential for gh is the later fix. LFS objects are not uploaded on push (the
+    pre-push hook is off; `git-lfs` could not run in the mediated sandbox before either). `git -C <path>/ push`, a
+    relative `-C`, `git remote update`, `git submodule update` and local `git fetch ../repo` (file transport) have no
+    network or fail.
 
 - `scripts/build-app.sh` and the queue's `confirm-live` read the process list and a process's path and
   start time through libproc instead of `ps` (2026-11-12): `ps` stopped the app build after a
@@ -330,8 +387,9 @@ Known gaps. Check this list before you treat a failure as a new defect.
 - The queue holds an install lease: while an installed batch still waits for `confirm-live` or
   `publish`, `install` of another batch is refused, unless the lease is older than 45 minutes or
   the user approves `install BATCH --take-over` (see `scripts/verification-README.md`).
-- Mediated `git` cannot exec helpers outside its trees: `git rebase --continue` with `GIT_EDITOR=true` fails
-  (`cannot run true`); use `GIT_EDITOR=:` (git's built-in no-op).
+- Mediated `git` cannot exec helpers outside its trees (`/bin`, git-core, and since 2026-11-13 `/usr/bin/true` and
+  `/usr/bin/false` in its local sandbox): `GIT_SEQUENCE_EDITOR=sed …` fails; `GIT_EDITOR=:` (git's built-in no-op) and
+  `true` work. With the rollback switch on, `true` fails again.
 - Process-fixture tests (`ClaudeInteractiveTests`) were flaky when run from a chat under the external boundary
   (2026-11-13, queue logs `1297d1b3`, `f948a195`, `c24b35de`). The earlier note blamed the SwiftUI layout suite
   `SettingsProposalLayoutTests` for doubling their wall time; that was wrong: the same suites take 8-9 s with or

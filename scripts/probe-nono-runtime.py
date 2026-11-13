@@ -16,7 +16,11 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import sys
 import time
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import nono_git_policy  # noqa: E402
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--nono', required=True, help='Verified helper from prepare-nono.py')
@@ -37,8 +41,11 @@ SWIFTPM_CACHES = [HOME / 'Library/Caches/org.swift.swiftpm', HOME / 'Library/org
 PATH = '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin'
 REPO = ROOT
 GIT_EXEC = subprocess.check_output(['/opt/homebrew/bin/git', '--exec-path'], text=True).strip()
-# git runs credential helpers and hooks through /bin/sh, which the command sandbox must be able to exec.
-GIT_TREES = sorted({GIT_EXEC, os.path.realpath(GIT_EXEC), '/bin'})
+GH = shutil.which('gh', path=PATH)
+# The user's commit identity, compared by hash inside the sandbox: never printed. Empty when no global name is set.
+_name = subprocess.run(['/opt/homebrew/bin/git', 'config', '--global', 'user.name'], capture_output=True, text=True).stdout.strip()
+NAME_HASH = hashlib.sha256((_name + '\n').encode()).hexdigest() if _name else ''
+ORIGIN = subprocess.run(['/opt/homebrew/bin/git', '-C', str(REPO), 'remote', 'get-url', 'origin'], capture_output=True, text=True).stdout.strip()
 # /usr/bin/python3 is a stub that execs the selected developer-tools interpreter by absolute path; a command
 # policy must pin that real file (macOS has no exec_paths) and allow its direct execution from the session.
 PYTHON = subprocess.check_output(['/usr/bin/python3', '-c', 'import os,sys;print(os.path.realpath(sys.executable))'], text=True).strip()
@@ -93,6 +100,11 @@ def make_case(name):
     return case
 
 
+def GIT_FS(case):
+    return {'fs_read': [str(case / 'project'), str(case / 'tmp'), str(REPO), str(HOME / '.config/git'), '/opt/homebrew'],
+            'fs_read_file': [str(HOME / '.gitconfig')], 'fs_write': [str(case / 'project'), str(case / 'tmp')], 'fs_write_file': []}
+
+
 def policy(case, browser_port):
     """Command mediation: keychain for `security`, a browser command for the app's MCP server, Xcode tools by absolute path."""
     profiles = case / 'profiles'
@@ -102,13 +114,10 @@ def policy(case, browser_port):
         'command_policies': {
             'executable_dirs': [str(TOOLCHAIN), str(DEVELOPER / 'usr/bin')],
             'commands': {
-                'git': {'executable': '/opt/homebrew/bin/git',
-                        'sandbox': {'keychain_access': 'read', 'fs_read': [str(case / 'project'), str(REPO), str(HOME / '.config/git'), '/opt/homebrew'],
-                                    'fs_read_file': [str(HOME / '.gitconfig')],
-                                    'fs_write': [str(case / 'project')], 'network': {'allow_all': True},
-                                    'environment': {'allow_vars': ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_*', 'TERM', 'TMPDIR', 'GIT_*']},
-                                    'unsafe_macos_seatbelt_rules': [r for tree in GIT_TREES for r in (
-                                        '(allow process-exec* (subpath "%s"))' % tree, '(allow file-read* (subpath "%s"))' % tree, '(allow file-map-executable (subpath "%s"))' % tree)]}},
+                # The app's narrowed shape (`ExternalSandboxPlanner.gitCommand`): local work without Keychain or network,
+                # `push`/`fetch`/`ls-remote` (also after `-C <root>`) with them; HOME forced to the real home as the app does.
+                'git': nono_git_policy.git_policy(GIT_FS(case), HOME, [case / 'project', REPO]),
+                **({'gh': nono_git_policy.gh_policy(GIT_FS(case), HOME, GH)} if GH else {}),
                 # The app's shape (`ExternalSandboxPlan.policyDocument`): the sandbox in the session edge plus an argument
                 # allow-list, default deny. Signing lists identities only; a listed item gets its exact secret reads.
                 'security': {'executable': '/usr/bin/security',
@@ -160,6 +169,16 @@ try:
     # ---- developer: union session + mediated commands --------------------------------------------------------
     case = make_case('developer')
     env = environment(case)
+    # The fixture repository talks to this checkout's own remote; its hooks folder logs what runs and whether the Keychain
+    # file was readable there (yes/no files, never content).
+    if ORIGIN:
+        subprocess.run(['/opt/homebrew/bin/git', '-C', str(case / 'project'), 'remote', 'add', 'origin', ORIGIN], check=True)
+    hooks = case / 'project/probe-hooks'
+    hooks.mkdir()
+    (hooks / 'reference-transaction').write_text('#!/bin/sh\ncat > /dev/null\ntouch "%s/hook-ran"\n'
+                                                 'test -r "%s/Library/Keychains/login.keychain-db" && touch "%s/hook-keychain"\nexit 0\n'
+                                                 % (case / 'tmp', HOME, case / 'tmp'))
+    os.chmod(hooks / 'reference-transaction', 0o755)
     browser_port = 39577
     profile = case / 'policy.json'
     profile.write_text(json.dumps(policy(case, browser_port), indent=1))
@@ -240,6 +259,32 @@ git -C "{case}/project" status --short > /dev/null 2>&1; echo "CHECK git-status-
 git -C "{case}/project" -c user.name=probe -c user.email=probe@example.invalid commit -q --allow-empty -m probe > /dev/null 2>&1; echo "CHECK git-commit-shim $?"
 git -C "{REPO}" ls-remote --exit-code origin HEAD > /dev/null 2>&1; echo "CHECK git-ls-remote $?"
 git -C "{REPO}" push --dry-run origin HEAD > "{case}/tmp/push.out" 2>&1; echo "CHECK git-push-dry-run $? $(tail -c 120 "{case}/tmp/push.out" | tr '\\n' ' ')"
+git -C "{REPO}" ls-remote --refs origin refs/heads/main > /dev/null 2>&1; echo "CHECK git-ls-remote-queue-shape $?"
+KC="{HOME}/Library/Keychains/login.keychain-db"
+P="{case}/project"
+git -C "$P" commit -q --allow-empty -m identity > /dev/null 2>&1; echo "CHECK git-commit-own-identity $?"
+h=$(git -C "$P" log -1 --format=%an 2>/dev/null | /usr/bin/shasum -a 256 | cut -c1-64); [ -n "{NAME_HASH}" ] && [ "$h" = "{NAME_HASH}" ]; echo "CHECK git-identity-kept $?"
+printf '[user]\\n\\tname = injected\\n' > "{case}/tmp/evil.gitconfig"
+GIT_CONFIG_GLOBAL="{case}/tmp/evil.gitconfig" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=injected HOME="{case}/tmp" git -C "$P" commit -q --allow-empty -m injected > /dev/null 2>&1
+h=$(git -C "$P" log -1 --format=%an 2>/dev/null | /usr/bin/shasum -a 256 | cut -c1-64); [ -n "{NAME_HASH}" ] && [ "$h" = "{NAME_HASH}" ]; echo "CHECK git-identity-injection-ignored $?"
+GIT_EDITOR=true git -C "$P" commit -q --amend --allow-empty > /dev/null 2>&1; echo "CHECK git-editor-true $?"
+GIT_EDITOR=: git -C "$P" commit -q --amend --allow-empty > /dev/null 2>&1; echo "CHECK git-editor-colon $?"
+git -c "alias.kc=!test -r '$KC'" kc > /dev/null 2>&1; echo "CHECK git-alias-keychain $?"
+git -c "alias.kc=!test -r '$KC'" kc push > /dev/null 2>&1; echo "CHECK git-alias-push-keychain $?"
+git -C "$P" config alias.pk "!test -r '$KC'"; git -C "$P" pk > /dev/null 2>&1; echo "CHECK git-repo-alias-keychain $?"
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.inj GIT_CONFIG_VALUE_0='!touch "{case}/tmp/injected"' git inj > /dev/null 2>&1; test -e "{case}/tmp/injected"; echo "CHECK git-config-count-alias $?"
+git -C "$P" ls-remote 'ext::sh -c touch% {case}/tmp/ext-ran' > /dev/null 2>&1; echo "CHECK git-ext-exit $?"; test -e "{case}/tmp/ext-ran"; echo "CHECK git-ext-ran $?"
+git credential fill < /dev/null > /dev/null 2>&1; echo "CHECK git-credential-refused $?"
+git -C "$P" pull > /dev/null 2> "{case}/tmp/pull.err"; echo "CHECK git-pull-refused $? $(head -c 160 "{case}/tmp/pull.err" | tr '\\n' ' ')"
+git -C "$P" config core.hooksPath "$P/probe-hooks"
+git -C "$P" config credential.helper '!touch "{case}/tmp/repo-helper-ran"; true'
+git -C "$P" update-ref refs/probe/local HEAD > /dev/null 2>&1; echo "CHECK git-local-hook-runs $(test -e "{case}/tmp/hook-ran"; echo $?) keychain $(test -e "{case}/tmp/hook-keychain"; echo $?)"
+rm -f "{case}/tmp/hook-ran" "{case}/tmp/hook-keychain"
+git -C "$P" fetch -q origin main > /dev/null 2>&1; echo "CHECK git-fetch-project $?"
+echo "CHECK git-fetch-hooks-off $(test -e "{case}/tmp/hook-ran"; echo $?) keychain $(test -e "{case}/tmp/hook-keychain"; echo $?) helper $(test -e "{case}/tmp/repo-helper-ran"; echo $?)"
+gh auth token > /dev/null 2> "{case}/tmp/gh.err"; echo "CHECK gh-token-refused $? $(grep -c 'command policy' "{case}/tmp/gh.err")"
+gh auth status -t > /dev/null 2>&1; echo "CHECK gh-show-token-refused $?"
+gh pr list --limit 1 > /dev/null 2>&1; echo "CHECK gh-pr-list $?"
 printf 'protocol=https\\nhost=github.com\\n' | "{GIT_EXEC}/git-credential-osxkeychain" get 2>/dev/null | grep -q '^password=' ; echo "CHECK git-helper-direct-no-secret $?"
 ls "{HOME}/Library/Keychains" > /dev/null 2>&1; echo "CHECK session-keychain-hidden $?"
 echo "CHECK proxy-env ${{HTTPS_PROXY:-unset}}"
@@ -270,7 +315,19 @@ wait
     results['developer'] = {'checks': found, 'exit': proc.poll()}
     exp = {'project-write': '0', 'cache-write': '0', 'toolchain-absolute-exec': '0', 'toolchain-swift-exec': '0', 'xcrun-find': '0',
            'python-direct-bypass': '0', 'browser-command-profiles-write': '0'}
-    exp.update({'git-status-shim': '0', 'git-commit-shim': '0', 'git-ls-remote': '0', 'git-push-dry-run': '0'})
+    exp.update({'git-status-shim': '0', 'git-commit-shim': '0', 'git-ls-remote': '0', 'git-push-dry-run': '0', 'git-ls-remote-queue-shape': '0',
+                'git-commit-own-identity': '0', 'git-identity-kept': '0', 'git-identity-injection-ignored': '0', 'git-editor-true': '0',
+                'git-editor-colon': '0', 'git-fetch-project': '0'})
+    # Narrowed git (2026-11-13): code an agent controls never runs with the Keychain; refused forms stay refused.
+    for name in ['git-alias-keychain', 'git-alias-push-keychain', 'git-repo-alias-keychain', 'git-config-count-alias', 'git-ext-exit',
+                 'git-ext-ran', 'git-credential-refused', 'git-pull-refused', 'gh-show-token-refused']:
+        check('developer/' + name, found.get(name, '0').split(' ')[0] not in ('0', ''), found.get(name, 'missing'))
+    check('developer/git-local-hook-runs-without-keychain', found.get('git-local-hook-runs', '') == '0 keychain 1', found.get('git-local-hook-runs', 'missing'))
+    check('developer/git-fetch-runs-no-repo-code', found.get('git-fetch-hooks-off', '') == '1 keychain 1 helper 1', found.get('git-fetch-hooks-off', 'missing'))
+    if GH:
+        token = found.get('gh-token-refused', '0 0').split(' ')
+        check('developer/gh-token-refused-by-policy', token[0] not in ('0', '') and token[-1] != '0', ' '.join(token))
+        check('developer/gh-pr-list (informational)', True, found.get('gh-pr-list', 'missing'))
     for name, code in exp.items():
         check('developer/' + name, found.get(name, '').split(' ')[0] == code, found.get(name, 'missing'))
     for name in ['other-write', 'other-cwd-write', 'security-direct-denied', 'session-profiles-hidden', 'session-keychain-hidden', 'git-helper-direct-no-secret',

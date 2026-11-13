@@ -344,6 +344,7 @@ public enum SettingsProposalInbox {
             - Наборы: \(presets).
             \(boundaryCommandRule(language: .russian))
             \(keychainItemRule(language: .russian))
+            \(gitBoundaryRule(language: .russian))
             - Приложение покажет пользователю список изменений в этом чате; применит их только он. Скажи пользователю, что предложение ждёт его решения. Предлагай только то, что нужно задаче; команды вне песочницы получают доступ ко всему Mac.
             - Когда пользователь решит, этот чат получит сообщение от приложения. До тех пор продолжай независимую часть задачи.
             """,
@@ -354,12 +355,19 @@ public enum SettingsProposalInbox {
             - Sets: \(presets).
             \(boundaryCommandRule(language: .english))
             \(keychainItemRule(language: .english))
+            \(gitBoundaryRule(language: .english))
             - The app shows the user the list of changes in this chat; only the user applies them. Tell the user the proposal waits for their decision. Propose only what the task needs; commands outside the sandbox get access to the whole Mac.
             - When the user decides, this chat receives a message from the app. Until then continue the independent part of the task.
             """, language: language)
     }
     /// Under the external boundary a trusted command stays inside (PERMISSIONS.md, section 1); shared with the Claude
     /// boundary instructions.
+    /// How git works under the external boundary: the Keychain only for push, fetch and ls-remote.
+    public static func gitBoundaryRule(language: AppLanguage = L10n.language) -> String {
+        L10n.text("- Git под внешней границей: учётные данные получают только `git push`, `git fetch` и `git ls-remote`. Вместо `git pull` выполняй `git fetch`, затем `git merge` (или `git rebase`, `git merge --ff-only`): результат тот же. Закрытый репозиторий получай так: `git init`, `git remote add origin <https-адрес>`, `git fetch`, `git checkout <ветка>`; `git clone` работает без учётных данных, только для публичных. Только https.",
+                  "- Git under the external boundary: only `git push`, `git fetch` and `git ls-remote` get credentials. Instead of `git pull` run `git fetch`, then `git merge` (or `git rebase`, `git merge --ff-only`): the result is the same. Get a private repository with `git init`, `git remote add origin <https url>`, `git fetch`, `git checkout <branch>`; `git clone` runs without credentials, for public repositories only. https only.",
+                  language: language)
+    }
     public static func boundaryCommandRule(language: AppLanguage = L10n.language) -> String {
         L10n.text("- Под внешней границей (`SWITCHBOARD_EXTERNAL_SANDBOX=1`) `addCommands` не выводит команду наружу: она всё равно выполняется внутри. Для записи Связки ключей запрашивай `addKeychainItems`, для учётных данных или сетевой идентичности - набор доступа с командой-посредником (`addPresets`), но не доверенную команду.",
                   "- Under the external boundary (`SWITCHBOARD_EXTERNAL_SANDBOX=1`) `addCommands` does not take a command outside: it still runs inside. For a Keychain item request `addKeychainItems`; for a credential or a network identity, an access set with a mediated command (`addPresets`); never a trusted command.",

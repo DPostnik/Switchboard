@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Under the external boundary, git gets the Keychain only for `push`, `fetch` and `ls-remote` (with the repository's hooks, aliases and credential helpers switched off); other git commands run without Keychain or network, `git pull` and `git credential` are refused with the route, and `gh` refuses `auth token`, extensions and aliases. Your global git identity stays in effect. Rollback: `defaults write local.daniil.switchboard ExternalBoundaryGitNarrowingOff -bool YES`.
+
 - A project can be granted named Keychain items (Project settings → Command sandbox → Keychain items, or an agent's access request with `addKeychainItems`, applied once on its card): under the external boundary the project's scripts read just those items with `security find-generic-password -s <service> [-a <account>] -w`, and the item's secret becomes readable by that project's agents. The rest of the Keychain stays closed: the Apple signing set no longer opens the whole Keychain to `security` and only lists signing identities; every other `security` call is refused.
 
 - Prevent access-request boundary warnings from pushing the sidebar and composer outside the window.

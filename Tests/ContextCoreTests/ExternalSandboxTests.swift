@@ -90,11 +90,13 @@ private func sha256(_ data: Data) -> String {
     #expect(plan.grants.contains(.init(.allow, plan.temporary.path)) && plan.grants.contains(.init(.unixSocket, plan.socket.path)))
     #expect(plan.grants.contains(.init(.readFile, root.appendingPathComponent("home/.gitconfig").resolvingSymlinksInPath().path)))
     #expect(plan.grants.contains(.init(.allow, root.appendingPathComponent("home/Library/Caches/Switchboard").resolvingSymlinksInPath().path)))
-    // Mediated commands follow the ticked presets: signing and GitHub get the Keychain, git keeps its helper trees.
+    // Mediated commands follow the ticked presets: signing and GitHub get the Keychain, git keeps its helper trees; git's own
+    // sandbox has neither Keychain nor network, only its network route does (`narrowedGitSplitsKeychainFromLocalWork`).
     let names = plan.commands.map(\.name).sorted()
     #expect(names.contains("codesign") && names.contains("security") && names.contains("git"))
     let git = plan.commands.first { $0.name == "git" }!
-    #expect(git.keychain && git.network && git.executableTrees.contains("/bin"))
+    #expect(!git.keychain && !git.network && git.executableTrees.contains("/bin"))
+    #expect(git.routes.contains { $0.sandbox.keychain && $0.sandbox.network && $0.sandbox.executableTrees.contains("/bin") })
     let document = plan.policyDocument()
     let policies = (document["command_policies"] as! [String: Any])["commands"] as! [String: Any]
     #expect((policies["codesign"] as! [String: Any])["allow_direct_exec_bypass"] as? [String] == ["/usr/bin/codesign"])
@@ -115,9 +117,9 @@ private func sha256(_ data: Data) -> String {
     #expect(allow == [["argv": ["prefix": ["find-identity"]]]])
     // Commands without an allow-list keep the shorthand and filter no arguments.
     #expect((policies["codesign"] as! [String: Any])["sandbox"] != nil && (policies["codesign"] as! [String: Any])["from"] == nil)
-    #expect((policies["git"] as! [String: Any])["from"] == nil)
+    #expect((policies["git"] as! [String: Any])["sandbox"] == nil && (policies["git"] as! [String: Any])["from"] != nil)
     #expect(plan.commands.first { $0.name == "security" }?.arguments == [.prefix(["find-identity"])])
-    #expect(plan.commands.filter { $0.name != "security" }.allSatisfy { $0.arguments == nil })
+    #expect(plan.commands.filter { !["security", "gh"].contains($0.name) }.allSatisfy { $0.arguments == nil })
     #expect(plan.authority.contains { $0.hasPrefix("command security ") && $0.hasSuffix("argv=prefix \"find-identity\"") })
     #expect((document["workdir"] as! [String: String])["access"] == "none")
     #expect(plan.environment["TMPDIR"] == plan.temporary.path && plan.environment["SWITCHBOARD_EXTERNAL_SANDBOX"] == "1")
@@ -548,4 +550,278 @@ private func claudeInput(_ root: URL, project: Project, workerID: String) -> Ext
     // The command sandbox switch off removes them too.
     var off = project; off.commandSandbox = false
     #expect(AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: off).commandSandbox == nil)
+}
+
+// MARK: - Narrowed mediated git and gh (user decision 2026-11-13)
+
+/// Which sandbox nono gives an argv, with nono 0.81.0's matcher semantics (whole tokens; `prefix` from the first argument;
+/// `contains` a contiguous run; deny before allow before default; the first matching intercept wins). The semantics were
+/// checked with `nono why` (`narrowedGitPolicyIsAcceptedByThePinnedHelper` repeats that when the helper is present).
+private enum Selection: Equatable { case refused(String), denied, route(Int), own }
+private func matches(_ rule: ExternalSandboxCommand.ArgumentRule, _ argv: [String]) -> Bool {
+    switch rule {
+    case .exact(let tokens): return argv == tokens
+    case .prefix(let tokens): return argv.starts(with: tokens)
+    case .contains(let tokens):
+        guard !tokens.isEmpty, tokens.count <= argv.count else { return false }
+        return (0...(argv.count - tokens.count)).contains { Array(argv[$0..<$0 + tokens.count]) == tokens }
+    }
+}
+private func select(_ command: ExternalSandboxCommand, _ argv: [String]) -> Selection {
+    if let refusal = command.refusals.first(where: { matches($0.rule, argv) }) { return .refused(refusal.reason) }
+    if let allowed = command.arguments, !allowed.contains(where: { matches($0, argv) }) { return .denied }
+    if let index = command.routes.firstIndex(where: { $0.rules.contains { matches($0, argv) } }) { return .route(index) }
+    return .own
+}
+
+private let gitFixture = ExternalSandboxPlanner.gitCommand("/opt/homebrew/bin/git", trees: ["/bin", "/opt/homebrew/libexec/git-core"],
+                                                           home: "/Users/u", roots: ["/x", "/shared"])
+
+@Test func narrowedGitSplitsKeychainFromLocalWork() throws {
+    let git = gitFixture
+    // Its own sandbox: no Keychain, no network, local protocols only, the identity and index variables a commit needs.
+    #expect(!git.keychain && !git.network && git.arguments == nil)
+    #expect(git.sandbox.environment == ExternalSandboxPlanner.gitLocalEnvironment)
+    #expect(git.sandbox.setEnvironment == ["GIT_TERMINAL_PROMPT": "0", "GIT_ALLOW_PROTOCOL": "file", "HOME": "/Users/u"])
+    #expect(git.sandbox.executableFiles == ["/usr/bin/false", "/usr/bin/true"] && git.sandbox.prependArguments.isEmpty)
+    for name in ["GIT_AUTHOR_NAME", "GIT_COMMITTER_EMAIL", "GIT_AUTHOR_DATE", "GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR"] {
+        #expect(git.sandbox.environment!.contains(name))
+    }
+    let keychain = git.routes[0].sandbox, clone = git.routes[1].sandbox
+    #expect(keychain.keychain && keychain.network && keychain.executableTrees == git.executableTrees && keychain.executableFiles.isEmpty)
+    #expect(keychain.environment == ExternalSandboxPlanner.plainEnvironment)
+    #expect(keychain.setEnvironment == ["GIT_TERMINAL_PROMPT": "0", "GIT_ALLOW_PROTOCOL": "https", "HOME": "/Users/u", "GIT_EDITOR": ":", "GIT_SEQUENCE_EDITOR": ":"])
+    #expect(keychain.prependArguments == ExternalSandboxPlanner.gitKeychainPrepend)
+    let prepend = keychain.prependArguments
+    #expect(prepend.first == "--no-pager" && prepend.contains("core.hooksPath=/dev/null") && prepend.contains("core.fsmonitor=false") && prepend.contains("core.askPass="))
+    #expect(prepend.firstIndex(of: "credential.helper=")! < prepend.firstIndex(of: "credential.helper=osxkeychain")!)
+    #expect(!clone.keychain && clone.network && clone.setEnvironment["GIT_ALLOW_PROTOCOL"] == "https:file" && clone.prependArguments.isEmpty)
+    // Never passed from the caller, in any git sandbox: config injection, replaced config files, programs git would run.
+    let forbidden = ["GIT_*", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0",
+                     "GIT_CONFIG_VALUE_0", "GIT_CONFIG_PARAMETERS", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS", "SSH_ASKPASS",
+                     "GIT_PROXY_COMMAND", "GIT_EXTERNAL_DIFF", "GIT_PAGER", "GIT_EXEC_PATH", "GIT_TEMPLATE_DIR", "XDG_CONFIG_HOME"]
+    for sandbox in [git.sandbox, keychain, clone] {
+        #expect(Set(sandbox.environment ?? ["GIT_*"]).isDisjoint(with: forbidden))
+        // The user's global config stays the one git reads: neither replaced nor switched off.
+        #expect(sandbox.setEnvironment["GIT_CONFIG_GLOBAL"] == nil && sandbox.setEnvironment["GIT_CONFIG_NOSYSTEM"] == nil && sandbox.setEnvironment["HOME"] == "/Users/u")
+    }
+}
+
+@Test func narrowedGitGivesTheKeychainOnlyToTheAcceptedShapes() {
+    let git = gitFixture
+    let keychain: [[String]] = [
+        ["push"], ["push", "--dry-run", "origin", "HEAD"], ["fetch"], ["fetch", "origin"], ["ls-remote", "--refs", "origin", "x"],
+        ["ls-remote", "--exit-code", "origin", "HEAD"],
+        // The verification queue's own calls (`verification_snapshot.publish_plan`, `reconcile_publication`).
+        ["-C", "/x", "push", "--force-with-lease=refs/heads/main:abc", "origin", "h:refs/heads/main"],
+        ["-C", "/x", "ls-remote", "--refs", "origin", "refs/heads/main"], ["-C", "/shared", "fetch"]]
+    for argv in keychain { #expect(select(git, argv) == .route(0), "\(argv)") }
+    // Negative: local work, aliases, injected config and every other global option stay in the sandbox without Keychain.
+    let local: [[String]] = [
+        ["status"], ["commit", "-m", "x"], ["commit", "-m", "push"], ["rebase", "--continue"], ["-c", "alias.x=!sh", "x"],
+        ["-c", "alias.x=!sh", "x", "push"], ["x", "push"], ["-c", "credential.helper=osxkeychain", "push"], ["-C", "/x", "-c", "a=b", "push"],
+        ["--config-env=a=B", "push"], ["--git-dir=/y/.git", "push"], ["--work-tree", "/y", "push"], ["--exec-path=/tmp", "push"],
+        ["-C", "/other", "push"], ["-C", "/x/", "push"], ["-C", "/x", "-C", "y", "push"], ["--no-pager", "push"], ["-P", "fetch"],
+        ["credential-osxkeychain", "get"], ["-C", "/other", "credential", "fill"], ["worktree", "add", "--detach", "/x/w", "HEAD"],
+        ["commit-tree", "t", "-p", "b"], ["update-ref", "refs/x", "h"], ["remote", "update"], ["submodule", "update"], ["Push"]]
+    for argv in local { #expect(select(git, argv) == .own, "\(argv)") }
+    #expect(select(git, ["clone", "https://example.invalid/r"]) == .route(1))
+    #expect(select(git, ["-C", "/x", "clone", "u"]) == .route(1))
+    #expect(select(git, ["-c", "a=b", "clone", "u"]) == .own)
+    for argv in [["pull"], ["pull", "--rebase"], ["-C", "/x", "pull"], ["-C", "/shared", "pull", "origin"]] {
+        #expect(select(git, argv) == .refused(ExternalSandboxPlanner.gitPullRefusal), "\(argv)")
+    }
+    for argv in [["credential", "fill"], ["credential", "approve"], ["-C", "/x", "credential", "fill"]] {
+        #expect(select(git, argv) == .refused(ExternalSandboxPlanner.gitCredentialRefusal), "\(argv)")
+    }
+}
+
+@Test func narrowedGitCompilesToABaseEdgeAndKeychainIntercepts() throws {
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    var project = Project(path: root.appendingPathComponent("project").path)
+    project.accessPresets = ["github"]
+    let input = claudeInput(root, project: project, workerID: "g1")
+    let plan = try ExternalSandboxPlanner.plan(input, helper: .success(helper)).get()
+    guard let git = plan.commands.first(where: { $0.name == "git" }) else { return }   // no git on this Mac: nothing to compile
+    // The project root is the accepted `-C` path, canonical.
+    #expect(git.routes[0].rules.contains(.prefix(["-C", plan.project, "push"])))
+    #expect(git.routes[0].sandbox.setEnvironment["HOME"] == root.appendingPathComponent("home").resolvingSymlinksInPath().path)
+    let policy = ((plan.policyDocument()["command_policies"] as! [String: Any])["commands"] as! [String: Any])["git"] as! [String: Any]
+    #expect(policy["sandbox"] == nil)
+    let edge = (policy["from"] as! [String: Any])["session"] as! [String: Any]
+    let base = edge["sandbox"] as! [String: Any]
+    #expect(base["keychain_access"] == nil && (base["network"] as! [String: Bool])["allow_all"] == false && base["argv_prepend"] == nil)
+    let environment = base["environment"] as! [String: Any]
+    #expect(!(environment["allow_vars"] as! [String]).contains("GIT_*"))
+    #expect((environment["set_vars"] as! [String: String])["GIT_ALLOW_PROTOCOL"] == "file")
+    #expect((base["unsafe_macos_seatbelt_rules"] as! [String]).contains("(allow process-exec* (literal \"/usr/bin/true\"))"))
+    let invocation = edge["invocation_policy"] as! [String: Any]
+    #expect(invocation["default"] as? String == "allow" && invocation["allow"] == nil)
+    #expect((invocation["deny"] as! [[String: Any]]).contains { ($0["argv"] as? [String: [String]]) == ["prefix": ["pull"]] && $0["reason"] as? String == ExternalSandboxPlanner.gitPullRefusal })
+    let intercept = policy["intercept"] as! [[String: Any]]
+    #expect(intercept.count == git.routes.map(\.rules.count).reduce(0, +))
+    let first = intercept[0]
+    #expect((first["match"] as! [String: Any])["argv"] as? [String: [String]] == ["prefix": ["push"]])
+    #expect(first["action"] as? [String: String] == ["type": "passthrough"])
+    let sandbox = first["sandbox"] as! [String: Any]
+    #expect(sandbox["keychain_access"] as? String == "read" && (sandbox["network"] as! [String: Bool])["allow_all"] == true)
+    #expect(sandbox["argv_prepend"] as? [String] == ExternalSandboxPlanner.gitKeychainPrepend)
+    #expect((sandbox["fs_write"] as! [String]) == (base["fs_write"] as! [String]))
+    #expect(((sandbox["environment"] as! [String: Any])["set_vars"] as! [String: String])["GIT_ALLOW_PROTOCOL"] == "https")
+    let clone = intercept.first { ($0["match"] as! [String: Any])["argv"] as? [String: [String]] == ["prefix": ["clone"]] }!["sandbox"] as! [String: Any]
+    #expect(clone["keychain_access"] == nil && (clone["network"] as! [String: Bool])["allow_all"] == true)
+}
+
+@Test func narrowedGhRefusesTokensExtensionsAndAliases() {
+    let gh = ExternalSandboxPlanner.ghCommand("/opt/homebrew/bin/gh", home: "/Users/u")
+    #expect(gh.keychain && gh.network && gh.routes.isEmpty)
+    #expect(gh.sandbox.environment == ExternalSandboxPlanner.plainEnvironment)
+    #expect(gh.sandbox.setEnvironment == ["HOME": "/Users/u", "GH_PROMPT_DISABLED": "1", "GH_NO_UPDATE_NOTIFIER": "1", "GH_PAGER": "cat", "GIT_TERMINAL_PROMPT": "0"])
+    for name in ["GH_HOST", "GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GH_*", "GIT_*", "PAGER", "EDITOR", "BROWSER"] {
+        #expect(!gh.sandbox.environment!.contains(name))
+    }
+    for argv in [["pr", "list"], ["pr", "view", "1", "--json", "title"], ["api", "repos/a/b"], ["run", "list"], ["repo", "view"],
+                 ["issue", "list"], ["release", "list"], ["auth", "status"], ["auth", "status", "--active"], ["--version"]] {
+        #expect(select(gh, argv) == .own, "\(argv)")
+    }
+    for argv in [["auth", "token"], ["auth", "status", "--show-token"], ["auth", "git-credential", "get"], ["extension", "install", "x"],
+                 ["ext", "list"], ["extensions"], ["alias", "set", "x", "!sh"], ["config", "set", "editor", "x"], ["pr", "list", "--show-token"]] {
+        #expect(select(gh, argv) == .refused(ExternalSandboxPlanner.ghRefusal), "\(argv)")
+    }
+    // Default deny: other auth forms, config reads, extensions and aliases run by name, codespaces.
+    for argv in [["auth", "status", "-t"], ["auth", "login"], ["auth", "setup-git"], ["auth", "refresh"], ["config", "get", "editor"],
+                 ["my-extension"], ["x"], ["codespace", "ssh"], ["gist", "create", "f"], []] {
+        #expect(select(gh, argv) == .denied, "\(argv)")
+    }
+}
+
+@Test func gitNarrowingSwitchRestoresThePreviousPolicyAndKeysTheAuthority() throws {
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    var project = Project(path: root.appendingPathComponent("project").path)
+    project.accessPresets = ["github"]
+    #expect(ExternalSandboxPlanner.gitNarrowingOffKey == "ExternalBoundaryGitNarrowingOff")
+    func plan(_ worker: String, narrow: Bool = true, project: Project) throws -> ExternalSandboxPlan {
+        var input = claudeInput(root, project: project, workerID: worker); input.narrowGit = narrow
+        return try ExternalSandboxPlanner.plan(input, helper: .success(helper)).get()
+    }
+    let on = try plan("s1", project: project), off = try plan("s2", narrow: false, project: project)
+    guard let legacy = off.commands.first(where: { $0.name == "git" }) else { return }
+    // Off: one sandbox with Keychain and network, the caller's `GIT_*`, no argument policy (the policy before 2026-11-13).
+    #expect(legacy.keychain && legacy.network && legacy.routes.isEmpty && legacy.refusals.isEmpty && legacy.arguments == nil && legacy.sandbox.environment == nil)
+    let policy = ((off.policyDocument()["command_policies"] as! [String: Any])["commands"] as! [String: Any])["git"] as! [String: Any]
+    #expect(policy["intercept"] == nil && policy["from"] == nil)
+    #expect((((policy["sandbox"] as! [String: Any])["environment"] as! [String: Any])["allow_vars"] as! [String]).contains("GIT_*"))
+    if let gh = off.commands.first(where: { $0.name == "gh" }) { #expect(gh.arguments == nil && gh.refusals.isEmpty) }
+    // Launch identity: the switch, a route and its prepended config are part of it; equal settings keep it.
+    #expect(on.authority != off.authority)
+    #expect(try plan("s3", project: project).authority == on.authority)
+    #expect(try plan("s4", narrow: false, project: project).authority == off.authority)
+    let line = try #require(on.authority.first { $0.hasPrefix("command git ") })
+    #expect(line.contains("keychain=false network=false") && line.contains("route[keychain=true network=true") && line.contains("core.hooksPath=/dev/null"))
+    #expect(line.contains("deny=prefix \"pull\"") && !line.contains(ExternalSandboxPlanner.gitPullRefusal))
+    #expect(!on.authority.contains { $0.contains(on.worker.path) })
+    // Another folder adds its `-C` routes, so the authority changes with it.
+    let shared = root.appendingPathComponent("shared")
+    try FileManager.default.createDirectory(at: shared, withIntermediateDirectories: true)
+    var wider = AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: project)
+    wider.filesystem = .project(extraRoots: [.init(path: shared.path, writable: true)])
+    var input = claudeInput(root, project: project, workerID: "s5"); input.profile = wider
+    let widened = try ExternalSandboxPlanner.plan(input, helper: .success(helper)).get()
+    #expect(widened.authority != on.authority)
+    #expect(widened.commands.first { $0.name == "git" }!.routes[0].rules.contains(.prefix(["-C", shared.resolvingSymlinksInPath().path, "fetch"])))
+}
+
+/// Codex plans git and gh through the same planner path as Claude (invariant 14).
+@Test func codexGetsTheSameNarrowedGitAndGh() throws {
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    var project = Project(path: root.appendingPathComponent("project").path)
+    project.accessPresets = ["github"]
+    let profile = AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: project)
+    var codex = CodexIntegration.boundaryInput(project: project.path, profile: profile, root: root, inbox: root.appendingPathComponent("inbox"))
+    codex.home = root.appendingPathComponent("home")
+    let codexPlan = try ExternalSandboxPlanner.plan(codex, helper: .success(helper)).get()
+    let claudePlan = try ExternalSandboxPlanner.plan(claudeInput(root, project: project, workerID: "cx"), helper: .success(helper)).get()
+    for name in ["git", "gh"] {
+        #expect(codexPlan.commands.first { $0.name == name } == claudePlan.commands.first { $0.name == name })
+    }
+    #expect(codexPlan.commands.first { $0.name == "git" }.map { !$0.routes.isEmpty } ?? true)
+}
+
+/// The emitted document is accepted by the pinned helper and its argument rules behave as the tests above assume. Runs when
+/// `.build/nono/nono` exists in this checkout or the main checkout (worktrees); the profile goes on stdin, no file is written.
+@Test func narrowedGitPolicyIsAcceptedByThePinnedHelper() throws {
+    let package = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    let candidates = [package, package.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()]
+        .map { $0.appendingPathComponent(".build/nono/nono").path }
+    guard let nono = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return }
+    func run(_ arguments: [String], _ document: [String: Any]) throws -> (Int32, String) {
+        let process = Process(), input = Pipe(), output = Pipe()
+        process.executableURL = URL(fileURLWithPath: nono); process.arguments = arguments
+        process.standardInput = input; process.standardOutput = output; process.standardError = output
+        try process.run()
+        input.fileHandleForWriting.write(try JSONSerialization.data(withJSONObject: document)); try input.fileHandleForWriting.close()
+        let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        return (process.terminationStatus, text)
+    }
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    var project = Project(path: root.appendingPathComponent("project").path)
+    project.accessPresets = ["github"]
+    let plan = try ExternalSandboxPlanner.plan(claudeInput(root, project: project, workerID: "n1"), helper: .success(helper)).get()
+    let document = plan.policyDocument()
+    let (code, text) = try run(["profile", "validate", "/dev/stdin"], document)
+    #expect(code == 0 && text.contains("Result: valid"), "\(text)")
+    // The keychain grant is seen in the intercepts only, never on git's own edge.
+    #expect(text.contains("from.intercept[0].sandbox is granted the login keychain") && !text.contains("'git' from.session is granted the login keychain"))
+    func why(_ document: [String: Any], _ name: String, _ argv: [String]) throws -> String {
+        let (_, out) = try run(["why", "--json", "--profile", "/dev/stdin", "--command", name, "--"] + argv, document)
+        return ((try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any])?["status"] as? String ?? out
+    }
+    guard let git = plan.commands.first(where: { $0.name == "git" }) else { return }
+    // Refusals through nono's own invocation policy.
+    #expect(try why(document, "git", ["pull"]) == "denied" && why(document, "git", ["credential", "fill"]) == "denied")
+    #expect(try why(document, "git", ["push"]) == "allowed" && why(document, "git", ["status"]) == "allowed")
+    // Routing: nono's `why` does not report intercepts, so each route's matchers are replayed as an allow-list (the same
+    // matcher shapes) and compared with the selection the other tests assume.
+    let commands = (document["command_policies"] as! [String: Any])["commands"] as! [String: Any]
+    var mirror = commands["git"] as! [String: Any]
+    mirror["intercept"] = nil
+    let samples: [[String]] = [["push"], ["-C", plan.project, "push", "--force-with-lease=a:b", "origin", "h:r"], ["ls-remote", "--refs", "origin", "x"],
+                               ["status"], ["commit", "-m", "x"], ["rebase", "--continue"], ["-c", "alias.x=!sh", "x"], ["-c", "alias.x=!sh", "x", "push"],
+                               ["credential", "fill"], ["-C", "/other", "push"], ["clone", "u"], ["commit", "-m", "push"]]
+    for (index, route) in git.routes.enumerated() {
+        var edge = (mirror["from"] as! [String: Any])["session"] as! [String: Any]
+        edge["invocation_policy"] = ["default": "deny", "allow": route.rules.map { ["argv": $0.matcherForTests] }] as [String: Any]
+        mirror["from"] = ["session": edge]
+        var replay = document; replay["command_policies"] = ["executable_dirs": [String](), "commands": ["git": mirror]] as [String: Any]
+        for argv in samples {
+            let expected = select(git, argv)
+            let matched = try why(replay, "git", argv) == "allowed"
+            if case .refused = expected { continue }
+            #expect(matched == (expected == .route(index)), "\(argv) route \(index)")
+        }
+    }
+    if let gh = plan.commands.first(where: { $0.name == "gh" }) {
+        for argv in [["auth", "token"], ["auth", "status", "-t"], ["extension", "list"], ["my-extension"], ["pr", "list"], ["auth", "status"]] {
+            let expected = select(gh, argv)
+            #expect(try why(document, "gh", argv) == (expected == .own ? "allowed" : "denied"), "\(argv)")
+        }
+    }
+}
+private extension ExternalSandboxCommand.ArgumentRule {
+    var matcherForTests: [String: [String]] {
+        switch self {
+        case .exact(let argv): ["exact": argv]
+        case .prefix(let argv): ["prefix": argv]
+        case .contains(let argv): ["contains": argv]
+        }
+    }
 }

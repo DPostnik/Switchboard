@@ -599,6 +599,7 @@ private func keychainReview(_ project: Project, add: [AgentPermissionProfile.Key
         #expect(CodexClient.settingsProposalInstructions(boundary: true, language: language)?.contains(rule) == true)
         #expect(rule.contains("security find-generic-password -s") && rule.contains("`addKeychainItems`") && rule.contains("/usr/bin/security"))
         #expect(SettingsProposalInbox.boundaryCommandRule(language: language).contains("`addKeychainItems`"))
+        #expect(SettingsProposalInbox.gitBoundaryRule(language: language).contains("`git fetch`") && SettingsProposalInbox.instructions(language: language).contains("`git init`"))
     }
     #expect(SettingsProposalInbox.keychainItemRule(language: .english).contains("Never print the secret"))
     #expect(SettingsProposalInbox.instructions(language: .english).contains(#""addKeychainItems": [{"service": "example-api", "account": "me"}]"#))

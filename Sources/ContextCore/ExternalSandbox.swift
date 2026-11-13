@@ -121,34 +121,90 @@ public enum ExternalSandboxLocations {
 /// One mediated command: runs through nono's broker shim with its own grants (the session union plus the Keychain
 /// or network it needs). Commands the role does not list run inside the session sandbox like everything else.
 public struct ExternalSandboxCommand: Hashable, Sendable, Encodable {
-    /// One allowed argument list, compared by nono with the arguments after the command name (`invocation_policy`).
+    /// One argument list matcher, compared by nono with the arguments after the command name (`invocation_policy`, and the
+    /// `match.argv` of an intercept rule). Whole tokens, no wildcards: `prefix` from the first argument, `contains` a
+    /// contiguous run anywhere (nono 0.81.0, checked with `nono why`).
     public enum ArgumentRule: Hashable, Sendable, Encodable {
         case exact([String])
         case prefix([String])
-        var policy: [String: Any] {
+        case contains([String])
+        var matcher: [String: [String]] {
             switch self {
-            case .exact(let argv): ["argv": ["exact": argv]]
-            case .prefix(let argv): ["argv": ["prefix": argv]]
+            case .exact(let argv): ["exact": argv]
+            case .prefix(let argv): ["prefix": argv]
+            case .contains(let argv): ["contains": argv]
             }
         }
+        var policy: [String: Any] { ["argv": matcher] }
         var label: String {
             switch self {
             case .exact(let argv): "exact " + argv.map { $0.debugDescription }.joined(separator: " ")
             case .prefix(let argv): "prefix " + argv.map { $0.debugDescription }.joined(separator: " ")
+            case .contains(let argv): "contains " + argv.map { $0.debugDescription }.joined(separator: " ")
             }
         }
     }
+    /// An argument form nono refuses before the command starts, with the text the agent reads (`invocation_policy.deny`).
+    public struct Refusal: Hashable, Sendable, Encodable {
+        public let rule: ArgumentRule
+        public let reason: String
+        public init(_ rule: ArgumentRule, reason: String) { self.rule = rule; self.reason = reason }
+    }
+    /// The rights one invocation runs with: the command's own sandbox, or the one an argument route selects.
+    public struct Sandbox: Hashable, Sendable, Encodable {
+        public var keychain: Bool
+        public var network: Bool
+        /// Directories whose executables the command may run by absolute path (git's own helpers).
+        public var executableTrees: [String]
+        /// Single executables the command may run (`/usr/bin/true` as a git editor).
+        public var executableFiles: [String]
+        /// Variables the caller may pass (nono `allow_vars`); nil: `ExternalSandboxCommand.defaultEnvironment`.
+        public var environment: [String]?
+        /// Variables nono sets after filtering; the caller cannot override them (`set_vars`).
+        public var setEnvironment: [String: String]
+        /// Arguments nono inserts after the command name, before the caller's (`argv_prepend`).
+        public var prependArguments: [String]
+        public init(keychain: Bool, network: Bool, executableTrees: [String] = [], executableFiles: [String] = [], environment: [String]? = nil,
+                    setEnvironment: [String: String] = [:], prependArguments: [String] = []) {
+            self.keychain = keychain; self.network = network; self.executableTrees = executableTrees; self.executableFiles = executableFiles
+            self.environment = environment; self.setEnvironment = setEnvironment; self.prependArguments = prependArguments
+        }
+        var label: String {
+            var text = "keychain=\(keychain) network=\(network) trees=\(executableTrees.joined(separator: ","))"
+            if !executableFiles.isEmpty { text += " files=" + executableFiles.joined(separator: ",") }
+            if let environment { text += " env=" + environment.joined(separator: ",") }
+            if !setEnvironment.isEmpty { text += " set=" + setEnvironment.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",") }
+            if !prependArguments.isEmpty { text += " prepend=" + prependArguments.map { $0.debugDescription }.joined(separator: " ") }
+            return text
+        }
+    }
+    /// Invocations whose arguments match one of `rules` run under `sandbox` instead of the command's own (nono `intercept`
+    /// with its own `sandbox`, first match wins, evaluated after the invocation policy).
+    public struct Route: Hashable, Sendable, Encodable {
+        public let rules: [ArgumentRule]
+        public let sandbox: Sandbox
+        public init(rules: [ArgumentRule], sandbox: Sandbox) { self.rules = rules; self.sandbox = sandbox }
+    }
+    /// The environment of a mediated command without its own list (unchanged since the first boundary).
+    public static let defaultEnvironment = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_*", "TERM", "TMPDIR", "GIT_*", "SSL_CERT_FILE"]
     public let name: String
     public let executable: String
-    public let keychain: Bool
-    public let network: Bool
-    /// Directories whose executables the command may run by absolute path (git's own helpers).
-    public let executableTrees: [String]
+    /// The command's own sandbox (no route matched).
+    public let sandbox: Sandbox
+    public var keychain: Bool { sandbox.keychain }
+    public var network: Bool { sandbox.network }
+    public var executableTrees: [String] { sandbox.executableTrees }
     /// The only argument lists nono lets through (default deny); nil leaves the arguments unfiltered.
     public let arguments: [ArgumentRule]?
+    /// Argument forms nono refuses with a reason, before `arguments` (evaluated first by nono).
+    public let refusals: [Refusal]
+    public let routes: [Route]
     public init(name: String, executable: String, keychain: Bool, network: Bool, executableTrees: [String] = [], arguments: [ArgumentRule]? = nil) {
-        self.name = name; self.executable = executable; self.keychain = keychain; self.network = network; self.executableTrees = executableTrees
-        self.arguments = arguments
+        self.init(name: name, executable: executable, sandbox: .init(keychain: keychain, network: network, executableTrees: executableTrees), arguments: arguments)
+    }
+    public init(name: String, executable: String, sandbox: Sandbox, arguments: [ArgumentRule]? = nil, refusals: [Refusal] = [], routes: [Route] = []) {
+        self.name = name; self.executable = executable; self.sandbox = sandbox
+        self.arguments = arguments; self.refusals = refusals; self.routes = routes
     }
 }
 
@@ -182,9 +238,12 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
     public var authority: [String] {
         let own = worker.path
         let paths = grants.filter { !$0.path.hasPrefix(own + "/") && $0.path != socket.path }.map { $0.mode.rawValue + " " + $0.path }
+        // Everything that decides a mediated command's rights, without the refusal texts (they change no right).
         let mediated = commands.map { command in
             let rules = command.arguments.map { " argv=" + $0.map(\.label).joined(separator: "; ") } ?? ""
-            return "command \(command.name) \(command.executable) keychain=\(command.keychain) network=\(command.network) trees=\(command.executableTrees.joined(separator: ","))" + rules
+            let refused = command.refusals.isEmpty ? "" : " deny=" + command.refusals.map(\.rule.label).joined(separator: "; ")
+            let routes = command.routes.map { " route[\($0.sandbox.label)] when " + $0.rules.map(\.label).joined(separator: "; ") }.joined()
+            return "command \(command.name) \(command.executable) \(command.sandbox.label)" + rules + refused + routes
         }
         return ["project " + project] + paths + mediated + executableDirectories.map { "exec " + $0 }
     }
@@ -212,26 +271,45 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
         let writes = grants.filter { $0.mode == .allow }.map(\.path)
         let writeFiles = grants.filter { $0.mode == .allowFile }.map(\.path)
         var commands: [String: Any] = [:]
-        for command in self.commands {
+        func compile(_ variant: ExternalSandboxCommand.Sandbox) -> [String: Any] {
+            var environment: [String: Any] = ["allow_vars": variant.environment ?? ExternalSandboxCommand.defaultEnvironment]
+            if !variant.setEnvironment.isEmpty { environment["set_vars"] = variant.setEnvironment }
             var sandbox: [String: Any] = ["fs_read": reads, "fs_read_file": readFiles, "fs_write": writes, "fs_write_file": writeFiles,
-                                          "network": ["allow_all": command.network],
-                                          "environment": ["allow_vars": ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_*", "TERM", "TMPDIR", "GIT_*", "SSL_CERT_FILE"]]]
-            if command.keychain { sandbox["keychain_access"] = "read" }
-            if !command.executableTrees.isEmpty {
-                // macOS has no exec_paths: helpers a tool runs by absolute path need explicit Seatbelt rules.
-                sandbox["unsafe_macos_seatbelt_rules"] = command.executableTrees.flatMap { tree in
-                    ["(allow process-exec* (subpath \"\(tree)\"))", "(allow file-read* (subpath \"\(tree)\"))", "(allow file-map-executable (subpath \"\(tree)\"))"]
-                }
+                                          "network": ["allow_all": variant.network], "environment": environment]
+            if variant.keychain { sandbox["keychain_access"] = "read" }
+            if !variant.prependArguments.isEmpty { sandbox["argv_prepend"] = variant.prependArguments }
+            // macOS has no exec_paths: helpers a tool runs by absolute path need explicit Seatbelt rules.
+            let rules = variant.executableTrees.flatMap { tree in
+                ["(allow process-exec* (subpath \"\(tree)\"))", "(allow file-read* (subpath \"\(tree)\"))", "(allow file-map-executable (subpath \"\(tree)\"))"]
+            } + variant.executableFiles.flatMap { file in
+                ["(allow process-exec* (literal \"\(file)\"))", "(allow file-read* (literal \"\(file)\"))", "(allow file-map-executable (literal \"\(file)\"))"]
             }
+            if !rules.isEmpty { sandbox["unsafe_macos_seatbelt_rules"] = rules }
+            return sandbox
+        }
+        for command in self.commands {
+            let sandbox = compile(command.sandbox)
             var policy: [String: Any] = ["executable": command.executable]
-            if let rules = command.arguments {
-                // `sandbox` is shorthand for `from.session.sandbox`; an argument allow-list needs the edge form (nono 0.81.0
+            if command.arguments != nil || !command.refusals.isEmpty {
+                // `sandbox` is shorthand for `from.session.sandbox`; an argument policy needs the edge form (nono 0.81.0
                 // schema: deny, approve, allow, then default; one argv matcher per rule, compared after the command name).
-                let invocation: [String: Any] = ["default": "deny", "allow": rules.map(\.policy)]
+                var invocation: [String: Any] = ["default": command.arguments == nil ? "allow" : "deny"]
+                if let rules = command.arguments { invocation["allow"] = rules.map(\.policy) }
+                if !command.refusals.isEmpty {
+                    invocation["deny"] = command.refusals.map { ["argv": $0.rule.matcher, "reason": $0.reason] as [String: Any] }
+                }
                 let edge: [String: Any] = ["sandbox": sandbox, "invocation_policy": invocation]
                 policy["from"] = ["session": edge] as [String: Any]
             } else {
                 policy["sandbox"] = sandbox
+            }
+            if !command.routes.isEmpty {
+                // An intercept rule with its own `sandbox` replaces the selected one for that invocation only (nono guide,
+                // "Per-intercept sandbox override"); `match.argv` takes one matcher, so each rule is its own entry.
+                policy["intercept"] = command.routes.flatMap { route in
+                    let sandbox = compile(route.sandbox)
+                    return route.rules.map { ["match": ["argv": $0.matcher], "action": ["type": "passthrough"], "sandbox": sandbox] as [String: Any] }
+                }
             }
             // Swift Build invokes codesign by absolute path for ad-hoc signatures.
             // Direct execution retains the session sandbox (no Keychain); named execution uses the broker.
@@ -306,6 +384,9 @@ public enum ExternalSandboxPlanner {
         public var mediateProcessList = false
         /// Refuse the boundary when a trusted project command cannot run inside it (`trustedCommandOutside`).
         public var commandInventory = false
+        /// Mediated git and gh with the narrowed policy (`ExternalSandboxPlanner.git`, `.gh`). Off only through the rollback
+        /// switch `ExternalBoundaryGitNarrowingOff`, read when a chat's process is planned; both providers take this default.
+        public var narrowGit = !UserDefaults.standard.bool(forKey: ExternalSandboxPlanner.gitNarrowingOffKey)
         public init(project: String, profile: AgentPermissionProfile, providerHome: URL, providerExecutable: URL, resources: URL?,
                     workflowDirectories: [URL] = [], workerID: String = String(UUID().uuidString.lowercased().prefix(8)),
                     home: URL = FileManager.default.homeDirectoryForCurrentUser) {
@@ -446,13 +527,22 @@ public enum ExternalSandboxPlanner {
                 commands.append(.init(name: "security", executable: "/usr/bin/security", keychain: true, network: false, arguments: securityRules))
             }
             if trusted.contains("gh"), let gh = resolveExecutable("gh") {
-                commands.append(.init(name: "gh", executable: gh, keychain: true, network: true))
+                commands.append(input.narrowGit ? Self.ghCommand(gh, home: canonical(input.home.path))
+                                                : .init(name: "gh", executable: gh, keychain: true, network: true))
             }
             if trusted.contains(where: { $0.hasPrefix("git ") }), let git = resolveGit() {
                 // git's own helpers (remote-https, credential-osxkeychain) by absolute path, and /bin/sh for hooks and helpers.
                 var trees = ["/bin"]
                 if let execPath = gitExecPath(git) { trees += [execPath, canonical(execPath)] }
-                commands.append(.init(name: "git", executable: git, keychain: true, network: true, executableTrees: Array(Set(trees)).sorted()))
+                let sorted = Array(Set(trees)).sorted()
+                if input.narrowGit {
+                    // `git -C <root> push` is accepted for the project and its folders: nono matches whole tokens only.
+                    var roots = [project]
+                    for root in effective.extraRoots { let path = canonical(expand(root.path, home: input.home)); if !roots.contains(path) { roots.append(path) } }
+                    commands.append(Self.gitCommand(git, trees: sorted, home: canonical(input.home.path), roots: roots))
+                } else {
+                    commands.append(.init(name: "git", executable: git, keychain: true, network: true, executableTrees: sorted))
+                }
             }
             if input.mediateProcessList { commands.append(.init(name: "pgrep", executable: "/usr/bin/pgrep", keychain: false, network: false)) }
             if input.commandInventory,
@@ -463,6 +553,78 @@ public enum ExternalSandboxPlanner {
         return .success(.init(workerID: input.workerID, project: project, grants: grants, commands: commands,
                               executableDirectories: executableDirectories, worker: worker, socket: socket,
                               relay: resources.appendingPathComponent("SandboxRuntime/mcp_relay.py"), temporary: temporary))
+    }
+
+    /// Rollback switch: `defaults write local.daniil.switchboard ExternalBoundaryGitNarrowingOff -bool YES` gives mediated git
+    /// and gh their earlier policy (one sandbox with Keychain and network, `GIT_*` passed, no argument policy) from the next
+    /// planned process of a chat.
+    public static let gitNarrowingOffKey = "ExternalBoundaryGitNarrowingOff"
+
+    /// Variables every narrowed git or gh sandbox passes from the caller: locale, terminal, temp folder, the boundary's CA file.
+    /// `HOME` is listed and also forced (`set_vars`), so the user's `~/.gitconfig` stays the global config.
+    public static let plainEnvironment = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_*", "TERM", "TMPDIR", "SSL_CERT_FILE"]
+    /// What local git work needs from the caller, in the sandbox without Keychain and network: the commit identity and dates a
+    /// script sets on purpose (`verification_snapshot.py` commit-tree), a temporary index (`GIT_INDEX_FILE`), the repository
+    /// (`GIT_DIR`, `GIT_WORK_TREE`, as `-C` does), an editor for commit and rebase, no editor on merge, no optional index lock.
+    /// Never passed: `GIT_CONFIG_*` (config injection, a replaced global or system file), `GIT_SSH*`, `GIT_ASKPASS`,
+    /// `SSH_ASKPASS`, `GIT_PROXY_COMMAND`, `GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`.
+    public static let gitLocalEnvironment = plainEnvironment + [
+        "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
+        "GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_MERGE_AUTOEDIT", "GIT_OPTIONAL_LOCKS"]
+    /// The git subcommands that get the Keychain (with network): they talk to the remote and may need its password.
+    public static let gitKeychainSubcommands = ["push", "fetch", "ls-remote"]
+    /// Prepended to every Keychain invocation, before the caller's arguments, so the repository's own config cannot run code
+    /// there: no pager, no hooks, no fsmonitor, no askpass program, a fixed alternate-refs command, only the osxkeychain
+    /// credential helper (an empty value resets the helper list, also URL-scoped ones: git's `select_all`), signing only
+    /// through `gpg`, which the sandbox cannot run. Command-line config is read last, so it overrides every config file.
+    public static let gitKeychainPrepend = ["--no-pager", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.askPass=",
+                                            "-c", "core.alternateRefsCommand=exit 0", "-c", "credential.helper=", "-c", "credential.helper=osxkeychain",
+                                            "-c", "gpg.format=openpgp", "-c", "gpg.program=gpg"]
+    public static let gitPullRefusal = "git pull does not run with the Keychain under the external boundary: it would run the repository's merge drivers and filters with it. Run `git fetch`, then `git merge --ff-only` or `git rebase`. / git pull под внешней границей не получает Связку ключей: он запустил бы с ней драйверы слияния и фильтры репозитория. Выполни `git fetch`, затем `git merge --ff-only` или `git rebase`."
+    public static let gitCredentialRefusal = "git credential is not available under the external boundary: credentials stay in the Keychain. `git push`, `git fetch` and `git ls-remote` use them themselves. / git credential под внешней границей недоступен: учётные данные остаются в Связке ключей, их сами берут `git push`, `git fetch` и `git ls-remote`."
+
+    /// Mediated git (user decision 2026-11-13). Its own sandbox has neither Keychain nor network: local work keeps the agent's
+    /// rights. `push`, `fetch`, `ls-remote` as the first argument (or after `-C <root>`, the project or one of its folders) run
+    /// with Keychain read and network, https only, the caller's `GIT_*` dropped and `gitKeychainPrepend` in front; any other
+    /// shape (`-c`, `--git-dir`, `--exec-path`, an alias, another `-C` path) stays in the local sandbox. `clone` gets network
+    /// without the Keychain (its own options can install filters); `pull` and `credential` are refused with the route.
+    public static func gitCommand(_ executable: String, trees: [String], home: String, roots: [String]) -> ExternalSandboxCommand {
+        let leads: [[String]] = [[]] + roots.map { ["-C", $0] }
+        // `/usr/bin/true` and `false` as editors: git runs them by name, outside the helper trees.
+        let local = ExternalSandboxCommand.Sandbox(keychain: false, network: false, executableTrees: trees, executableFiles: ["/usr/bin/false", "/usr/bin/true"],
+                                                   environment: gitLocalEnvironment,
+                                                   setEnvironment: ["GIT_TERMINAL_PROMPT": "0", "GIT_ALLOW_PROTOCOL": "file", "HOME": home])
+        var clone = local
+        clone.network = true
+        clone.setEnvironment["GIT_ALLOW_PROTOCOL"] = "https:file"
+        let keychain = ExternalSandboxCommand.Sandbox(keychain: true, network: true, executableTrees: trees, environment: plainEnvironment,
+                                                      setEnvironment: ["GIT_TERMINAL_PROMPT": "0", "GIT_ALLOW_PROTOCOL": "https", "HOME": home,
+                                                                       "GIT_EDITOR": ":", "GIT_SEQUENCE_EDITOR": ":"],
+                                                      prependArguments: gitKeychainPrepend)
+        let refusals = leads.map { ExternalSandboxCommand.Refusal(.prefix($0 + ["pull"]), reason: gitPullRefusal) }
+            + leads.map { ExternalSandboxCommand.Refusal(.prefix($0 + ["credential"]), reason: gitCredentialRefusal) }
+        return .init(name: "git", executable: executable, sandbox: local, refusals: refusals,
+                     routes: [.init(rules: leads.flatMap { lead in gitKeychainSubcommands.map { .prefix(lead + [$0]) } }, sandbox: keychain),
+                              .init(rules: leads.map { .prefix($0 + ["clone"]) }, sandbox: clone)])
+    }
+
+    /// The gh subcommands agents run (`gh <name> …`); anything else, extensions and aliases included, is refused by default.
+    public static let ghSubcommands = ["pr", "issue", "repo", "api", "run", "workflow", "release", "search", "label", "status", "cache",
+                                       "help", "--help", "-h", "version", "--version"]
+    public static let ghRefusal = "This gh form is not available under the external boundary (token, extension, alias, config). / Эта форма gh недоступна под внешней границей (токен, расширения, алиасы, настройки)."
+    /// Mediated gh (user decision 2026-11-13): Keychain and network as before, an argument allow-list, no `GH_*` or `GIT_*` from
+    /// the caller (`GH_HOST`, `GH_CONFIG_DIR`, `GH_TOKEN`, `GH_ENTERPRISE_TOKEN` would redirect the host, config or token), no
+    /// pager or prompt.
+    public static func ghCommand(_ executable: String, home: String) -> ExternalSandboxCommand {
+        let sandbox = ExternalSandboxCommand.Sandbox(keychain: true, network: true, environment: plainEnvironment,
+                                                     setEnvironment: ["HOME": home, "GH_PROMPT_DISABLED": "1", "GH_NO_UPDATE_NOTIFIER": "1",
+                                                                      "GH_PAGER": "cat", "GIT_TERMINAL_PROMPT": "0"])
+        let refused: [ExternalSandboxCommand.ArgumentRule] = [.prefix(["auth", "token"]), .contains(["--show-token"]), .prefix(["auth", "git-credential"]),
+                                                              .prefix(["extension"]), .prefix(["extensions"]), .prefix(["ext"]), .prefix(["alias"]),
+                                                              .prefix(["config", "set"])]
+        let allowed: [ExternalSandboxCommand.ArgumentRule] = ghSubcommands.map { .prefix([$0]) }
+            + [.exact(["auth", "status"]), .exact(["auth", "status", "--active"]), .exact(["auth", "status", "--hostname", "github.com"])]
+        return .init(name: "gh", executable: executable, sandbox: sandbox, arguments: allowed, refusals: refused.map { .init($0, reason: ghRefusal) })
     }
 
     /// Heads nono can neither run in the session nor mediates here: setuid tools, the unified log, launchd, Apple Events,

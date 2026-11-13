@@ -18,8 +18,12 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import sys
 import threading
 import time
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import nono_git_policy  # noqa: E402
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--nono', required=True, help='Verified helper from prepare-nono.py')
@@ -78,6 +82,13 @@ try:
             # Every other `security` form is refused by the argument allow-list (output discarded, exit 0 = refused).
             {'cmd': '! security dump-keychain > /dev/null 2>&1 && ! security find-generic-password -s switchboard-probe-unlisted -w > /dev/null 2>&1'
                     ' && ! security find-internet-password -s github.com -w > /dev/null 2>&1', 'workdir': str(workdir)},
+            # Narrowed git, same planner shape as Claude (invariant 14): the queue's network shape reaches the remote with the
+            # Keychain; an alias, injected config, `ext::` and `git credential` do not. Exit 0 = every check as expected.
+            {'cmd': f'git -C "{ROOT}" ls-remote --refs origin refs/heads/main > /dev/null 2>&1'
+                    f' && ! git -c "alias.kc=!test -r \'{pathlib.Path.home()}/Library/Keychains/login.keychain-db\'" kc > /dev/null 2>&1'
+                    f' && ! env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.inj GIT_CONFIG_VALUE_0="!true" git inj > /dev/null 2>&1'
+                    f' && ! git -C "{ROOT}" ls-remote "ext::sh -c true" > /dev/null 2>&1'
+                    f' && ! git credential fill < /dev/null > /dev/null 2>&1', 'workdir': str(workdir)},
         ]
         requests, events, calls = [], [], []
 
@@ -133,8 +144,14 @@ try:
                 # The app's shape: sandbox in the session edge, argument allow-list with default deny.
                 'commands': {'security': {'executable': '/usr/bin/security', 'from': {'session': {
                     'sandbox': {'keychain_access': 'read', 'fs_read': [str(project)], 'network': {'allow_all': False}},
-                    'invocation_policy': {'default': 'deny', 'allow': [{'argv': {'prefix': ['find-identity']}}]}}}}}}}))
+                    'invocation_policy': {'default': 'deny', 'allow': [{'argv': {'prefix': ['find-identity']}}]}}}},
+                    'git': nono_git_policy.git_policy(
+                        {'fs_read': [str(project), str(other), str(cache), str(ROOT), '/opt/homebrew', str(pathlib.Path.home() / '.config/git')],
+                         'fs_read_file': [str(pathlib.Path.home() / '.gitconfig')],
+                         'fs_write': [] if reader else [str(project), str(cache)], 'fs_write_file': []},
+                        pathlib.Path.home(), [project, ROOT])}}}))
         grants = [('--read' if reader else '--allow', project), ('--read' if reader else '--allow', cache), ('--read', other),
+                  ('--read', ROOT), ('--read', '/opt/homebrew'), ('--read-file', pathlib.Path.home() / '.gitconfig'),
                   ('--allow', home), ('--allow', case / 'tmp'), ('--read', pathlib.Path(BIN).parent), ('--read', DEVELOPER),
                   ('--read-file', RELAY), ('--allow-unix-socket', sock)]
         command = SETSID + [NONO, 'run', '--silent', '--no-audit', '--no-diagnostics', '--no-rollback', '--profile', str(policy)]
@@ -264,7 +281,7 @@ try:
             failures.append(name + ': MCP tools through the relay ' + str(s['mcp_tools']))
         exits = [c['exit'] for c in s['commands']]
         # The cache grant does not depend on the command's workdir; a reader has no write grant at all.
-        expected = [0, 0, 0, 0, 0, 0] if name == 'developer' else ([1, 1, 0, 0, 0, 0] if name == 'other-workdir' else [1, 1, 1, 0, 0, 0])
+        expected = [0, 0, 0, 0, 0, 0, 0] if name == 'developer' else ([1, 1, 0, 0, 0, 0, 0] if name == 'other-workdir' else [1, 1, 1, 0, 0, 0, 0])
         if exits != expected:
             failures.append(name + ': command exits ' + str(exits) + ' expected ' + str(expected))
         if name == 'developer' and len(s['commands']) > 4 and not s['commands'][4]['output'].endswith('1'):
