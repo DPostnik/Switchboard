@@ -29,9 +29,15 @@ extension NSAttributedString.Key {
     /// Marks the image paths of the text; true when the marks changed.
     @discardableResult func refresh(_ storage: NSTextStorage, layoutManager: NSLayoutManager?) -> Bool {
         let found = TranscriptImagePaths.find(in: storage.string, isFile: isFile).filter { TranscriptImagePaths.thumbnail($0.url) != nil }
+        // AppKit can extend a chip's attributes into pasted text at its boundary.
+        // Compare the actual marked spans, even when all detected image paths stayed put.
+        var marked: [(range: NSRange, url: URL)] = []
+        storage.enumerateAttribute(.composerImage, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            if let url = value as? URL { marked.append((range, url)) }
+        }
         // Replacing the whole text (a draft switch) drops the marks even when the paths stay where they were.
         guard found.map(\.range) != ranges.map(\.range) || found.map(\.url) != ranges.map(\.url)
-                || found.contains(where: { storage.attribute(.composerImage, at: $0.range.location, effectiveRange: nil) == nil })
+                || marked.map(\.range) != found.map(\.range) || marked.map(\.url) != found.map(\.url)
         else { return false }
         ranges = found
         numbers = [:]

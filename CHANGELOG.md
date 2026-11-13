@@ -4,6 +4,10 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Codex sub-agent calls appear in the chat as cards named by their action (start, message, follow-up task, resume, wait, interrupt, stop, list) with the task on one line; long summaries in the sub-agents panel are cut to one line.
+
+- Fix invisible text after pasting it right behind an image in the message field.
+
 - Fix Codex 0.167 sub-agent steps: Switchboard reads a running sub-agent's history page by page instead of failing with "list_turns is not supported yet", and stopping a single sub-agent works again.
 
 - Developer chats with Apple signing access can install the verified Switchboard iPhone app through a fixed app-owned tool without leaving the external boundary.

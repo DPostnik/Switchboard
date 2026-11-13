@@ -85,6 +85,9 @@ enum CodexDecoding {
             return text.isEmpty ? nil : TranscriptItem(id: id, kind: ActivityDetail.thinkingKind, text: text)
         case "fileChange": return TranscriptItem(id: id, kind: "activity", text: L10n.text("Изменение файлов · \(raw["status"].string ?? "")", "File changes · \(raw["status"].string ?? "")"))
         case "mcpToolCall": return TranscriptItem(id: id, kind: "activity", text: raw["tool"].string ?? L10n.text("Вызов инструмента", "Calling tool"))
+        case "collabAgentToolCall":
+            return TranscriptItem(id: id, kind: "activity",
+                                  text: CodexToolCalls.toolCall(raw)?.title ?? L10n.text("Подагенты", "Sub-agents"))
         case "dynamicToolCall": return TranscriptItem(id: id, kind: "activity", text: raw["tool"].string ?? L10n.text("Вызов инструмента", "Calling tool"))
         case "webSearch":
             let query = raw["query"].string ?? raw["action"]["query"].string ?? raw["action"]["url"].string ?? ""

@@ -52,12 +52,17 @@ parser.add_argument('--profile', default=str(HOME / 'Library/Application Support
 parser.add_argument('--model', default='haiku')
 parser.add_argument('--only', default='1,2,3,4,5,6', help='Comma-separated check groups')
 parser.add_argument('--options', default='a,b,c,d,e', help='Credential options for check 1')
-parser.add_argument('--main-option', default='', help='Credential option for checks 2-6 (default: first qualifying, else a)')
+parser.add_argument('--main-option', default='', help='Credential option for checks 2-6 (default: first qualifying, else d)')
 parser.add_argument('--osascript', action='store_true', help='Also mediate osascript with (allow appleevent-send)')
 parser.add_argument('--turn-timeout', type=int, default=240)
 parser.add_argument('--keep', action='store_true', help='Keep fixture folders (never the token files)')
 args = parser.parse_args()
 GROUPS = set(args.only.split(','))
+
+# The outer boundary would invalidate the Keychain, relay and process visibility checks.
+# Refuse before creating artifacts or reading credentials; do not report this as a probe pass.
+if os.environ.get('SWITCHBOARD_EXTERNAL_SANDBOX') == '1':
+    parser.exit(2, 'B1 probe requires a host process outside the external sandbox; this session is sandboxed.\n')
 
 STAMP = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
 OUT = ROOT / '.build/verification/claude-nono' / STAMP
@@ -286,7 +291,7 @@ echo "pgrep_lf_target=$(pgrep -lf "$target" 2>/dev/null | grep -c "$target")" >>
 lsof -nP -iTCP -sTCP:LISTEN > "$TMPDIR/lsof.out" 2>&1; echo "lsof_listen_rc=$? lines=$(wc -l < "$TMPDIR/lsof.out" | tr -d ' ')" >> "$f"
 tpid=$(pgrep -f "$target" 2>/dev/null | head -1)
 lsof -p "${tpid:-1}" > "$TMPDIR/lsofp.out" 2>&1; echo "lsof_pid_rc=$? lines=$(wc -l < "$TMPDIR/lsofp.out" | tr -d ' ')" >> "$f"
-echo "sysctl_loadavg=$(sysctl -n vm.loadavg > /dev/null 2>&1; echo $?)" >> "$f"
+echo "sysctl_loadavg=$(sysctl -n vm.loadavg hw.ncpu > /dev/null 2>&1; echo $?)" >> "$f"
 ps -axo pid= > "$TMPDIR/ps.out" 2>&1; echo "ps_rc=$? lines=$(wc -l < "$TMPDIR/ps.out" | tr -d ' ') err=$(grep -v '^ *[0-9]' "$TMPDIR/ps.out" | head -1 | tr -cd '[:alnum:] :._-' | cut -c1-80)" >> "$f"
 log show --last 1m > /dev/null 2>&1; echo "zsh_builtin_log_rc=$?" >> "$f"
 command log show --last 1m --style compact > "$TMPDIR/log.out" 2>&1; echo "log_show_rc=$? lines=$(wc -l < "$TMPDIR/log.out" | tr -d ' ') first=$(head -1 "$TMPDIR/log.out" | tr -cd '[:alnum:] :._-' | cut -c1-60)" >> "$f"
@@ -562,7 +567,7 @@ class Session:
             return facts
         before = processes()
         members = [p for p in before if p[2] == self.proc.pid]
-        tracked = {w: [p[0] for p in before if w in p[3]] for w in watch}
+        tracked = {w: [p[0] for p in before if p[2] == self.proc.pid and w in p[3]] for w in watch}
         relay_before = [p[0] for p in before if 'mcp_relay.py ' + str(self.socket) in p[3]]
         facts['group_members_before'] = len(members)
         facts['tracked_before'] = {w: len(v) for w, v in tracked.items()}
@@ -608,6 +613,10 @@ class Session:
             facts['socket_removed'] = not self.socket.exists()
             if self.host_log.exists():
                 host_logs.append((self.name, self.host_log.read_bytes()))
+        for kept in ['policy.json', 'settings.json']:
+            if (self.worker / kept).exists():
+                shutil.copy2(self.worker / kept, OUT / 'sessions' / ('%s-%s' % (self.name, kept)))
+        (OUT / 'sessions' / (self.name + '-grants.json')).write_text(json.dumps(self.grants(), indent=1))
         transcript = OUT / 'sessions' / (self.name + '.jsonl')
         transcript.write_text('\n'.join(json.dumps(e) for e in self.events) + '\n' + '\n'.join('STDERR ' + l for l in self.stderr) + '\n')
         transcripts.append(transcript)
@@ -782,8 +791,8 @@ if GROUPS & {'2', '3', '4', '5', '6'}:
         for group in sorted(GROUPS & {'2', '3', '4', '5', '6'}):
             record('%s/main-session' % group, 'skipped', True, reason=SECRET.reason)
     else:
-        option = args.main_option or next((o for o in ['d', 'c', 'b', 'a', 'e'] if o in qualifying), None) or \
-            next((o for o in ['d', 'c', 'b', 'a'] if o in working), 'a')
+        # d is the hand-over that keeps the token from agent Bash (run 20261112-102330); the others leak it.
+        option = args.main_option or next((o for o in ['d', 'c', 'b', 'a', 'e'] if o in qualifying), None) or 'd'
         target = 'sb-probe-target-' + uuid.uuid4().hex[:8]
         sleeper = subprocess.Popen(['/bin/sleep', '900'], start_new_session=True)  # outside the boundary
         outside = subprocess.Popen(['/usr/bin/python3', '-I', '-c', 'import time; time.sleep(900)', target], start_new_session=True)
@@ -824,10 +833,10 @@ if GROUPS & {'2', '3', '4', '5', '6'}:
                 relay_ok = 'sbprobe-probe_echo keychains_listable=1' in outputs
                 inner_ok = 'project_probe-project_echo keychains_listable=0' in outputs
                 record('3/relay-server', 'pass' if servers.get('sbprobe') == 'connected' and 'mcp__sbprobe__probe_echo' in tools and relay_ok else 'fail', True,
-                       status=servers.get('sbprobe'), listed='mcp__sbprobe__probe_echo' in tools, call_outside_boundary=relay_ok,
+                       server_status=servers.get('sbprobe'), listed='mcp__sbprobe__probe_echo' in tools, call_outside_boundary=relay_ok,
                        permission_requests=t3.get('permissions'))
                 record('3/project-mcp-server', 'pass' if servers.get('project_probe') == 'connected' and inner_ok else 'fail', True,
-                       status=servers.get('project_probe'), listed='mcp__project_probe__project_echo' in tools, call_inside_boundary=inner_ok,
+                       server_status=servers.get('project_probe'), listed='mcp__project_probe__project_echo' in tools, call_inside_boundary=inner_ok,
                        note='--strict-mcp-config: the app passes approved .mcp.json servers through --mcp-config; they run inside the boundary')
             if '4' in GROUPS:
                 pgrep_n = int(runtime.get('pgrep_target', '0') or 0)
@@ -871,21 +880,23 @@ if GROUPS & {'2', '3', '4', '5', '6'}:
                                   '1. Call the Bash tool with run_in_background set to true and the command: sleep 313\n'
                                   '2. Call the Bash tool with run_in_background set to true and the command: lsof -r 5 -nP -iTCP -sTCP:LISTEN > /dev/null\n'
                                   '3. Call the Agent tool with run_in_background set to true, subagent_type general-purpose, description "sleeper", and the '
-                                  'prompt: "Use the Bash tool to run the command sleep 317 (not in the background), then reply done."\n'
+                                  'prompt: "Use the Bash tool to run the command sleep 300 with run_in_background set to true, then reply with its task ID."\n'
                                   'After starting all three, reply with the single word started.')
                 main_facts['teardown_turn'] = {'tools': [t['name'] for t in t4.get('tools', [])], 'error': t4.get('error')}
-                deadline = time.monotonic() + 90
+                deadline = time.monotonic() + 180
+                waited = time.monotonic()
                 while time.monotonic() < deadline:
                     rows = processes()
-                    seen = {w: any(w in p[3] for p in rows) for w in ['sleep 313', 'sleep 317', 'lsof -r 5']}
+                    seen = {w: any(p[2] == session.proc.pid and w in p[3] for p in rows) for w in ['sleep 313', 'sleep 300', 'lsof -r 5']}
                     if all(seen.values()):
                         break
                     time.sleep(1)
                 main_facts['before_sigterm'] = seen
+                main_facts['waited_seconds'] = round(time.monotonic() - waited, 1)
         except Exception as error:
             main_facts['error'] = repr(error)[:800]
         finally:
-            teardown = session.stop(watch=['sleep 313', 'sleep 317', 'lsof -r 5']) if session else {}
+            teardown = session.stop(watch=['sleep 313', 'sleep 300', 'lsof -r 5']) if session else {}
             for child in (sleeper, outside):
                 child.kill()
             denied = denials(session.stderr) if session else []

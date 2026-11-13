@@ -110,6 +110,7 @@ enum CodexProtocolSurface {
                                   "commandActions.*.type", "commandActions.*.path", "commandActions.*.query"],
         "item:reasoning": ["id", "summary", "content"],
         "item:fileChange": ["id", "status", "changes.*.path", "changes.*.diff", "changes.*.kind.type", "changes.*.kind.move_path"],
+        "item:collabAgentToolCall": ["id", "tool", "status", "prompt", "model", "receiverThreadIds", "agentsStates"],
         "item:mcpToolCall": ["id", "server", "tool", "status", "arguments", "result.content", "error.message"],
         "item:dynamicToolCall": ["id", "tool", "namespace", "status", "arguments", "success"],
         "item:webSearch": ["id", "query", "action.type", "action.query", "action.queries", "action.url", "action.pattern"],

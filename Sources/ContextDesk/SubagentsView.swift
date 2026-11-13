@@ -19,14 +19,14 @@ struct SubagentsBar: View {
             Button { showing.toggle() } label: {
                 HStack(spacing: 8) {
                     Image(systemName: agents.isEmpty ? "terminal" : "person.2").foregroundStyle(.secondary)
-                    Text(summary).foregroundStyle(.secondary)
+                    Text(summary).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                     ForEach(agents.prefix(4)) { agent in
                         chip(agent.title) { SubagentStatusIcon(status: agent.status, stalled: stalled.contains(agent.id), waiting: waiting.contains(agent.id)) }
                     }
                     ForEach(tasks.prefix(max(0, 4 - agents.count))) { task in chip(task.title) { SubagentStatusIcon(status: task.status) } }
                     if agents.count + tasks.count > 4 { Text("+\(agents.count + tasks.count - 4)").foregroundStyle(.secondary) }
                     Spacer(minLength: 0)
-                    Text(L10n.text("Показать", "Show")).fontWeight(.medium).foregroundStyle(DeskPalette.accentDeep)
+                    Text(L10n.text("Показать", "Show")).fixedSize().fontWeight(.medium).foregroundStyle(DeskPalette.accentDeep)
                 }.font(.ui(.callout)).contentShape(Rectangle())
             }
             .buttonStyle(PointerButtonStyle(base: .plain))

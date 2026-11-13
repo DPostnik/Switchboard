@@ -145,3 +145,25 @@ private func itemEvent(_ method: String, _ item: String) throws -> TranscriptIte
     let lines = ToolCallDiffLines.lines(old: big, new: big + "\nz")
     #expect(lines.count == 1401 && lines.first?.sign == .removed && lines.last == Line(.added, "z"))
 }
+
+@Test func codexCollaborationUsesStructuredChipsDuringExecution() throws {
+    let prompt = "Review routing\nKeep the existing permissions"
+    let raw = JSONValue.object(["type": .string("collabAgentToolCall"), "id": .string("agent-call"),
+                               "tool": .string("spawnAgent"), "status": .string("inProgress"),
+                               "prompt": .string(prompt)])
+    let started = try #require(CodexDecoding.transcriptItem(raw))
+    let call = try #require(started.toolCall)
+    #expect(started.kind == "activity")
+    #expect(call.kind == .think && call.status == .inProgress)
+    #expect(call.inputSummary?.contains("\n") == false)
+    #expect(call.content == [.text(prompt)])
+    let expected: [String: AgentToolCall.Status] = ["completed": .completed, "failed": .failed, "interrupted": .cancelled]
+    for (status, mapped) in expected {
+        var finished = raw.object
+        finished["status"] = .string(status)
+        #expect(CodexDecoding.transcriptItem(.object(finished))?.toolCall?.status == mapped)
+    }
+    var follow = raw.object
+    follow["tool"] = .string("followupTask")
+    #expect(CodexDecoding.transcriptItem(.object(follow))?.toolCall?.title == L10n.text("Новое задание подагенту", "Follow-up task for sub-agent"))
+}

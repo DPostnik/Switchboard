@@ -20,6 +20,25 @@ enum CodexToolCalls {
     static func toolCall(_ raw: JSONValue) -> AgentToolCall? {
         guard let id = raw["id"].string else { return nil }
         switch raw["type"].string {
+        case "collabAgentToolCall":
+            // `CollabAgentTool` and `CollabAgentToolCallStatus` values of the Codex 0.167.0 schema.
+            let title: String
+            switch raw["tool"].string {
+            case "spawnAgent": title = L10n.text("Запуск подагента", "Start sub-agent")
+            case "sendInput", "sendMessage": title = L10n.text("Сообщение подагенту", "Message sub-agent")
+            case "followupTask": title = L10n.text("Новое задание подагенту", "Follow-up task for sub-agent")
+            case "resumeAgent": title = L10n.text("Возобновление подагента", "Resume sub-agent")
+            case "wait": title = L10n.text("Ожидание подагентов", "Wait for sub-agents")
+            case "interruptAgent": title = L10n.text("Прерывание подагента", "Interrupt sub-agent")
+            case "closeAgent": title = L10n.text("Остановка подагента", "Stop sub-agent")
+            case "listAgents": title = L10n.text("Список подагентов", "List sub-agents")
+            default: title = L10n.text("Подагенты", "Sub-agents")
+            }
+            let prompt = raw["prompt"].string
+            let summary = prompt.map { ActivityDetail.oneLine($0, limit: 160) }
+            let state = raw["status"].string == "interrupted" ? .cancelled : status(raw["status"].string)
+            return AgentToolCall(id: id, kind: .think, status: state,
+                                 title: title, content: prompt.map { [.text($0)] } ?? [], inputSummary: summary)
         case "commandExecution": return command(raw, id: id)
         case "fileChange": return fileChange(raw, id: id)
         case "mcpToolCall":

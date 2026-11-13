@@ -153,3 +153,38 @@ private func writeImage(_ url: URL, width: Int = 600, height: Int = 300) throws 
     let editor = ComposerTextView(frame: .zero)
     #expect(Set([.png, .tiff, .fileURL]).isSubset(of: Set(editor.readablePasteboardTypes)))
 }
+
+@Test @MainActor func textPastedAfterImageDoesNotKeepHiddenChipAttributes() throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("paste-chip-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let shot = folder.appendingPathComponent("shot.png")
+    try writeImage(shot)
+    let editor = ComposerTextView(frame: NSRect(x: 0, y: 0, width: 500, height: 100))
+    editor.layoutManager?.delegate = editor.images
+    editor.string = "[\(shot.path)]"
+    editor.refreshImages()
+    let storage = try #require(editor.textStorage)
+    let boundary = storage.length
+    let attributes = storage.attributes(at: boundary - 1, effectiveRange: nil)
+    // Model AppKit extending the preceding chip's attributes into a pasted transcript.
+    let transcript = "Транскрипт after image"
+    storage.append(NSAttributedString(string: transcript, attributes: attributes))
+    editor.refreshImages()
+    #expect(editor.string == "[\(shot.path)]" + transcript)
+    #expect(editor.images.ranges.count == 1)
+    #expect(storage.attribute(.composerImage, at: boundary, effectiveRange: nil) == nil)
+    #expect(storage.attribute(.toolTip, at: boundary, effectiveRange: nil) == nil)
+    let manager = try #require(editor.layoutManager)
+    manager.ensureLayout(for: try #require(editor.textContainer))
+    let glyph = manager.glyphIndexForCharacter(at: boundary)
+    #expect(!manager.propertyForGlyph(at: glyph).contains(.null))
+    #expect(!manager.propertyForGlyph(at: glyph).contains(.controlCharacter))
+    // A second insertion remains visible, and clearing the draft removes all chips.
+    storage.append(NSAttributedString(string: " again", attributes: attributes))
+    editor.refreshImages()
+    #expect(storage.attribute(.composerImage, at: storage.length - 1, effectiveRange: nil) == nil)
+    editor.string = "plain text"
+    editor.refreshImages()
+    #expect(editor.images.ranges.isEmpty)
+}
