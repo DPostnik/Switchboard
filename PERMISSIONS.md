@@ -440,7 +440,10 @@ Known gaps. Check this list before you treat a failure as a new defect.
   entries, once each. PATH is lookup order only; no right changes. Side effect: Codex commands under the boundary no
   longer read the user's login profile, so PATH additions from `.zprofile` and `.zshrc` are absent (`.zshenv` is still
   read). The native path is unchanged. A worker started before the update keeps the old arguments until it is replaced.
-  Unit-tested; not yet checked live.
+  Checked live 2026-11-13 (same Codex chat D12755A8, build 513): `which -a git` prints the nono `shims/git` first,
+  `git ls-remote --heads origin` on the private https repository returns 2 heads, mediated `pgrep -lf Switchboard` sees
+  processes outside the sandbox. Not checked live: `gh` and `security` in Codex, Keychain items in Codex, Homebrew tools
+  on the new base PATH.
 - Under nono `ps` cannot run (setuid) and `log show` cannot run in any sandbox: use
   `project_diagnostics` and `app_log`. `pgrep` sees only sandboxed processes unless mediated.
   `lsof -i` and `sysctl -n vm.loadavg` work.
