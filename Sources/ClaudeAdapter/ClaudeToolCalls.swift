@@ -51,7 +51,8 @@ enum ClaudeToolCalls {
         case "WebSearch":
             return .init(id: id, kind: .fetch, status: .inProgress, title: ToolCallText.webSearch(string("query") ?? ""))
         case "Agent", "Task":
-            return .init(id: id, kind: .think, status: .inProgress, title: string("description") ?? name, inputSummary: string("subagent_type"))
+            return .init(id: id, kind: .think, status: .inProgress, title: string("description") ?? name, inputSummary: string("subagent_type"),
+                         badge: string("subagent_type"))
         case "Skill":
             // `skill` is "<plugin>:<name>" for the user's skills (`ClaudeSkills`); `args` is what the skill was asked to do.
             return .init(id: id, kind: .read, status: .inProgress, title: ToolCallText.skill(ClaudeSkills.displayName(string("skill") ?? name)),

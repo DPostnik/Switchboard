@@ -57,11 +57,13 @@ public struct AgentToolCall: Codable, Sendable, Equatable {
     public var content: [Content]
     /// A short neutral summary of the call's input (one line), for calls whose title does not say everything.
     public var inputSummary: String?
+    /// A short label shown as a chip beside the title: the sub-agent's type or model. Absent in items stored before it.
+    public var badge: String?
 
     public init(id: String, kind: Kind, status: Status, title: String, locations: [Location] = [], content: [Content] = [],
-                inputSummary: String? = nil) {
+                inputSummary: String? = nil, badge: String? = nil) {
         self.id = id; self.kind = kind; self.status = status; self.title = title
-        self.locations = locations; self.content = content; self.inputSummary = inputSummary
+        self.locations = locations; self.content = content; self.inputSummary = inputSummary; self.badge = badge
     }
 
     public var diffs: [Diff] { content.compactMap { if case .diff(let diff) = $0 { diff } else { nil } } }

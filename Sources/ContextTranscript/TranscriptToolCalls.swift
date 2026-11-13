@@ -81,6 +81,12 @@ extension TranscriptScrollView {
         }
     }
 
+    /// The chip beside a call's title (a sub-agent's type or model), one line and short; nil when absent.
+    static func badgeText(_ call: AgentToolCall) -> String? {
+        guard let badge = call.badge.map({ ActivityDetail.oneLine($0, limit: 40) }), !badge.isEmpty else { return nil }
+        return badge
+    }
+
     /// Whether a call row has anything to open.
     static func hasBody(_ call: AgentToolCall, item: TranscriptItem, result: TranscriptItem?) -> Bool {
         if call.inputSummary?.isEmpty == false || !call.content.isEmpty || item.reduced == true { return true }
@@ -98,6 +104,13 @@ extension TranscriptScrollView {
         let title = call.title.isEmpty ? Self.activityHeadline(item.text) : call.title
         line.append(NSAttributedString(string: " " + ActivityDetail.oneLine(title, limit: 140),
                                        attributes: [.font: Self.stepFont, .foregroundColor: DeskPalette.ns.inkSoft]))
+        if let badge = Self.badgeText(call) {
+            line.append(NSAttributedString(string: "  ", attributes: [.font: Self.stepFont]))
+            line.append(NSAttributedString(string: "\u{2009}" + badge + "\u{2009}", attributes: [
+                .font: NSFont.systemFont(ofSize: 10.5, weight: .medium), .foregroundColor: DeskPalette.ns.muted,
+                .backgroundColor: DeskPalette.ns.subtle, .toolTip: badge
+            ]))
+        }
         line.append(NSAttributedString(string: "  ", attributes: [.font: Self.stepFont]))
         // A call that failed by its result shows the failure even when the engine reported no status change.
         let status = result?.failed == true && !call.status.isFinal ? .failed : call.status
@@ -135,7 +148,8 @@ extension TranscriptScrollView {
             guard !shown.text.isEmpty else { return }
             line.append(NSAttributedString(string: "\n" + shown.text, attributes: [.font: Self.outputFont, .foregroundColor: color, .paragraphStyle: style]))
         }
-        if let summary = call.inputSummary, !summary.isEmpty { note(summary) }
+        // The note repeats nothing the chip already shows (a Claude sub-agent's type).
+        if let summary = call.inputSummary, !summary.isEmpty, summary != call.badge { note(summary) }
         if item.reduced == true, call.content.isEmpty {
             note(L10n.text("В архиве подробности вызова не хранятся.", "Archived chats do not keep call details."))
         }

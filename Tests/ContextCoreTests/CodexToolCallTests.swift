@@ -3,6 +3,7 @@ import Testing
 import AgentContract
 @testable import ContextCore
 @testable import CodexAdapter
+@testable import ClaudeAdapter
 
 // Codex 0.160.0 calls, plans and stop reasons in the ACP-shaped model (stage C, 2026-11-02). Item and notification
 // shapes follow `codex app-server generate-json-schema --experimental` of 0.160.0 (ThreadItem, FileUpdateChange,
@@ -157,6 +158,17 @@ private func itemEvent(_ method: String, _ item: String) throws -> TranscriptIte
     #expect(call.kind == .think && call.status == .inProgress)
     #expect(call.inputSummary?.contains("\n") == false)
     #expect(call.content == [.text(prompt)])
+    // Laid out like a Claude `Agent` call: the task's first line as the title, the action as the note.
+    #expect(call.title == "Review routing")
+    #expect(call.inputSummary == L10n.text("Запуск подагента", "Start sub-agent") && call.badge == nil)
+    var withModel = raw.object
+    withModel["model"] = .string("gpt-6.1-sol")
+    #expect(CodexDecoding.transcriptItem(.object(withModel))?.toolCall?.badge == "gpt-6.1-sol")
+    // A call without a task (wait, stop, list) keeps the action as its title.
+    var wait = raw.object
+    wait["tool"] = .string("wait"); wait["prompt"] = nil
+    let waited = try #require(CodexDecoding.transcriptItem(.object(wait))?.toolCall)
+    #expect(waited.title == L10n.text("Ожидание подагентов", "Wait for sub-agents") && waited.inputSummary == nil && waited.content.isEmpty)
     let expected: [String: AgentToolCall.Status] = ["completed": .completed, "failed": .failed, "interrupted": .cancelled]
     for (status, mapped) in expected {
         var finished = raw.object
@@ -165,5 +177,12 @@ private func itemEvent(_ method: String, _ item: String) throws -> TranscriptIte
     }
     var follow = raw.object
     follow["tool"] = .string("followupTask")
-    #expect(CodexDecoding.transcriptItem(.object(follow))?.toolCall?.title == L10n.text("Новое задание подагенту", "Follow-up task for sub-agent"))
+    #expect(CodexDecoding.transcriptItem(.object(follow))?.toolCall?.inputSummary == L10n.text("Новое задание подагенту", "Follow-up task for sub-agent"))
+    // Items stored before the chip existed still decode.
+    let stored = try JSONDecoder().decode(AgentToolCall.self, from: Data(#"{"id":"a","kind":"think","status":"completed","title":"T","locations":[],"content":[]}"#.utf8))
+    #expect(stored.badge == nil && stored.title == "T")
+    // The Claude `Agent` call shows its sub-agent type as the same chip.
+    let claude = ClaudeToolCalls.toolCall(id: "c", name: "Agent", input: try JSONDecoder().decode(JSONValue.self,
+        from: Data(#"{"description":"Check sources","prompt":"Look","subagent_type":"Explore"}"#.utf8)))
+    #expect(claude.title == "Check sources" && claude.badge == "Explore")
 }

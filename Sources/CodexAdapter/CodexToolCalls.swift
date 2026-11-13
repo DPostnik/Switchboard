@@ -21,24 +21,17 @@ enum CodexToolCalls {
         guard let id = raw["id"].string else { return nil }
         switch raw["type"].string {
         case "collabAgentToolCall":
-            // `CollabAgentTool` and `CollabAgentToolCallStatus` values of the Codex 0.167.0 schema.
-            let title: String
-            switch raw["tool"].string {
-            case "spawnAgent": title = L10n.text("Запуск подагента", "Start sub-agent")
-            case "sendInput", "sendMessage": title = L10n.text("Сообщение подагенту", "Message sub-agent")
-            case "followupTask": title = L10n.text("Новое задание подагенту", "Follow-up task for sub-agent")
-            case "resumeAgent": title = L10n.text("Возобновление подагента", "Resume sub-agent")
-            case "wait": title = L10n.text("Ожидание подагентов", "Wait for sub-agents")
-            case "interruptAgent": title = L10n.text("Прерывание подагента", "Interrupt sub-agent")
-            case "closeAgent": title = L10n.text("Остановка подагента", "Stop sub-agent")
-            case "listAgents": title = L10n.text("Список подагентов", "List sub-agents")
-            default: title = L10n.text("Подагенты", "Sub-agents")
-            }
-            let prompt = raw["prompt"].string
-            let summary = prompt.map { ActivityDetail.oneLine($0, limit: 160) }
+            // `CollabAgentTool` and `CollabAgentToolCallStatus` values of the Codex 0.167.0 schema. Laid out like a Claude
+            // `Agent` call: the task as the title, the model as a chip, the action as the note.
+            let action = collabAction(raw["tool"].string)
+            let prompt = raw["prompt"].string?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let task = prompt.flatMap { $0.split(whereSeparator: \.isNewline).first.map(String.init) }
+                .map { ActivityDetail.oneLine($0, limit: 90) }
+            let model = raw["model"].string.flatMap { $0.isEmpty ? nil : String($0.prefix(40)) }
             let state = raw["status"].string == "interrupted" ? .cancelled : status(raw["status"].string)
-            return AgentToolCall(id: id, kind: .think, status: state,
-                                 title: title, content: prompt.map { [.text($0)] } ?? [], inputSummary: summary)
+            return AgentToolCall(id: id, kind: .think, status: state, title: task.flatMap { $0.isEmpty ? nil : $0 } ?? action,
+                                 content: prompt.flatMap { $0.isEmpty ? nil : [.text($0)] } ?? [],
+                                 inputSummary: task == nil ? nil : action, badge: model)
         case "commandExecution": return command(raw, id: id)
         case "fileChange": return fileChange(raw, id: id)
         case "mcpToolCall":
@@ -71,6 +64,21 @@ enum CodexToolCalls {
             return AgentToolCall(id: id, kind: .read, status: .completed, title: ToolCallText.read(path),
                                  locations: path.isEmpty ? [] : [.init(path: path)])
         default: return nil
+        }
+    }
+
+    /// What a sub-agent call does, named for the user.
+    static func collabAction(_ tool: String?) -> String {
+        switch tool {
+        case "spawnAgent": L10n.text("Запуск подагента", "Start sub-agent")
+        case "sendInput", "sendMessage": L10n.text("Сообщение подагенту", "Message sub-agent")
+        case "followupTask": L10n.text("Новое задание подагенту", "Follow-up task for sub-agent")
+        case "resumeAgent": L10n.text("Возобновление подагента", "Resume sub-agent")
+        case "wait": L10n.text("Ожидание подагентов", "Wait for sub-agents")
+        case "interruptAgent": L10n.text("Прерывание подагента", "Interrupt sub-agent")
+        case "closeAgent": L10n.text("Остановка подагента", "Stop sub-agent")
+        case "listAgents": L10n.text("Список подагентов", "List sub-agents")
+        default: L10n.text("Подагенты", "Sub-agents")
         }
     }
 
