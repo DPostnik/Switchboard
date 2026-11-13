@@ -287,7 +287,7 @@ Follow-up (2026-11-12): disabling the duplicate diagnostics server must retain a
 transport (`/usr/bin/false`, empty arguments, disabled and not required); Codex validates even
 disabled entries. Channel 3 only; no grant or retry behavior changes. Verification pending.
 
-Mobile settings decisions (2026-11-12, implementation pending verification): channel 4 proposals
+Mobile settings decisions (implemented 2026-11-12, validated 2026-11-13): channel 4 proposals
 can be published as pending chat approval cards through the existing authenticated remote database.
 The phone sends a host-owned single-use UUID handle (compared by UUID value after database normalization) and an explicit persistent-settings decision marker;
 settings are never taken from the remote command. Every target project must be shared, the source
@@ -304,11 +304,11 @@ Manual iPhone signing workflow (2026-11-13): `scripts/install-mobile-manual.py` 
 in channel 1 with the compiler's nested macro sandbox disabled (invariant 8), then calls named
 `codesign` in channel 2, using an already-issued profile and its authorized entitlements. It does
 not request account access, export a private key, renew profiles, or automatically retry device
-installation. Operator build/sign/strict verification/install/launch passed. Developer clean build, brokered
-signature and strict verification also passed with the external boundary enabled. Device installation
-is blocked: CoreDevice cannot read the artifact Info.plist (NSCocoaErrorDomain 257, EPERM). No retry
-or alternate path after refusal. A fixed app-owned device installation tool (channel 3) is a proposed
-separate change, not implemented or granted. Existing swift/apple-signing sets are unchanged. See docs/improvements.md for actual results.
+installation. Operator build/sign/strict verification/install/launch passed. Developer clean build,
+brokered signature and strict verification also passed with the external boundary enabled. Direct
+CLI installation remains refused by CoreDevice (artifact Info.plist, NSCocoaErrorDomain 257/EPERM);
+installation instead uses the implemented fixed app-owned tool described below. Existing
+swift/apple-signing sets are unchanged. See docs/improvements.md for actual results.
 
 iPhone installation (user decision 2026-11-13): Developer must be able to install this project's
 app without changing to Operator. Channel 3 adds `install_mobile_app`, no tool arguments, only
@@ -325,6 +325,12 @@ reply, timeout or repeat call cannot install it twice. No keys, account sessions
 grants reach the agent. A nonzero device result is uncertain and is never automatically retried.
 This new authority is installation of the fixed signed mobile artifact only; source builds and
 signing remain in channels 1 and 2. No existing boundary, grant or approval invariant is relaxed.
+Verified live in Developer on 2026-11-13: host installation produced a new device bundle container,
+and one subsequent launch succeeded. The 15-second tool wait expired before confirmation;
+read-only device state reconciled this attempt, without a second installation. A receipt may
+therefore remain uncertain even when installation completed; never retry based on that status.
+Native build and 68 selected tests passed. Mobile Decline and fixed chat continuation were verified
+live; persistent Apply is covered by automated tests, not claimed as a live UI check.
 
 Known gaps. Check this list before you treat a failure as a new defect.
 

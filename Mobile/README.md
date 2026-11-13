@@ -514,8 +514,8 @@ only the compiler's nested macro sandbox, signs through the named `codesign` com
 verifies the seal and installs once. It never exports keys, renews a profile or retries
 installation automatically. `--source PATH` selects an explicit verified source snapshot.
 Developer clean build and signature verification passed with the existing `swift` and
-`apple-signing` sets. Use `--sign-only` for this verified scope. Developer device installation
-is blocked by CoreDevice artifact access (Info.plist, EPERM); no automatic fallback is attempted. A fresh profile still requires account-side provisioning. Logs are stored in
+`apple-signing` sets. Use `--sign-only`, then the app-owned tool below. Direct CLI installation
+remains blocked by CoreDevice artifact access (Info.plist, EPERM); no automatic fallback is attempted. A fresh profile still requires account-side provisioning. Logs are stored in
 `.build/mobile-manual-signing/`.
 
 
@@ -529,3 +529,15 @@ device installation inside the boundary. Existing swift/apple-signing access is 
 Reader/Editor and unrelated projects do not receive this tool. Tool installation receipts live
 in app-owned Switchboard-sandbox/mobile-installs and prevent redispatch after uncertain outcomes.
 Profile renewal remains a separate account-side operation. No extra signing credentials are copied.
+
+
+Developer build, signature, host-tool installation and launch were verified on 2026-11-13.
+The tool currently waits 15 seconds for installation. A timeout records an uncertain result;
+it must not trigger another install. Reconcile with a read-only query of the same app:
+
+```sh
+xcrun devicectl device info apps --device 00008140-0016658A0E13001C --bundle-id com.contextdesk.mobile --include-container-paths
+```
+
+Compare the returned bundle container/version with previously recorded state. App presence
+alone does not prove a fresh installation; leave the result uncertain if evidence is inconclusive.
