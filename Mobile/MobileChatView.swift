@@ -29,6 +29,8 @@ struct MobileChatView: View {
                 }
                 transcript(device: device, chat: chat, project: project)
             }
+            .onAppear { model.setOpenPushChat(MobileChatKey(device: deviceID, chat: chatID)) }
+            .onDisappear { if model.openPushChat == MobileChatKey(device: deviceID, chat: chatID) { model.setOpenPushChat(nil) } }
             .background(Color(.systemBackground))
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 MobileChatDock(model: model, device: device, chat: chat, project: project, writing: $writing,

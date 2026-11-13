@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct MobileSettings: View {
     @ObservedObject var model: MobileModel
@@ -19,11 +20,17 @@ struct MobileSettings: View {
                     Text(L10n.text("Меняется сразу. Твои сообщения и ответы агентов не переводятся.", "Changes right away. Your messages and agent answers are not translated."))
                 }
                 Section {
-                    Label(L10n.text("Push пока не подключены", "Push notifications are not connected"), systemImage: "bell.badge")
+                    Toggle(L10n.text("Уведомления", "Notifications"), isOn: Binding(get: { model.pushEnabled }, set: { value in
+                        Task { await model.setPushEnabled(value) }
+                    })).disabled(model.pushChanging).accessibilityIdentifier("push-toggle")
+                    Text(model.pushState.text).font(.footnote).foregroundStyle(.secondary).accessibilityIdentifier("push-status")
+                    if model.pushState == .denied {
+                        Link(L10n.text("Открыть настройки iOS", "Open iOS Settings"), destination: URL(string: UIApplication.openSettingsURLString)!)
+                    }
                 } header: {
                     Text(L10n.text("Уведомления", "Notifications"))
                 } footer: {
-                    Text(L10n.text("Для уведомлений на заблокированном iPhone нужна подпись Apple Developer Program. Текущая бесплатная установка её не поддерживает.", "Notifications on a locked iPhone require Apple Developer Program signing. The current free installation does not support it."))
+                    Text(L10n.text("Mac отправляет уведомления, пока Switchboard запущен и подключён к сети. Настройки текста и отправки находятся на Mac.", "Your Mac sends notifications while Switchboard is running and online. Configure text and delivery on the Mac."))
                 }
                 Section {
                     Label(L10n.text("Последние 20 сообщений", "The latest 20 messages"), systemImage: "clock.arrow.circlepath")

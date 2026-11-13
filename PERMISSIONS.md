@@ -299,7 +299,7 @@ match. File changes, local decisions, project changes and host restart invalidat
 The mobile review includes named Keychain item warnings and the same command-boundary notes as Mac.
 Changed boundary notes invalidate old handles. Oversized or partially skipped requests can only be declined remotely. Applying uses SavedState.apply
 and awaits durable saving before success; a save failure is uncertain. Provider identity and role
-limits are unchanged for both Codex and Claude. No APNs or background iOS execution is added.
+limits are unchanged for both Codex and Claude. That access-request transport does not itself use APNs. Optional native push delivery is a separate feature described below.
 Settings take effect on the next provider launch. Mobile decisions queue the same fixed continuation
 as desktop decisions, after a successful save; no proposal-supplied text is sent.
 
@@ -591,6 +591,19 @@ Known gaps. Check this list before you treat a failure as a new defect.
 - `git worktree add ../sibling` is outside the git grant.
 - Requests outside an active turn (background sub-agents) get the role's own answer; what would
   need the user is refused.
+
+### Native push signing key (2026-11-13)
+
+`Switchboard.APNs` is a reserved Keychain service prefix for both providers. Project
+settings cannot grant its items to agents. The Mac app reads/writes the signing key
+itself through Security.framework (`Switchboard.APNs.v1`, account `auth-key`); agents
+never receive the PEM or JWT. No new role, broker grant or app-owned agent tool is added.
+This uses ordinary application storage, not a new agent permission channel. Source
+and tests run inside the existing boundary (channel 1). The fixed app-owned iPhone
+installer (channel 3) keeps its existing signature/team/bundle checks and no-retry rule.
+No permission invariant or taken decision changes. PostgreSQL database tests remain
+blocked inside the external boundary by its shared-memory refusal (the user ran the suite successfully in Terminal); a trusted Python command
+would not remove that boundary and is not a valid workaround.
 
 ## 6. How to fix a defect in this area
 

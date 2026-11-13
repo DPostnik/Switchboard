@@ -55,6 +55,7 @@ with tempfile.TemporaryDirectory(prefix='context-remote-db-', dir='/tmp') as dir
         sql((root/'supabase/migrations/202611050001_remote_interactions.sql').read_text())
         sql((root/'supabase/migrations/202611060001_remote_web.sql').read_text())
         sql((root/'supabase/migrations/202611100001_remote_web_images.sql').read_text())
+        sql((root/'supabase/migrations/202611130001_remote_push.sql').read_text())
         assert sql("""select public.valid_remote_options('{"model":"m","role":"reader","addOns":["mail","userChrome"]}'),
             public.valid_remote_options('{"model":"m","access":null,"role":null,"addOns":null}'),
             public.valid_remote_options('{"model":"m","role":""}'), public.valid_remote_options('{"model":"m","role":5}'),
@@ -346,6 +347,55 @@ with tempfile.TemporaryDirectory(prefix='context-remote-db-', dir='/tmp') as dir
         assert sql('select count(*) from public.remote_web_messages;') == '0'
         assert sql(owner + 'select public.remote_web_version();').endswith('1')
         sql(owner + 'delete from public.remote_devices;')
+        # Push devices: owner-only rows, validated values, one row per token, at most 8 installations, cascade on Auth delete.
+        def register(who, installation, token, environment='development', topic='com.contextdesk.mobile', language='ru'):
+            return sql(who + f"select public.register_remote_push('{installation}','{token}','{environment}','{topic}','{language}');")
+        token_a, token_b = 'a' * 64, '0123456789abcdef' * 10
+        phone_a, phone_b = str(uuid.uuid4()), str(uuid.uuid4())
+        register(owner, phone_a, token_a)
+        assert sql(owner + f"select token, environment, topic, locale from public.remote_push_devices where id='{phone_a}';").endswith(f'{token_a}|development|com.contextdesk.mobile|ru')
+        assert sql(other + 'select count(*) from public.remote_push_devices;').endswith('0')
+        sql(other + "update public.remote_push_devices set locale = 'en';")
+        sql(other + 'delete from public.remote_push_devices;')
+        assert sql(owner + f"select locale, count(*) from public.remote_push_devices group by locale;").endswith('ru|1')
+        rejects(other + f"insert into public.remote_push_devices(id,owner,token,environment,topic,locale) values ('{uuid.uuid4()}','11111111-1111-1111-1111-111111111111','{token_a}','development','t','en');")
+        rejects('set role anon; select count(*) from public.remote_push_devices;')
+        rejects(f"set role anon; select public.register_remote_push('{uuid.uuid4()}','{token_a}','development','com.contextdesk.mobile','ru');")
+        rejects('set role anon; select public.remote_push_version();')
+        rejects("set role authenticated; set request.jwt.claim.sub = ''; " + f"select public.register_remote_push('{uuid.uuid4()}','{token_a}','development','t','ru');")
+        for bad in [dict(token='A' * 64), dict(token='a' * 63), dict(token='a' * 401), dict(token='g' * 64), dict(token=''),
+                    dict(environment='sandbox'), dict(environment=''), dict(topic='com/evil'), dict(topic=''), dict(topic='a' * 156),
+                    dict(language='de'), dict(language='')]:
+            rejects(owner + f"select public.register_remote_push('{uuid.uuid4()}','{bad.get('token', token_b)}','{bad.get('environment', 'production')}','{bad.get('topic', 'com.contextdesk.mobile')}','{bad.get('language', 'en')}');")
+        assert sql(owner + 'select count(*) from public.remote_push_devices;').endswith('1')
+        first = sql(owner + f"select updated from public.remote_push_devices where id='{phone_a}';").splitlines()[-1]
+        register(owner, phone_a, token_a, language='en')
+        assert sql(owner + f"select updated > '{first}'::timestamptz, locale from public.remote_push_devices where id='{phone_a}';").endswith('t|en')
+        # A reinstall registers the same token under a new installation ID: the token moves, one row remains.
+        register(owner, phone_b, token_a)
+        assert sql(owner + "select string_agg(id::text, ',') from public.remote_push_devices;").endswith(phone_b)
+        # Another owner cannot take over an installation ID through the upsert.
+        rejects(other + f"select public.register_remote_push('{phone_b}','{token_b}','development','com.contextdesk.mobile','en');")
+        assert sql(owner + f"select token from public.remote_push_devices where id='{phone_b}';").endswith(token_a)
+        # A ninth installation removes the least recently registered one.
+        phones = [phone_b] + [str(uuid.uuid4()) for _ in range(8)]
+        for index, phone in enumerate(phones[1:]): register(owner, phone, format(index + 1, 'x') * 64)
+        remaining = sql(owner + 'select id::text from public.remote_push_devices order by updated;').splitlines()[-8:]
+        assert sql(owner + 'select count(*) from public.remote_push_devices;').endswith('8') and phone_b not in remaining
+        assert set(remaining) == set(phones[1:])
+        sql(owner + f"delete from public.remote_push_devices where id='{phones[1]}' and token='{'1' * 64}' and updated < now() - interval '1 hour';")
+        assert sql(owner + 'select count(*) from public.remote_push_devices;').endswith('8')
+        sql(owner + f"delete from public.remote_push_devices where id='{phones[1]}' and token='{'1' * 64}' and updated < now() + interval '1 hour';")
+        assert sql(owner + 'select count(*) from public.remote_push_devices;').endswith('7')
+        assert sql(owner + 'select public.remote_push_version();').endswith('1')
+        sql("insert into auth.users values ('33333333-3333-3333-3333-333333333333');")
+        third = "set role authenticated; set request.jwt.claim.sub = '33333333-3333-3333-3333-333333333333';"
+        register(third, str(uuid.uuid4()), 'c' * 64)
+        assert sql("select count(*) from public.remote_push_devices where owner = '33333333-3333-3333-3333-333333333333';") == '1'
+        sql("delete from auth.users where id = '33333333-3333-3333-3333-333333333333';")
+        assert sql("select count(*) from public.remote_push_devices where owner = '33333333-3333-3333-3333-333333333333';") == '0'
+        assert sql('select count(*) from public.remote_push_devices;') == '7'
+        print('PASS: push devices (owner-only read/update/delete, anonymous denied, token/environment/topic/locale validation, re-registration refreshes, token moves to the newest installation, upsert cannot take another owner\'s ID, 8 installations per owner, guarded delete, version gate, Auth user cascade)')
         print('PASS: web chats (writes only through the Mac functions, owner isolation, 100,000-character limit, keep list, one signal per call, 60-chat snapshots, restore/search validation, 15-day cleanup)')
         print('PASS: interactions (answers bound to a request handle, queue/interrupt validation, uncertain-message blocking with answers still claimed, role/add-on settings, version gate); file answers (owner-only, claimed file commands, immutable, swept after 10 minutes); chat settings validation, immutable choices and uncertain-work blocking; photo expiry, grace period, immutable history, retention permissions/idempotence; all data migrations, delete/recreate revision continuity, atomic event rollback, private channel RLS, compact signals, delta revisions/deletions, owner/project isolation, duplicate claims and no uncertain replay')
     finally:

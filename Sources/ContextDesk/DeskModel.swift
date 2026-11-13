@@ -1433,6 +1433,7 @@ private struct ChatRunState: Equatable {
     private func applyArchived(_ ids: [String], archived: Bool, revealArchive: Bool) {
         for id in ids {
             guard let index = state.chats.firstIndex(where: { $0.id == id }) else { continue }
+            if archived { mobileRemote.withdrawPushChat(id) }
             state.chats[index].archived = archived
             if archived { state.chats[index].limitResume = nil }
             // Further turns add bodies to the history file; the next archive pass reads it again.
@@ -1478,6 +1479,7 @@ private struct ChatRunState: Equatable {
             return
         }
         forgetTurnCheckpoints(chatID: id)
+        mobileRemote.withdrawPushChat(id)
         let removed = state.chats.first { $0.id == id }
         // The process sweeper labels events with the agent session ID.
         ChatReferences.remove(chat: id); ChatEventLog.remove(chat: id)
@@ -1623,11 +1625,14 @@ private struct ChatRunState: Equatable {
                 guard let chat = review.requestingChat(in: state.chats) else { continue }
                 postNotice(threadID: chat.id, title: L10n.text("Агент просит доступ", "The agent asks for access"),
                            identifier: Self.settingsProposalNoticeID(review.id), actionID: Self.settingsProposalNoticeID(review.id))
+                mobileRemote.postPush(thread: chat.id, id: Self.settingsProposalNoticeID(review.id), subject: .accessRequest)
             }
         }
         let open = Set(current.map { Self.settingsProposalNoticeID($0.id) })
         let decided = Set(notices.compactMap(\.actionID).filter { $0.hasPrefix(Self.settingsProposalNoticePrefix) && !open.contains($0) })
+            .union(known.subtracting(Set(current.map(\.id))).map(Self.settingsProposalNoticeID))
         if !decided.isEmpty {
+            mobileRemote.push.withdraw(events: decided)
             notices.removeAll { notice in notice.actionID.map { decided.contains($0) } == true }
             if Bundle.main.bundleURL.pathExtension == "app" { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: Array(decided)) }
         }
@@ -2576,6 +2581,7 @@ private struct ChatRunState: Equatable {
         guard chatID == threadID, !showingJobs, !showingAttention, (!showingArchive || archiveViewingChat), !loadingChat,
               let index = state.chats.firstIndex(where: { $0.id == threadID }),
               state.chats[index].unreadCompletionID == completionID else { return }
+        mobileRemote.push.withdraw(chats: [threadID])
         state.chats[index].unreadCompletionID = nil
         unreadResponseItems[threadID] = nil
         // Approval/input notices are acknowledged separately when their request is visible.
@@ -2588,6 +2594,10 @@ private struct ChatRunState: Equatable {
     }
 
     func notify(_ action: PendingAction) {
+        let subject: PushSubject
+        if case .approval = action.interaction.kind { subject = .approval } else { subject = .question }
+        mobileRemote.postPush(thread: action.threadID, id: action.id, subject: subject,
+            text: [action.interaction.details, action.interaction.reason].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n"))
         postNotice(threadID: action.threadID, title: action.title, identifier: action.id, actionID: action.id)
         refreshDockBadge()
     }
@@ -2598,6 +2608,7 @@ private struct ChatRunState: Equatable {
         removeActionNotices([action])
     }
     private func removeActionNotices(_ actions: [PendingAction]) {
+        mobileRemote.push.withdraw(events: Set(actions.map(\.id)))
         notices.removeAll { notice in
             actions.contains { $0.id == notice.actionID && $0.threadID == notice.threadID }
         }
@@ -3386,6 +3397,9 @@ private struct ChatRunState: Equatable {
                 recordUnreadCompletion(threadID: threadID, completionID: completionID)
                 postNotice(threadID: threadID, title: title, identifier: completionID, completionID: completionID,
                            body: state.chats.first { $0.id == threadID }?.recap)
+                mobileRemote.postPush(thread: threadID, id: completionID,
+                    subject: completion.hasError || (status != .completed && status != .cancelled) ? .turnFailed : status == .cancelled ? .turnStopped : .turnReady,
+                    text: state.chats.first { $0.id == threadID }?.recap)
             }
             finishActiveTurn(threadID: thread, turnID: turnID,
                              status: completion.status, hasError: completion.hasError)
@@ -3591,5 +3605,8 @@ private struct ChatRunState: Equatable {
         let completionID = "turn:" + chat.id + ":" + turn
         recordUnreadCompletion(threadID: chat.id, completionID: completionID)
         postNotice(threadID: chat.id, title: title, identifier: completionID, completionID: completionID)
+        mobileRemote.postPush(thread: chat.id, id: completionID,
+            subject: status == .completed ? .turnReady : status == .interrupted ? .turnStopped : .turnFailed,
+            text: state.chats.first { $0.id == chat.id }?.recap)
     }
 }

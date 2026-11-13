@@ -801,13 +801,14 @@ public struct RemoteNotStored: Error, LocalizedError {
     public var errorDescription: String? { cause.localizedDescription }
 }
 public enum RemoteVault {
-    public static func read(_ account: String) -> Data? {
-        try? readChecked(account)
+    /// Pre-rename service name of the Supabase session: renaming it would mean copying the stored session secret.
+    public static let defaultService = "ContextDesk.MobileRemote.v1"
+    public static func read(_ account: String, service: String = defaultService) -> Data? {
+        try? readChecked(account, service: service)
     }
-    public static func readChecked(_ account: String) throws -> Data? {
+    public static func readChecked(_ account: String, service: String = defaultService) throws -> Data? {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-            // Pre-rename service name: renaming it would mean copying the stored session secret.
-            kSecAttrService as String: "ContextDesk.MobileRemote.v1", kSecAttrAccount as String: account,
+            kSecAttrService as String: service, kSecAttrAccount as String: account,
             kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
@@ -819,9 +820,9 @@ public enum RemoteVault {
             throw RemoteFailure.keychain(status)
         }
     }
-    public static func save(_ data: Data?, account: String) throws {
+    public static func save(_ data: Data?, account: String, service: String = defaultService) throws {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "ContextDesk.MobileRemote.v1", kSecAttrAccount as String: account]
+            kSecAttrService as String: service, kSecAttrAccount as String: account]
         if let data {
             let changes: [String: Any] = [kSecValueData as String: data]
             let result = SecItemUpdate(query as CFDictionary, changes as CFDictionary)
@@ -940,7 +941,8 @@ public actor RemoteAPI {
         components.queryItems = [URLQueryItem(name: "apikey", value: key), URLQueryItem(name: "vsn", value: "1.0.0")]
         return RemoteRealtimeCredentials(url: components.url!, owner: value.user.id, token: value.access_token)
     }
-    private func request(_ path: String, method: String = "GET", body: Data? = nil, auth: Bool = true, prefer: String? = nil) async throws -> Data {
+    /// Internal so feature extensions in other files (push devices) share authentication and error mapping.
+    func request(_ path: String, method: String = "GET", body: Data? = nil, auth: Bool = true, prefer: String? = nil) async throws -> Data {
         let credentials = auth ? try await validSession() : nil
         try Task.checkCancellation()
         guard let url = URL(string: base.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/" + path) else { throw RemoteFailure.configuration }

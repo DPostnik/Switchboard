@@ -10,8 +10,8 @@ public enum KeychainItemRule {
     public static let maximumPerProject = 16
     public static let maximumPerChange = 8
     public static let maximumLength = 128
-    /// Services (case-insensitive prefixes) that are never granted: provider sign-ins and browser cookie keys.
-    public static let reserved = ["Claude Code-credentials", "Chrome Safe Storage", "Chromium Safe Storage", "Claude Safe Storage"]
+    /// Services (case-insensitive prefixes) that are never granted: provider sign-ins, browser cookie keys and the APNs signing key.
+    public static let reserved = ["Claude Code-credentials", "Chrome Safe Storage", "Chromium Safe Storage", "Claude Safe Storage", "Switchboard.APNs"]
 
     public enum Rejection: Error, Equatable, Sendable {
         case empty, tooLong, characters, reserved

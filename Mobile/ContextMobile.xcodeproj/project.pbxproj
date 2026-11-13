@@ -53,6 +53,10 @@ AAAAF000000000000000000F = {isa = PBXFileReference; lastKnownFileType = sourceco
 AAAAF0000000000000000010 = {isa = PBXBuildFile; fileRef = AAAAF000000000000000000F; };
 AAAAF0000000000000000011 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/ContextCore/MobileReceipts.swift; sourceTree = SOURCE_ROOT; };
 AAAAF0000000000000000012 = {isa = PBXBuildFile; fileRef = AAAAF0000000000000000011; };
+AAAAG0000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Sources/ContextCore/MobilePush.swift; sourceTree = SOURCE_ROOT; };
+AAAAG0000000000000000002 = {isa = PBXBuildFile; fileRef = AAAAG0000000000000000001; };
+AAAAG0000000000000000003 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobilePushNotifications.swift; sourceTree = SOURCE_ROOT; };
+AAAAG0000000000000000004 = {isa = PBXBuildFile; fileRef = AAAAG0000000000000000003; };
 /* Begin PBXBuildFile section */
 		ABCDE0000000000000000001 = {isa = PBXBuildFile; fileRef = ABCDE0000000000000000002; };
 		59CFC907D5F4E60C0B46C6AC /* ../Sources/ContextCore/MobileRemote.swift in Sources */ = {isa = PBXBuildFile; fileRef = C23157AC2005C3BBBDA7D2C8 /* ../Sources/ContextCore/MobileRemote.swift */; };
@@ -159,6 +163,8 @@ AAAAF000000000000000000C,
 AAAAF000000000000000000E,
 AAAAF0000000000000000010,
 AAAAF0000000000000000012,
+AAAAG0000000000000000002,
+AAAAG0000000000000000004,
 				59CFC907D5F4E60C0B46C6AC /* ../Sources/ContextCore/MobileRemote.swift in Sources */,
 				D0FDF956FB34FEB9F0D65EA5 /* ../Sources/ContextCore/Localization.swift in Sources */,
 			);
@@ -188,6 +194,8 @@ AAAAF0000000000000000012,
 				INFOPLIST_KEY_UIRequiresFullScreen = YES;
 				DEVELOPMENT_TEAM = 4M74WJDNSW;
 				GENERATE_INFOPLIST_FILE = YES;
+                CODE_SIGN_ENTITLEMENTS = ContextMobile.entitlements;
+                INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Switchboard";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -224,6 +232,8 @@ AAAAF0000000000000000012,
 				INFOPLIST_KEY_UIRequiresFullScreen = YES;
 				DEVELOPMENT_TEAM = 4M74WJDNSW;
 				GENERATE_INFOPLIST_FILE = YES;
+                CODE_SIGN_ENTITLEMENTS = ContextMobile.entitlements;
+                INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Switchboard";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

@@ -1,7 +1,7 @@
 #!/bin/zsh
-# Build, sign and install the iPhone app over Wi-Fi. A Personal Team profile lasts 7 days and Xcode reuses
-# a cached one until it expires, so a profile with under 3 days left is moved aside first: Xcode then
-# fetches a fresh one (restored if the build fails).
+# Build, sign and install the iPhone app over Wi-Fi. Xcode reuses a cached profile until it expires, so a
+# profile with under 3 days left is moved aside first: Xcode then fetches a fresh one (restored if the build
+# fails). Personal Team profiles lasted 7 days; the paid team's last a year, so renewal is rarely due.
 #   zsh scripts/install-mobile.sh               the working copy, always installs
 #   zsh scripts/install-mobile.sh --scheduled   committed main in a private worktree, only when the last
 #                                               installed profile has under 3 days left (launchd job,

@@ -49,6 +49,25 @@ struct MobileChatKey: Hashable, Sendable {
     var previewFiles: [String: RemoteFile] = [:]
     #endif
 
+    @Published var pushEnabled = UserDefaults.standard.bool(forKey: "mobilePushEnabled")
+    @Published var pushChanging = false
+    @Published var pushState: MobilePushState = .notAsked
+    @Published var pushRoute: MobileChatKey?
+    @Published var pushRouteRevision = 0
+    var openPushChat: MobileChatKey?
+    var pendingPushRoute: MobileChatKey?
+    var hasPushSnapshot = false
+    var pushRemovalPending = UserDefaults.standard.bool(forKey: "mobilePushRemovalPending")
+    var pushSigningOut = false
+    var pushToken: String?
+    var pushWork: Task<Void, Never>?
+    let pushInstallation: String = {
+        if let stored = UserDefaults.standard.string(forKey: "mobilePushInstallation"), UUID(uuidString: stored) != nil { return stored }
+        let value = UUID().uuidString.lowercased()
+        UserDefaults.standard.set(value, forKey: "mobilePushInstallation")
+        return value
+    }()
+
     // MARK: Per-chat state
 
     func receipt(_ key: MobileChatKey) -> RemoteCommand? { receipts.receipt(device: key.device, chat: key.chat) }
@@ -99,12 +118,14 @@ struct MobileChatKey: Hashable, Sendable {
             UserDefaults.standard.set(url, forKey: "supabaseURL"); UserDefaults.standard.set(key, forKey: "supabaseKey")
             receipts = stored
             startConnection()
+            await preparePush()
         } catch { password = ""; status = error.localizedDescription }
     }
     func setActive(_ value: Bool) {
         active = value
-        if value { startConnection() }
+        if value { startConnection(); Task { await preparePush(); await updatePushBadge() } }
         else {
+            Task { await updatePushBadge() }
             lifecycle = UUID(); realtime?.stop(); updates.cancel()
             dirtyDevices = []; dirtyCommands = []; onlineMacs = []
         }
@@ -159,6 +180,7 @@ struct MobileChatKey: Hashable, Sendable {
         devices.removeAll { value in !fetched.contains { $0.id == value.id } }
         commands = updated
         try resolveDelivery()
+        reconcilePushNotifications()
     }
     private func requestUpdates() {
         guard active, connectionState == .connected,
@@ -195,6 +217,7 @@ struct MobileChatKey: Hashable, Sendable {
             } else { commands.removeAll { $0.id == id } }
         }
         try resolveDelivery()
+        reconcilePushNotifications()
         commands = Array(commands.prefix(600))
     }
 
@@ -371,6 +394,19 @@ struct MobileChatKey: Hashable, Sendable {
         commands.first { $0.device == device && $0.chat == chat && $0.approval.flatMap(UUID.init(uuidString:)) == UUID(uuidString: approval) }
     }
     func signOut() async {
+        guard !pushSigningOut else { return }
+        pushSigningOut = true
+        defer { pushSigningOut = false }
+        await pushWork?.value
+        do {
+            if !MobilePushNotifications.preview, let api, try await api.supportsPush() {
+                try await api.unregisterPush(id: pushInstallation)
+            }
+        }
+        catch { status = L10n.text("Не удалось отключить уведомления. Повтори выход из аккаунта.", "Could not disconnect notifications. Try signing out again."); return }
+        pushToken = nil; pushState = .signedOut; hasPushSnapshot = false
+        pendingPushRoute = nil; pushRoute = nil; openPushChat = nil
+        await MobilePushNotifications.remove { _ in true }
         lifecycle = UUID(); realtime?.stop(); realtime = nil; updates.cancel()
         dirtyDevices = []; dirtyCommands = []; onlineMacs = []
         do { try await api?.signOut(); api = nil; signedIn = false; devices = []; commands = []; drafts = [:]; photoDrafts = [:]; chatErrors = [:] }

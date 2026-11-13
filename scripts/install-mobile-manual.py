@@ -34,7 +34,11 @@ def main():
     load = runpy.run_path(str(repo / 'scripts/mobile-profile.py'))['load']
     identities = subprocess.check_output(['security', 'find-identity', '-v', '-p', 'codesigning'], text=True)
     available = set(re.findall(r'\b[0-9A-F]{40}\b', identities))
-    profiles = []
+    # Entitlements the source requires (Mobile/ContextMobile.entitlements, e.g. aps-environment). The signature still
+    # takes its entitlements from the profile, so an older profile without them would silently sign an app without push.
+    required_path = source / 'Mobile/ContextMobile.entitlements'
+    required = plistlib.loads(required_path.read_bytes()) if required_path.exists() else {}
+    profiles, lacking = [], set()
     for path in (Path.home() / 'Library/Developer/Xcode/UserData/Provisioning Profiles').glob('*.mobileprovision'):
         profile = load(path)
         entitlements = profile.get('Entitlements', {})
@@ -42,10 +46,17 @@ def main():
                 or args.udid not in profile.get('ProvisionedDevices', [])
                 or profile['ExpirationDate'].replace(tzinfo=timezone.utc) <= datetime.now(timezone.utc)):
             continue
+        missing = sorted(key for key, value in required.items() if entitlements.get(key) != value)
+        if missing:
+            lacking.update(missing)
+            continue
         matching = sorted({hashlib.sha1(cert).hexdigest().upper()
                            for cert in profile.get('DeveloperCertificates', [])} & available)
         if matching:
             profiles.append((profile['ExpirationDate'], path, profile, matching[0]))
+    if not profiles and lacking:
+        raise SystemExit('The device profile lacks entitlements required by Mobile/ContextMobile.entitlements: '
+                         + ', '.join(sorted(lacking)) + '. Enable the capabilities for the App ID and refresh the profile through Xcode.')
     if not profiles:
         raise SystemExit('No valid device profile and matching signing identity. Provision through Xcode first.')
     _, profile_path, profile, identity = max(profiles, key=lambda item: item[0])

@@ -24,7 +24,9 @@ import ContextCore
         let finished = run.finished ?? Date(), report = text
         do {
             let (ledger, created) = try await attentionStore.update { $0.record(source, status: status, output: report, now: finished) }
+            let closed = attention.open.filter { old in !ledger.open.contains { $0.id == old.id } }.map(\.id)
             attention = ledger
+            removeAttentionNotifications(closed)
             created.forEach(postAttentionNotification)
         } catch {
             self.error = L10n.text("Не удалось сохранить важное сообщение: ", "Could not save an important message: ") + error.localizedDescription
@@ -97,6 +99,14 @@ import ContextCore
     }
 
     private func postAttentionNotification(_ item: AttentionItem) {
+        if let thread = item.threadID {
+            let subject: PushSubject = switch item.kind {
+            case .blocker: .blocker(job: item.jobName)
+            case .runProblem: .taskProblem(job: item.jobName)
+            case .quotaWait: .quotaWait(job: item.jobName)
+            }
+            mobileRemote.postPush(thread: thread, id: PushEvent.attentionID(item.id), subject: subject, text: item.text)
+        }
         guard Bundle.main.bundleURL.pathExtension == "app" else { return }
         let content = UNMutableNotificationContent()
         switch item.kind {
@@ -111,6 +121,7 @@ import ContextCore
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "attention:" + item.id.uuidString, content: content, trigger: nil), withCompletionHandler: nil)
     }
     private func removeAttentionNotifications(_ ids: [UUID]) {
+        mobileRemote.push.withdraw(events: Set(ids.map(PushEvent.attentionID)))
         guard Bundle.main.bundleIdentifier != nil else { return }
         let identifiers = ids.map { "attention:" + $0.uuidString }
         UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: identifiers)

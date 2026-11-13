@@ -4,6 +4,10 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Keep iPhone notification completion callbacks on the main thread to prevent a crash when opening a push notification.
+
+- Add optional native iPhone push notifications sent by the Mac through APNs, with private default text, away detection and withdrawal of resolved requests.
+
 - Fix GitHub CLI in chats under the external boundary: `gh pr checks` and similar commands find the login and may start git; an access request file the app cannot read now tells its chat instead of disappearing.
 
 - Codex sub-agent calls appear in the chat as cards named by their action (start, message, follow-up task, resume, wait, interrupt, stop, list) with the task on one line; long summaries in the sub-agents panel are cut to one line.

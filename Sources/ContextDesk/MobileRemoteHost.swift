@@ -6,8 +6,16 @@ import AgentContract
 import Combine
 import IOKit.pwr_mgt
 import IOKit.ps
+import UniformTypeIdentifiers
 
 @MainActor final class MobileRemoteHost: ObservableObject {
+    let push = MobilePushCenter()
+    @Published var pushEnabled = false { didSet { pushConfigChanged() } }
+    @Published var pushDetail = false { didSet { push.detail = pushDetail; saveConfig() } }
+    @Published var pushOnlyAway = true { didSet { push.onlyAway = pushOnlyAway; saveConfig() } }
+    @Published var pushKeyID = "" { didSet { pushConfigChanged() } }
+    @Published var pushTeamID = "4M74WJDNSW" { didSet { pushConfigChanged() } }
+    private var pushSetup: Task<Void, Never>?
     @Published var url = ""
     @Published var key = ""
     @Published var email = ""
@@ -72,6 +80,7 @@ import IOKit.ps
         var url: String; var key: String; var device: String; var projects: Set<String>
         var autoEnable: Bool?; var active: Bool?
         var quietPublishing: Bool?; var quietIntervalMinutes: Int?
+        var pushEnabled: Bool?; var pushDetail: Bool?; var pushOnlyAway: Bool?; var pushKeyID: String?; var pushTeamID: String?
     }
     init(setupFile: URL = Locations.root.appendingPathComponent("mobile-setup.json"),
          configFile: URL = Locations.root.appendingPathComponent("mobile-remote.json"),
@@ -82,6 +91,10 @@ import IOKit.ps
         if let data = try? Data(contentsOf: configFile), let config = try? JSONDecoder().decode(Config.self, from: data) {
             url = config.url; key = config.key; device = config.device; projects = config.projects
             autoEnable = config.autoEnable ?? true; active = config.active ?? true
+            pushEnabled = config.pushEnabled ?? false; pushDetail = config.pushDetail ?? false
+            pushOnlyAway = config.pushOnlyAway ?? true; pushKeyID = config.pushKeyID ?? ""
+            pushTeamID = config.pushTeamID ?? "4M74WJDNSW"
+            push.detail = pushDetail; push.onlyAway = pushOnlyAway
             quietPublishing = config.quietPublishing ?? true
             quietIntervalMinutes = Self.quietIntervalChoices.contains(config.quietIntervalMinutes ?? 0)
                 ? config.quietIntervalMinutes! : Self.defaultQuietIntervalMinutes
@@ -95,7 +108,9 @@ import IOKit.ps
     }
     private func currentConfig() -> Config {
         Config(url: url, key: key, device: device, projects: projects, autoEnable: autoEnable, active: active,
-               quietPublishing: quietPublishing, quietIntervalMinutes: quietIntervalMinutes)
+               quietPublishing: quietPublishing, quietIntervalMinutes: quietIntervalMinutes,
+               pushEnabled: pushEnabled, pushDetail: pushDetail, pushOnlyAway: pushOnlyAway,
+               pushKeyID: pushKeyID, pushTeamID: pushTeamID)
     }
     /// A Supabase connection is entered; without it a project cannot be shown on the phone.
     var configured: Bool { !url.isEmpty && !key.isEmpty }
@@ -191,7 +206,45 @@ import IOKit.ps
             observePowerAndSleep()
             updateSleepAssertion()
             channel.start()
+            configurePush()
         } catch { password = ""; fail(error.localizedDescription) }
+    }
+    private func pushConfigChanged() {
+        saveConfig()
+        configurePush()
+    }
+    func configurePush() {
+        pushSetup?.cancel(); push.reset()
+        guard enabled, pushEnabled, let api else { return }
+        push.valid = { [weak self] event in
+            guard let self, let model, let id = event.chat,
+                  let chat = model.state.chats.first(where: { $0.id == id }) else { return false }
+            return enabled && pushEnabled && !chat.isArchived && projects.contains(chat.projectID.uuidString)
+        }
+        push.badge = { [weak self] in
+            guard let self, let model else { return 0 }
+            let shared = Set(model.state.chats.filter { !$0.isArchived && projects.contains($0.projectID.uuidString) }.map(\.id))
+            return model.pending.filter { shared.contains($0.threadID) }.count
+                + model.settingsProposals.filter { $0.requestingChat(in: model.state.chats).map { shared.contains($0.id) } == true }.count
+        }
+        push.detail = pushDetail; push.onlyAway = pushOnlyAway
+        pushSetup = Task { guard !Task.isCancelled else { return }; await push.enable(api: api, mac: device, keyID: pushKeyID, teamID: pushTeamID) }
+    }
+    func postPush(thread: String, id: String, subject: PushSubject, text: String? = nil) {
+        guard enabled, pushEnabled, let model,
+              let chat = model.state.chats.first(where: { $0.id == thread }), !chat.isArchived,
+              projects.contains(chat.projectID.uuidString),
+              let project = model.state.projects.first(where: { $0.id == chat.projectID }) else { return }
+        push.post(PushEvent(id: id, subject: subject, chat: thread, project: project.name,
+                            chatTitle: chat.title, text: text, created: Date()))
+    }
+    func withdrawPushChat(_ chat: String) {
+        guard let model else { return }
+        let events = Set(model.pending.filter { $0.threadID == chat }.map(\.id))
+            .union(model.settingsProposals.filter { $0.requestingChat(in: model.state.chats)?.id == chat }
+                .map { DeskModel.settingsProposalNoticeID($0.id) })
+            .union(model.attention.items.filter { $0.threadID == chat }.map { PushEvent.attentionID($0.id) })
+        push.withdraw(events: events, chats: [chat])
     }
     private func publishCurrent() async throws {
         guard enabled, !sleeping, let model, let api else { throw CancellationError() }
@@ -438,6 +491,7 @@ import IOKit.ps
         await disable()
     }
     func disable() async {
+        pushSetup?.cancel(); pushSetup = nil; push.reset()
         enabled = false; sleeping = false
         realtime?.stop(); realtime = nil
         publication.cancel(); commandWork.cancel(); modelChanges = nil
@@ -550,10 +604,45 @@ struct MobileRemoteSettings: View {
                     Text(L10n.text("Доступ с телефона выключится, а команды в очереди будут потеряны. Потом нужно будет снова войти в Supabase.",
                                    "Phone access stops and queued commands are lost. You will need to sign in to Supabase again."))
                 }
+            MobilePushSettings(host: host, push: host.push)
             if !host.status.isEmpty {
                 Text(host.status).font(.ui(.caption)).foregroundStyle(host.statusFailed ? DeskPalette.problem : Color.primary).textSelection(.enabled)
             }
         }
         .task { host.prepareConnection() }
+    }
+}
+
+struct MobilePushSettings: View {
+    @ObservedObject var host: MobileRemoteHost
+    @ObservedObject var push: MobilePushCenter
+    @State private var choosingKey = false
+    var body: some View {
+        Group {
+            Text(L10n.text("Уведомления на iPhone", "iPhone notifications")).font(.headline)
+            Toggle(L10n.text("Отправлять уведомления", "Send notifications"), isOn: $host.pushEnabled)
+            TextField("Key ID", text: $host.pushKeyID)
+            TextField("Team ID", text: $host.pushTeamID)
+            Button(L10n.text("Выбрать файл .p8…", "Choose .p8 file…")) { choosingKey = true }
+                .fileImporter(isPresented: $choosingKey, allowedContentTypes: [UTType(filenameExtension: "p8") ?? .data]) { result in
+                    do {
+                        let url = try result.get()
+                        if let id = APNsCredentials.keyID(fileName: url.lastPathComponent) { host.pushKeyID = id }
+                        try push.importKey(url, keyID: host.pushKeyID, teamID: host.pushTeamID)
+                        host.configurePush()
+                    } catch { push.report(error) }
+                }
+            if push.hasKey {
+                Text(L10n.text("Ключ хранится в Связке ключей Mac.", "Key is stored in the Mac Keychain.")).font(.ui(.caption))
+                Button(L10n.text("Удалить ключ", "Remove key"), role: .destructive) { push.removeKey() }
+            }
+            Toggle(L10n.text("Только пока я отошёл от Mac", "Only while I am away from the Mac"), isOn: $host.pushOnlyAway)
+            Toggle(L10n.text("Включать название чата и текст", "Include chat title and text"), isOn: $host.pushDetail)
+            Text(L10n.text("Apple может читать текст уведомлений. По умолчанию передаются только тип события и название проекта.", "Apple can read notification text. By default, only the event type and project name are sent."))
+                .font(.ui(.caption)).foregroundStyle(.secondary)
+            Button(L10n.text("Отправить тестовое уведомление", "Send test notification")) { push.test() }
+                .disabled(!host.enabled || !host.pushEnabled)
+            if !push.status.isEmpty { Text(push.status).font(.ui(.caption)).textSelection(.enabled) }
+        }
     }
 }

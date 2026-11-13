@@ -17,6 +17,35 @@ final class InteractionTests: XCTestCase {
         waitForExpectations(timeout: timeout)
     }
 
+    @MainActor func testPushSettingsStatesInBothLanguages() {
+        for (language, states) in [
+            ("en", [("notAsked", "Permission has not been requested"), ("allowed", "Notifications connected"),
+                    ("denied", "Allow notifications in iOS Settings"), ("schema", "Update the Supabase schema and Mac app")]),
+            ("ru", [("notAsked", "Разрешение ещё не запрошено"), ("allowed", "Уведомления подключены"),
+                    ("denied", "Разреши уведомления в настройках iOS"), ("schema", "Обнови схему Supabase и приложение на Mac")])
+        ] {
+            for (state, expected) in states {
+                let app = XCUIApplication()
+                app.launchArguments = ["-mobile-preview", "-preview-push", state, "-interfaceLanguage", language]
+                app.launch()
+                let settings = app.buttons["open-settings"]
+                XCTAssertTrue(settings.waitForExistence(timeout: 10)); settings.tap()
+                let status = app.staticTexts["push-status"]
+                XCTAssertTrue(status.waitForExistence(timeout: 5))
+                XCTAssertEqual(status.label, expected)
+                XCTAssertTrue(app.switches["push-toggle"].exists)
+                app.terminate()
+            }
+        }
+    }
+    @MainActor func testPushMarkerRoutesToPublishedChat() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-mobile-preview", "-preview-push-route", "-interfaceLanguage", "en"]
+        app.launch()
+        XCTAssertTrue(app.navigationBars["Mobile app"].waitForExistence(timeout: 10))
+        app.terminate()
+    }
+
     @MainActor func testAnsweringQuestionWithOptionAndOtherInBothLanguages() throws {
         for (language, first, second, waiting, needs) in [("ru", "1 из 2", "2 из 2", "Ожидает Mac", "Ждут ответа: 2"),
                                                           ("en", "1 of 2", "2 of 2", "Waiting for Mac", "Waiting for you: 2")] {

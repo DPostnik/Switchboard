@@ -138,6 +138,17 @@ extension MobileModel {
             chats += [release, migration, nightly]
         }
         devices = [RemoteDevice(id: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", owner: "dddddddd-dddd-dddd-dddd-dddddddddddd", snapshot: RemoteSnapshot(projects: projects, chats: chats))]
+        hasPushSnapshot = true
+        if let index = arguments.firstIndex(of: "-preview-push"), index + 1 < arguments.count {
+            let state = arguments[index + 1]
+            pushState = ["notAsked": .notAsked, "denied": .denied, "allowed": .registered, "schema": .schema, "failed": .failed][state] ?? .disabled
+            pushEnabled = ["allowed", "schema", "failed", "denied"].contains(state)
+        }
+        if arguments.contains("-preview-push-route"), let device = devices.first, let chat = device.snapshot.chats.first {
+            let marker = PushMarker(kind: .turn, device: device.id, chat: chat.id, event: "preview-event")
+            if let parsed = PushMarker(userInfo: [PushMarker.key: marker.dictionary]) { routePush(parsed) }
+        }
+
         connectionState = ProcessInfo.processInfo.arguments.contains("-preview-offline") ? .offline : .connected
         onlineMacs = Set(devices.map(\.id))
         signedIn = true

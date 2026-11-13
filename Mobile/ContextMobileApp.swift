@@ -2,12 +2,13 @@ import SwiftUI
 import Foundation
 
 @main struct ContextMobileApp: App {
+    @UIApplicationDelegateAdaptor(MobilePushDelegate.self) private var pushDelegate
     @StateObject private var model = MobileModel()
     @Environment(\.scenePhase) private var phase
     var body: some Scene {
         WindowGroup {
             MobileLanguageRoot(model: model)
-                .task { model.setActive(phase == .active); await model.restoreConnection() }
+                .task { pushDelegate.model = model; model.setActive(phase == .active); await model.restoreConnection() }
                 .onChange(of: phase) { _, value in
                     if value == .active { model.setActive(true) } else if value == .background { model.setActive(false) }
                 }
@@ -31,6 +32,7 @@ struct MobileLanguageRoot: View {
                     L10n.use(value)
                     UserDefaults.standard.set(value.rawValue, forKey: AppLanguage.preferenceKey)
                     language = value
+                    model.uploadPush()
                 }))
                 .id(language)
                 .environment(\.locale, language.locale)
@@ -44,8 +46,9 @@ struct MobileRoot: View {
     @State private var search = ""
     @State private var creatingChat = false
     @State private var destination: MobileChatDestination?
+    @State private var path: [MobileChatDestination] = []
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             Group {
                 if model.signedIn {
                     MobileChatList(model: model, search: $search)
@@ -75,6 +78,14 @@ struct MobileRoot: View {
                     creatingChat = false
                     destination = MobileChatDestination(device: command.device, chat: command.chat)
                 }
+            }
+            .onChange(of: model.pushRouteRevision) { _, _ in
+                settings = false
+                destination = nil
+                path = model.pushRoute.map { [MobileChatDestination(device: $0.device, chat: $0.chat)] } ?? []
+            }
+            .onAppear {
+                if let route = model.pushRoute { destination = MobileChatDestination(device: route.device, chat: route.chat) }
             }
             .navigationDestination(item: $destination) { target in
                 MobileChatView(model: model, deviceID: target.device, chatID: target.chat)

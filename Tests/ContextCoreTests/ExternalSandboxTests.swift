@@ -499,7 +499,7 @@ private func claudeInput(_ root: URL, project: Project, workerID: String) -> Ext
         #expect(KeychainItemRule.checked(.init(service: bad)) == .failure(.characters), "\(bad.debugDescription)")
         #expect(KeychainItemRule.checked(.init(service: "ok", account: bad)) == .failure(.characters), "\(bad.debugDescription)")
     }
-    for reserved in ["Claude Code-credentials", "claude code-credentials-1a2b3c4d", "Chrome Safe Storage", "CHROMIUM SAFE STORAGE", "Claude Safe Storage"] {
+    for reserved in ["Claude Code-credentials", "claude code-credentials-1a2b3c4d", "Chrome Safe Storage", "CHROMIUM SAFE STORAGE", "Claude Safe Storage", "Switchboard.APNs.v1", "switchboard.apns"] {
         #expect(KeychainItemRule.checked(.init(service: reserved)) == .failure(.reserved))
     }
     // Exact forms only: both orders without an account, every order of the three groups with one.

@@ -31,7 +31,7 @@ was provisioned on 2026-09-27; public signup is disabled.
 
 Apple documents that a Personal Team provisioning profile expires after seven days:
 https://developer.apple.com/help/account/basics/about-your-developer-account
-No paid Apple membership, hosting plan or domain is assumed or purchased.
+Push notifications require the paid Apple Developer Program membership enabled on 2026-11-13. No hosting plan or domain is required.
 Supabase RLS reference: https://supabase.com/docs/guides/database/postgres/row-level-security
 
 ## Device installation and re-signing
@@ -168,7 +168,7 @@ A macOS Swift typecheck of shared views is useful but is **not** an iOS build.
 - Server connection and Mac Presence are distinct. Presence is advisory and does
   not authorize commands or prove execution. Last-update age describes data, not
   host liveness. Disconnecting the phone never stops work on the Mac.
-- No push notifications or iOS background execution are implemented.
+- Push delivery requires the optional APNs setup below. Background withdrawal is best effort.
 
 ## Remaining work before declaring the original plan complete
 
@@ -252,11 +252,7 @@ with one shared Realtime connection. Hidden chats continue to synchronize; a
 implemented. Simulator-only `-preview-project-list` supplies two larger project
 lists and an empty project for disclosure/search checks without cloud access.
 
-Mobile push notifications are requested but not delivered. Current Personal Team
-signing has no APNs entitlement. Apple Developer Program signing, APNs registration
-and a server sender must be configured before testing locked-device delivery.
-Reference: https://developer.apple.com/help/account/reference/supported-capabilities-ios
-There is no background polling workaround or misleading notification toggle.
+Native push notification setup and its remaining live checks are described below.
 
 Scroll regression verification: the bounded transcript uses eager layout and a
 bottom default anchor; the jump button is governed by measured viewport position.
@@ -541,3 +537,40 @@ xcrun devicectl device info apps --device 00008140-0016658A0E13001C --bundle-id 
 
 Compare the returned bundle container/version with previously recorded state. App presence
 alone does not prove a fresh installation; leave the result uncertain if evidence is inconclusive.
+
+## Native iPhone notifications (2026-11-13)
+
+Verified on 2026-11-13: Mac build and 65 selected Swift tests; unsigned simulator and signed device builds; strict signature; device installation and launch; test and real-chat push delivery; post-fix notification tap opens the chat. The database migration tests passed in the user’s Terminal. Automated simulator UI tests remain blocked by the agent sandbox; away hold/release, withdrawal, foreground suppression and language switching have not all been exercised on the device.
+Apply `supabase/migrations/202611130001_remote_push.sql` in the Supabase SQL editor
+once after the existing migrations. The table holds owner-scoped installation tokens,
+not notification text. Both devices must use the same account.
+
+Enable Push Notifications and Time Sensitive Notifications on `com.contextdesk.mobile`.
+Refresh the device provisioning profile through Xcode: it must include
+`aps-environment = development` and `com.apple.developer.usernotifications.time-sensitive`.
+The manual signing script refuses a profile missing source-required entitlements.
+The app-owned installer verifies the signature, bundle ID and team; it does not have
+an entitlement allow-list that needs changing for push.
+
+In Mac Settings → Advanced → Mobile access → iPhone notifications, import the sandbox
+APNs `.p8` key yourself and set its Key ID and Team ID. Agents must not read the key.
+The app stores it in its reserved `Switchboard.APNs.v1` Keychain item. Enable notifications
+on the Mac and in iPhone Settings inside the app. Allow the iOS system prompt.
+Use the Mac test button after signing and installing both apps and applying the migration.
+
+By default the Mac holds notifications until its screen locks or input is idle for
+120 seconds. Requests stay held while pending; turn and attention notices wait at most
+ten minutes. Default text includes the subject and project, without chat content.
+The optional detail setting includes chat text, readable by Apple. Text follows each
+phone's language. A tap opens its chat; the open chat suppresses foreground banners.
+Answered requests are withdrawn through a background push, or cleaned up after the
+next foreground synchronization. Background delivery can be throttled or skipped.
+
+The Mac must remain awake, online and running with mobile access enabled. APNs may
+store only one notice per app while the phone is offline. Badge values sent by one
+Mac cover that Mac; the phone recomputes the total when it opens. Lock-screen approval
+buttons, encrypted notification extensions and production APNs setup are deferred.
+
+Before calling delivery verified, check test delivery on a locked phone, approval
+holding/release, tap navigation, withdrawal, foreground suppression and both languages.
+Build/signature, installation and actual delivery are separate checks.
