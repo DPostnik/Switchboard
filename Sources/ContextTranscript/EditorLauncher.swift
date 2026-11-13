@@ -21,7 +21,7 @@ import os
         return found
     }
 
-    public static func refresh() { cache = nil; browserCache = nil }
+    public static func refresh() { cache = nil; browserCache = nil; terminalCache = nil }
 
     private static var browserCache: [(browser: ExternalBrowser, app: URL)]?
 
@@ -57,6 +57,41 @@ import os
     public static func browserItems(_ path: String) -> [NSMenuItem] {
         browsers(for: path).map { found in
             EditorMenuItem(title: openTitle(found.browser.title)) { openInBrowser(path, browser: found.browser, app: found.app) }
+        }
+    }
+
+    private static var terminalCache: [(terminal: ExternalTerminal, app: URL)]?
+
+    /// Terminals found on this Mac, looked up once per launch.
+    public static var installedTerminals: [(terminal: ExternalTerminal, app: URL)] {
+        if let terminalCache { return terminalCache }
+        let found = ExternalEditors.installedTerminals { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) }
+        terminalCache = found
+        return found
+    }
+
+    /// The terminal chosen last time, otherwise the first installed one.
+    public static var preferredTerminal: (terminal: ExternalTerminal, app: URL)? {
+        ExternalEditors.preferredTerminal(UserDefaults.standard.string(forKey: ExternalEditors.terminalPreferenceKey),
+                                          among: installedTerminals)
+    }
+
+    /// Opens a new terminal window in `folder` and remembers an explicitly chosen terminal.
+    /// Launch Services starts the terminal, so it never inherits the app's agent environment.
+    public static func openTerminal(_ folder: String, terminal: (terminal: ExternalTerminal, app: URL)? = nil) {
+        if let terminal { UserDefaults.standard.set(terminal.terminal.id, forKey: ExternalEditors.terminalPreferenceKey) }
+        var directory: ObjCBool = false
+        guard let chosen = terminal ?? preferredTerminal,
+              FileManager.default.fileExists(atPath: folder, isDirectory: &directory), directory.boolValue else {
+            log.error("Terminal not opened: no terminal or the folder is missing")
+            NSSound.beep(); return
+        }
+        let id = chosen.terminal.id
+        NSWorkspace.shared.open([URL(fileURLWithPath: folder, isDirectory: true)], withApplicationAt: chosen.app,
+                                configuration: NSWorkspace.OpenConfiguration()) { _, error in
+            let log = Logger(subsystem: "local.daniil.switchboard", category: "editor")
+            if let error { log.error("Terminal \(id, privacy: .public) did not open: \(error.localizedDescription, privacy: .public)") }
+            else { log.info("Opened a folder in terminal \(id, privacy: .public)") }
         }
     }
 

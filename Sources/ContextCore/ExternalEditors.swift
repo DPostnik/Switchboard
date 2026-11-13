@@ -40,6 +40,9 @@ public struct ExternalBrowser: Identifiable, Hashable, Sendable {
     public init(id: String, title: String, bundleID: String) { self.id = id; self.title = title; self.bundleID = bundleID }
 }
 
+/// A terminal application: like a browser, it is opened through Launch Services, here with a folder's URL.
+public typealias ExternalTerminal = ExternalBrowser
+
 public enum ExternalEditors {
     /// Preference key holding the chosen editor's ID; `system` opens files in their default app.
     public static let preferenceKey = "preferredEditor"
@@ -152,6 +155,28 @@ public enum ExternalEditors {
     /// Known browsers whose application is found, with its location.
     public static func installedBrowsers(locate: (String) -> URL?) -> [(browser: ExternalBrowser, app: URL)] {
         browsers.compactMap { browser in locate(browser.bundleID).map { (browser, $0) } }
+    }
+
+    /// Terminals that open a new window in a folder passed through Launch Services, in the order an unset
+    /// preference picks the first installed one. Terminal ships with macOS, so it comes last as the fallback.
+    public static let terminals: [ExternalTerminal] = [
+        ExternalTerminal(id: "ghostty", title: "Ghostty", bundleID: "com.mitchellh.ghostty"),
+        ExternalTerminal(id: "iterm", title: "iTerm", bundleID: "com.googlecode.iterm2"),
+        ExternalTerminal(id: "warp", title: "Warp", bundleID: "dev.warp.Warp-Stable"),
+        ExternalTerminal(id: "terminal", title: "Terminal", bundleID: "com.apple.Terminal"),
+    ]
+
+    public static let terminalPreferenceKey = "preferredTerminal"
+
+    /// Known terminals whose application is found, with its location.
+    public static func installedTerminals(locate: (String) -> URL?) -> [(terminal: ExternalTerminal, app: URL)] {
+        terminals.compactMap { terminal in locate(terminal.bundleID).map { (terminal, $0) } }
+    }
+
+    /// The saved terminal when it is installed, otherwise the first installed one.
+    public static func preferredTerminal(_ saved: String?, among installed: [(terminal: ExternalTerminal, app: URL)])
+        -> (terminal: ExternalTerminal, app: URL)? {
+        installed.first { $0.terminal.id == saved } ?? installed.first
     }
 
     /// The editor inherits this environment when it is not running yet. The app's agent homes and chat labels

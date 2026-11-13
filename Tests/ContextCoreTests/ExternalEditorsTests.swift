@@ -53,6 +53,17 @@ private func editor(_ id: String) -> ExternalEditor { ExternalEditors.known.firs
     #expect(ExternalEditors.browsers.map(\.id) == ["chrome", "safari"])
 }
 
+@Test func terminalPreferenceFallsBackToTheFirstInstalledTerminal() {
+    let apps = ["com.apple.Terminal": "/System/Applications/Utilities/Terminal.app",
+                "com.mitchellh.ghostty": "/Applications/Ghostty.app"]
+    let found = ExternalEditors.installedTerminals { apps[$0].map { URL(fileURLWithPath: $0) } }
+    #expect(found.map(\.terminal.id) == ["ghostty", "terminal"])
+    #expect(ExternalEditors.preferredTerminal(nil, among: found)?.terminal.id == "ghostty")
+    #expect(ExternalEditors.preferredTerminal("terminal", among: found)?.terminal.id == "terminal")
+    #expect(ExternalEditors.preferredTerminal("iterm", among: found)?.terminal.id == "ghostty")
+    #expect(ExternalEditors.preferredTerminal(nil, among: []) == nil)
+}
+
 @Test func editorFolderIsTheDeepestProjectHoldingTheFile() {
     let folders = ["/work/app", "/work/app/.worktrees/feature", "/work/other", "/"]
     #expect(ExternalEditors.folder(containing: "/work/app/Sources/a.swift", in: folders) == "/work/app")

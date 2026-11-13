@@ -1300,6 +1300,9 @@ struct ChatView: View {
                     .help(L10n.text("Файлы проекта (⇧⌘E)", "Project files (⇧⌘E)"))
                     .keyboardShortcut("e", modifiers: [.command, .shift])
                 }
+                if let folder = model.selectedWorkingDirectory {
+                    OpenTerminalButton(folder: folder)
+                }
                 if let chat = model.selectedChat {
                     if model.state.browserEnabled == true, let session = chat.nativeSession, model.isRegistered(session.connection) {
                         ChatBrowserControls(session: session, project: model.selectedWorkingDirectory ?? "",
