@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Sub-agent chips above the message field are as wide as their names instead of stretching to a fixed width.
+
 - Codex sub-agent calls in the chat look like Claude's: the task is the title, the model is a chip beside it, and the action (start, message, wait) is the note. Claude sub-agent calls show their type as the same chip.
 
 - The iPhone app names the agent of Claude chats too ("Agent: Claude"), as it already did for Codex chats.

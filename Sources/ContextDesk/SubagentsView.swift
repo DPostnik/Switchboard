@@ -38,11 +38,7 @@ struct SubagentsBar: View {
     }
 
     private func chip(_ title: String, @ViewBuilder icon: () -> some View) -> some View {
-        HStack(spacing: 4) {
-            icon()
-            Text(title).lineLimit(1).truncationMode(.tail)
-        }.padding(.horizontal, 7).padding(.vertical, 3).frame(maxWidth: 180)
-            .background(DeskPalette.subtle, in: Capsule())
+        SubagentChip(title: title, icon: icon())
     }
 
     /// Sub-agents that ended their turn but wait for a background command they started; they resume when it finishes.
@@ -78,6 +74,23 @@ struct SubagentsBar: View {
             groups.append(parts.joined(separator: " "))
         }
         return groups.joined(separator: " · ")
+    }
+}
+
+/// One sub-agent or task in the bar: as wide as its title, never stretched by the bar's spacer. A long title is cut to
+/// `titleLimit` characters, so the chip keeps a bounded width without a flexible frame.
+struct SubagentChip<Icon: View>: View {
+    static var titleLimit: Int { 28 }
+    let title: String
+    let icon: Icon
+    var body: some View {
+        HStack(spacing: 4) {
+            icon
+            Text(ActivityDetail.oneLine(title, limit: Self.titleLimit)).lineLimit(1)
+        }.padding(.horizontal, 7).padding(.vertical, 3)
+            .background(DeskPalette.subtle, in: Capsule())
+            .fixedSize()
+            .help(title)
     }
 }
 
