@@ -73,6 +73,7 @@ private func interactiveFixture(_ root: URL) throws -> URL {
     #!\#(fixturePython)
     import sys,os,json,pathlib,time,threading
     home=pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])
+    \#(fixtureWriteHelpers)
     if '--version' in sys.argv:
         print('2.1.292 (Claude Code)'); sys.exit(0)
     if sys.argv[1:3] == ['auth','status']:
@@ -87,7 +88,7 @@ private func interactiveFixture(_ root: URL) throws -> URL {
         assert not any(k in a for k in ['--resume','--session-id','--append-system-prompt','--input-format'])
         assert not any(k in os.environ for k in ['ANTHROPIC_API_KEY','CLAUDE_CODE_OAUTH_TOKEN','ANTHROPIC_BASE_URL','BASH_ENV','NODE_OPTIONS'])
         text=sys.stdin.read()
-        with (home/'generated').open('a') as f: f.write(json.dumps({'args':a,'cwd':os.getcwd(),'input':text})+'\n')
+        append('generated',json.dumps({'args':a,'cwd':os.getcwd(),'input':text})+'\n')
         mode=(home/'generation-mode').read_text() if (home/'generation-mode').exists() else 'success'
         if mode=='hang': time.sleep(30); sys.exit(1)
         props=json.loads(a[a.index('--json-schema')+1])['properties']
@@ -118,14 +119,15 @@ private func interactiveFixture(_ root: URL) throws -> URL {
     assert sys.argv[sys.argv.index('--setting-sources')+1] == ''
     assert not any(k in os.environ for k in ['ANTHROPIC_API_KEY','CLAUDE_CODE_OAUTH_TOKEN','ANTHROPIC_BASE_URL','BASH_ENV','NODE_OPTIONS'])
     sid=sys.argv[sys.argv.index('--resume' if '--resume' in sys.argv else '--session-id')+1]
-    def out(value): print(json.dumps(value),flush=True)
+    def out(value): pause(); print(json.dumps(value),flush=True)
     def result(**extra): out({'type':'result','session_id':sid,'is_error':False,
         'usage':{'input_tokens':10,'cache_creation_input_tokens':20,'cache_read_input_tokens':70,'output_tokens':5},
         'modelUsage':{'claude-helper':{'contextWindow':5000,'inputTokens':1},'claude-test':{'contextWindow':1000,'inputTokens':10}},**extra})
     # Claude Code 2.1.292: a turn the CLI starts on a task notification names that origin in its result.
     notified={'origin':{'kind':'task-notification'}}
+    # Recorded before the first frame: a test that saw any frame of this process sees its launch.
+    append('launches',sid+'\n')
     out({'type':'system','subtype':'init','session_id':sid,'model':'claude-test'})
-    with (home/'launches').open('a') as f: f.write(sid+'\n')
     def tasks(*ids): out({'type':'system','subtype':'background_tasks_changed','session_id':sid,'tasks':[{'task_id':i,'task_type':'local_agent'} for i in ids]})
     def woke():
         out({'type':'assistant','session_id':sid,'parent_tool_use_id':'call1','message':{'id':'sub-done','content':[{'type':'text','text':'sub-report'}]}})
@@ -148,7 +150,7 @@ private func interactiveFixture(_ root: URL) throws -> URL {
     for line in sys.stdin:
         value=json.loads(line)
         if value['type']=='control_request':
-            with (home/'controls').open('a') as f: f.write(json.dumps({'request':value['request'],'pid':os.getpid()})+'\n')
+            append('controls',json.dumps({'request':value['request'],'pid':os.getpid()})+'\n')
             if value['request']['subtype']=='stop_task' and (home/'refuse-stop').exists():
                 out({'type':'control_response','response':{'subtype':'error','request_id':value['request_id'],'error':'Task is busy'}}); continue
             if value['request']['subtype']=='get_task_output':
@@ -173,7 +175,7 @@ private func interactiveFixture(_ root: URL) throws -> URL {
         elif value['type']=='user':
             record=json.loads((home/'contextdesk-sessions'/(sid+'.json')).read_text())
             assert record['active'] and record['sent']
-            with (home/'submitted').open('a') as f: f.write(json.dumps({'prompt':value['message']['content'],'args':sys.argv,'pid':os.getpid(),'env':{k:os.environ[k] for k in ['MCP_TIMEOUT','MCP_TOOL_TIMEOUT','CLAUDE_CODE_DISABLE_CLAUDE_MDS','CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES','MCP_CONNECTION_NONBLOCKING'] if k in os.environ}})+'\n')
+            append('submitted',json.dumps({'prompt':value['message']['content'],'args':sys.argv,'pid':os.getpid(),'env':{k:os.environ[k] for k in ['MCP_TIMEOUT','MCP_TOOL_TIMEOUT','CLAUDE_CODE_DISABLE_CLAUDE_MDS','CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES','MCP_CONNECTION_NONBLOCKING'] if k in os.environ}})+'\n')
             prompt=value['message']['content']
             if prompt=='broken': print('invalid-json',flush=True); continue
             if prompt=='notified':
@@ -350,8 +352,8 @@ private func interactiveFixture(_ root: URL) throws -> URL {
             out({'type':'stream_event','session_id':sid,'event':{'type':'message_delta','usage':{'output_tokens':5}}})
             result()
         elif value['type']=='control_response':
-            (home/'answer').write_text(json.dumps(value))
-            with (home/'answers').open('a') as f: f.write(json.dumps(value)+'\n')
+            replace('answer',json.dumps(value))
+            append('answers',json.dumps(value)+'\n')
             if twice and value['response']['request_id']=='permission':
                 # Same tool again in the same turn: a Write to another file, then a Bash command that still asks.
                 out({'type':'control_request','request_id':'permission-2','request':{'subtype':'can_use_tool','tool_name':'Write','input':{'file_path':str(pathlib.Path.cwd()/'second.txt'),'content':'more'}}})
@@ -382,6 +384,17 @@ private func waitFor(_ condition: @escaping () async -> Bool) async throws {
         try await Task.sleep(for: .milliseconds(10))
     }
     throw ClientFailure("Fixture timed out")
+}
+/// The JSON document a fixture keeps in `file`, read once the whole document is there. The fixture replaces such files
+/// atomically; the wait is for the state itself, not for the file's existence.
+private func waitForJSON(_ file: URL) async throws -> JSONValue {
+    var value: JSONValue?
+    try await waitFor {
+        value = try? JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: file))
+        return value != nil
+    }
+    guard let value else { throw ClientFailure("Fixture file \(file.lastPathComponent) is not JSON") }
+    return value
 }
 private func interactiveRequest(context: AgentContext, root: URL, session: AgentSessionReference? = nil, prompt: String = "hello", id: UUID = UUID(),
                                 fullAccess: Bool = false, kind: AgentExecutionRequest.Kind = .interactive, model: String = "",
@@ -431,8 +444,8 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root, role: developer)).value()
     let target = shared.appendingPathComponent("notes.md").path
     _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "write-call:" + target, role: developer)).value()
-    try await waitFor { FileManager.default.fileExists(atPath: home.appendingPathComponent("answer").path) }
-    let reply = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: home.appendingPathComponent("answer")))["response"]["response"]
+    // The turn waits after the answer, so there is no completion to wait for; this answer is the only one in the test.
+    let reply = try await waitForJSON(home.appendingPathComponent("answer"))["response"]["response"]
     #expect(reply["behavior"].string == "allow")
     try await waitFor { await events.capabilities().contains { $0.source == "can_use_tool" } }
     #expect(await events.interaction() == nil)
@@ -549,9 +562,13 @@ private func interactiveRequest(context: AgentContext, root: URL, session: Agent
     let editor = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
     _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: editor)).value()
     try await waitFor { await events.completionCount() == 9 }
+    // Exact, read after the editor turn completed: the fixture records `initialize` before answering it and each launch
+    // before its first frame, so every process that served a turn is in both files. A third `initialize` is a replaced process.
     let later = try String(contentsOf: home.appendingPathComponent("controls"), encoding: .utf8).split(separator: "\n")
         .map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }.filter { $0["request"]["subtype"].string == "initialize" }
-    #expect(later.count == 2 && later.last?["request"]["hooks"] == .null)
+    let launched = try String(contentsOf: home.appendingPathComponent("launches"), encoding: .utf8).split(separator: "\n")
+    #expect(later.count == 2 && later.last?["request"]["hooks"] == .null,
+            "initialize from pids \(later.map { $0["pid"].int ?? 0 }), launches \(launched), language \(L10n.language)")
     await adapter.disconnect()
 }
 
@@ -2229,18 +2246,21 @@ private func boundaryFixture(token: Result<ClaudeAccessToken, ClaudeTokenFailure
     let nono = root.appendingPathComponent("nono")
     try Data(#"""
     #!\#(fixturePython)
-    import os,sys,json,pathlib
+    import os,sys,json,pathlib,time
+    home=pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])
+    \#(fixtureWriteHelpers)
     a=sys.argv; i=a.index('--')
     profile=a[a.index('--profile')+1]
-    with (pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])/'nono-args').open('a') as f: f.write(json.dumps(a[1:i]+['policy-exists='+str(os.path.exists(profile))])+'\n')
+    append('nono-args',json.dumps(a[1:i]+['policy-exists='+str(os.path.exists(profile))])+'\n')
     os.execv(a[i+1], a[i+1:])
     """#.utf8).write(to: nono)
     try installFixtureExecutable(at: nono)
     let binary = root.appendingPathComponent("claude.py")
     try Data(#"""
     #!\#(fixturePython)
-    import sys,os,json,pathlib
+    import sys,os,json,pathlib,time
     home=pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])
+    \#(fixtureWriteHelpers)
     if '--version' in sys.argv: print('2.1.292 (Claude Code)'); sys.exit(0)
     if sys.argv[1:3]==['auth','status']:
         print(json.dumps({'loggedIn':True,'apiProvider':'firstParty','authMethod':'oauth','email':'fixture'})); sys.exit(0)
@@ -2254,9 +2274,10 @@ private func boundaryFixture(token: Result<ClaudeAccessToken, ClaudeTokenFailure
         'mcp':json.loads(a[a.index('--mcp-config')+1]),'pid':os.getpid(),'pgid':os.getpgid(0),
         'env':{k:v for k,v in os.environ.items() if k.startswith(('CLAUDE_CODE','SWITCHBOARD_EXTERNAL','SWITCHBOARD_SETTINGS','TMPDIR','SSL_CERT'))},
         'prompt':a[a.index('--append-system-prompt')+1]}
-    with (home/'boundary-launches').open('a') as f: f.write(json.dumps(launch)+'\n')
+    # Recorded before the first frame: a test that saw any frame of this process sees its launch.
+    append('boundary-launches',json.dumps(launch)+'\n')
     sid=a[a.index('--resume' if '--resume' in a else '--session-id')+1]
-    def out(v): print(json.dumps(v),flush=True)
+    def out(v): pause(); print(json.dumps(v),flush=True)
     def result(): out({'type':'result','session_id':sid,'is_error':False,'usage':{'input_tokens':1,'output_tokens':1}})
     out({'type':'system','subtype':'init','session_id':sid,'model':'claude-test'})
     n=0
@@ -2265,7 +2286,7 @@ private func boundaryFixture(token: Result<ClaudeAccessToken, ClaudeTokenFailure
         if v['type']=='control_request':
             out({'type':'control_response','response':{'subtype':'success','request_id':v['request_id'],'response':{}}})
         elif v['type']=='control_response':
-            with (home/'answers').open('a') as f: f.write(json.dumps(v['response'])+'\n')
+            append('answers',json.dumps(v['response'])+'\n')
             result()
         elif v['type']=='user':
             p=v['message']['content']; n+=1
@@ -2346,7 +2367,10 @@ private func boundaryDeveloper(_ root: URL, sharedRoots: [AgentPermissionProfile
     _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: fixture.root, session: session, prompt: "refresh", role: developer)).value()
     try await waitFor { await events.completionCount() == 4 }
     #expect(fixture.answers().last?["subtype"].string == "error")
-    #expect(fixture.launches().count == 1 && fixture.tokens.readCount == 1)
+    // Exact, read after the fourth completion: the fixture records a launch before its first frame. A second launch is a
+    // replaced process; the message names each launch's prompt start (a changed app language changes the prompt).
+    #expect(fixture.launches().count == 1 && fixture.tokens.readCount == 1,
+            "launches \(fixture.launches().map { "\($0["pid"].int ?? 0): \(($0["prompt"].string ?? "").prefix(40))" }), reads \(fixture.tokens.readCount)")
     // The secret never reaches the chat, the transcript or the ledger.
     let texts = await events.items().map(\.text) + events.diagnostics() + events.capabilities(includeLifecycle: true).compactMap(\.target)
     #expect(!texts.contains { $0.contains(fixture.token) })

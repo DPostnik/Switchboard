@@ -25,13 +25,16 @@ private func workerFixture() throws -> (URL, URL) {
     let executable = root.appendingPathComponent("engine.py")
     try Data(#"""
     #!\#(fixturePython)
-    import json,os,pathlib,sys
+    import json,os,pathlib,sys,time
     root=pathlib.Path(os.environ['CODEX_HOME']); loaded=set(); chrome=False; mode=''
-    def emit(method,params): print(json.dumps({'method':method,'params':params}),flush=True)
+    home=root
+    \#(fixtureWriteHelpers)
+    def send(value): pause(); print(json.dumps(value),flush=True)
+    def emit(method,params): send({'method':method,'params':params})
     for line in sys.stdin:
         m=json.loads(line)
         if 'method' not in m:
-            with (root/'answers').open('a') as f:f.write(str(m.get('id'))+'\n')
+            append('answers',str(m.get('id'))+'\n')
             continue
         if 'id' not in m:continue
         method=m['method'];p=m.get('params',{});r={};tid=p.get('threadId','')
@@ -42,7 +45,7 @@ private func workerFixture() throws -> (URL, URL) {
             if chrome:emit('account/updated',{})
         if method=='thread/resume':
             if (root/'require-rollout').exists() and not (root/('rollout-'+tid)).exists():
-                print(json.dumps({'id':m['id'],'error':{'code':-32600,'message':'no rollout found for thread id '+tid}}),flush=True);continue
+                send({'id':m['id'],'error':{'code':-32600,'message':'no rollout found for thread id '+tid}});continue
             loaded.add(tid);r={'thread':{'id':tid}}
         if method=='thread/unsubscribe':loaded.discard(tid);r={'status':'unsubscribed'}
         if method=='mcpServerStatus/list':r={'data':[{'name':'switchboard_user_chrome','tools':{'status':{'name':'status'}}}]}
@@ -55,16 +58,17 @@ private func workerFixture() throws -> (URL, URL) {
                 loaded.add('child')
                 emit('item/completed',{'threadId':tid,'turnId':'turn-'+tid,'item':{'id':'spawn','type':'subAgentActivity','agentThreadId':'child','agentPath':'/root/child','kind':'started'}})
                 emit('turn/completed',{'threadId':tid,'turn':{'id':'turn-'+tid,'status':'completed'}})
-            else:print(json.dumps({'id':'approval-'+tid,'method':'item/commandExecution/requestApproval','params':{'threadId':tid,'turnId':'turn-'+tid,'command':'echo fixture'}}),flush=True)
+            else:send({'id':'approval-'+tid,'method':'item/commandExecution/requestApproval','params':{'threadId':tid,'turnId':'turn-'+tid,'command':'echo fixture'}})
         if method=='thread/read':
             if tid=='chrome' and mode in ('reset','crash'):
                 if mode=='crash':sys.exit(0)
                 emit('account/updated',{})
             r={'thread':{'id':tid,'turns':[{'id':'child-turn','status':'inProgress','items':[]}] if tid=='child' else []}}
         if method=='turn/interrupt' and tid not in loaded:
-            print(json.dumps({'id':m['id'],'error':{'code':-32600,'message':'wrong worker'}}),flush=True);continue
-        with (root/'calls.jsonl').open('a') as f:f.write(json.dumps({'method':method,'thread':tid,'pid':os.getpid(),'args':sys.argv[1:],'params':p})+'\n')
-        print(json.dumps({'id':m['id'],'result':r}),flush=True)
+            send({'id':m['id'],'error':{'code':-32600,'message':'wrong worker'}});continue
+        # Recorded before the answer: a test that got the answer to a request sees its line.
+        append('calls.jsonl',json.dumps({'method':method,'thread':tid,'pid':os.getpid(),'args':sys.argv[1:],'params':p})+'\n')
+        send({'id':m['id'],'result':r})
     """#.utf8).write(to: executable)
     try installFixtureExecutable(at: executable)
     return (root, executable)

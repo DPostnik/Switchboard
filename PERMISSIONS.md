@@ -332,10 +332,27 @@ Known gaps. Check this list before you treat a failure as a new defect.
   the user approves `install BATCH --take-over` (see `scripts/verification-README.md`).
 - Mediated `git` cannot exec helpers outside its trees: `git rebase --continue` with `GIT_EDITOR=true` fails
   (`cannot run true`); use `GIT_EDITOR=:` (git's built-in no-op).
-- The verification queue runs all `native-tests` filters of one check in one parallel run. A SwiftUI layout suite
-  (`SettingsProposalLayoutTests`, about 7 s on the main actor) beside the process-fixture suites
-  (`ClaudeInteractiveTests`) doubles their wall time and makes fixed-deadline tests flaky (seen 2026-11-13, two
-  runs). Put such a suite into its own `native-tests` check.
+- Process-fixture tests (`ClaudeInteractiveTests`) were flaky when run from a chat under the external boundary
+  (2026-11-13, queue logs `1297d1b3`, `f948a195`, `c24b35de`). The earlier note blamed the SwiftUI layout suite
+  `SettingsProposalLayoutTests` for doubling their wall time; that was wrong: the same suites take 8-9 s with or
+  without it under the boundary and about 4.3 s outside any sandbox, so the slowdown comes from the boundary
+  (process start and file I/O; its cause is not investigated). The failures had two separate causes:
+  - Read races, seen with and without the layout suite: `claudeDeveloperWritesIntoASharedFolderWithoutAsking`
+    decoded `home/answer` once the file existed, while the fixture was still writing it. Fixed in the tests: the
+    fixtures replace whole-document files through a temporary file and `os.replace`, append log lines with one
+    `os.write` on an `O_APPEND` descriptor, record a launch before their first frame, and the test waits until the
+    answer decodes. Every other fixture file a test reads is written before the frame the test waits for. With
+    `SWITCHBOARD_FIXTURE_DELAY_MS` (tests only: each fixture write and frame waits that long) the four process-fixture
+    suites pass at 150 ms and 250 ms (about 2x and 2.7x their wall time); the old read fails every time at 150 ms.
+  - Extra launches (`claudeDeveloperRoleRegistersTheCommandHookAndAnswersByRole`,
+    `claudeBoundaryHandsTheTokenOnlyOnFd3AndAnswersByTheBoundary`, and locally `claudeIdleBackgroundCliIsReleased`),
+    seen only in runs that included `SettingsProposalLayoutTests`. Not slowness: that suite switches the process-wide
+    app language (`L10n.use`) while it renders, the Claude system prompt is localized and part of the launch identity,
+    so a turn submitted in that window replaces the warm process. The app itself never switches language in a running
+    Mac process, so this is a test interference, not a product race; a slower run only overlaps the window more. Not
+    fixed: keep `SettingsProposalLayoutTests` out of runs with the process-fixture suites (its own `native-tests`
+    check) until the view can be rendered in a given language without the global switch. The two exact-count
+    assertions now print the launches (the boundary one with each prompt's start), so this case shows in the message.
 - A task submitted from the CLI sandbox cannot be run from a chat under the boundary (`toolchain changed since
   submission`): the environment fingerprint differs. Submit and run from the same mode.
 - Under nono `ps` cannot run (setuid) and `log show` cannot run in any sandbox: use

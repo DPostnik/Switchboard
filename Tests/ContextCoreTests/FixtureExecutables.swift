@@ -18,6 +18,29 @@ let fixturePython: String = {
     return path
 }()
 
+/// Slow mode for the process fixtures, tests only: `SWITCHBOARD_FIXTURE_DELAY_MS` in the test run's environment makes a
+/// fixture sleep that long before each file it writes and each frame it prints. The adapters start fixtures with their
+/// own environment, so the value is written into the script as a Python literal (seconds). Unset or 0: no delay.
+let fixtureDelaySeconds: String = {
+    let milliseconds = Int(ProcessInfo.processInfo.environment["SWITCHBOARD_FIXTURE_DELAY_MS"] ?? "") ?? 0
+    return milliseconds > 0 ? String(Double(milliseconds) / 1000) : "0"
+}()
+
+/// Python helpers shared by the process fixtures; `home` must be a `pathlib.Path` before they run. Files a test reads are
+/// written so a reader never sees half of them: `replace` writes a temporary file in the same folder and renames it over
+/// the target, `append` adds whole lines with one `os.write` on an `O_APPEND` descriptor.
+let fixtureWriteHelpers = #"""
+DELAY=\#(fixtureDelaySeconds)
+def pause():
+    if DELAY: time.sleep(DELAY)
+def append(name,text):
+    pause(); data=text.encode(); fd=os.open(str(home/name),os.O_WRONLY|os.O_APPEND|os.O_CREAT,0o644)
+    try: assert os.write(fd,data)==len(data)
+    finally: os.close(fd)
+def replace(name,text):
+    pause(); temporary=home/('.'+name+'.'+str(os.getpid())+'.tmp'); temporary.write_text(text); os.replace(temporary,home/name)
+"""#
+
 private let fixtureLauncher: URL = {
     let launcher = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         .appendingPathComponent("Fixtures/fixture-launcher")
