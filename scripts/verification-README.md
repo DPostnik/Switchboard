@@ -90,13 +90,18 @@ transport delivery. Installation does not mark live behavior verified.
 
 Only one batch at a time owns the installed bundle. `install` records an install lease in the
 queue database (holder batch and install time) before it replaces `build/Switchboard.app`. While
-the holder still waits for `confirm-live` or `publish`, `install` of a different batch is refused
+the holder still waits for live verification, `install` of a different batch is refused
 before anything is checked, staged or replaced: it exits 1 with a one-line reason on stderr (holder
 batch, its task IDs and titles, how long ago it was installed, what it waits for) and the same details
 as JSON on stdout. It consumes no install or restart attempt. The holder keeps the lease while any of its
-tasks is `awaiting_live`, or `verified` while publication is allowed (live confirmed but not yet
-published still holds). The lease ends when its tasks are `published`, `blocked` (failed live check),
-`failed`, `cancelled`, `interrupted` or `conflict`, or `verified` with `allow_publish: false`. A lease
+tasks is `awaiting_live`. Successful `confirm-live` releases the hold immediately, before
+publication. `verified` tasks never hold the installed bundle, regardless of publication policy.
+Publication uses the archived snapshot and saved live evidence, so another batch may install
+while the verified batch prepares its commits and push. A failed live check is recorded with
+`python3 scripts/verify-project.py fail-live BATCH_ID --reason "Observed failure"`; it marks pending
+live tasks `blocked`, releases their hold, and prevents publication. Invalid or incomplete evidence
+keeps tasks awaiting live verification; a restart or an idle chat is not verification. Other final
+states (`published`, `failed`, `cancelled`, `interrupted`, `conflict`) do not hold either. A lease
 older than 45 minutes (`INSTALL_LEASE_LIMIT_SECONDS`) no longer blocks, so an abandoned chat cannot block
 everyone; the next install says it took over the stale lease. `install BATCH_ID --take-over` installs
 anyway and records the displaced batch in the lease and in `install-attempt.json`; it is never automatic

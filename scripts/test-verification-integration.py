@@ -218,7 +218,7 @@ class VerificationIntegrationTests(unittest.TestCase):
         self.assertEqual(batch['status'], 'awaiting_live')
         self.reject_publish(batch)
 
-    # Install lease: one batch at a time owns build/Switchboard.app until it is confirmed live and published.
+    # Install lease: one batch at a time owns build/Switchboard.app until live verification finishes.
 
     def built(self, name, file, **extra):
         self.submit(name, file=file, **{'after': name, 'title': 'Title of ' + name, **extra})
@@ -268,20 +268,27 @@ class VerificationIntegrationTests(unittest.TestCase):
         self.assertEqual(self.installed_build_info(), self.archived_build_info(first))
         return first, second
 
-    def test_install_refused_while_holder_awaits_live_and_until_published(self):
+    def test_live_confirmation_releases_before_publication(self):
         first, second = self.lease_fixture()
         refusal = self.refused(second, at=12 * 60)
         message = str(refusal)
         self.assertNotIn('\n', message)
         for expected in (first['id'], 'first (Title of first)', '12 min ago', 'live confirmation',
-                         'confirm-live and publish', f'install {second["id"]} --take-over', '45 min'):
+                         'confirm-live (success) or fail-live (observed failure)', f'install {second["id"]} --take-over', '45 min'):
             self.assertIn(expected, message)
         self.assertEqual(refusal.details['state'], 'refused')
         self.assertEqual(refusal.details['holder']['batch_id'], first['id'])
-        # Live confirmed but not yet published: still the holder.
-        self.queue.transition('first', 'verified', 'fixture live evidence')
-        self.assertIn('waiting for publication', str(self.refused(second, at=20 * 60)))
-        self.publish(first)
+        # Exercise real evidence validation, mocking only process identity and signature checks.
+        executable = self.repo / 'build/Switchboard.app/Contents/MacOS/Switchboard'
+        manifest = json.loads((self.state / 'batches' / first['id'] / 'snapshot/manifest.json').read_text())
+        evidence = Path(self.temp.name) / 'live.json'
+        evidence.write_text(json.dumps(dict(snapshot_digest=manifest['digest'],
+            executable_sha256=project.digest(executable), running_executable=str(executable),
+            pid=123, verified_by='fixture', checks=['Observed expected behavior'])))
+        with patch.object(project, 'process_identity', return_value=(str(executable), int(executable.stat().st_mtime) + 1)):
+            project.confirm_live(self.queue, self.state, first['id'], evidence)
+        self.assertFalse(self.queue.install_lease(self.clock)['active'])
+        self.assertEqual(self.queue.status('first')['status'], 'verified')
         result, note = self.install(second, at=21 * 60)
         self.assertEqual(result['state'], 'waiting_for_restart')
         self.assertNotIn('displaced', result)
@@ -289,6 +296,9 @@ class VerificationIntegrationTests(unittest.TestCase):
         self.assertEqual(self.installed_build_info(), self.archived_build_info(second))
         self.assertEqual(self.restarts, [first['id'], second['id']])
         self.assertEqual(self.queue.install_lease(self.clock)['batch_id'], second['id'])
+        # Publication still works after another bundle has replaced the verified one.
+        self.publish(first)
+        self.assertEqual(self.queue.status('first')['status'], 'published')
 
     def assert_lease_ends(self, final):
         first, second = self.lease_fixture()
@@ -312,17 +322,38 @@ class VerificationIntegrationTests(unittest.TestCase):
     def test_lease_ends_when_holder_cancelled(self):
         self.assert_lease_ends('cancelled')
 
-    def test_publication_policy_decides_whether_verified_holder_still_holds(self):
+    def test_verified_install_never_holds_for_publication(self):
         self.restarts, self.clock = [], 1_900_000_000.0
-        unpublishable = self.built('first', 'a', restrictions={'allow_publish': False})
+        first = self.built('first', 'a', restrictions={'allow_publish': False})
         second = self.built('second', 'b')
-        self.install(unpublishable)
-        # Verified without live and publication prohibited: nothing is pending, so no lease.
+        self.install(first)
         self.assertFalse(self.queue.install_lease(self.clock)['active'])
         self.install(second)
+        self.assertFalse(self.queue.install_lease(self.clock)['active'])
         third = self.built('third', 'a', before='base', after='third')
-        # Verified without live but publication pending: holds.
-        self.assertIn('waiting for publication', str(self.refused(third)))
+        self.install(third)
+
+    def test_fail_live_cli_releases_and_blocks_publication(self):
+        first, second = self.lease_fixture()
+        result = self.cli('fail-live', first['id'], '--reason', 'Observed broken behavior')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.queue.status('first')['status'], 'blocked')
+        self.assertIn('Observed broken behavior', self.queue.status('first')['detail'])
+        self.assertFalse(self.queue.install_lease(self.clock)['active'])
+        self.reject_publish(first)
+        self.install(second)
+
+    def test_invalid_live_evidence_keeps_hold(self):
+        first, second = self.lease_fixture()
+        evidence = Path(self.temp.name) / 'invalid-live.json'
+        evidence.write_text('{}')
+        with self.assertRaises(ValueError):
+            project.confirm_live(self.queue, self.state, first['id'], evidence)
+        self.refused(second)
+        for batch_id, reason in ((first['id'], '  '), ('missing', 'failure')):
+            with self.assertRaises(ValueError):
+                project.fail_live(self.queue, batch_id, reason)
+        self.refused(second)
 
     def test_stale_lease_expires_after_the_limit(self):
         first, second = self.lease_fixture()

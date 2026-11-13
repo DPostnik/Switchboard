@@ -126,6 +126,9 @@ def main():
     live = subs.add_parser('confirm-live')
     live.add_argument('batch_id')
     live.add_argument('evidence', type=Path)
+    failed_live = subs.add_parser('fail-live', help='record an observed live failure and release the install hold')
+    failed_live.add_argument('batch_id')
+    failed_live.add_argument('--reason', required=True)
     cancel = subs.add_parser('cancel')
     cancel.add_argument('task_id')
     install = subs.add_parser('install')
@@ -203,6 +206,8 @@ def main():
                         if queue.status(task_id)['status'] == 'verified':
                             queue.transition(task_id, 'published', 'Publication confirmed from remote tip')
                 emit(result)
+        elif args.action == 'fail-live':
+            emit(fail_live(queue, args.batch_id, args.reason))
         elif args.action == 'confirm-live':
             emit(confirm_live(queue, args.state_dir, args.batch_id, args.evidence))
         else:
@@ -232,6 +237,20 @@ def dependency_tasks(queue, ids):
     for task_id in ids:
         visit(task_id)
     return ordered
+
+
+def fail_live(queue, batch_id, reason):
+    """Record an observed failure, never infer success from a restart or an idle chat."""
+    if not reason.strip():
+        raise ValueError('live failure requires a nonempty reason')
+    with queue.executor():
+        batch = queue.batch(batch_id)
+        if not batch or batch['status'] != 'awaiting_live':
+            raise ValueError('batch is not awaiting live verification')
+        for task_id in batch['spec']['task_ids']:
+            if queue.status(task_id)['status'] == 'awaiting_live':
+                queue.transition(task_id, 'blocked', 'Live verification failed: ' + reason.strip())
+        return queue.projection()
 
 
 def confirm_live(queue, state_dir, batch_id, evidence_path):
@@ -342,7 +361,7 @@ def lease_view(queue, now, limit=INSTALL_LEASE_LIMIT_SECONDS):
 
 
 def claim_install_lease(queue, batch_id, now, take_over=False, limit=INSTALL_LEASE_LIMIT_SECONDS):
-    """Refuse an install of a different batch while the holder waits for live confirmation or publication.
+    """Refuse an install of a different batch while the holder waits for live confirmation.
 
     Returns who was displaced (expired lease or explicit take-over), or None. Must run under the executor lock."""
     lease = lease_view(queue, now, limit)
@@ -357,10 +376,10 @@ def claim_install_lease(queue, batch_id, now, take_over=False, limit=INSTALL_LEA
     tasks = ', '.join(f"{t['id']} ({t['title']})" for t in lease['tasks']) or 'no tasks'
     reason = (f"install refused: batch {lease['batch_id']} holds the installed bundle (tasks: {tasks}; installed "
               f"{minutes(lease['age_seconds'])} ago; waiting for {lease['waiting_for']}). Wait, or let its chat finish "
-              f"with confirm-live and publish, or with the user's approval run install {batch_id} --take-over; "
+              f"with confirm-live (success) or fail-live (observed failure), or with the user's approval run install {batch_id} --take-over; "
               f"the lease expires {minutes(limit)} after install")
     raise InstallRefused(dict(state='refused', batch_id=batch_id, reason=reason, holder=lease,
-                              options=['wait', 'holder runs confirm-live and publish',
+                              options=['wait', 'holder runs confirm-live or fail-live',
                                        f'install {batch_id} --take-over (explicit, with the user)']))
 
 
