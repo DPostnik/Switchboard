@@ -164,13 +164,17 @@ public struct ExternalSandboxCommand: Hashable, Sendable, Encodable {
         public var setEnvironment: [String: String]
         /// Arguments nono inserts after the command name, before the caller's (`argv_prepend`).
         public var prependArguments: [String]
+        /// Folders only this sandbox may read on top of the session's (gh's login record `~/.config/gh`); the session
+        /// never gets them.
+        public var reads: [String]
         public init(keychain: Bool, network: Bool, executableTrees: [String] = [], executableFiles: [String] = [], environment: [String]? = nil,
-                    setEnvironment: [String: String] = [:], prependArguments: [String] = []) {
+                    setEnvironment: [String: String] = [:], prependArguments: [String] = [], reads: [String] = []) {
             self.keychain = keychain; self.network = network; self.executableTrees = executableTrees; self.executableFiles = executableFiles
-            self.environment = environment; self.setEnvironment = setEnvironment; self.prependArguments = prependArguments
+            self.environment = environment; self.setEnvironment = setEnvironment; self.prependArguments = prependArguments; self.reads = reads
         }
         var label: String {
             var text = "keychain=\(keychain) network=\(network) trees=\(executableTrees.joined(separator: ","))"
+            if !reads.isEmpty { text += " reads=" + reads.joined(separator: ",") }
             if !executableFiles.isEmpty { text += " files=" + executableFiles.joined(separator: ",") }
             if let environment { text += " env=" + environment.joined(separator: ",") }
             if !setEnvironment.isEmpty { text += " set=" + setEnvironment.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",") }
@@ -199,6 +203,11 @@ public struct ExternalSandboxCommand: Hashable, Sendable, Encodable {
     /// Argument forms nono refuses with a reason, before `arguments` (evaluated first by nono).
     public let refusals: [Refusal]
     public let routes: [Route]
+    /// Mediated commands this one may start through their shims (nono `can_use`); each of them lists this one in `callers`.
+    public var canUse: [String] = []
+    /// Mediated commands that may start this one. Each gets the session's edge (same sandbox, argument policy and routes):
+    /// a chained call never gains a right the agent's direct call would not have.
+    public var callers: [String] = []
     public init(name: String, executable: String, keychain: Bool, network: Bool, executableTrees: [String] = [], arguments: [ArgumentRule]? = nil) {
         self.init(name: name, executable: executable, sandbox: .init(keychain: keychain, network: network, executableTrees: executableTrees), arguments: arguments)
     }
@@ -243,7 +252,9 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
             let rules = command.arguments.map { " argv=" + $0.map(\.label).joined(separator: "; ") } ?? ""
             let refused = command.refusals.isEmpty ? "" : " deny=" + command.refusals.map(\.rule.label).joined(separator: "; ")
             let routes = command.routes.map { " route[\($0.sandbox.label)] when " + $0.rules.map(\.label).joined(separator: "; ") }.joined()
-            return "command \(command.name) \(command.executable) \(command.sandbox.label)" + rules + refused + routes
+            let chain = (command.canUse.isEmpty ? "" : " uses=" + command.canUse.joined(separator: ","))
+                + (command.callers.isEmpty ? "" : " callers=" + command.callers.joined(separator: ","))
+            return "command \(command.name) \(command.executable) \(command.sandbox.label)" + rules + refused + routes + chain
         }
         return ["project " + project] + paths + mediated + executableDirectories.map { "exec " + $0 }
     }
@@ -274,7 +285,7 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
         func compile(_ variant: ExternalSandboxCommand.Sandbox) -> [String: Any] {
             var environment: [String: Any] = ["allow_vars": variant.environment ?? ExternalSandboxCommand.defaultEnvironment]
             if !variant.setEnvironment.isEmpty { environment["set_vars"] = variant.setEnvironment }
-            var sandbox: [String: Any] = ["fs_read": reads, "fs_read_file": readFiles, "fs_write": writes, "fs_write_file": writeFiles,
+            var sandbox: [String: Any] = ["fs_read": reads + variant.reads, "fs_read_file": readFiles, "fs_write": writes, "fs_write_file": writeFiles,
                                           "network": ["allow_all": variant.network], "environment": environment]
             if variant.keychain { sandbox["keychain_access"] = "read" }
             if !variant.prependArguments.isEmpty { sandbox["argv_prepend"] = variant.prependArguments }
@@ -290,19 +301,26 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
         for command in self.commands {
             let sandbox = compile(command.sandbox)
             var policy: [String: Any] = ["executable": command.executable]
-            if command.arguments != nil || !command.refusals.isEmpty {
+            if command.arguments != nil || !command.refusals.isEmpty || !command.callers.isEmpty {
                 // `sandbox` is shorthand for `from.session.sandbox`; an argument policy needs the edge form (nono 0.81.0
                 // schema: deny, approve, allow, then default; one argv matcher per rule, compared after the command name).
-                var invocation: [String: Any] = ["default": command.arguments == nil ? "allow" : "deny"]
-                if let rules = command.arguments { invocation["allow"] = rules.map(\.policy) }
-                if !command.refusals.isEmpty {
-                    invocation["deny"] = command.refusals.map { ["argv": $0.rule.matcher, "reason": $0.reason] as [String: Any] }
+                // A chained call selects `from.<caller>` and never falls back to the session edge, so each caller gets a copy.
+                var edge: [String: Any] = ["sandbox": sandbox]
+                if command.arguments != nil || !command.refusals.isEmpty {
+                    var invocation: [String: Any] = ["default": command.arguments == nil ? "allow" : "deny"]
+                    if let rules = command.arguments { invocation["allow"] = rules.map(\.policy) }
+                    if !command.refusals.isEmpty {
+                        invocation["deny"] = command.refusals.map { ["argv": $0.rule.matcher, "reason": $0.reason] as [String: Any] }
+                    }
+                    edge["invocation_policy"] = invocation
                 }
-                let edge: [String: Any] = ["sandbox": sandbox, "invocation_policy": invocation]
-                policy["from"] = ["session": edge] as [String: Any]
+                var from: [String: Any] = ["session": edge]
+                for caller in command.callers { from[caller] = edge }
+                policy["from"] = from
             } else {
                 policy["sandbox"] = sandbox
             }
+            if !command.canUse.isEmpty { policy["can_use"] = command.canUse }
             if !command.routes.isEmpty {
                 // An intercept rule with its own `sandbox` replaces the selected one for that invocation only (nono guide,
                 // "Per-intercept sandbox override"); `match.argv` takes one matcher, so each rule is its own entry.
@@ -527,8 +545,8 @@ public enum ExternalSandboxPlanner {
                 commands.append(.init(name: "security", executable: "/usr/bin/security", keychain: true, network: false, arguments: securityRules))
             }
             if trusted.contains("gh"), let gh = resolveExecutable("gh") {
-                commands.append(input.narrowGit ? Self.ghCommand(gh, home: canonical(input.home.path))
-                                                : .init(name: "gh", executable: gh, keychain: true, network: true))
+                commands.append(input.narrowGit ? Self.ghCommand(gh, home: canonical(input.home.path), reads: Self.ghLoginReads(home: input.home))
+                                                : .init(name: "gh", executable: gh, sandbox: .init(keychain: true, network: true, reads: Self.ghLoginReads(home: input.home))))
             }
             if trusted.contains(where: { $0.hasPrefix("git ") }), let git = resolveGit() {
                 // git's own helpers (remote-https, credential-osxkeychain) by absolute path, and /bin/sh for hooks and helpers.
@@ -544,6 +562,7 @@ public enum ExternalSandboxPlanner {
                     commands.append(.init(name: "git", executable: git, keychain: true, network: true, executableTrees: sorted))
                 }
             }
+            if input.narrowGit { Self.chainGitHub(&commands) }
             if input.mediateProcessList { commands.append(.init(name: "pgrep", executable: "/usr/bin/pgrep", keychain: false, network: false)) }
             if input.commandInventory,
                let command = unrunnableTrustedCommand(trusted, mediated: Set(commands.map(\.name)), grants: grants, home: input.home) {
@@ -615,16 +634,54 @@ public enum ExternalSandboxPlanner {
     /// Mediated gh (user decision 2026-11-13): Keychain and network as before, an argument allow-list, no `GH_*` or `GIT_*` from
     /// the caller (`GH_HOST`, `GH_CONFIG_DIR`, `GH_TOKEN`, `GH_ENTERPRISE_TOKEN` would redirect the host, config or token), no
     /// pager or prompt.
-    public static func ghCommand(_ executable: String, home: String) -> ExternalSandboxCommand {
-        let sandbox = ExternalSandboxCommand.Sandbox(keychain: true, network: true, environment: plainEnvironment,
+    public static func ghCommand(_ executable: String, home: String, reads: [String] = []) -> ExternalSandboxCommand {
+        // go-keyring reads gh's token with `/usr/bin/security` by absolute path. nono's child exec gate allows only gh and the
+        // shims in gh's sandbox; this Seatbelt rule lets that one file run there, with gh's Keychain grant and no argument
+        // filter (PERMISSIONS.md, gh gap).
+        let sandbox = ExternalSandboxCommand.Sandbox(keychain: true, network: true, executableFiles: ["/usr/bin/security"], environment: plainEnvironment,
                                                      setEnvironment: ["HOME": home, "GH_PROMPT_DISABLED": "1", "GH_NO_UPDATE_NOTIFIER": "1",
-                                                                      "GH_PAGER": "cat", "GIT_TERMINAL_PROMPT": "0"])
+                                                                      "GH_PAGER": "cat", "GIT_TERMINAL_PROMPT": "0"], reads: reads)
         let refused: [ExternalSandboxCommand.ArgumentRule] = [.prefix(["auth", "token"]), .contains(["--show-token"]), .prefix(["auth", "git-credential"]),
                                                               .prefix(["extension"]), .prefix(["extensions"]), .prefix(["ext"]), .prefix(["alias"]),
                                                               .prefix(["config", "set"])]
         let allowed: [ExternalSandboxCommand.ArgumentRule] = ghSubcommands.map { .prefix([$0]) }
             + [.exact(["auth", "status"]), .exact(["auth", "status", "--active"]), .exact(["auth", "status", "--hostname", "github.com"])]
         return .init(name: "gh", executable: executable, sandbox: sandbox, arguments: allowed, refusals: refused.map { .init($0, reason: ghRefusal) })
+    }
+
+    /// gh's login record for gh's own sandbox (user decision 2026-11-13, an exception to invariant 12 for this one sandbox):
+    /// `~/.config/gh` read-only, where `hosts.yml` names the account whose token gh then reads from the Keychain. Nothing
+    /// when the folder is missing, a link, or `hosts.yml` holds a plain-text token (`gh auth login --insecure-storage`):
+    /// `gh api` can upload any file gh reads, so a readable token file would hand the token to the agent. The app reads the
+    /// file only to look for the key; its content goes nowhere.
+    public static func ghLoginReads(home: URL, manager: FileManager = .default) -> [String] {
+        let folder = home.appendingPathComponent(".config/gh", isDirectory: true)
+        guard let type = (try? manager.attributesOfItem(atPath: folder.path))?[.type] as? FileAttributeType, type == .typeDirectory else { return [] }
+        let hosts = folder.appendingPathComponent("hosts.yml")
+        if let attributes = try? manager.attributesOfItem(atPath: hosts.path) {
+            guard attributes[.type] as? FileAttributeType == .typeRegular, (attributes[.size] as? Int ?? .max) <= 1 << 20,
+                  let text = try? String(contentsOf: hosts, encoding: .utf8), !holdsPlainToken(text) else { return [] }
+        }
+        return [canonical(folder.path)]
+    }
+    /// A `hosts.yml` line that stores a token value (`oauth_token: gho_…`), at any indentation.
+    static func holdsPlainToken(_ hostsFile: String) -> Bool {
+        hostsFile.split(whereSeparator: \.isNewline).contains { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("oauth_token:") else { return false }
+            let value = trimmed.dropFirst("oauth_token:".count).trimmingCharacters(in: .whitespaces)
+            return !value.isEmpty && value != "\"\"" && value != "''"
+        }
+    }
+    /// gh starts git through its shim (`gh pr checks` reads the branch and remote). The git it starts gets exactly the edge
+    /// the agent's own git call gets: the local sandbox, the same refusals, push/fetch/ls-remote through the same routes.
+    /// (gh's keyring lookup by absolute path is a Seatbelt rule in `ghCommand`, not a chain.)
+    static func chainGitHub(_ commands: inout [ExternalSandboxCommand]) {
+        guard let gh = commands.firstIndex(where: { $0.name == "gh" }) else { return }
+        if let git = commands.firstIndex(where: { $0.name == "git" }) {
+            commands[gh].canUse.append("git")
+            commands[git].callers.append("gh")
+        }
     }
 
     /// Heads nono can neither run in the session nor mediates here: setuid tools, the unified log, launchd, Apple Events,

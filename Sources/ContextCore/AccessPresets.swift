@@ -53,7 +53,9 @@ public enum AccessPresetCatalog {
         AccessPreset(id: "github", titleRU: "GitHub (git и gh)", titleEN: "GitHub (git and gh)",
                      summaryRU: "Настройки git и gh. gh и сетевые команды git (push, pull, fetch, clone) идут вне песочницы, чтобы брать токен из Связки ключей; git worktree — чтобы убирать рабочие копии (часть .git песочница не даёт менять).",
                      summaryEN: "git and gh settings. gh and git network commands (push, pull, fetch, clone) run outside the sandbox to use the Keychain token; git worktree does too, to clean up worktrees (the sandbox protects parts of .git).",
-                     read: ["~/.gitconfig", "~/.config/git", "~/.config/gh"],
+                     // No `~/.config/gh`: under the external boundary only gh's own sandbox reads it (`ExternalSandboxPlanner.ghLoginReads`,
+                     // invariant 12); on the native paths gh runs as a trusted command outside the sandbox.
+                     read: ["~/.gitconfig", "~/.config/git"],
                      unsandboxed: ["gh", "git push", "git pull", "git fetch", "git clone", "git ls-remote", "git worktree"],
                      markers: [".git"]),
         AccessPreset(id: "node", titleRU: "Node.js (npm, yarn, pnpm, bun)", titleEN: "Node.js (npm, yarn, pnpm, bun)",

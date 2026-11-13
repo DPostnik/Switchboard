@@ -708,6 +708,81 @@ private let gitFixture = ExternalSandboxPlanner.gitCommand("/opt/homebrew/bin/gi
     }
 }
 
+/// gh's login record reaches gh's own sandbox only, and only while it holds no plain-text token (user decision 2026-11-13).
+@Test func ghLoginRecordIsReadableOnlyWithoutAPlainToken() throws {
+    let home = FileManager.default.temporaryDirectory.appendingPathComponent("gh-login-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: home) }
+    let folder = home.appendingPathComponent(".config/gh", isDirectory: true)
+    #expect(ExternalSandboxPlanner.ghLoginReads(home: home).isEmpty)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let canonical = folder.resolvingSymlinksInPath().path
+    #expect(ExternalSandboxPlanner.ghLoginReads(home: home) == [canonical])   // no hosts.yml yet: nothing secret to hide
+    let hosts = folder.appendingPathComponent("hosts.yml")
+    try "github.com:\n    users:\n        DPostnik:\n    git_protocol: https\n    user: DPostnik\n".write(to: hosts, atomically: true, encoding: .utf8)
+    #expect(ExternalSandboxPlanner.ghLoginReads(home: home) == [canonical])
+    try "github.com:\n    oauth_token: \"\"\n    user: DPostnik\n".write(to: hosts, atomically: true, encoding: .utf8)
+    #expect(ExternalSandboxPlanner.ghLoginReads(home: home) == [canonical])
+    for text in ["github.com:\n    oauth_token: gho_secret\n    user: DPostnik\n",
+                 "github.com:\n    users:\n        DPostnik:\n            oauth_token: gho_secret\n"] {
+        try text.write(to: hosts, atomically: true, encoding: .utf8)
+        #expect(ExternalSandboxPlanner.ghLoginReads(home: home).isEmpty, "\(text)")
+    }
+    // A linked folder is not followed.
+    try FileManager.default.removeItem(at: folder)
+    let elsewhere = home.appendingPathComponent("elsewhere", isDirectory: true)
+    try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+    try FileManager.default.createSymbolicLink(at: folder, withDestinationURL: elsewhere)
+    #expect(ExternalSandboxPlanner.ghLoginReads(home: home).isEmpty)
+}
+
+/// gh may start the mediated git (its edge equals the agent's own), reads its login record in its own sandbox only, and its
+/// sandbox may run `/usr/bin/security` by path (go-keyring), which nono's child exec gate would otherwise refuse.
+@Test func ghChainsGitAndReadsItsLoginRecordInItsOwnSandboxOnly() throws {
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    let login = root.appendingPathComponent("home/.config/gh", isDirectory: true)
+    try FileManager.default.createDirectory(at: login, withIntermediateDirectories: true)
+    try "github.com:\n    user: DPostnik\n".write(to: login.appendingPathComponent("hosts.yml"), atomically: true, encoding: .utf8)
+    var project = Project(path: root.appendingPathComponent("project").path)
+    project.accessPresets = ["github", "apple-signing"]
+    let plan = try ExternalSandboxPlanner.plan(claudeInput(root, project: project, workerID: "gc"), helper: .success(helper)).get()
+    guard let gh = plan.commands.first(where: { $0.name == "gh" }) else { return }   // no gh on this Mac
+    let folder = login.resolvingSymlinksInPath().path
+    #expect(gh.sandbox.reads == [folder])
+    // No session grant inside the user's home covers the login record (grants of the test's own temp tree are not the home).
+    let home = root.appendingPathComponent("home").resolvingSymlinksInPath().path
+    #expect(!plan.grants.contains { $0.path == folder || $0.path.hasPrefix(folder + "/") || ($0.path.hasPrefix(home) && folder.hasPrefix($0.path + "/")) })
+    let commands = (plan.policyDocument()["command_policies"] as! [String: Any])["commands"] as! [String: Any]
+    func edge(_ name: String, _ caller: String = "session") -> [String: Any]? {
+        ((commands[name] as? [String: Any])?["from"] as? [String: Any])?[caller] as? [String: Any]
+    }
+    #expect(((edge("gh")!["sandbox"] as! [String: Any])["fs_read"] as! [String]).contains(folder))
+    for (name, value) in commands where name != "gh" {
+        let text = String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
+        #expect(!text.contains(".config/gh"), "\(name)")
+    }
+    #expect(plan.authority.contains { $0.hasPrefix("command gh ") && $0.contains("reads=" + folder) })
+    if let git = plan.commands.first(where: { $0.name == "git" }) {
+        #expect(gh.canUse == ["git"] && git.callers == ["gh"])
+        #expect((commands["gh"] as! [String: Any])["can_use"] as? [String] == ["git"])
+        let session = try #require(edge("git")), chained = try #require(edge("git", "gh"))
+        #expect(NSDictionary(dictionary: session).isEqual(to: chained))
+        #expect((session["sandbox"] as! [String: Any])["keychain_access"] == nil)
+    }
+    // The keyring lookup: one Seatbelt exec rule for `/usr/bin/security` in gh's own sandbox, no direct-exec bypass anywhere.
+    #expect(gh.sandbox.executableFiles == ["/usr/bin/security"])
+    let rules = (edge("gh")!["sandbox"] as! [String: Any])["unsafe_macos_seatbelt_rules"] as? [String] ?? []
+    #expect(rules.contains("(allow process-exec* (literal \"/usr/bin/security\"))"))
+    for (name, value) in commands {
+        #expect((value as! [String: Any])["allow_direct_exec_bypass"] == nil || name == "codesign", "\(name)")
+        if !["gh", "security"].contains(name) {
+            let text = String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self).replacingOccurrences(of: "\\/", with: "/")
+            #expect(!text.contains("/usr/bin/security"), "\(name)")
+        }
+    }
+}
+
 @Test func gitNarrowingSwitchRestoresThePreviousPolicyAndKeysTheAuthority() throws {
     let root = try fixtureProject()
     defer { try? FileManager.default.removeItem(at: root) }
@@ -824,6 +899,15 @@ private let gitFixture = ExternalSandboxPlanner.gitCommand("/opt/homebrew/bin/gi
         for argv in [["auth", "token"], ["auth", "status", "-t"], ["extension", "list"], ["my-extension"], ["pr", "list"], ["auth", "status"]] {
             let expected = select(gh, argv)
             #expect(try why(document, "gh", argv) == (expected == .own ? "allowed" : "denied"), "\(argv)")
+        }
+        // git started by gh: the same refusals as the agent's own call.
+        if gh.canUse.contains("git") {
+            func chained(_ argv: [String]) throws -> String {
+                let (_, out) = try run(["why", "--json", "--profile", "/dev/stdin", "--caller", "gh", "--command", "git", "--"] + argv, document)
+                return ((try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any])?["status"] as? String ?? out
+            }
+            #expect(try chained(["rev-parse", "--abbrev-ref", "HEAD"]) == "allowed" && chained(["push"]) == "allowed")
+            #expect(try chained(["pull"]) == "denied" && chained(["credential", "fill"]) == "denied")
         }
     }
 }

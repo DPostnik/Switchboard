@@ -36,7 +36,7 @@ private func sandboxSettings(_ profile: AgentPermissionProfile, cwd: String) thr
     project.sandboxCommands = [" zsh scripts/build-app.sh ", ""]
     let sandbox = developer(project).commandSandbox
     #expect(sandbox?.write == ["/Users/me/app", "/Users/me/shared"])
-    #expect(sandbox?.read == ["/Users/me/app", "/Users/me/shared", "/Users/me/wiki", "~/.gitconfig", "~/.config/git", "~/.config/gh"])
+    #expect(sandbox?.read == ["/Users/me/app", "/Users/me/shared", "/Users/me/wiki", "~/.gitconfig", "~/.config/git"])
     #expect(sandbox?.unsandboxed.prefix(3) == ["ps", "sysctl -n", "gh"] && sandbox?.unsandboxed.last == "zsh scripts/build-app.sh")
     #expect(sandbox?.unsandboxed.contains("git worktree") == true)
     // Roles without a shell, audit runs and a project that turned the sandbox off have none.

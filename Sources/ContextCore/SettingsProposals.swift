@@ -141,7 +141,7 @@ public struct SettingsProposalReview: Identifiable, Equatable, Sendable {
     /// is agent-written, so it only picks where the card is shown: the chat later receives fixed app text
     /// (`SettingsProposalOutcome.message`), never its strings.
     public func requestingChat(in chats: [Chat]) -> Chat? { Self.chat(labeled: chat, in: chats) }
-    static func chat(labeled label: String?, in chats: [Chat]) -> Chat? {
+    public static func chat(labeled label: String?, in chats: [Chat]) -> Chat? {
         guard let label, !label.isEmpty else { return nil }
         return chats.first { chat in
             !chat.isArchived && !chat.isScheduledRecord && (chat.nativeSession?.nativeID == label || chat.id == label)
@@ -196,9 +196,15 @@ extension SavedState {
 public enum SettingsProposalOutcome: Sendable {
     /// `appliedWithoutEffect`: applied, but every added trusted command stays inside this chat's external boundary
     /// (`SettingsProposalOutcome.afterApply(_:notes:)`), so nothing new applies and a retry would fail the same way.
-    case applied, appliedWithoutEffect, rejected
+    /// `unusable`: not a decision. The file in the chat's own folder did not decode or changed nothing, so the app removed
+    /// it unseen; the chat learns that and gets the format once more instead of believing the request waits.
+    case applied, appliedWithoutEffect, rejected, unusable
     public func message(language: AppLanguage = L10n.language) -> String {
         switch self {
+        case .unusable: L10n.text(
+            "Switchboard: твой запрос на изменение настроек проекта не принят: файл не соответствует формату или ничего не меняет (например, указан неизвестный проект). Приложение удалило его, пользователь его не видел. Если доступ всё ещё нужен, запиши запрос заново в папку \"$\(SettingsProposalInbox.environmentKey)\" строго в формате: \(SettingsProposalInbox.format()). Не придумывай другие поля.",
+            "Switchboard: your project settings request was not accepted: the file does not match the format or changes nothing (for example, an unknown project). The app removed it and the user never saw it. If you still need the access, write the request again into the folder \"$\(SettingsProposalInbox.environmentKey)\" in exactly this format: \(SettingsProposalInbox.format()). Do not invent other fields.",
+            language: language)
         case .applied: L10n.text(
             "Switchboard: пользователь применил твой запрос на изменение настроек проекта. Новые права действуют с этого сообщения. Повтори шаг, которому не хватало доступа, и продолжай задачу.",
             "Switchboard: the user applied your project settings request. The new access applies from this message. Retry the step that lacked access and continue the task.",
@@ -266,7 +272,10 @@ public enum SettingsProposalInbox {
     /// Pending proposals, oldest first. Unreadable or oversized files and proposals that change nothing are removed.
     /// Reads the root and one level of per-chat folders; links are never followed. A file in a folder is authored by the
     /// session the folder belongs to; an empty folder of no current chat is removed once it is stale.
-    public static func load(state: SavedState, directory: URL = directory, manager: FileManager = .default, now: Date = Date()) -> [SettingsProposalReview] {
+    /// `unusable` receives the author label (the folder's session) of each removed file from a chat's own folder: it did not
+    /// decode or changed nothing. Root files have no known author and are removed silently, as before.
+    public static func load(state: SavedState, directory: URL = directory, manager: FileManager = .default, now: Date = Date(),
+                            unusable: ((String) -> Void)? = nil) -> [SettingsProposalReview] {
         try? manager.createDirectory(at: directory, withIntermediateDirectories: true)
         let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey]
         let entries = (try? manager.contentsOfDirectory(at: directory, includingPropertiesForKeys: keys)) ?? []
@@ -293,13 +302,17 @@ public enum SettingsProposalInbox {
         var result: [SettingsProposalReview] = []
         for file in files.prefix(maximumFiles) {
             let values = try? file.url.resourceValues(forKeys: Set(keys))
+            let author = file.folder.map { map[$0] ?? $0 }
+            func discard() {
+                try? manager.removeItem(at: file.url)
+                if let author, (try? manager.attributesOfItem(atPath: file.url.path)) == nil { unusable?(author) }
+            }
             guard values?.isRegularFile == true, values?.isSymbolicLink != true, (values?.fileSize ?? .max) <= maximumSize,
                   let data = try? Data(contentsOf: file.url), let proposal = try? JSONDecoder().decode(SettingsProposal.self, from: data) else {
-                try? manager.removeItem(at: file.url); continue
+                discard(); continue
             }
-            let review = SettingsProposalReview(id: id(file), proposal: proposal, state: state, folder: file.folder,
-                                                author: file.folder.map { map[$0] ?? $0 })
-            if review.projects.isEmpty && review.skipped.isEmpty { try? manager.removeItem(at: file.url); continue }
+            let review = SettingsProposalReview(id: id(file), proposal: proposal, state: state, folder: file.folder, author: author)
+            if review.projects.isEmpty && review.skipped.isEmpty { discard(); continue }
             result.append(review)
         }
         return result
@@ -322,13 +335,17 @@ public enum SettingsProposalInbox {
         try? FileManager.default.removeItem(at: file)
         return (try? FileManager.default.attributesOfItem(atPath: file.path)) == nil
     }
+    /// The JSON shape of a proposal, as the instructions and the `unusable` continuation show it.
+    public static func format(sharedChatVariable: String? = nil) -> String {
+        let chat = sharedChatVariable.map { #""chat": "<$"# + $0 + #">", "# } ?? ""
+        return "{" + chat + #""reason": "...", "changes": [{"project": "<project path or name>", "addPresets": ["vercel"], "removePresets": [], "addFolders": [{"path": "~/path", "writable": false}], "removeFolders": [], "addCommands": ["zsh scripts/build.sh"], "removeCommands": [], "addKeychainItems": [{"service": "example-api", "account": "me"}], "removeKeychainItems": [], "sandbox": true}]}"#
+    }
     /// How a chat writes a proposal, shared by every provider whose sessions can write to the inbox. Without
     /// `sharedChatVariable` the variable names the chat's own folder and the app knows the author, so the format has no
     /// `chat`. With it (a process that writes to the shared root) `chat` is required and holds that variable's value.
     public static func instructions(sharedChatVariable: String? = nil, language: AppLanguage = L10n.language) -> String {
         let presets = AccessPresetCatalog.all.map(\.id).joined(separator: ", ")
-        let chat = sharedChatVariable.map { #""chat": "<$"# + $0 + #">", "# } ?? ""
-        let format = "{" + chat + #""reason": "...", "changes": [{"project": "<project path or name>", "addPresets": ["vercel"], "removePresets": [], "addFolders": [{"path": "~/path", "writable": false}], "removeFolders": [], "addCommands": ["zsh scripts/build.sh"], "removeCommands": [], "addKeychainItems": [{"service": "example-api", "account": "me"}], "removeKeychainItems": [], "sandbox": true}]}"#
+        let format = format(sharedChatVariable: sharedChatVariable)
         let author = sharedChatVariable.map { variable in L10n.text(
             "- Поле `chat` ОБЯЗАТЕЛЬНО: впиши значение `$\(variable)`. Без него приложение не знает, какой чат просит, и после решения пользователя задача сама не продолжится.",
             "- The `chat` field is REQUIRED: put the value of `$\(variable)` there. Without it the app does not know which chat asks, and the task will not continue by itself after the user decides.",

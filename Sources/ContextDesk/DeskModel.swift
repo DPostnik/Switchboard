@@ -1607,7 +1607,9 @@ private struct ChatRunState: Equatable {
     /// Re-derives the pending proposals from the inbox files. Cards and markers come only from the files, so a restart shows
     /// the same requests again and sends nothing by itself; a request that appears while the app runs is announced once.
     func refreshSettingsProposals() {
-        let current = SettingsProposalInbox.load(state: state, directory: settingsProposalDirectory)
+        var unusableAuthors: [String] = []
+        let current = SettingsProposalInbox.load(state: state, directory: settingsProposalDirectory) { unusableAuthors.append($0) }
+        for author in unusableAuthors { reportUnusableSettingsProposal(author: author) }
         remoteSettingsProposals.refresh(current, state: state, boundaryNotes: proposalBoundaryNotes)
         let announce = settingsProposalsLoaded
         settingsProposalsLoaded = true
@@ -1670,6 +1672,21 @@ private struct ChatRunState: Equatable {
             AppLog.lifecycle.notice("Settings proposal \(id, privacy: .public) decided; chat \(chat, privacy: .public) is unavailable, nothing sent")
         }
     }
+    /// A file in a chat's own folder that did not decode or changed nothing was removed unseen: tell that chat once, with the
+    /// format, instead of letting it believe the request waits. At most one message per chat in ten minutes, so a chat that
+    /// keeps writing broken files cannot loop. The text is fixed (`SettingsProposalOutcome.unusable`), never the file's.
+    private func reportUnusableSettingsProposal(author: String) {
+        guard let chat = SettingsProposalReview.chat(labeled: author, in: state.chats)?.id else { return }
+        let now = Date()
+        if let last = unusableSettingsProposalReported[chat], now.timeIntervalSince(last) < 600 {
+            AppLog.lifecycle.notice("Unusable settings proposal from chat \(chat, privacy: .public) removed; already reported recently")
+            return
+        }
+        unusableSettingsProposalReported[chat] = now
+        let queued = queueContinuation(chat, text: SettingsProposalOutcome.unusable.message())
+        AppLog.lifecycle.notice("Unusable settings proposal from chat \(chat, privacy: .public) removed; report queued: \(queued, privacy: .public)")
+    }
+    private var unusableSettingsProposalReported: [String: Date] = [:]
     static let settingsProposalNoticePrefix = "settings-proposal:"
     static func settingsProposalNoticeID(_ id: String) -> String { settingsProposalNoticePrefix + id }
     /// Pending proposals that have a card in their chat, by chat ID; the others stay global reviews (`globalSettingsProposals`).

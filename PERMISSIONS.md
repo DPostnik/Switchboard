@@ -140,7 +140,10 @@ Secrets
     Per item, visible and removable in the project settings, listed by the grant review; never the
     whole Keychain and never a reserved item (`KeychainItemRule.reserved`).
 12. Secret paths (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `.env*`, provider credential
-    files) stay denied inside every restricted role.
+    files) stay denied inside every restricted role. One deliberate exception (user decision
+    2026-11-13): mediated gh's own sandbox reads `~/.config/gh` (read-only), only while its
+    `hosts.yml` holds no plain-text `oauth_token` (the token stays in the Keychain). The session and
+    every other command never get it.
 
 Process
 13. Never retry a turn, an answer or an action after an uncertain transport result.
@@ -466,10 +469,39 @@ Known gaps. Check this list before you treat a failure as a new defect.
   refused with the route text; `-c ... push` is routed to the local sandbox (`transport 'https' not allowed`); the queue
   published this change itself (push with a lease) under the narrowed git. Not checked live: Codex, `clone`, the probes,
   the rollback switch.
-- `gh` under the boundary does not work for repository commands: `gh pr list` calls git internally and nono refuses the
-  chain (`tool 'gh' is not allowed to call git`); with `-R owner/repo` it gets HTTP 401 (gh finds no login: `~/.config/gh`
-  is not a grant of the mediated command). No evidence that gh ever authenticated under the boundary; not verified as a
-  regression of the narrowing. `gh auth token` and `gh extension` are refused as intended.
+- `gh` under the boundary (fixed 2026-11-13, user decision; `ExternalSandboxPlanner.ghLoginReads`, `chainGitHub`). Before,
+  repository commands failed: `gh pr checks` started git and nono refused the chain (`tool 'gh' is not allowed to invoke
+  git`), and gh found no login: `~/.config/gh` was not readable in its sandbox, and its keyring lookup (go-keyring starts
+  `/usr/bin/security find-generic-password -s gh:github.com` by absolute path) is refused in every project, because
+  nono's child exec gate (`add_child_process_exec_gate_with_policy`, `tool-sandbox/platform/macos.rs`) lets gh's sandbox
+  start only gh itself and the shims; seen as HTTP 401 with the account read. Seen live in Codex chats 2849861C (hw-bench,
+  git chain) and 92CF9E1E (nextjs-sanity-platform: no `github` access set, so gh ran unmediated without its login; the
+  route there is a proposal with `addPresets: ["github"]`). Now:
+  - The `github` access set no longer lists `~/.config/gh` as a session read (it did until 2026-11-13, so every command
+    of such a project, `cat` included, could read gh's login record against invariant 12; on the native paths gh runs
+    as a trusted command outside the sandbox and never needed it).
+  - gh's sandbox alone reads `~/.config/gh`, read-only, when `hosts.yml` has no plain-text `oauth_token` value; with a
+    plain token (`--insecure-storage`) nothing is granted, because `gh api` can upload any file gh reads. A linked folder is
+    not followed. Part of the authority (`reads=`), so a change replaces the process.
+  - In the narrowed mode only: gh `can_use` git; git's `from.gh` edge is a copy of its session edge (local sandbox, the same refusals; the intercepts
+    give push/fetch/ls-remote the same Keychain route as the agent's own call). A chained call never gains a right the
+    agent's direct call lacks.
+  - gh's sandbox may start `/usr/bin/security` (one Seatbelt `process-exec` rule through `executableFiles`, emitted in
+    `unsafe_macos_seatbelt_rules`, which lifts the child exec gate for that file only). An intermediate attempt
+    (`allow_direct_exec_bypass` on `security`, 2026-11-13) did not help and was removed: that field only affects the
+    session's outer exec gate (`add_outer_process_exec_gate`), not a command sandbox's children; the earlier note that a
+    start by absolute path runs in the caller's sandbox was wrong.
+  - Residual risk: gh's sandbox holds Keychain read and may now run `security` with any arguments. gh itself starts it
+    only for its own item, and the agent cannot make gh run another program (extensions and aliases refused, no `GH_*`
+    passed), but any code path that runs inside gh's sandbox could read other Keychain items. Before the narrowing gh had
+    the same Keychain grant; a proxy credential would remove it but needs nono's CA in the user trust store for Go
+    (`macos_trust.rs`; user decision 2026-11-13: not now).
+  - Verified: unit tests and `nono profile validate`/`nono why --caller gh` with the pinned helper. Live: see
+    `docs/improvements.md`. `gh auth token` and `gh extension` stay refused; `gh -R owner/repo …` with `-R` first stays
+    denied by the argument allow-list (put `-R` after the subcommand).
+- Settings proposal files in a chat's own folder that do not decode or change nothing are still removed, but the app
+  now queues one fixed continuation to that chat (`SettingsProposalOutcome.unusable`, RU/EN, with the format, at most one
+  per chat in ten minutes). Before (until 2026-11-13) they vanished unseen and the chat believed its request waited.
 - Codex commands bypassed the mediation shims (found live 2026-11-13, Codex chat D12755A8, arena-hw-bench, build 508).
   Codex 0.167.0 runs shell commands as `zsh -lc` (codex-rs/core/src/shell.rs `derive_exec_args`, login on by default),
   and its shell snapshot is also taken in a login shell and applied only to `-lc` commands

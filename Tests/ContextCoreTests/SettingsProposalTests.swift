@@ -70,6 +70,33 @@ private func sampleState() -> SavedState {
     #expect(SettingsProposalInbox.load(state: sampleState(), directory: directory).isEmpty)
 }
 
+/// A broken or empty file in a chat's own folder is reported to that folder's author once it is gone; root files have no
+/// known author and stay silent (found live 2026-11-13: a Codex chat wrote `{"type": "filesystem", ...}`, the app removed
+/// it unseen and the chat believed its request waited).
+@Test func unusableFilesInAChatFolderAreReportedToTheirAuthor() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let folder = directory.appendingPathComponent("01a1d56c-282a", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    try Data(#"{"type": "filesystem", "path": "/Users/me/.config/gh", "access": ["read"], "reason": "x"}"#.utf8)
+        .write(to: folder.appendingPathComponent("github-cli-access.json"))
+    try Data(#"{"changes":[{"project":"/Users/me/app","addPresets":["github"]}]}"#.utf8).write(to: folder.appendingPathComponent("empty.json"))
+    try Data("not json".utf8).write(to: directory.appendingPathComponent("root-bad.json"))
+    try writeRaw("other-1/good.json", chat: nil, in: directory)
+    var reported: [String] = []
+    let reviews = SettingsProposalInbox.load(state: sampleState(), directory: directory) { reported.append($0) }
+    #expect(reviews.map(\.id) == ["other-1/good.json"])
+    #expect(reported == ["01a1d56c-282a", "01a1d56c-282a"])
+    #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path).isEmpty)
+    #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("root-bad.json").path))
+    // The fixed text carries the format in both languages and nothing from the file.
+    for language in [AppLanguage.russian, .english] {
+        let text = SettingsProposalOutcome.unusable.message(language: language)
+        #expect(text.contains(#""changes": [{"project""#) && text.contains("$" + SettingsProposalInbox.environmentKey) && !text.contains("filesystem"))
+    }
+    #expect(SettingsProposalOutcome.unusable.message(language: .russian) != SettingsProposalOutcome.unusable.message(language: .english))
+}
+
 private func writeRaw(_ relative: String, chat: String?, in directory: URL) throws {
     let file = directory.appendingPathComponent(relative)
     try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)

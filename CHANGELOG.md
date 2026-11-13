@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Fix GitHub CLI in chats under the external boundary: `gh pr checks` and similar commands find the login and may start git; an access request file the app cannot read now tells its chat instead of disappearing.
+
 - Codex sub-agent calls appear in the chat as cards named by their action (start, message, follow-up task, resume, wait, interrupt, stop, list) with the task on one line; long summaries in the sub-agents panel are cut to one line.
 
 - Fix invisible text after pasting it right behind an image in the message field.
