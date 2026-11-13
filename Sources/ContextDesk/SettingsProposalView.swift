@@ -123,9 +123,11 @@ struct SettingsProposalChanges: View {
 /// project's chats off it; the per-command lines in the list say which and what to request instead. Apply stays enabled.
 struct SettingsProposalBoundarySummary: View {
     let notes: [SettingsProposalBoundaryNote]
+    /// The app passes nothing (the process language); tests render both languages without switching the process-global one.
+    var language: AppLanguage = L10n.language
 
     var body: some View {
-        if let text = Self.text(notes) {
+        if let text = Self.text(notes, language: language) {
             // This summary also sits outside the card's bounded scroll view. Let it accept
             // the proposed height: fixedSize would wrap it at the split view's zero-width
             // minimum-size probe and push the sidebar/composer outside the window again.

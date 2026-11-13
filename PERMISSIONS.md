@@ -346,13 +346,15 @@ Known gaps. Check this list before you treat a failure as a new defect.
     suites pass at 150 ms and 250 ms (about 2x and 2.7x their wall time); the old read fails every time at 150 ms.
   - Extra launches (`claudeDeveloperRoleRegistersTheCommandHookAndAnswersByRole`,
     `claudeBoundaryHandsTheTokenOnlyOnFd3AndAnswersByTheBoundary`, and locally `claudeIdleBackgroundCliIsReleased`),
-    seen only in runs that included `SettingsProposalLayoutTests`. Not slowness: that suite switches the process-wide
-    app language (`L10n.use`) while it renders, the Claude system prompt is localized and part of the launch identity,
-    so a turn submitted in that window replaces the warm process. The app itself never switches language in a running
-    Mac process, so this is a test interference, not a product race; a slower run only overlaps the window more. Not
-    fixed: keep `SettingsProposalLayoutTests` out of runs with the process-fixture suites (its own `native-tests`
-    check) until the view can be rendered in a given language without the global switch. The two exact-count
-    assertions now print the launches (the boundary one with each prompt's start), so this case shows in the message.
+    seen only in runs that included `SettingsProposalLayoutTests`. Not slowness: that suite switched the process-wide
+    app language (`L10n.use`) while it rendered, the Claude system prompt is localized and part of the launch identity,
+    so a turn submitted in that window replaced the warm process. The app itself never switches language in a running
+    Mac process, so this was a test interference, not a product race. Fixed in the tests: `SettingsProposalBoundarySummary`
+    takes an optional `language` (default: the process language) and the layout suite renders both languages through
+    it; `noTestSwitchesTheProcessLanguage` fails when a test file calls `L10n.use(` again (allowed list empty).
+    `ClaudeInteractiveTests` with the layout suite then passed 7 of 7 local runs. A separate `native-tests` check
+    would not have isolated the suites anyway: the verification queue merges all `native-tests` filters of one task
+    into a single run. The two exact-count assertions print the launches (the boundary one with each prompt's start).
 - A task submitted from the CLI sandbox cannot be run from a chat under the boundary (`toolchain changed since
   submission`): the environment fingerprint differs. Submit and run from the same mode.
 - Under nono `ps` cannot run (setuid) and `log show` cannot run in any sandbox: use
