@@ -72,7 +72,7 @@ enum CodexProtocolSurface {
                                              "rateLimits.primary.resetsAt", "rateLimits.secondary", "ordinaryUsageAllowed"],
         "response:thread/start": ["thread.id", "thread.ephemeral", "thread.environments", "sandbox.type", "modelProvider", "model"],
         "response:turn/start": ["turn.id"],
-        "response:thread/read": ["thread.id", "thread.turns.*.id", "thread.turns.*.status", "thread.turns.*.items",
+        "response:thread/read": ["thread.id", "thread.historyMode", "thread.turns.*.id", "thread.turns.*.status", "thread.turns.*.items",
                                  "thread.turns.*.startedAt", "thread.turns.*.completedAt", "thread.turns.*.durationMs"],
         "response:thread/turns/list": ["data.*.id", "data.*.status", "data.*.startedAt", "data.*.completedAt", "data.*.durationMs",
                                        "nextCursor"],

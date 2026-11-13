@@ -141,11 +141,23 @@ extension CodexSubagentTests {
         if method == 'initialize': result = {'userAgent':'fixture'}
         if method == 'test/spawn':
             print(json.dumps({'method':'item/completed','params':{'threadId':'parent','item':{'id':'spawn','type':'subAgentActivity','agentThreadId':'child','agentPath':'/root/research','kind':'started'}}}), flush=True)
+        # Codex 0.167.0: a loaded paginated child refuses full-history hydration.
+        if method == 'thread/read' and p.get('includeTurns'):
+            print(json.dumps({'id':m['id'],'error':{'code':-32601,'message':'list_turns is not supported yet'}}), flush=True)
+            continue
         if method == 'thread/read':
-            result = {'thread':{'id':p['threadId'],'turns':[{'id':'child-turn','status':'inProgress','items':[
+            result = {'thread':{'id':p['threadId'],'historyMode':'paginated','turns':[]}}
+        if method == 'thread/turns/list':
+            assert p['sortDirection'] == 'desc' and p['itemsView'] == 'notLoaded'
+            result = {'data':[{'id':'child-turn','status':'inProgress','items':[],'itemsView':'notLoaded'},
+                              {'id':'old-turn','status':'completed','items':[],'itemsView':'notLoaded'}],'nextCursor':None}
+        if method == 'thread/items/list':
+            items = {'child-turn':[
                 {'id':'message','type':'agentMessage','text':'Reading source'},
                 {'id':'cmd','type':'commandExecution','command':'rg source','status':'completed','aggregatedOutput':'found','exitCode':0}
-            ]}]}}
+            ], 'old-turn':[{'id':'old','type':'agentMessage','text':'Earlier'}]}[p['turnId']]
+            assert p['sortDirection'] == 'desc'
+            result = {'data':[{'item':i,'turnId':p['turnId']} for i in reversed(items)],'nextCursor':None}
         if method == 'test/calls': result = calls
         print(json.dumps({'id':m['id'],'result':result}), flush=True)
     """#.utf8).write(to: executable)
@@ -172,8 +184,12 @@ extension CodexSubagentTests {
         }
         #expect(child.title == "research")
         #expect(child.steps.contains { $0.text == "Reading source" })
+        // Turns and items arrive newest first; the steps keep transcript order.
+        let order = child.steps.map(\.text)
+        #expect((order.firstIndex(of: "Earlier") ?? .max) < (order.firstIndex(of: "Reading source") ?? -1))
         try await client.stopSubagents("child", session: .init(connection: .originalCodex, nativeID: "parent"))
         let calls = try await transport.request("test/calls").array
+        #expect(!calls.contains { $0["method"].string == "thread/read" && $0["params"]["includeTurns"].bool == true })
         let interrupts = calls.filter { $0["method"].string == "turn/interrupt" }
         #expect(interrupts.count == 1)
         #expect(interrupts.first?["params"]["threadId"].string == "child")

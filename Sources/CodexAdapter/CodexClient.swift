@@ -370,9 +370,7 @@ public actor CodexClient {
             throw ClientFailure(L10n.text("Этот подагент больше не работает в данном чате.", "This sub-agent is no longer running in this chat."))
         }
         for child in running where task == nil || task == child {
-            let result = try await transport.request("thread/read", params: .object([
-                "threadId": .string(child), "includeTurns": .bool(true)
-            ]))
+            let result = try await readChildThread(child)
             let turn = try CodexSubagentTracker.interruptTarget(result, child: child)
             guard let turn else {
                 for event in subagentTracker.history(result, child: child) { eventSink.yield(event) }
