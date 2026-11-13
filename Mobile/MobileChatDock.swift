@@ -134,8 +134,8 @@ struct MobileApprovalCard: View {
         if approval.canAllow {
             Button {
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                Task { _ = await model.send(device: device, chat: chat, kind: "allow", approval: approval.id) }
-            } label: { Text(L10n.text("Разрешить один раз", "Allow once")).multilineTextAlignment(.center).frame(maxWidth: .infinity) }
+                Task { _ = await model.send(device: device, chat: chat, kind: "allow", text: approval.projectSettings == true ? RemoteCommand.projectSettingsDecision : "", approval: approval.id) }
+            } label: { Text(approval.projectSettings == true ? L10n.text("Применить настройки", "Apply settings") : L10n.text("Разрешить один раз", "Allow once")).multilineTextAlignment(.center).frame(maxWidth: .infinity) }
                 .buttonStyle(.borderedProminent).tint(.orange).accessibilityIdentifier("allow-approval")
         }
     }

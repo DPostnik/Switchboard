@@ -13,7 +13,8 @@ public struct RemoteSetup: Codable, Sendable {
         let data = try Data(contentsOf: file)
         guard data.count <= 16_384 else { throw RemoteFailure.configuration }
         let setup = try JSONDecoder().decode(Self.self, from: data)
-        _ = try RemoteAPI(url: setup.url, key: setup.key)
+        // Validate configuration only; importing a handoff must not read an existing session.
+        _ = try RemoteAPI(url: setup.url, key: setup.key, storage: .init(read: { _ in nil }, write: { _, _ in }))
         guard !setup.email.isEmpty, !setup.password.isEmpty else { throw RemoteFailure.configuration }
         try FileManager.default.removeItem(at: file)
         return setup
@@ -313,7 +314,11 @@ public struct RemoteApproval: Codable, Identifiable, Sendable, Equatable {
     public var id: String
     public var details: String
     public var canAllow: Bool
-    public init(id: String, details: String, canAllow: Bool) { self.id = id; self.details = details; self.canAllow = canAllow }
+    /// A persistent project settings request rather than a one-time tool approval. Absent on older hosts.
+    public var projectSettings: Bool?
+    public init(id: String, details: String, canAllow: Bool, projectSettings: Bool? = nil) {
+        self.id = id; self.details = details; self.canAllow = canAllow; self.projectSettings = projectSettings
+    }
 }
 /// A pending structured question or tool form, as the desktop's request card shows it. Approvals stay in `RemoteApproval`.
 /// Agent text is data. When the phone cannot show the request faithfully, `canAnswer` is false and `macOnly` says why:
@@ -489,10 +494,12 @@ public enum WebChats {
         return result
     }
 }
+#if !os(iOS)
 extension Chat {
     /// Started from the web client: such chats keep the `web:` ID they were created with.
     public var startedOnWeb: Bool { id.hasPrefix(WebChats.prefix) }
 }
+#endif
 /// One message of a web chat, full text up to `textLimit` characters.
 public struct RemoteWebMessage: Codable, Sendable, Hashable {
     public static let textLimit = 100_000
@@ -613,6 +620,8 @@ public struct RemoteCommand: Codable, Identifiable, Sendable {
     public static let interactionKinds: Set<String> = ["answer", "queue", "interrupt"]
     /// Kinds that only the web schema (`remote_web_version`) accepts: bring a chat back to the web, start an archive search.
     public static let webKinds: Set<String> = ["restore", "search"]
+    /// Existing text column: a client explicitly confirms persistent settings, never an old "Allow once" button.
+    public static let projectSettingsDecision = "project-settings"
     public static let kinds = Set(["send", "stop", "allow", "deny", "create", "configure", "file"]).union(interactionKinds).union(webKinds)
     /// Uses the existing immutable send envelope and queue; no database migration required.
     /// The first send owns the new app ID. Later sends cannot recreate a missing conversation.

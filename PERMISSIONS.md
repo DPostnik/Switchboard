@@ -287,6 +287,45 @@ Follow-up (2026-11-12): disabling the duplicate diagnostics server must retain a
 transport (`/usr/bin/false`, empty arguments, disabled and not required); Codex validates even
 disabled entries. Channel 3 only; no grant or retry behavior changes. Verification pending.
 
+Mobile settings decisions (2026-11-12, implementation pending verification): channel 4 proposals
+can be published as pending chat approval cards through the existing authenticated remote database.
+The phone sends a host-owned single-use UUID handle (compared by UUID value after database normalization) and an explicit persistent-settings decision marker;
+settings are never taken from the remote command. Every target project must be shared, the source
+chat must exist and belong to a target, and the reviewed diff and current target settings must still
+match. File changes, local decisions, project changes and host restart invalidate old handles.
+The mobile review includes named Keychain item warnings and the same command-boundary notes as Mac.
+Changed boundary notes invalidate old handles. Oversized or partially skipped requests can only be declined remotely. Applying uses SavedState.apply
+and awaits durable saving before success; a save failure is uncertain. Provider identity and role
+limits are unchanged for both Codex and Claude. No APNs or background iOS execution is added.
+Settings take effect on the next provider launch. Mobile decisions queue the same fixed continuation
+as desktop decisions, after a successful save; no proposal-supplied text is sent.
+
+Manual iPhone signing workflow (2026-11-13): `scripts/install-mobile-manual.py` builds unsigned
+in channel 1 with the compiler's nested macro sandbox disabled (invariant 8), then calls named
+`codesign` in channel 2, using an already-issued profile and its authorized entitlements. It does
+not request account access, export a private key, renew profiles, or automatically retry device
+installation. Operator build/sign/strict verification/install/launch passed. Developer clean build, brokered
+signature and strict verification also passed with the external boundary enabled. Device installation
+is blocked: CoreDevice cannot read the artifact Info.plist (NSCocoaErrorDomain 257, EPERM). No retry
+or alternate path after refusal. A fixed app-owned device installation tool (channel 3) is a proposed
+separate change, not implemented or granted. Existing swift/apple-signing sets are unchanged. See docs/improvements.md for actual results.
+
+iPhone installation (user decision 2026-11-13): Developer must be able to install this project's
+app without changing to Operator. Channel 3 adds `install_mobile_app`, no tool arguments, only
+when the running Switchboard bundle belongs to this project, a shell/network/project-capable
+profile already has Apple signing access (or is unrestricted), and this project's mobile target
+exists. Reader/Editor and other projects do not receive the tool. Both providers share the app's
+ChatDirectory scope. The fixed artifact is .build/mobile-device/Build/Products/Debug-iphoneos/ContextMobile.app,
+with bundle com.contextdesk.mobile, Apple team 4M74WJDNSW and the already-configured iPhone.
+The host copies it without following links into its protected Switchboard-sandbox staging root,
+rejects symlinks/foreign bundles and verifies its Apple certificate/team/designated app requirement.
+It never executes project code on Mac or accepts commands, paths, identities or device IDs.
+A durable per-project/device/artifact attempt receipt is saved before CoreDevice dispatch; a lost
+reply, timeout or repeat call cannot install it twice. No keys, account sessions or filesystem
+grants reach the agent. A nonzero device result is uncertain and is never automatically retried.
+This new authority is installation of the fixed signed mobile artifact only; source builds and
+signing remain in channels 1 and 2. No existing boundary, grant or approval invariant is relaxed.
+
 Known gaps. Check this list before you treat a failure as a new defect.
 
 - Mediated `security` (2026-11-12): before, apple-signing mediated `/usr/bin/security` with Keychain read and no
@@ -468,7 +507,8 @@ Known gaps. Check this list before you treat a failure as a new defect.
   Codex treats it as role-defined and only logs it, as the brief of 2026-11-12 asked.
 - Claude's own Claude in Chrome bridge (`--chrome`) is not verified under nono, so chats with the
   user's Chrome stay on the CLI sandbox.
-- Access requests: the card does not reach the mobile app. A proposal without a known author (a root
+- Access requests: eligible cards reach the mobile app (pending live verification); all target
+  projects must be shared. A proposal without a known author (a root
   file without a valid `chat`, a folder of no current chat: unknown, archived, a scheduled run, an
   unmapped Codex token) keeps the global sheet, says so, and continues nothing. A running turn is
   not interrupted: the new rights apply from the next turn.

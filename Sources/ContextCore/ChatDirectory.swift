@@ -1,4 +1,5 @@
 import Foundation
+import AgentContract
 
 /// What a "master" chat may read about the other chats (plan Phase 5): a snapshot file the app rewrites every
 /// scheduler tick and a small stdio MCP server (`ChatDirectoryRuntime/server.py`) that answers `list_chats` and
@@ -85,7 +86,8 @@ public enum ChatDirectory {
     public struct HostApplication: Equatable, Sendable {
         public let executable: String
         public let subsystem: String
-        public var arguments: [String] { ["--host-app", executable, "--log-subsystem", subsystem] }
+        public var mobileInstall = false
+        public var arguments: [String] { ["--host-app", executable, "--log-subsystem", subsystem] + (mobileInstall ? ["--mobile-install"] : []) }
     }
     /// The app's unified-log subsystem (`AppLog.subsystem`).
     public static let logSubsystem = Perf.subsystem
@@ -93,7 +95,7 @@ public enum ChatDirectory {
     /// `bundle` and `executable` are the running app's (`Bundle.main.bundleURL`, `Bundle.main.executableURL`); injected
     /// so tests can pass their own. The executable path keeps the bundle path as the app sees it: the restart request
     /// names that path, and the running app listens for exactly it.
-    public static func hostApplication(bundle: URL, executable: URL?, project: String, subsystem: String = logSubsystem) -> HostApplication? {
+    public static func hostApplication(bundle: URL, executable: URL?, project: String, subsystem: String = logSubsystem, permissions: AgentPermissionProfile? = nil) -> HostApplication? {
         guard bundle.isFileURL, bundle.pathExtension == "app", let executable, executable.isFileURL, !project.isEmpty else { return nil }
         let standardized = bundle.standardizedFileURL
         let name = executable.lastPathComponent
@@ -102,6 +104,12 @@ public enum ChatDirectory {
         let root = URL(fileURLWithPath: project).resolvingSymlinksInPath().standardizedFileURL.path
         let real = standardized.resolvingSymlinksInPath().path
         guard root != "/", real.hasPrefix(root + "/") else { return nil }
-        return HostApplication(executable: standardized.appendingPathComponent("Contents/MacOS/\(name)").path, subsystem: subsystem)
+        return HostApplication(executable: standardized.appendingPathComponent("Contents/MacOS/\(name)").path, subsystem: subsystem, mobileInstall: permissions.map(mobileInstallationAllowed) ?? false)
+    }
+    public static func mobileInstallationAllowed(_ profile: AgentPermissionProfile) -> Bool {
+        guard profile.shell == .on, profile.network else { return false }
+        if case .unrestricted = profile.effective.filesystem { return true }
+        guard case .project = profile.filesystem else { return false }
+        return profile.commandSandbox?.unsandboxed.contains("codesign") == true
     }
 }

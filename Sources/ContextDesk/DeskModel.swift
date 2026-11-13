@@ -459,6 +459,7 @@ private struct ChatRunState: Equatable {
     @Published var error: String?
     /// Project settings changes agents proposed (`SettingsProposalInbox`), waiting for the user's decision.
     @Published private(set) var settingsProposals: [SettingsProposalReview] = []
+    private var remoteSettingsProposals = RemoteSettingsProposals()
     /// The inbox the proposals are read from; tests point it at a folder of their own.
     var settingsProposalDirectory = SettingsProposalInbox.directory
     /// The first listing seeds the known proposals without announcing them (a restart re-derives the cards silently).
@@ -1607,12 +1608,14 @@ private struct ChatRunState: Equatable {
     /// the same requests again and sends nothing by itself; a request that appears while the app runs is announced once.
     func refreshSettingsProposals() {
         let current = SettingsProposalInbox.load(state: state, directory: settingsProposalDirectory)
+        remoteSettingsProposals.refresh(current, state: state, boundaryNotes: proposalBoundaryNotes)
         let announce = settingsProposalsLoaded
         settingsProposalsLoaded = true
         guard current != settingsProposals else { return }
         let known = Set(settingsProposals.map(\.id))
         settingsProposals = current
         settingsProposalBoundaryNotes = Dictionary(uniqueKeysWithValues: current.map { ($0.id, proposalBoundaryNotes($0)) }.filter { !$0.1.isEmpty })
+        mobileRemote.requestPublication(immediate: true)
         if announce {
             for review in current where !known.contains(review.id) {
                 guard let chat = review.requestingChat(in: state.chats) else { continue }
@@ -1951,7 +1954,7 @@ private struct ChatRunState: Equatable {
         let permissions = project.map { chat.resolvedRole(in: $0, catalog: roleCatalog).profile(for: $0, addOns: chat.resolvedAddOns(in: $0), sharedRoots: sharedRoots) }
         let diagnostics = permissions?.shell != nil && permissions?.shell != .off ? workingDirectory(forChat: id) : nil
         // `app_log` and `request_app_restart` only where the running app bundle lies inside the diagnostics project.
-        let host = diagnostics.flatMap { ChatDirectory.hostApplication(bundle: hostBundle.bundle, executable: hostBundle.executable, project: $0) }
+        let host = diagnostics.flatMap { ChatDirectory.hostApplication(bundle: hostBundle.bundle, executable: hostBundle.executable, project: $0, permissions: permissions) }
         guard chat.chatDirectoryAccess == true else {
             return scopedChatDirectoryArguments(id: id, script: script, diagnostics: diagnostics, host: host)
         }
@@ -1965,7 +1968,7 @@ private struct ChatRunState: Equatable {
         guard traits(agent).contains(.chatDirectory), let script,
               FileManager.default.fileExists(atPath: script.path) else { return nil }
         let diagnostics = permissions.shell == .off ? nil : projectPath
-        let host = diagnostics.flatMap { ChatDirectory.hostApplication(bundle: hostBundle.bundle, executable: hostBundle.executable, project: $0) }
+        let host = diagnostics.flatMap { ChatDirectory.hostApplication(bundle: hostBundle.bundle, executable: hostBundle.executable, project: $0, permissions: permissions) }
         return scopedChatDirectoryArguments(id: id, script: script, diagnostics: diagnostics, host: host)
     }
     private func scopedChatDirectoryArguments(id: String, script: URL, diagnostics: String?, host: ChatDirectory.HostApplication?) -> [String]? {
@@ -2661,9 +2664,15 @@ private struct ChatRunState: Equatable {
     /// Shared by every `remoteSnapshot` call: the publication runs on every model change, once per running chat.
     static let remoteTimestampFormatter = ISO8601DateFormatter()
     func remoteSnapshot(projects: Set<String>) async -> RemoteSnapshot {
+        refreshSettingsProposals()
         let selected = state.projects.filter { projects.contains($0.id.uuidString) }
         var chats: [RemoteChat] = []
-        let awaitingApproval = Set(pending.map(\.threadID))
+        var projectApprovals: [String: [RemoteApproval]] = [:]
+        for chat in state.chats where projects.contains(chat.projectID.uuidString) && !chat.isArchived {
+            let requests = remoteSettingsProposals.approvals(chat: chat.id, sharedProjects: projects)
+            if !requests.isEmpty { projectApprovals[chat.id] = requests }
+        }
+        let awaitingApproval = Set(pending.map(\.threadID)).union(projectApprovals.keys)
         let enabled = state.chats.filter { projects.contains($0.projectID.uuidString) && !$0.isArchived }
         let phoneChats = enabled.sorted(by: {
             if awaitingApproval.contains($0.id) != awaitingApproval.contains($1.id) { return awaitingApproval.contains($0.id) }
@@ -2689,11 +2698,12 @@ private struct ChatRunState: Equatable {
                 guard case .approval(let canAllow) = action.interaction.kind else { return nil }
                 return RemoteApproval(id: action.id, details: String(action.interaction.details.prefix(8000)), canAllow: canAllow && action.interaction.details.count <= 8000)
             }
+            let allApprovals = (projectApprovals[chat.id] ?? []) + approvals
             let shown = phoneIDs.contains(chat.id) ? 20 : WebChats.snapshotMessages
             var remote = RemoteChat(id: chat.id, project: chat.projectID.uuidString, title: chat.title,
                 running: isBusy(threadID: chat.id), messages: messages.filter { ["user", "assistant"].contains($0.kind) }.suffix(shown).map {
                     RemoteMessage(id: $0.id, role: $0.kind, fullText: $0.text)
-                }, approvals: approvals, turn: runs[chat.id]?.turnID)
+                }, approvals: allApprovals, turn: runs[chat.id]?.turnID)
             if chat.isWebVisible { remote.web = true }
             if chat.chatSearch == true { remote.chatSearch = true }
             if remote.running, let run = runs[chat.id] {
@@ -2899,6 +2909,48 @@ private struct ChatRunState: Equatable {
         if command.kind == "search" { return try await startRemoteChatSearch(command) }
         if command.kind == "restore" { return try await restoreWebChat(command) }
         if command.createsChat { return try await createRemoteChat(command) }
+        // Settings decisions belong to the user, not a provider connection. A stopped/disconnected
+        // agent must not prevent the phone from resolving a project access request.
+        if ["allow", "deny"].contains(command.kind) {
+            refreshSettingsProposals()
+            if let handle = command.approval,
+               state.chats.contains(where: { $0.id == command.chat && !$0.isArchived && $0.projectID.uuidString == command.project }),
+               command.kind == "deny" || command.text == RemoteCommand.projectSettingsDecision,
+               let review = remoteSettingsProposals.take(handle: handle, chat: command.chat, allow: command.kind == "allow",
+                                                         sharedProjects: mobileRemote.projects) {
+                guard let chat = state.chats.first(where: { $0.id == command.chat && !$0.isArchived }),
+                      chat.projectID.uuidString == command.project else { throw RemoteFailure.invalidCommand }
+                let outcome: SettingsProposalOutcome = command.kind == "allow"
+                    ? .afterApply(review, notes: proposalBoundaryNotes(review)) : .rejected
+                if command.kind == "allow" {
+                    guard state.apply(review) else { throw RemoteFailure.invalidCommand }
+                }
+                guard SettingsProposalInbox.remove(review.id, directory: settingsProposalDirectory) else {
+                    persist()
+                    return "uncertain"
+                }
+                refreshSettingsProposals()
+                if command.kind == "allow" {
+                    // A failed durable save is uncertain, never a false success or an invitation to resend.
+                    do { try await store.save(state) } catch {
+                        self.error = error.localizedDescription
+                        persist()
+                        return "uncertain"
+                    }
+                    persist()
+                }
+                // Use the same fixed continuation as a desktop decision, without proposal-supplied text.
+                if queueContinuation(chat.id, text: outcome.message()) {
+                    do { try await store.save(state) } catch {
+                        self.error = error.localizedDescription
+                        persist()
+                        return "uncertain"
+                    }
+                }
+                AppLog.lifecycle.notice("Phone resolved settings proposal \(review.id, privacy: .public): \(command.kind, privacy: .public)")
+                return "submitted"
+            }
+        }
         guard let chat = state.chats.first(where: { $0.id == command.chat && $0.projectID.uuidString == command.project && !$0.isArchived }),
               let project = state.projects.first(where: { $0.id == chat.projectID }),
               !isChangingChat(chat.id), chatIsAvailable(chat.id), chatConnected(chat.id), chatAuthenticated(chat.id) else { throw RemoteFailure.invalidCommand }

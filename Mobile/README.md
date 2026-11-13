@@ -486,3 +486,46 @@ saving a delivery receipt; older Macs reject the new kinds as unknown commands.
   (`-preview-queue-paused`), `-preview-roles`; `-preview-chat-settings` and `-preview-new-chat`
   open those sheets for screenshots. `MobilePreviewTransport` answers both schema RPCs with 1
   and acknowledges command inserts. UI tests: `Mobile/UITests/InteractionTests.swift`.
+
+
+### Project access requests without push notifications
+
+Settings proposals with a known source chat appear in that chat's pending approval dock.
+The existing remote snapshot stores them in the database; the existing durable command queue
+carries Apply settings / Decline back to the Mac. All target projects must be explicitly shared.
+The card states that the grant persists for the project and lists the effective settings diff.
+No APNs, extra server sender, database migration or background iOS execution is required.
+
+Mac-owned single-use handles bind the decision to the current reviewed proposal and target
+project settings. Changed/deleted files, local decisions, hidden projects and host restarts
+invalidate old answers. Truncated or partially skipped requests cannot be approved remotely.
+Updated iPhone clients send an explicit persistent-settings marker in the existing command
+text column; old Allow once clients cannot apply project settings. The Mac can apply a request
+while the provider is disconnected and acknowledges only after saving settings. A failed save
+is uncertain. New permissions apply at the next agent launch. The Mac queues the same fixed
+continuation as a desktop decision; it never sends proposal-supplied text or replays an uncertain turn. This path is shared by Codex and Claude.
+
+
+### Existing-profile signing without Xcode account access
+
+`python3 scripts/install-mobile-manual.py --launch` uses an existing development profile
+for this app and iPhone. It builds unsigned under the caller's current permissions, disables
+only the compiler's nested macro sandbox, signs through the named `codesign` command,
+verifies the seal and installs once. It never exports keys, renews a profile or retries
+installation automatically. `--source PATH` selects an explicit verified source snapshot.
+Developer clean build and signature verification passed with the existing `swift` and
+`apple-signing` sets. Use `--sign-only` for this verified scope. Developer device installation
+is blocked by CoreDevice artifact access (Info.plist, EPERM); no automatic fallback is attempted. A fresh profile still requires account-side provisioning. Logs are stored in
+`.build/mobile-manual-signing/`.
+
+
+### Developer installation through Switchboard
+
+Under the external boundary, use `python3 scripts/install-mobile-manual.py --sign-only`
+(or `--source PATH --sign-only` for a verified snapshot), then call `install_mobile_app`.
+The app-owned tool accepts no paths, commands or device identifiers. It verifies and installs
+the fixed signed Switchboard bundle on the configured iPhone. The source script refuses direct
+device installation inside the boundary. Existing swift/apple-signing access is required;
+Reader/Editor and unrelated projects do not receive this tool. Tool installation receipts live
+in app-owned Switchboard-sandbox/mobile-installs and prevent redispatch after uncertain outcomes.
+Profile renewal remains a separate account-side operation. No extra signing credentials are copied.

@@ -4,6 +4,12 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Developer chats with Apple signing access can install the verified Switchboard iPhone app through a fixed app-owned tool without leaving the external boundary.
+
+- Review and apply project access requests from iPhone chat cards through the existing remote database, without push notifications.
+
+- Fix iPhone builds by excluding a desktop-only chat extension from the shared mobile source.
+
 - Codex chats under the external boundary run commands in a non-login shell, so `git`, `gh`, `pgrep` and `security` go through the boundary's mediation again (private `git fetch` and `push` work); PATH additions from your `.zprofile` and `.zshrc` no longer apply there.
 
 - A Terminal button in the chat toolbar (Control-Command-T) opens a terminal window in the chat's folder or worktree; Ghostty, iTerm, Warp and Terminal are supported, and the last choice is remembered.

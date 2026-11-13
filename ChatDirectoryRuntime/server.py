@@ -11,6 +11,9 @@ executable, inside that project) and --log-subsystem, it adds app_log and reques
 the app, never from the agent. Standard library only.
 """
 import argparse
+import hashlib
+import shutil
+import tempfile
 import collections
 import contextlib
 import glob
@@ -172,6 +175,122 @@ REDACTIONS = [
                 r"|AKIA[0-9A-Z]{16}|glpat-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"),
      "[redacted]"),
 ]
+
+
+MOBILE_INSTALL_TOOL = {
+    "name": "install_mobile_app",
+    "description": "Install this project's signed Switchboard iPhone app on the configured iPhone. "
+                   "No paths, device IDs or commands accepted. Verifies the Apple signature, team and app ID. "
+                   "One attempt per artifact; never retry an uncertain result. / "
+                   "Установить подписанное iPhone-приложение Switchboard из этого проекта на настроенный iPhone. "
+                   "Без путей, команд и ID устройств. Проверяет подпись Apple, команду и ID приложения. "
+                   "Одна попытка на сборку; не повторяй при неопределённом результате.",
+    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
+}
+MOBILE_DEVICE = "00008140-0016658A0E13001C"
+MOBILE_BUNDLE = "com.contextdesk.mobile"
+MOBILE_TEAM = "4M74WJDNSW"
+MOBILE_INSTALL_ROOT = Path.home() / "Library/Application Support/Switchboard-sandbox/mobile-installs"
+MOBILE_ARTIFACT = Path(".build/mobile-device/Build/Products/Debug-iphoneos/ContextMobile.app")
+
+
+def mobile_install_available(options):
+    project = getattr(options, "diagnostics_project", None)
+    return bool(getattr(options, "mobile_install", False) and getattr(options, "host", None)
+                and project and (Path(project) / "Mobile/ContextMobile.xcodeproj").is_dir())
+
+
+def mobile_bundle_digest(bundle):
+    """Hash staged bytes; never follow links from an agent-writable artifact."""
+    digest = hashlib.sha256()
+    total = 0
+    for path in sorted(bundle.rglob("*")):
+        if path.is_symlink():
+            raise ValueError("Linked bundle entries are refused / Ссылки внутри пакета запрещены")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise ValueError("Unsupported bundle entry / Недопустимый файл пакета")
+        digest.update(str(path.relative_to(bundle)).encode() + b"\0")
+        with path.open("rb") as stream:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > 256 * 1024 * 1024:
+                    raise ValueError("Bundle exceeds 256 MiB / Пакет больше 256 МиБ")
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def install_mobile_app(options, arguments):
+    if arguments:
+        raise ValueError("No arguments accepted / Аргументы не принимаются")
+    if not mobile_install_available(options):
+        raise ValueError("Mobile installation is not granted / Установка на iPhone не разрешена")
+    project = Path(options.diagnostics_project).resolve(strict=True)
+    source = project / MOBILE_ARTIFACT
+    # Every source ancestor must remain inside the app-selected project.
+    cursor = source
+    while cursor != project:
+        if cursor.is_symlink():
+            raise ValueError("Linked artifact paths are refused / Ссылки в пути сборки запрещены")
+        cursor = cursor.parent
+    if not source.is_dir() or not source.resolve().is_relative_to(project):
+        raise ValueError("Build the signed iPhone app first / Сначала собери подписанное iPhone-приложение")
+    MOBILE_INSTALL_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # This staging root is app-owned, outside every provider's writable roots. Copy links as links,
+    # then reject them; copying must not read a link's target, even during a source mutation.
+    with tempfile.TemporaryDirectory(prefix="stage-", dir=MOBILE_INSTALL_ROOT) as temporary:
+        staged = Path(temporary) / "ContextMobile.app"
+        shutil.copytree(source, staged, symlinks=True)
+        artifact = mobile_bundle_digest(staged)
+        info = plistlib.loads((staged / "Info.plist").read_bytes())
+        if info.get("CFBundleIdentifier") != MOBILE_BUNDLE or "iPhoneOS" not in info.get("CFBundleSupportedPlatforms", []):
+            raise ValueError("Unexpected iPhone application / Другое iPhone-приложение")
+        environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(Path.home()),
+                       "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer"}
+        requirement = '=anchor apple generic and certificate leaf[subject.OU] = "' + MOBILE_TEAM + '" and identifier "' + MOBILE_BUNDLE + '"'
+        integrity = subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(staged)],
+                                   stdin=subprocess.DEVNULL, capture_output=True, timeout=5, env=environment, check=False)
+        if integrity.returncode:
+            raise ValueError("Bundle signature integrity failed / Целостность подписи пакета нарушена")
+        verified = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", "-R", requirement, str(staged)],
+                                  stdin=subprocess.DEVNULL, capture_output=True, timeout=5, env=environment, check=False)
+        if verified.returncode:
+            detail = redact(verified.stderr.decode("utf-8", "replace"))[0][:400]
+            raise ValueError("Apple signature/team verification failed / Подпись Apple или команда не прошла проверку: " + detail)
+        key = hashlib.sha256((str(project) + MOBILE_DEVICE + artifact).encode()).hexdigest()
+        receipt = MOBILE_INSTALL_ROOT / (key + ".json")
+        record = {"artifact": artifact, "device": MOBILE_DEVICE, "bundle": MOBILE_BUNDLE,
+                  "status": "uncertain", "message": "Installation attempted; do not retry / Установка начата; не повторять"}
+        try:
+            descriptor = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            previous = json.loads(receipt.read_text())
+            return {"alreadyAttempted": True, **previous}
+        # Persist BEFORE dispatch. A crash, timeout or lost reply can never trigger a second installation.
+        with os.fdopen(descriptor, "w") as stream:
+            json.dump(record, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            result = subprocess.run(["/usr/bin/xcrun", "devicectl", "device", "install", "app", "--device", MOBILE_DEVICE, str(staged)],
+                                    stdin=subprocess.DEVNULL, capture_output=True, timeout=15, env=environment, check=False)
+            if result.returncode == 0:
+                record.update(status="installed", message="iPhone app installed / Приложение установлено на iPhone")
+            else:
+                record.update(status="uncertain", message="Device installation did not confirm success; do not retry / Устройство не подтвердило установку; не повторять")
+            output = (result.stdout + result.stderr).decode("utf-8", "replace")[-1200:]
+            record["deviceOutput"] = redact(output)[0]
+        except (OSError, subprocess.SubprocessError):
+            record.update(message="Device installation outcome unknown; do not retry / Результат установки неизвестен; не повторять")
+        temporary_receipt = receipt.with_suffix(".tmp")
+        temporary_receipt.write_text(json.dumps(record, ensure_ascii=False))
+        os.replace(temporary_receipt, receipt)
+        return record
 
 
 def host_application(project, executable, subsystem):
@@ -882,14 +1001,17 @@ def handle(request, options):
     if method == "tools/list":
         host = getattr(options, "host", None)
         return {"tools": (TOOLS if options.snapshot else []) + (SEARCH_TOOLS if options.index else []) + ([INSPECT_TOOL] if options.root else [])
-                + ([DIAGNOSTICS_TOOL] if getattr(options, "diagnostics_project", None) else []) + ([APP_LOG_TOOL, RESTART_TOOL] if host else [])}
+                + ([DIAGNOSTICS_TOOL] if getattr(options, "diagnostics_project", None) else []) + ([APP_LOG_TOOL, RESTART_TOOL] if host else [])
+                + ([MOBILE_INSTALL_TOOL] if mobile_install_available(options) else [])}
     if method == "tools/call":
         name, arguments = params.get("name"), params.get("arguments")
         arguments = {} if arguments is None else arguments
         try:
             if not isinstance(arguments, dict):
                 raise ValueError("Arguments must be an object / Аргументы должны быть объектом")
-            if name in ("app_log", "request_app_restart"):
+            if name == "install_mobile_app":
+                result = install_mobile_app(options, arguments)
+            elif name in ("app_log", "request_app_restart"):
                 host = getattr(options, "host", None)
                 if not host:
                     raise ValueError("Unknown tool")
@@ -947,6 +1069,7 @@ def main():
     parser.add_argument("--inspect", help="print inspect_chat for this ID and exit")
     parser.add_argument("--events", type=int, default=40)
     parser.add_argument("--before", type=int, default=0)
+    parser.add_argument("--mobile-install", action="store_true", help="app-granted fixed iPhone installer")
     parser.add_argument("--host-app", help="the running app's executable; offered tools need it inside the diagnostics project")
     parser.add_argument("--log-subsystem")
     parser.add_argument("--codex-thread", help="the Codex thread a restart request continues; given by the app")

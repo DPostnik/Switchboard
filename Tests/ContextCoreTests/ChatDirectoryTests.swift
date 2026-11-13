@@ -417,3 +417,39 @@ private func isError(_ reply: [String: Any]?) -> Bool { (reply?["result"] as? [S
         }
     }
 }
+
+@Test func mobileInstallerRoleGateRequiresSigningGrantAndProjectShell() throws {
+    var developer = AgentRoleCatalog.presets.first { $0.id == AgentRoleID.developer }!.profile
+    #expect(!ChatDirectory.mobileInstallationAllowed(developer))
+    developer.commandSandbox = .init(read: [], write: [], unsandboxed: ["codesign"])
+    #expect(ChatDirectory.mobileInstallationAllowed(developer))
+    developer.network = false
+    #expect(!ChatDirectory.mobileInstallationAllowed(developer))
+    for role in AgentRoleCatalog.presets where [AgentRoleID.reader, AgentRoleID.editor].contains(role.id) {
+        #expect(!ChatDirectory.mobileInstallationAllowed(role.profile))
+    }
+}
+
+@Test func mobileInstallerRuntimeContract() throws {
+    let script = directoryServer.deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("scripts/test-mobile-install-tool.py")
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+    process.arguments = ["-I", script.path]
+    try process.run()
+    process.waitUntilExit()
+    #expect(process.terminationStatus == 0)
+}
+
+@Test func mobileInstallerToolIsOnlyListedWithAppGrantedScope() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let project = root.appendingPathComponent("project")
+    let (_, executable) = try fakeHostApp(in: project)
+    try FileManager.default.createDirectory(at: project.appendingPathComponent("Mobile/ContextMobile.xcodeproj"), withIntermediateDirectories: true)
+    let list: [[String: Any]] = [["jsonrpc": "2.0", "id": 1, "method": "tools/list"]]
+    let base = ["--diagnostics-project", project.path, "--host-app", executable.path, "--log-subsystem", "local.daniil.switchboard"]
+    #expect(toolNames(try serve(list, arguments: base + ["--mobile-install"])[1]).contains("install_mobile_app"))
+    #expect(!toolNames(try serve(list, arguments: base)[1]).contains("install_mobile_app"))
+    #expect(!toolNames(try serve(list, arguments: ["--diagnostics-project", project.path, "--mobile-install"])[1]).contains("install_mobile_app"))
+}

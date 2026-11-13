@@ -426,3 +426,41 @@ private func interaction(_ kind: AgentInteraction.Kind) -> AgentInteraction {
     #expect(project.addOns(["mail", "future"], setting: "future", on: false) == ["mail"])
     #expect(project.addOns([], setting: "future", on: true) == [])
 }
+
+@Test @MainActor func phoneSettingsDecisionsApplyOnlyPublishedRequestsAndPersistWithoutAnAgent() async throws {
+    try await withWorkingChat { model, _, store, project in
+        let inbox = URL(fileURLWithPath: project.path).appendingPathComponent("proposals")
+        try FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
+        model.settingsProposalDirectory = inbox
+        model.mobileRemote.projects = [project.id.uuidString]
+        var change = SettingsProposal.Change(project: project.path)
+        change.addPresets = ["apple-signing"]
+        let proposal = SettingsProposal(chat: "t", reason: "Sign iPhone", changes: [change])
+        let file = inbox.appendingPathComponent("request.json")
+        try JSONEncoder().encode(proposal).write(to: file)
+        let card = try #require(await model.remoteSnapshot(projects: [project.id.uuidString]).chats.first?.approvals.first)
+        #expect(card.projectSettings == true && card.canAllow)
+        model.connected = false
+        let command = RemoteCommand(owner: UUID().uuidString, device: UUID().uuidString,
+                                    project: project.id.uuidString, chat: "t", kind: "allow", text: RemoteCommand.projectSettingsDecision, approval: card.id)
+        var legacy = command; legacy.text = ""
+        await #expect(throws: RemoteFailure.self) { try await model.executeRemote(legacy) }
+        var wrongProject = command; wrongProject.project = UUID().uuidString
+        await #expect(throws: RemoteFailure.self) { try await model.executeRemote(wrongProject) }
+        #expect(try await model.executeRemote(command) == "submitted")
+        #expect(model.state.projects[0].accessPresets?.contains("apple-signing") == true)
+        #expect(try await store.load().projects[0].accessPresets?.contains("apple-signing") == true)
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+        #expect(model.draft == "Desktop draft")
+        await #expect(throws: RemoteFailure.self) { try await model.executeRemote(command) }
+
+        change.addPresets = ["node"]
+        try JSONEncoder().encode(SettingsProposal(chat: "t", changes: [change])).write(to: file)
+        let declined = try #require(await model.remoteSnapshot(projects: [project.id.uuidString]).chats.first?.approvals.first)
+        let deny = RemoteCommand(owner: command.owner, device: command.device, project: command.project,
+                                 chat: "t", kind: "deny", approval: declined.id)
+        #expect(try await model.executeRemote(deny) == "submitted")
+        #expect(model.state.projects[0].accessPresets?.contains("node") != true)
+        #expect(await model.remoteSnapshot(projects: [project.id.uuidString]).chats.first?.approvals.isEmpty == true)
+    }
+}
