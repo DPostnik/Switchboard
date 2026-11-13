@@ -415,6 +415,16 @@ Known gaps. Check this list before you treat a failure as a new defect.
     into a single run. The two exact-count assertions print the launches (the boundary one with each prompt's start).
 - A task submitted from the CLI sandbox cannot be run from a chat under the boundary (`toolchain changed since
   submission`): the environment fingerprint differs. Submit and run from the same mode.
+- Narrowed git and gh, live 2026-11-13 (Claude chat 4942F27A, build 508): local git keeps the user's identity
+  (author name and email equal the global config), `GIT_EDITOR=true` and `:` work, an alias gets no Keychain, `GIT_CONFIG_COUNT`
+  injection is ignored; `fetch`, `-C <project> ls-remote --refs` and `push --dry-run` work; `pull` and `credential` are
+  refused with the route text; `-c ... push` is routed to the local sandbox (`transport 'https' not allowed`); the queue
+  published this change itself (push with a lease) under the narrowed git. Not checked live: Codex, `clone`, the probes,
+  the rollback switch.
+- `gh` under the boundary does not work for repository commands: `gh pr list` calls git internally and nono refuses the
+  chain (`tool 'gh' is not allowed to call git`); with `-R owner/repo` it gets HTTP 401 (gh finds no login: `~/.config/gh`
+  is not a grant of the mediated command). No evidence that gh ever authenticated under the boundary; not verified as a
+  regression of the narrowing. `gh auth token` and `gh extension` are refused as intended.
 - Under nono `ps` cannot run (setuid) and `log show` cannot run in any sandbox: use
   `project_diagnostics` and `app_log`. `pgrep` sees only sandboxed processes unless mediated.
   `lsof -i` and `sysctl -n vm.loadavg` work.
