@@ -307,8 +307,12 @@ Known gaps. Check this list before you treat a failure as a new defect.
   `security` is mediated, `dump-keychain` and other refused forms (run `scripts/probe-nono-runtime.py` outside any
   sandbox), Codex, an item created by an app whose ACL excludes `security`, and the mobile card (its proposal lines
   live in another branch).
-- Claude file tools (Write, Edit) cannot write into the chat's own proposal folder (denied `outsideBoundary`, and the
-  refusal text wrongly suggests `addFolders`); a shell write works. Seen twice on 2026-11-13.
+- Claude file tools (Read, Write, Edit) reach a file directly inside the chat's own proposal folder without a prompt,
+  under the boundary (ledger `boundary`) and on the CLI-sandbox fallback (`sandboxed`); the folder is the one the app
+  chose from the session ID and real paths are compared, so another chat's folder, the inbox root, a subfolder or a link
+  out keep the old answer, and under the boundary their refusal names `$SWITCHBOARD_SETTINGS_PROPOSALS` instead of
+  `addFolders` (2026-11-13, unit-tested, not checked live). Codex needs nothing: under the boundary its edits are not
+  asked (`externalSandbox`, `approvalPolicy: never`) and nono holds the granted folder.
 - Mediated `git` has Keychain read and runs its helpers: a github-set project can likely obtain internet passwords
   through `git credential-osxkeychain` (inferred, not run). Not narrowed here.
 

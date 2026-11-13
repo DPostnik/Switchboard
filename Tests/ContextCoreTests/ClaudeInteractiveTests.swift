@@ -2353,6 +2353,120 @@ private func boundaryDeveloper(_ root: URL, sharedRoots: [AgentPermissionProfile
     await adapter.disconnect()
 }
 
+/// The chat's own settings proposal folder (defect 2026-11-13, chat 1D20A230): Write and Edit of a file directly inside it
+/// run without a prompt under the boundary and on the CLI-sandbox fallback. Every other place in the inbox keeps the old
+/// answer: refused under the boundary (with the text that names the own folder), asked on the fallback.
+@Test(arguments: [true, false]) func claudeFileToolsWriteOnlyIntoTheChatsOwnProposalFolder(boundary: Bool) async throws {
+    let fixture = try boundaryFixture(token: boundary ? nil : .failure(.missing))
+    let manager = FileManager.default
+    defer { try? manager.removeItem(at: fixture.root) }
+    let adapter = ClaudeIntegration(boundary: fixture.runtime), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: fixture.binary, home: fixture.home, resources: fixture.resources)).value()
+    // Writes in the roots are asked: an inbox inside a temporary folder (the test data root) is then not silent by that rule.
+    var role = boundaryDeveloper(fixture.root); role.projectWrites = .ask
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: fixture.root, role: role)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: fixture.root, session: session, role: role)).value()
+    try await waitFor { await events.completionCount() == 1 }
+    #expect(fixture.helperArguments().isEmpty == !boundary)
+    let own = try #require(SettingsProposalInbox.chatFolder(session.nativeID)), inbox = SettingsProposalInbox.directory
+    let other = try #require(SettingsProposalInbox.chatFolder("other-" + UUID().uuidString, create: true))
+    defer { try? manager.removeItem(at: own); try? manager.removeItem(at: other) }
+    try manager.createDirectory(at: own.appendingPathComponent("nested"), withIntermediateDirectories: true)
+    try Data("{}".utf8).write(to: other.appendingPathComponent("taken.json"))
+    try manager.createSymbolicLink(at: own.appendingPathComponent("link.json"), withDestinationURL: other.appendingPathComponent("taken.json"))
+    var turns = 1
+    func request(_ tool: String, _ path: String) async throws {
+        let input = String(decoding: try JSONEncoder().encode(["file_path": path, "content": "{}", "old_string": "{", "new_string": "{"]), as: UTF8.self)
+        let asked = await events.interactions().count
+        _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: fixture.root, session: session,
+                                                         prompt: "tool:\(tool) \(input)", role: role)).value()
+        turns += 1
+        let expected = turns
+        try await waitFor {
+            let done = await events.completionCount() == expected
+            let count = await events.interactions().count
+            return done || count > asked
+        }
+        if let question = await events.interactions().dropFirst(asked).first {
+            _ = try await adapter.answer(question.id, session: session, context: descriptor.context, response: .deny).value()
+            try await waitFor { await events.completionCount() == expected }
+        }
+    }
+    let allowed = [("Write", own.path + "/proposal.json"), ("Edit", own.path + "/proposal.json"),
+                   ("Write", own.path + "/../" + own.lastPathComponent + "/second.json")]
+    for (tool, path) in allowed { try await request(tool, path) }
+    #expect(await events.interactions().isEmpty)
+    #expect(fixture.answers().count == allowed.count && fixture.answers().allSatisfy { $0["response"]["behavior"].string == "allow" })
+    let records = await events.capabilities().filter { ["Write", "Edit"].contains($0.tool) }
+    // The ledger shortens long targets.
+    #expect(records.count == allowed.count && zip(records, allowed).allSatisfy { record, call in
+        record.tool == call.0 && record.target.map { !$0.isEmpty && call.1.hasPrefix($0) } == true
+            && record.decision == .allowed && record.reason == (boundary ? "boundary" : "sandboxed")
+    })
+    // Negative: another chat's folder, the inbox root, a subfolder, `..` into another folder, a link out of the folder.
+    let misplaced = [other.path + "/proposal.json", inbox.path + "/proposal.json", own.path + "/nested/proposal.json",
+                     own.path + "/../" + other.lastPathComponent + "/proposal.json", own.path + "/link.json"]
+    // Negative: the authors file next to the inbox and a plain outside path keep the old refusal.
+    let elsewhere = [SettingsProposalInbox.authorsFile().path, "/outside-project/file"]
+    for path in misplaced + elsewhere { try await request("Write", path) }
+    let later = await events.capabilities().filter { ["Write", "Edit"].contains($0.tool) }.dropFirst(allowed.count)
+    #expect(!later.contains { $0.decision == .allowed })
+    let answers = Array(fixture.answers().dropFirst(allowed.count))
+    #expect(answers.count == misplaced.count + elsewhere.count && answers.allSatisfy { $0["response"]["behavior"].string == "deny" })
+    if boundary {
+        #expect(await events.interactions().isEmpty)
+        #expect(later.allSatisfy { $0.decision == .denied && $0.reason == "outsideBoundary" })
+        let messages = answers.compactMap { $0["response"]["message"].string }
+        #expect(messages.count == answers.count)
+        for message in messages.prefix(misplaced.count) {
+            #expect(message.contains("$" + SettingsProposalInbox.environmentKey) && !message.contains("addFolders"), "\(message)")
+        }
+        for message in messages.dropFirst(misplaced.count) { #expect(message.contains("addFolders"), "\(message)") }
+    } else {
+        // The fallback answers as before (asked, or refused); nothing in the inbox outside the own folder is silent.
+        #expect(await events.interactions().count <= misplaced.count + elsewhere.count)
+    }
+    await adapter.disconnect()
+}
+
+@Test func claudeOwnProposalFileComparesRealPaths() throws {
+    let manager = FileManager.default
+    let root = manager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? manager.removeItem(at: root) }
+    let inbox = root.appendingPathComponent("settings-proposals"), outside = root.appendingPathComponent("outside")
+    let own = try #require(SettingsProposalInbox.chatFolder("AAAA-1", directory: inbox, create: true))
+    let other = try #require(SettingsProposalInbox.chatFolder("BBBB-2", directory: inbox, create: true))
+    try manager.createDirectory(at: outside, withIntermediateDirectories: true)
+    try manager.createDirectory(at: own.appendingPathComponent("sub"), withIntermediateDirectories: true)
+    try manager.createSymbolicLink(at: own.appendingPathComponent("out.json"), withDestinationURL: outside.appendingPathComponent("x.json"))
+    try Data().write(to: outside.appendingPathComponent("y.json"))
+    try manager.createSymbolicLink(at: own.appendingPathComponent("y.json"), withDestinationURL: outside.appendingPathComponent("y.json"))
+    #expect(ClaudeIntegration.isOwnProposalFile(own.path + "/p.json", folder: own))
+    #expect(ClaudeIntegration.isOwnProposalFile(own.path + "/../AAAA-1/p.json", folder: own))
+    for path in [own.path, own.path + "/sub", own.path + "/sub/p.json", own.path + "/../BBBB-2/p.json", other.path + "/p.json",
+                 inbox.path + "/p.json", own.path + "/out.json", own.path + "/y.json", own.path + "/../../outside/p.json", "p.json", "AAAA-1/p.json"] {
+        #expect(!ClaudeIntegration.isOwnProposalFile(path, folder: own), "\(path)")
+    }
+    // A chat folder replaced by a link is never its own folder, wherever the link points.
+    let linked = inbox.appendingPathComponent("CCCC-3")
+    try manager.createSymbolicLink(at: linked, withDestinationURL: outside)
+    #expect(!ClaudeIntegration.isOwnProposalFile(linked.path + "/p.json", folder: linked))
+    #expect(!ClaudeIntegration.isOwnProposalFile(outside.path + "/p.json", folder: linked))
+    // The refusal texts: the inbox names the own folder, everything else keeps the request route.
+    for language in [AppLanguage.russian, .english] {
+        let misplaced = ClaudeIntegration.outsideBoundaryRefusal(other.path + "/p.json", inbox: inbox, language: language)
+        #expect(misplaced.contains("`$SWITCHBOARD_SETTINGS_PROPOSALS`") && !misplaced.contains("addFolders"))
+        #expect(ClaudeIntegration.outsideBoundaryRefusal(outside.path + "/p.json", inbox: inbox, language: language).contains("(addFolders)"))
+        #expect(ClaudeIntegration.outsideBoundaryRefusal(other.path + "/p.json", language: language).contains("(addFolders)"))
+    }
+    #expect(ClaudeIntegration.outsideBoundaryRefusal(inbox.path, inbox: inbox, language: .english)
+            == "Outside this chat's settings proposal folder: \(inbox.path). Settings proposals go only into this chat's own folder, named by `$SWITCHBOARD_SETTINGS_PROPOSALS`: write the file directly there.")
+    #expect(ClaudeIntegration.outsideBoundaryRefusal(inbox.path, inbox: inbox, language: .russian)
+            == "Путь вне папки предложений этого чата: \(inbox.path). Предложения настроек записываются только в собственную папку этого чата, путь к ней - в `$SWITCHBOARD_SETTINGS_PROPOSALS`: запиши файл прямо туда.")
+}
+
 @Test func claudeBoundaryFallsBackWithOneNoticeWhenTheTokenIsMissing() async throws {
     let fixture = try boundaryFixture(token: .failure(.missing))
     defer { try? FileManager.default.removeItem(at: fixture.root) }

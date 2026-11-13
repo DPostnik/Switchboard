@@ -1134,6 +1134,15 @@ public actor ClaudeIntegration: AgentIntegration {
         case "Read", "Glob", "Grep", "Write", "Edit":
             let writing = ["Write", "Edit"].contains(name)
             if profile.filesystem != .unrestricted, let path = input["file_path"].string ?? input["path"].string {
+                // The session's own settings proposal folder: a file directly inside it is read and written without a
+                // prompt, wherever the role's roots are. This is not a file root widened for a shell command (invariant 6):
+                // the folder is the app's channel-4 drop box, already writable by this session's commands (the boundary
+                // plan's and the CLI sandbox's `extraWrites`), and a file there changes nothing until the user applies it.
+                // Only where that grant exists; never another chat's folder, the inbox root or a subfolder.
+                if policy.boundary || policy.sandbox != nil, let folder = SettingsProposalInbox.chatFolder(id),
+                   Self.isOwnProposalFile(path, folder: folder) {
+                    await allow(policy.boundary ? "boundary" : "sandboxed"); return
+                }
                 let roots = writing ? policy.writableRoots : policy.readableRoots
                 let inProject = Self.isWithinProject(path, cwd: cwd)
                 // With a command sandbox, temporary folders are open to the file tools as they are to commands; under the
@@ -1147,7 +1156,7 @@ public actor ClaudeIntegration: AgentIntegration {
                 }
                 guard inside else {
                     // Under the boundary a path outside it fails, also in attended chats; the text names the standard route.
-                    if policy.boundary { await deny(Self.outsideBoundaryRefusal(path), reason: "outsideBoundary"); return }
+                    if policy.boundary { await deny(Self.outsideBoundaryRefusal(path, inbox: SettingsProposalInbox.directory), reason: "outsideBoundary"); return }
                     if attended && !policy.restricted { askReason = "outsideRoots"; break } else { await deny(outside, reason: "outsideRoots"); return }
                 }
                 // Silent inside the role when the role says so; the editor role still asks like the old standard mode.
@@ -1245,25 +1254,38 @@ public actor ClaudeIntegration: AgentIntegration {
     /// Resolve existing ancestors through POSIX, including /var versus /private/var.
     /// Missing leaf components are allowed; inaccessible paths and dangling symlinks fail closed.
     static func isWithinProject(_ path: String, cwd: String) -> Bool {
-        func canonical(_ raw: String) -> String? {
-            guard raw.hasPrefix("/"), !raw.utf8.contains(0) else { return nil }
-            var candidate = raw, suffix: [String] = []
-            for _ in 0..<256 {
-                if let resolved = realpath(candidate, nil) {
-                    defer { free(resolved) }
-                    let base = String(cString: resolved)
-                    return suffix.reversed().reduce(base) { ($0 as NSString).appendingPathComponent($1) }
-                }
-                guard errno == ENOENT, candidate != "/",
-                      (try? FileManager.default.attributesOfItem(atPath: candidate)[.type] as? FileAttributeType) != .typeSymbolicLink else { return nil }
-                let leaf = (candidate as NSString).lastPathComponent
-                guard !leaf.isEmpty, leaf != ".", leaf != ".." else { return nil }
-                suffix.append(leaf); candidate = (candidate as NSString).deletingLastPathComponent
-            }
-            return nil
-        }
-        guard let root = canonical(cwd), let target = canonical(path.hasPrefix("/") ? path : cwd + "/" + path) else { return false }
+        guard let root = canonicalPath(cwd), let target = canonicalPath(path.hasPrefix("/") ? path : cwd + "/" + path) else { return false }
         return target == root || target.hasPrefix(root == "/" ? "/" : root + "/")
+    }
+    /// The real path of an absolute path whose leaf components may be missing; nil for a dangling link or an unreadable path.
+    static func canonicalPath(_ raw: String) -> String? {
+        guard raw.hasPrefix("/"), !raw.utf8.contains(0) else { return nil }
+        var candidate = raw, suffix: [String] = []
+        for _ in 0..<256 {
+            if let resolved = realpath(candidate, nil) {
+                defer { free(resolved) }
+                let base = String(cString: resolved)
+                return suffix.reversed().reduce(base) { ($0 as NSString).appendingPathComponent($1) }
+            }
+            guard errno == ENOENT, candidate != "/",
+                  (try? FileManager.default.attributesOfItem(atPath: candidate)[.type] as? FileAttributeType) != .typeSymbolicLink else { return nil }
+            let leaf = (candidate as NSString).lastPathComponent
+            guard !leaf.isEmpty, leaf != ".", leaf != ".." else { return nil }
+            suffix.append(leaf); candidate = (candidate as NSString).deletingLastPathComponent
+        }
+        return nil
+    }
+    /// Whether `path` is a file directly inside `folder`, this session's own settings proposal folder. `folder` comes only
+    /// from the session ID the app launched the process for (`SettingsProposalInbox.chatFolder`), never from the agent's
+    /// path, the environment or the cwd (invariant 2). Real paths are compared: a linked folder, a link that resolves
+    /// elsewhere, `..` into another folder, a subfolder and the folder itself are not a proposal file.
+    static func isOwnProposalFile(_ path: String, folder: URL) -> Bool {
+        let manager = FileManager.default
+        guard path.hasPrefix("/"),
+              (try? manager.attributesOfItem(atPath: folder.path)[.type] as? FileAttributeType) == .typeDirectory,
+              let parent = canonicalPath(folder.deletingLastPathComponent().path), let target = canonicalPath(path),
+              (try? manager.attributesOfItem(atPath: target)[.type] as? FileAttributeType) != .typeDirectory else { return false }
+        return (target as NSString).deletingLastPathComponent == (parent as NSString).appendingPathComponent(folder.lastPathComponent)
     }
     private func respond(_ wire: ClaudeWire, requestID: String, response: JSONValue) async throws {
         try await wire.send(.object(["type": .string("control_response"), "response": .object([

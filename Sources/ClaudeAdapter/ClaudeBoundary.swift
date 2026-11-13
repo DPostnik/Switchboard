@@ -176,9 +176,17 @@ extension ClaudeIntegration {
     public static func boundaryCandidate(_ profile: AgentPermissionProfile, userChromeEnabled: Bool) -> Bool {
         !ClaudeLaunchPolicy(profile, scheduled: false, userChromeEnabled: userChromeEnabled).userChrome
     }
-    /// The refusal of a file tool outside the boundary, naming the standard route.
-    static func outsideBoundaryRefusal(_ path: String, language: AppLanguage = L10n.language) -> String {
-        L10n.text("Путь вне границы проекта: \(path). Не ищи обход: если он нужен задаче, запиши одно предложение настроек (addFolders) с точной папкой и причиной.",
+    /// The refusal of a file tool outside the boundary, naming the standard route. A path inside the settings proposal
+    /// `inbox` (its root, another chat's folder, a subfolder) is a misplaced proposal, not a missing folder: the text
+    /// names the chat's own folder instead of `addFolders`.
+    static func outsideBoundaryRefusal(_ path: String, inbox: URL? = nil, language: AppLanguage = L10n.language) -> String {
+        if let inbox, path.hasPrefix("/"), isWithinProject(path, cwd: inbox.path) {
+            let variable = "`$" + SettingsProposalInbox.environmentKey + "`"
+            return L10n.text("Путь вне папки предложений этого чата: \(path). Предложения настроек записываются только в собственную папку этого чата, путь к ней - в \(variable): запиши файл прямо туда.",
+                             "Outside this chat's settings proposal folder: \(path). Settings proposals go only into this chat's own folder, named by \(variable): write the file directly there.",
+                             language: language)
+        }
+        return L10n.text("Путь вне границы проекта: \(path). Не ищи обход: если он нужен задаче, запиши одно предложение настроек (addFolders) с точной папкой и причиной.",
                   "Outside the project's boundary: \(path). Do not look for a workaround: if the task needs it, write one settings proposal (addFolders) with the exact folder and the reason.",
                   language: language)
     }
