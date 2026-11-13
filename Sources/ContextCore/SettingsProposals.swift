@@ -61,6 +61,9 @@ public struct SettingsProposalReview: Identifiable, Equatable, Sendable {
     public var projects: [ProjectDiff]
     /// Parts that were dropped, in the user's language (unknown project, relative path, unknown set).
     public var skipped: [String]
+    /// At least one change named a known project. With no diff and nothing skipped, the request asks for settings that
+    /// are already in effect (`SettingsProposalOutcome.alreadyGranted`).
+    public var namesKnownProject = false
 
     static let maximumText = 300
 
@@ -79,6 +82,7 @@ public struct SettingsProposalReview: Identifiable, Equatable, Sendable {
             guard let project = byPath.first ?? (byName.count == 1 ? byName.first : nil) else {
                 skipped.append(L10n.text("Проект не найден: \(target.prefix(120))", "Project not found: \(target.prefix(120))")); continue
             }
+            namesKnownProject = true
             var diff = projects.first { $0.projectID == project.id } ?? ProjectDiff(projectID: project.id, name: project.name)
             if let sandbox = change.sandbox, sandbox != project.usesCommandSandbox { diff.sandbox = sandbox }
             let presets = Set(project.accessPresets ?? [])
@@ -198,9 +202,15 @@ public enum SettingsProposalOutcome: Sendable {
     /// (`SettingsProposalOutcome.afterApply(_:notes:)`), so nothing new applies and a retry would fail the same way.
     /// `unusable`: not a decision. The file in the chat's own folder did not decode or changed nothing, so the app removed
     /// it unseen; the chat learns that and gets the format once more instead of believing the request waits.
-    case applied, appliedWithoutEffect, rejected, unusable
+    /// `alreadyGranted`: not a decision either. The file named a known project and asked only for settings it already has,
+    /// so the access the chat lacks is something else; it must report the real refusal instead of asking again.
+    case applied, appliedWithoutEffect, rejected, unusable, alreadyGranted
     public func message(language: AppLanguage = L10n.language) -> String {
         switch self {
+        case .alreadyGranted: L10n.text(
+            "Switchboard: твой запрос на изменение настроек проекта ничего не меняет: всё запрошенное у проекта уже есть. Приложение удалило файл, пользователь его не видел. Не отправляй этот запрос снова. Причина отказа в другом: сообщи пользователю точную команду или путь и полный текст ошибки, затем продолжай независимую часть задачи.",
+            "Switchboard: your project settings request changes nothing: the project already has everything it asks for. The app removed the file and the user never saw it. Do not send this request again. The refusal has another cause: report the exact command or path and the full error text to the user, then continue the independent part of the task.",
+            language: language)
         case .unusable: L10n.text(
             "Switchboard: твой запрос на изменение настроек проекта не принят: файл не соответствует формату или ничего не меняет (например, указан неизвестный проект). Приложение удалило его, пользователь его не видел. Если доступ всё ещё нужен, запиши запрос заново в папку \"$\(SettingsProposalInbox.environmentKey)\" строго в формате: \(SettingsProposalInbox.format()). Не придумывай другие поля.",
             "Switchboard: your project settings request was not accepted: the file does not match the format or changes nothing (for example, an unknown project). The app removed it and the user never saw it. If you still need the access, write the request again into the folder \"$\(SettingsProposalInbox.environmentKey)\" in exactly this format: \(SettingsProposalInbox.format()). Do not invent other fields.",
@@ -272,10 +282,11 @@ public enum SettingsProposalInbox {
     /// Pending proposals, oldest first. Unreadable or oversized files and proposals that change nothing are removed.
     /// Reads the root and one level of per-chat folders; links are never followed. A file in a folder is authored by the
     /// session the folder belongs to; an empty folder of no current chat is removed once it is stale.
-    /// `unusable` receives the author label (the folder's session) of each removed file from a chat's own folder: it did not
-    /// decode or changed nothing. Root files have no known author and are removed silently, as before.
+    /// `unusable` receives the author label (the folder's session) of each removed file from a chat's own folder and why it
+    /// was removed: `.unusable` (did not decode, or named no known project) or `.alreadyGranted` (a known project already has
+    /// everything it asks for). Root files have no known author and are removed silently, as before.
     public static func load(state: SavedState, directory: URL = directory, manager: FileManager = .default, now: Date = Date(),
-                            unusable: ((String) -> Void)? = nil) -> [SettingsProposalReview] {
+                            unusable: ((String, SettingsProposalOutcome) -> Void)? = nil) -> [SettingsProposalReview] {
         try? manager.createDirectory(at: directory, withIntermediateDirectories: true)
         let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey]
         let entries = (try? manager.contentsOfDirectory(at: directory, includingPropertiesForKeys: keys)) ?? []
@@ -303,16 +314,16 @@ public enum SettingsProposalInbox {
         for file in files.prefix(maximumFiles) {
             let values = try? file.url.resourceValues(forKeys: Set(keys))
             let author = file.folder.map { map[$0] ?? $0 }
-            func discard() {
+            func discard(_ outcome: SettingsProposalOutcome = .unusable) {
                 try? manager.removeItem(at: file.url)
-                if let author, (try? manager.attributesOfItem(atPath: file.url.path)) == nil { unusable?(author) }
+                if let author, (try? manager.attributesOfItem(atPath: file.url.path)) == nil { unusable?(author, outcome) }
             }
             guard values?.isRegularFile == true, values?.isSymbolicLink != true, (values?.fileSize ?? .max) <= maximumSize,
                   let data = try? Data(contentsOf: file.url), let proposal = try? JSONDecoder().decode(SettingsProposal.self, from: data) else {
                 discard(); continue
             }
             let review = SettingsProposalReview(id: id(file), proposal: proposal, state: state, folder: file.folder, author: author)
-            if review.projects.isEmpty && review.skipped.isEmpty { discard(); continue }
+            if review.projects.isEmpty && review.skipped.isEmpty { discard(review.namesKnownProject ? .alreadyGranted : .unusable); continue }
             result.append(review)
         }
         return result

@@ -4,6 +4,10 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- The iPhone app names the agent of Claude chats too ("Agent: Claude"), as it already did for Codex chats.
+
+- An access request for settings the project already has now tells its chat that nothing changed and to report the real refusal, instead of asking it to resend the request.
+
 - Keep iPhone notification completion callbacks on the main thread to prevent a crash when opening a push notification.
 
 - Add optional native iPhone push notifications sent by the Mac through APNs, with private default text, away detection and withdrawal of resolved requests.

@@ -265,6 +265,8 @@ import ContextCore
     model.state.projects = [project]; model.state.chats = [chat]
     var published = await model.remoteSnapshot(projects: [project.id.uuidString]).chats[0]
     #expect(!published.running && published.activity == nil && published.runningSince == nil)
+    // The phone names the agent of a Claude chat too, although Claude chats publish no settings.
+    #expect(published.agent == RemoteModelOption.claudeAgent && published.settings == nil)
 
     await model.receive(.init(session: chat.nativeSession, payload: .started(turn: "turn")))
     await model.receive(.init(session: chat.nativeSession, payload: .status(turn: "turn", text: "Reading " + String(repeating: "x", count: 300))))

@@ -35,7 +35,8 @@ public struct RemoteModelOption: Codable, Identifiable, Sendable, Equatable {
     /// Engine that runs the model; nil means Codex (older hosts). Kept a string so a future agent never breaks snapshot decoding.
     public var agent: String?
     public init(id: String, name: String, agent: String? = nil) { self.id = id; self.name = name; self.agent = agent }
-    public var agentTitle: String { agent == Self.claudeAgent ? "Claude" : "Codex" }
+    public var agentTitle: String { Self.agentTitle(agent) }
+    public static func agentTitle(_ agent: String?) -> String { agent == claudeAgent ? "Claude" : "Codex" }
 }
 public struct RemoteChatOptions: Codable, Sendable, Equatable {
     public static let addOnLimit = 8
@@ -180,6 +181,9 @@ public struct RemoteChat: Codable, Identifiable, Sendable, Equatable {
     public var settings: RemoteChatSettings?
     /// Absent on older hosts. A Claude scheduled-run record accepts no messages from any device.
     public var readOnly: Bool?
+    /// The agent running this chat (`RemoteModelOption.codexAgent` or `.claudeAgent`); nil on older hosts and for a chat
+    /// whose agent session has not started yet. A string, so a future agent never breaks snapshot decoding.
+    public var agent: String?
     /// The running turn's current action ("Bash · npm test") or agent status; nil when idle or on older hosts.
     public var activity: String?
     /// ISO 8601 start of the running turn; nil when idle or on older hosts.

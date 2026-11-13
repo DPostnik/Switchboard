@@ -83,10 +83,12 @@ private func sampleState() -> SavedState {
     try Data(#"{"changes":[{"project":"/Users/me/app","addPresets":["github"]}]}"#.utf8).write(to: folder.appendingPathComponent("empty.json"))
     try Data("not json".utf8).write(to: directory.appendingPathComponent("root-bad.json"))
     try writeRaw("other-1/good.json", chat: nil, in: directory)
+    try Data(#"{"reason":"x","changes":[]}"#.utf8).write(to: folder.appendingPathComponent("no-changes.json"))
     var reported: [String] = []
-    let reviews = SettingsProposalInbox.load(state: sampleState(), directory: directory) { reported.append($0) }
+    let reviews = SettingsProposalInbox.load(state: sampleState(), directory: directory) { reported.append("\($1)") }
     #expect(reviews.map(\.id) == ["other-1/good.json"])
-    #expect(reported == ["01a1d56c-282a", "01a1d56c-282a"])
+    // The already granted set gets its own message; a broken file and a file with no changes keep the format message.
+    #expect(reported.sorted() == ["alreadyGranted", "unusable", "unusable"])
     #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path).isEmpty)
     #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("root-bad.json").path))
     // The fixed text carries the format in both languages and nothing from the file.
@@ -95,6 +97,11 @@ private func sampleState() -> SavedState {
         #expect(text.contains(#""changes": [{"project""#) && text.contains("$" + SettingsProposalInbox.environmentKey) && !text.contains("filesystem"))
     }
     #expect(SettingsProposalOutcome.unusable.message(language: .russian) != SettingsProposalOutcome.unusable.message(language: .english))
+    for language in [AppLanguage.russian, .english] {
+        let text = SettingsProposalOutcome.alreadyGranted.message(language: language)
+        #expect(text.hasPrefix("Switchboard: ") && !text.contains(#""changes""#) && !text.contains("github"))
+    }
+    #expect(SettingsProposalOutcome.alreadyGranted.message(language: .russian) != SettingsProposalOutcome.alreadyGranted.message(language: .english))
 }
 
 private func writeRaw(_ relative: String, chat: String?, in directory: URL) throws {

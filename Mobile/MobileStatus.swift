@@ -25,9 +25,11 @@ enum MobileText {
 }
 
 extension RemoteChat {
-    /// The agent running this chat, when the snapshot shows it: Codex chats carry settings with a
-    /// model of a known agent, read-only records come from Claude scheduled runs. Otherwise unknown.
+    /// The agent running this chat, when the snapshot shows it: newer hosts publish it (`agent`); on older hosts
+    /// Codex chats carry settings with a model of a known agent and read-only records come from Claude scheduled runs.
+    /// Otherwise unknown.
     func agentTitle(in project: RemoteProject?) -> String? {
+        if let agent { return [RemoteModelOption.codexAgent, RemoteModelOption.claudeAgent].contains(agent) ? RemoteModelOption.agentTitle(agent) : nil }
         if readOnly == true { return "Claude" }
         guard let model = settings?.options.model else { return nil }
         let known = (project?.newChatModels ?? []) + (project?.models ?? [])
