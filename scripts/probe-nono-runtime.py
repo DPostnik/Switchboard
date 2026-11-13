@@ -278,10 +278,15 @@ git credential fill < /dev/null > /dev/null 2>&1; echo "CHECK git-credential-ref
 git -C "$P" pull > /dev/null 2> "{case}/tmp/pull.err"; echo "CHECK git-pull-refused $? $(head -c 160 "{case}/tmp/pull.err" | tr '\\n' ' ')"
 git -C "$P" config core.hooksPath "$P/probe-hooks"
 git -C "$P" config credential.helper '!touch "{case}/tmp/repo-helper-ran"; true'
+git -C "$P" config credential.https://github.com.helper '!touch "{case}/tmp/repo-helper-ran"; true'
+git -C "$P" config credential.https://example.com.helper '!touch "{case}/tmp/foreign-helper-ran"; true'
 git -C "$P" update-ref refs/probe/local HEAD > /dev/null 2>&1; echo "CHECK git-local-hook-runs $(test -e "{case}/tmp/hook-ran"; echo $?) keychain $(test -e "{case}/tmp/hook-keychain"; echo $?)"
 rm -f "{case}/tmp/hook-ran" "{case}/tmp/hook-keychain"
 git -C "$P" fetch -q origin main > /dev/null 2>&1; echo "CHECK git-fetch-project $?"
 echo "CHECK git-fetch-hooks-off $(test -e "{case}/tmp/hook-ran"; echo $?) keychain $(test -e "{case}/tmp/hook-keychain"; echo $?) helper $(test -e "{case}/tmp/repo-helper-ran"; echo $?)"
+git -C "$P" config http.proxy https://probe@example.com
+git -C "$P" ls-remote https://github.com/git/git.git > /dev/null 2>&1; echo "CHECK git-foreign-host-no-helper $? $(test -e "{case}/tmp/foreign-helper-ran"; echo $?)"
+git -C "$P" config --unset http.proxy
 gh auth token > /dev/null 2> "{case}/tmp/gh.err"; echo "CHECK gh-token-refused $? $(grep -c 'command policy' "{case}/tmp/gh.err")"
 gh auth status -t > /dev/null 2>&1; echo "CHECK gh-show-token-refused $?"
 gh pr list --limit 1 > /dev/null 2>&1; echo "CHECK gh-pr-list $?"
@@ -324,6 +329,10 @@ wait
         check('developer/' + name, found.get(name, '0').split(' ')[0] not in ('0', ''), found.get(name, 'missing'))
     check('developer/git-local-hook-runs-without-keychain', found.get('git-local-hook-runs', '') == '0 keychain 1', found.get('git-local-hook-runs', 'missing'))
     check('developer/git-fetch-runs-no-repo-code', found.get('git-fetch-hooks-off', '') == '1 keychain 1 helper 1', found.get('git-fetch-hooks-off', 'missing'))
+    # Host pinning (2026-11-13): no helper, the repository's own included, answers for a host other than github.com. A proxy
+    # URL with a user name and no password makes git ask the helpers for that host before it connects.
+    foreign = found.get('git-foreign-host-no-helper', '').split(' ')
+    check('developer/git-foreign-host-no-helper', len(foreign) == 2 and foreign[0] != '0' and foreign[1] == '1', found.get('git-foreign-host-no-helper', 'missing'))
     if GH:
         token = found.get('gh-token-refused', '0 0').split(' ')
         check('developer/gh-token-refused-by-policy', token[0] not in ('0', '') and token[-1] != '0', ' '.join(token))

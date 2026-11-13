@@ -592,12 +592,17 @@ public enum ExternalSandboxPlanner {
         "GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_MERGE_AUTOEDIT", "GIT_OPTIONAL_LOCKS"]
     /// The git subcommands that get the Keychain (with network): they talk to the remote and may need its password.
     public static let gitKeychainSubcommands = ["push", "fetch", "ls-remote"]
+    /// The one host git's credential helper answers for (user decision 2026-11-13). The remote URL, `url.*.insteadOf` and
+    /// `http.*.proxy` are repository config an agent can edit; with a helper for every host it could ask for the stored
+    /// password of any site. A URL-scoped helper is asked only when the credential's protocol and host match.
+    public static let gitCredentialHost = "github.com"
     /// Prepended to every Keychain invocation, before the caller's arguments, so the repository's own config cannot run code
     /// there: no pager, no hooks, no fsmonitor, no askpass program, a fixed alternate-refs command, only the osxkeychain
-    /// credential helper (an empty value resets the helper list, also URL-scoped ones: git's `select_all`), signing only
-    /// through `gpg`, which the sandbox cannot run. Command-line config is read last, so it overrides every config file.
+    /// credential helper (an empty value resets the helper list, also URL-scoped ones: git's `select_all`), and that helper
+    /// only for `gitCredentialHost`, signing only through `gpg`, which the sandbox cannot run. Command-line config is read
+    /// last, so it overrides every config file.
     public static let gitKeychainPrepend = ["--no-pager", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.askPass=",
-                                            "-c", "core.alternateRefsCommand=exit 0", "-c", "credential.helper=", "-c", "credential.helper=osxkeychain",
+                                            "-c", "core.alternateRefsCommand=exit 0", "-c", "credential.helper=", "-c", "credential.https://\(gitCredentialHost).helper=osxkeychain",
                                             "-c", "gpg.format=openpgp", "-c", "gpg.program=gpg"]
     public static let gitPullRefusal = "git pull does not run with the Keychain under the external boundary: it would run the repository's merge drivers and filters with it. Run `git fetch`, then `git merge --ff-only` or `git rebase`. / git pull под внешней границей не получает Связку ключей: он запустил бы с ней драйверы слияния и фильтры репозитория. Выполни `git fetch`, затем `git merge --ff-only` или `git rebase`."
     public static let gitCredentialRefusal = "git credential is not available under the external boundary: credentials stay in the Keychain. `git push`, `git fetch` and `git ls-remote` use them themselves. / git credential под внешней границей недоступен: учётные данные остаются в Связке ключей, их сами берут `git push`, `git fetch` и `git ls-remote`."

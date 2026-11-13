@@ -605,7 +605,9 @@ private let gitFixture = ExternalSandboxPlanner.gitCommand("/opt/homebrew/bin/gi
     #expect(keychain.prependArguments == ExternalSandboxPlanner.gitKeychainPrepend)
     let prepend = keychain.prependArguments
     #expect(prepend.first == "--no-pager" && prepend.contains("core.hooksPath=/dev/null") && prepend.contains("core.fsmonitor=false") && prepend.contains("core.askPass="))
-    #expect(prepend.firstIndex(of: "credential.helper=")! < prepend.firstIndex(of: "credential.helper=osxkeychain")!)
+    // The helper list is reset, then one helper is added for github.com only: no helper answers for another host.
+    #expect(prepend.firstIndex(of: "credential.helper=")! < prepend.firstIndex(of: "credential.https://github.com.helper=osxkeychain")!)
+    #expect(prepend.filter { $0.contains("helper=") } == ["credential.helper=", "credential.https://github.com.helper=osxkeychain"])
     #expect(!clone.keychain && clone.network && clone.setEnvironment["GIT_ALLOW_PROTOCOL"] == "https:file" && clone.prependArguments.isEmpty)
     // Never passed from the caller, in any git sandbox: config injection, replaced config files, programs git would run.
     let forbidden = ["GIT_*", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0",
@@ -630,7 +632,7 @@ private let gitFixture = ExternalSandboxPlanner.gitCommand("/opt/homebrew/bin/gi
     // Negative: local work, aliases, injected config and every other global option stay in the sandbox without Keychain.
     let local: [[String]] = [
         ["status"], ["commit", "-m", "x"], ["commit", "-m", "push"], ["rebase", "--continue"], ["-c", "alias.x=!sh", "x"],
-        ["-c", "alias.x=!sh", "x", "push"], ["x", "push"], ["-c", "credential.helper=osxkeychain", "push"], ["-C", "/x", "-c", "a=b", "push"],
+        ["-c", "alias.x=!sh", "x", "push"], ["x", "push"], ["-c", "credential.helper=osxkeychain", "push"], ["-c", "credential.https://example.com.helper=osxkeychain", "push"], ["-C", "/x", "-c", "a=b", "push"],
         ["--config-env=a=B", "push"], ["--git-dir=/y/.git", "push"], ["--work-tree", "/y", "push"], ["--exec-path=/tmp", "push"],
         ["-C", "/other", "push"], ["-C", "/x/", "push"], ["-C", "/x", "-C", "y", "push"], ["--no-pager", "push"], ["-P", "fetch"],
         ["credential-osxkeychain", "get"], ["-C", "/other", "credential", "fill"], ["worktree", "add", "--detach", "/x/w", "HEAD"],

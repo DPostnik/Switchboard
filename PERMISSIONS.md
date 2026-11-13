@@ -378,7 +378,7 @@ Known gaps. Check this list before you treat a failure as a new defect.
     `git -C <repo> push --force-with-lease=…` and `ls-remote --refs`), run in a nono intercept sandbox with Keychain read and
     network: `GIT_ALLOW_PROTOCOL=https`, editors `:`, the caller's `GIT_*` dropped, and nono prepends `--no-pager -c
     core.hooksPath=/dev/null -c core.fsmonitor=false -c core.askPass= -c core.alternateRefsCommand=exit 0 -c
-    credential.helper= -c credential.helper=osxkeychain -c gpg.format=openpgp -c gpg.program=gpg`. Any other shape (`-c`,
+    credential.helper= -c credential.https://github.com.helper=osxkeychain -c gpg.format=openpgp -c gpg.program=gpg`. Any other shape (`-c`,
     `--config-env`, `--git-dir`, `--work-tree`, `--exec-path`, `--no-pager`, an alias, another or relative `-C` path) runs
     in the local sandbox, so its network fails with `transport 'https' not allowed`. `clone` gets network without the
     Keychain (its own `--config` can install filters): a private clone is `git init`, `git remote add`, `git fetch`,
@@ -413,9 +413,17 @@ Known gaps. Check this list before you treat a failure as a new defect.
   - Remains: inside the Keychain sandbox `/bin/sh` must run (git runs every credential helper through the shell), so
     anything the prepended config does not cover could still run there; known uncovered: none for `push`/`fetch`/
     `ls-remote` over https. The remote URL, `url.*.insteadOf`, `http.*.proxy` and `http.*.sslVerify` are
-    repository-controlled (URL-scoped `http.*` keys beat a command-line value): with a local proxy and TLS verification
-    off an agent could make `credential-osxkeychain` answer for a host of its choosing. Closing it needs remote-host
-    pinning (later step, not built). gh: `gh api`/`release upload` can upload any file gh reads, the Keychain database
+    repository-controlled (URL-scoped `http.*` keys beat a command-line value). Host pinning (2026-11-13, user decision;
+    `ExternalSandboxPlanner.gitCredentialHost`): the only helper is `credential.https://github.com.helper=osxkeychain`,
+    so git asks it only when the credential's protocol and host are `https://github.com` (the final URL after
+    `insteadOf`, and a proxy URL with a user name); no stored password of another site can be requested. The host is a
+    constant, not read from `.git/config` (agent-writable) and not a project setting: a remote on another host gets no
+    password under the boundary (`could not read Username`, prompts are off). Accepted residual (user decision
+    2026-11-13: not needed, no follow-up task): with a local proxy and TLS verification off, or with verification on
+    through the repository-settable `http.sslCAInfo`, `http.proxySSLCAInfo` or `http.curloptResolve`, an agent could
+    still capture the `github.com` credential itself; closing it would need `network.allow_domain` on the intercept
+    sandbox, which needs nono's session proxy for all agent traffic. Unit-tested; not checked live (probe check
+    `developer/git-foreign-host-no-helper` exists, the probe runs only outside a sandbox). gh: `gh api`/`release upload` can upload any file gh reads, the Keychain database
     file included (encrypted); a proxy credential for gh is the later fix. LFS objects are not uploaded on push (the
     pre-push hook is off; `git-lfs` could not run in the mediated sandbox before either). `git -C <path>/ push`, a
     relative `-C`, `git remote update`, `git submodule update` and local `git fetch ../repo` (file transport) have no

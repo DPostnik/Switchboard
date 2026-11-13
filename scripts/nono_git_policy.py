@@ -11,7 +11,7 @@ GIT_LOCAL_ENV = PLAIN_ENV + ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_AUTHOR_
                              'GIT_MERGE_AUTOEDIT', 'GIT_OPTIONAL_LOCKS']
 KEYCHAIN_SUBCOMMANDS = ['push', 'fetch', 'ls-remote']
 KEYCHAIN_PREPEND = ['--no-pager', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.askPass=',
-                    '-c', 'core.alternateRefsCommand=exit 0', '-c', 'credential.helper=', '-c', 'credential.helper=osxkeychain',
+                    '-c', 'core.alternateRefsCommand=exit 0', '-c', 'credential.helper=', '-c', 'credential.https://github.com.helper=osxkeychain',
                     '-c', 'gpg.format=openpgp', '-c', 'gpg.program=gpg']
 GH_SUBCOMMANDS = ['pr', 'issue', 'repo', 'api', 'run', 'workflow', 'release', 'search', 'label', 'status', 'cache',
                   'help', '--help', '-h', 'version', '--version']
