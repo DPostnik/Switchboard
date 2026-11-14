@@ -237,7 +237,7 @@ struct ClaudeLaunchPolicy: Equatable {
     /// Temporary folders a sandboxed command may write (`/private/tmp`, the user's `/private/var/folders` ones).
     static var temporaryRoots: [String] { ["/private/tmp"] + ClaudeIntegration.userTemporaryFolders }
     static var attachmentRoots: [String] {
-        [DroppedFiles.directory.path, Locations.root.appendingPathComponent("mobile-photos", isDirectory: true).path]
+        DroppedFiles.attachmentDirectories.map(\.path)
     }
 }
 

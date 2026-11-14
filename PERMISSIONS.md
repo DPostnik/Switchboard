@@ -723,3 +723,15 @@ Discovery and automatic status refresh never pair/select/grant. Saved profile
 selection remains explicit and does not move existing chat grants. Clipboard copy
 runs only on the user's popup click, with no new extension permission.
 No role, boundary, grant invariant or taken decision changes. Live UI checks pending.
+
+
+Attachment read parity (2026-11-14): channel 1 compiles the existing app-owned
+attachment read policy in the shared external-boundary planner, for both providers.
+Only `dropped-files` and `mobile-photos` are added read-only, never the app data root
+or provider credentials. Claude's native Read/sandbox policy uses the same root list.
+Stores are created before planning so an existing worker can read its first later
+attachment; new/resumed workers receive the grants after the app update. Already
+running old workers require replacement/restart. This preserves the existing Claude
+store-wide attachment policy; per-chat attachment isolation is not introduced.
+No role setting, access set, ledger reason, approval or taken decision changes.
+Regression checks and live verification: see docs/improvements.md.

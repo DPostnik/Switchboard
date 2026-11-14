@@ -922,3 +922,34 @@ private extension ExternalSandboxCommand.ArgumentRule {
         }
     }
 }
+
+@Test func bothProvidersReadAttachmentsAddedAfterWorkerLaunchWithoutGrantingTheAppHome() throws {
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    let project = Project(path: root.appendingPathComponent("project").path)
+    // Neither store exists when the worker is planned (first-ever screenshot/mobile upload).
+    let stores = ["dropped-files", "mobile-photos"].map { root.appendingPathComponent("app-data/" + $0) }
+    var codex = CodexIntegration.boundaryInput(project: project.path,
+        profile: AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: project), root: root,
+        inbox: root.appendingPathComponent("inbox"))
+    var claude = claudeInput(root, project: project, workerID: "attachment-claude")
+    #expect(codex.attachmentDirectories == DroppedFiles.attachmentDirectories)
+    #expect(claude.attachmentDirectories == codex.attachmentDirectories)
+    codex.attachmentDirectories = stores; claude.attachmentDirectories = stores
+    for input in [codex, claude] {
+        let before = try ExternalSandboxPlanner.plan(input, helper: .success(helper)).get()
+        for store in stores {
+            let path = store.resolvingSymlinksInPath().path
+            #expect(FileManager.default.fileExists(atPath: path))
+            #expect(before.grants.contains(.init(.read, path)))
+            #expect(!before.grants.contains { $0.mode == .allow && ($0.path == path || path.hasPrefix($0.path + "/")) })
+            // A new attachment is covered by the existing recursive read grant; no worker or scope change is needed.
+            let attachment = store.appendingPathComponent("later/screenshot.png")
+            try FileManager.default.createDirectory(at: attachment.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data([1, 2, 3]).write(to: attachment)
+        }
+        #expect(!before.grants.contains { $0.path == root.appendingPathComponent("app-data").resolvingSymlinksInPath().path })
+        #expect(try ExternalSandboxPlanner.plan(input, helper: .success(helper)).get().authority == before.authority)
+    }
+}

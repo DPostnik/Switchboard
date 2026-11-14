@@ -393,7 +393,10 @@ public enum ExternalSandboxPlanner {
         public var workflowDirectories: [URL]
         public var workerID: String
         public var home: URL
-        /// Provider-specific app folders the session reads (attachments) or writes (the settings proposal inbox).
+        /// Shared app-owned attachment stores, read-only for both providers. Create before launch so the first
+        /// attachment added to an already-running worker is readable too.
+        public var attachmentDirectories: [URL] = DroppedFiles.attachmentDirectories
+        /// Provider-specific app folders the session reads or writes (the settings proposal inbox).
         public var extraReads: [String] = []
         public var extraWrites: [String] = []
         /// Grant the worker's own `settings.json` read-only (Claude reads its launch settings from that file).
@@ -514,6 +517,14 @@ public enum ExternalSandboxPlanner {
         for tree in toolchainTrees { add(.read, tree) }
         add(.read, resources.path)
         for directory in input.workflowDirectories { add(.read, directory.path) }
+        for directory in input.attachmentDirectories {
+            do {
+                try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+                add(.read, directory.path)
+            } catch {
+                ExternalSandboxLog.logger.error("Cannot prepare attachment store: \(directory.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
         for path in input.extraReads { add(.read, path) }
         for path in input.extraWrites { add(.allow, path) }
         add(.readFile, input.home.appendingPathComponent(".gitconfig").path)

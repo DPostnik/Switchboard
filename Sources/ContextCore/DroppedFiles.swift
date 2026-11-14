@@ -20,6 +20,11 @@ public enum DroppedFiles {
     /// Where copies of dropped temporary files are kept, inside the app's own home.
     public static var directory: URL { Locations.root.appendingPathComponent("dropped-files", isDirectory: true) }
 
+    /// App-owned attachment stores read by both providers. This excludes the app data root and provider homes.
+    public static var attachmentDirectories: [URL] {
+        [directory, Locations.root.appendingPathComponent("mobile-photos", isDirectory: true)]
+    }
+
     /// A screenshot thumbnail hands over a file in a temporary folder (`…/T/TemporaryItems/NSIRD_screencaptureui_…`)
     /// and removes it once the drop ends, so its path would point at nothing by the time the agent reads it.
     public static func isTemporary(_ url: URL, temporaryDirectory: URL = FileManager.default.temporaryDirectory) -> Bool {
