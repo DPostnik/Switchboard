@@ -182,3 +182,8 @@ import Testing
     #expect(!calls.contains { $0["method"].string?.hasSuffix(":missing") == true })
     await app.stop()
 }
+
+@Test func userChromeInstructionsDescribeTheExtensionTools() {
+    // Coordinate clicks, zoom, focused typing, form values, waits and frames (extension revision 2).
+    #expect(["triple_click", "x,y", "clip", "set_value", "waitSeconds", "frameId", "cmd+a"].allSatisfy { UserChromeConfiguration.instructions.contains($0) })
+}

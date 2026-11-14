@@ -487,11 +487,13 @@ private func boundaryFixture() throws -> (root: URL, project: Project, helper: E
 }
 
 /// Both providers' review kinds, built by the app's factory from the adapters' own planner inputs.
-@MainActor private func boundaryKinds(_ root: URL, role: String = AgentRoleID.developer, addOns: Set<RoleAddOn> = []) -> [SettingsProposalBoundary.Kind] {
+@MainActor private func boundaryKinds(_ root: URL, role: String = AgentRoleID.developer, addOns: Set<RoleAddOn> = [],
+                                      userChromeReady: Bool = false) -> [SettingsProposalBoundary.Kind] {
     let permissions: (Project) -> AgentPermissionProfile = { AgentRoleCatalog.preset(role).profile(for: $0, addOns: addOns) }
     return [AgentIntegrationFactory.claudeProfile, AgentIntegrationFactory.codexProfile].compactMap {
         AgentIntegrationFactory.proposalBoundaryKind($0, home: root.appendingPathComponent("provider"), executable: nil,
-                                                     resources: root.appendingPathComponent("resources"), userChromeEnabled: true, permissions: permissions)
+                                                     resources: root.appendingPathComponent("resources"), userChromeEnabled: true,
+                                                     userChromeReady: userChromeReady, permissions: permissions)
     }
 }
 
@@ -657,8 +659,10 @@ private func keychainReview(_ project: Project, add: [AgentPermissionProfile.Key
     // Already off the boundary through another trusted command (the inventory): the new one keeps its native meaning.
     var ineligible = project; ineligible.sandboxCommands = ["/usr/bin/log show"]
     #expect(notes(ineligible).isEmpty)
-    // Claude with the user's Chrome stays on the CLI sandbox; Codex is still under the boundary.
+    // Claude with the user's Chrome stays on the CLI sandbox without the app's Chrome extension; Codex is still under the
+    // boundary. With the extension installed Claude is under the boundary too.
     #expect(notes(project, kinds: boundaryKinds(root, addOns: [.userChrome])).map(\.provider) == ["Codex"])
+    #expect(notes(project, kinds: boundaryKinds(root, addOns: [.userChrome], userChromeReady: true)).map(\.provider).sorted() == ["Claude", "Codex"])
     let (review, _) = commandReview(script, project: off)
     #expect(SettingsProposalOutcome.afterApply(review, notes: []) == .applied)
     #expect(SettingsProposalBoundarySummary.text([]) == nil)

@@ -315,7 +315,10 @@ public actor ClaudeIntegration: AgentIntegration {
             // it. Stable across turns, so it never changes the launch identity by itself.
             let inbox = SettingsProposalInbox.chatFolder(id, create: true)
             // Recompiled at every turn: a changed project setting changes the plan's authority and so replaces the process.
-            let boundaryDecision = boundaryPlan(profile: profile, cwd: record.cwd, skills: skills, scheduled: scheduled, inbox: inbox)
+            // The user's Chrome under the boundary: the app's own adapter with this chat's grant, never the CLI's `--chrome`.
+            let chromeServer = policy.userChrome ? Self.userChromeServer(resources: resources, grant: request.userChromeGrant) : nil
+            let boundaryDecision = boundaryPlan(profile: profile, cwd: record.cwd, skills: skills, scheduled: scheduled, inbox: inbox,
+                                                userChromeReady: chromeServer != nil)
             var boundary: ClaudeBoundaryLaunch? = if case .success(let value) = boundaryDecision { value } else { nil }
             /// The launch identity: the CLI arguments and, under the boundary, the plan's authority.
             func identity(_ arguments: [String], _ boundary: ClaudeBoundaryLaunch?) -> [String] {
@@ -325,7 +328,7 @@ public actor ClaudeIntegration: AgentIntegration {
             let launch = identity(try Self.arguments(id: id, resumed: true, permissions: profile, model: request.model.model, effort: request.model.effort,
                                             advisor: request.model.advisor, chatDirectory: request.chatDirectory, scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                             projectAgents: ProjectAgents.argument(projectPath: record.cwd), projectServers: projectServers,
-                                            home: home, userChrome: userChrome, skills: skills, projectSkills: projectSkills, cwd: record.cwd, boundary: boundary != nil), boundary)
+                                            home: home, userChrome: userChrome, userChromeServer: chromeServer, skills: skills, projectSkills: projectSkills, cwd: record.cwd, boundary: boundary != nil), boundary)
             // A worker's token cannot be refreshed inside the boundary: before it expires, the next turn starts a new process.
             if let current = wires[id], let state = boundaries[id], state.expiresAt.timeIntervalSinceNow <= ClaudeBoundaryToken.minimumLifetime {
                 wires.removeValue(forKey: id); abandonWait(id); await current.closeAndWait()
@@ -341,7 +344,7 @@ public actor ClaudeIntegration: AgentIntegration {
                     identity(try Self.arguments(id: id, resumed: true, permissions: profile, model: model ?? request.model.model, effort: effort ?? request.model.effort,
                                        advisor: advisor ?? request.model.advisor, chatDirectory: request.chatDirectory, scheduled: scheduled, projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                        projectAgents: ProjectAgents.argument(projectPath: record.cwd), projectServers: projectServers,
-                                       home: home, userChrome: userChrome, skills: skills, projectSkills: projectSkills, cwd: record.cwd, boundary: boundary != nil), boundary)
+                                       home: home, userChrome: userChrome, userChromeServer: chromeServer, skills: skills, projectSkills: projectSkills, cwd: record.cwd, boundary: boundary != nil), boundary)
                 }
                 let live = try variant(scheduled: false, userChrome: false)
                 if scheduledWires.contains(id), wireArguments[id] == (try variant(scheduled: true, userChrome: userChrome)) {
@@ -410,8 +413,8 @@ public actor ClaudeIntegration: AgentIntegration {
                                                    chatDirectory: request.chatDirectory, scheduled: scheduled,
                                                    projectInstructions: ProjectInstructions.prompt(projectPath: record.cwd),
                                                    projectAgents: ProjectAgents.argument(projectPath: record.cwd), browserServer: server,
-                                                   projectServers: projectServers, home: home, userChrome: userChrome, skills: skills, projectSkills: projectSkills, cwd: record.cwd,
-                                                   boundary: boundary != nil)
+                                                   projectServers: projectServers, home: home, userChrome: userChrome, userChromeServer: chromeServer,
+                                                   skills: skills, projectSkills: projectSkills, cwd: record.cwd, boundary: boundary != nil)
                 var environment = ClaudeProfile.environment(home: home).merging(Self.sessionEnvironment) { _, new in new }
                 // Every descendant of this CLI (also after `setsid`) carries the chat label for the orphan sweeper.
                 environment.merge(ProcessLabels.environment(chat: id)) { _, new in new }
@@ -520,12 +523,15 @@ public actor ClaudeIntegration: AgentIntegration {
     /// Flags for one launch. A scheduled turn runs unattended, so connector actions are never held for approval.
     static func arguments(id: String, resumed: Bool, permissions requested: AgentPermissionProfile, model: String, effort: String?, advisor: String? = nil, chatDirectory: [String]? = nil, scheduled: Bool = false,
                           projectInstructions: String? = nil, projectAgents: String? = nil, browserServer: [String]? = nil,
-                          projectServers: [String: JSONValue] = [:], home: URL? = nil, userChrome: Bool = false, skills: String? = nil,
-                          projectSkills: Bool = false, cwd: String? = nil, boundary: Bool = false) throws -> [String] {
+                          projectServers: [String: JSONValue] = [:], home: URL? = nil, userChrome: Bool = false, userChromeServer: [String]? = nil,
+                          skills: String? = nil, projectSkills: Bool = false, cwd: String? = nil, boundary: Bool = false) throws -> [String] {
         let policy = ClaudeLaunchPolicy(requested, scheduled: scheduled, userChromeEnabled: userChrome, boundary: boundary)
         // Only roles with connectors load the account's claude.ai connectors such as Gmail.
         let connectors = policy.connectors
-        let chrome = policy.userChrome
+        // Under the boundary the user's Chrome is the app's own server behind the relay; the CLI's `--chrome` bridge is
+        // not verified under nono, so it stays for the launches outside the boundary.
+        let appChrome = policy.userChrome && policy.boundary ? userChromeServer : nil
+        let chrome = policy.userChrome && appChrome == nil
         var args = ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
                     "--permission-prompt-tool", "stdio", "--setting-sources", ""]
         if !connectors { args.append("--strict-mcp-config") }
@@ -533,9 +539,9 @@ public actor ClaudeIntegration: AgentIntegration {
         // `--disable-slash-commands` turns off skills only; MCP servers' prompts stay available as `/mcp__<server>__<prompt>`.
         // The user's skill plugins (`ClaudeSkills`) take its place; `--plugin-dir=` keeps the variadic flag off the next argument.
         let skillArguments = skills.map { ["--plugin-dir=" + $0] } ?? ["--disable-slash-commands"]
-        if browser != nil || !projectServers.isEmpty || chatDirectory != nil {
+        if browser != nil || !projectServers.isEmpty || chatDirectory != nil || appChrome != nil {
             // The app's browser server (its tools run without a prompt, like scheduled runs) and the project's approved servers.
-            args += skillArguments + (try ClaudeJobRunner.mcpArguments(browser: browser, project: projectServers, chats: chatDirectory))
+            args += skillArguments + (try ClaudeJobRunner.mcpArguments(browser: browser, project: projectServers, chats: chatDirectory, userChrome: appChrome))
         } else if connectors || chrome || skills != nil {
             // `--safe-mode` would also drop claude.ai connectors, the user's Chrome and skill plugins, so its isolation is spelled out as in browser chats.
             args += skillArguments + ["--mcp-config", "{\"mcpServers\":{}}"]
@@ -581,7 +587,7 @@ public actor ClaudeIntegration: AgentIntegration {
         let proposals = policy.sandbox != nil || policy.boundary ? settingsProposalInstructions() : nil
         let sandboxRules = policy.boundary ? boundaryCommandInstructions() : policy.sandbox != nil
             ? sandboxCommandInstructions(trusted: AgentCommandPolicy(policy.profile).trustedPrefixes.map(\.command)) : nil
-        args += ["--append-system-prompt", ([AgentAutonomy.instructions(), delegation, chrome ? userChromeInstructions() : nil, sandboxRules, proposals,
+        args += ["--append-system-prompt", ([AgentAutonomy.instructions(), delegation, appChrome != nil ? appChromeInstructions() : chrome ? userChromeInstructions() : nil, sandboxRules, proposals,
                                              home.flatMap { ClaudeProfile.instructions(home: $0) },
                                              projectSkills && skills != nil ? ClaudeSkills.projectInstructions() : nil,
                                              projectInstructions].compactMap { $0 }).joined(separator: "\n\n")]
@@ -610,6 +616,32 @@ public actor ClaudeIntegration: AgentIntegration {
         SettingsProposalInbox.instructions(language: language)
     }
     /// When to reach for the user's own Chrome rather than the app's isolated browser.
+    /// Guidance for the user's Chrome through the app's own extension (chats under the boundary).
+    static func appChromeInstructions(language: AppLanguage = L10n.language) -> String {
+        L10n.text(
+            """
+            Chrome пользователя в Switchboard:
+            - Инструменты `mcp__switchboard_user_chrome__*` управляют настоящим Chrome пользователя через связанное расширение Switchboard: его входы на сайты, его вкладки.
+            - Если пользователь просит использовать его браузер или его Chrome («в моём браузере», «через мой Chrome»), работай этими инструментами, а не встроенным браузером.
+            - Иначе начинай со встроенного браузера `switchboard_browser`, если он подключён. Когда он не может получить нужное, переходи в Chrome пользователя сам, без отдельного вопроса: нет входа на сайт (и импорт сессии недоступен или не помог), сайт блокирует встроенный браузер или не пускает дальше, нужное действие встроенный браузер не выполняет. Файлы встроенный браузер загружает сам (`browser_input` action=upload по ref поля или кнопки загрузки); в Chrome пользователя (`switchboard_user_chrome_upload`) переходи, только если такая загрузка не удалась. Если встроенный браузер не подключён, сразу используй Chrome пользователя. Кратко сообщи пользователю, что перешёл в его Chrome и почему.
+            - Сначала вызови `switchboard_user_chrome_list`. Для задачи открой свою вкладку (`switchboard_user_chrome_open`) и передавай полученный `leaseId` во все операции с ней. Существующую вкладку выбирай (`switchboard_user_chrome_select`, `userSelected: true`) только по просьбе пользователя. Закрывай только свои вкладки (`switchboard_user_chrome_release`); не закрывай браузер и чужие вкладки.
+            - Перед действием прочитай страницу (`switchboard_user_chrome_read`) и передавай точные `expectedURL` и `documentToken` из последнего чтения или скриншота. Действие с неизвестным исходом не повторяй: прочитай вкладку и посмотри, что произошло.
+            - Чтение (`read`, `find`) даёт `ref` элементов и состояние формы: значения полей, отметки, обязательные поля, ошибки, алерты. `find` ищет по словам из подписи. Скриншот (`screenshot`) показывает страницу; `clip` увеличивает область. Клик (`input` action click, double_click, triple_click, right_click) — по `ref` или по `x`,`y` в пикселях последнего скриншота; после прокрутки или перехода сделай новый скриншот. Текст (`type`) — в поле по `ref` или в поле с фокусом; клавиши (`key`) — с модификаторами, например cmd+a или shift+Tab. Список и галочку задавай через `set_value`. Прокрутка (`scroll`) — у `ref`, у `x`,`y` или в центре. Если страница грузится, передай `waitSeconds` в `read` или `screenshot`. Элементы во фрейме читай и нажимай с `frameId` из `read.frames`.
+            - Если Chrome не запущен или расширение не подключено, сообщи об этом пользователю одной фразой и продолжи независимую работу; не перезапускай Chrome и не повторяй вызов в цикле.
+            - Вход на сайт не разрешает новых внешних действий: отправка сообщений, заявок, покупки и публикации требуют прежних подтверждений.
+            """,
+            """
+            The user's Chrome in Switchboard:
+            - The `mcp__switchboard_user_chrome__*` tools drive the user's real Chrome through the paired Switchboard extension, with the user's site sign-ins and tabs.
+            - When the user asks you to use their browser or their Chrome ("in my browser", "with my Chrome"), use these tools rather than the built-in browser.
+            - Otherwise start with the built-in `switchboard_browser` when it is attached. When it cannot get what the task needs, switch to the user's Chrome on your own without asking: a missing site sign-in (and session import is unavailable or did not help), the site blocks the built-in browser or will not let it proceed, or an action the built-in browser cannot perform. The built-in browser uploads files itself (`browser_input` action=upload with the ref of the file field or upload button); switch to the user's Chrome (`switchboard_user_chrome_upload`) only if that upload fails. If the built-in browser is not attached, use the user's Chrome directly. Briefly tell the user that you switched to their Chrome and why.
+            - Call `switchboard_user_chrome_list` first. Open your own tab for the task (`switchboard_user_chrome_open`) and pass the returned `leaseId` to every operation on it. Select an existing tab (`switchboard_user_chrome_select`, `userSelected: true`) only when the user asked for it. Close only your own tabs (`switchboard_user_chrome_release`); never close the browser or other tabs.
+            - Read the page before you act (`switchboard_user_chrome_read`) and pass the exact `expectedURL` and `documentToken` from the latest read or screenshot. Never repeat an action with an unknown outcome: read the tab and observe what happened.
+            - Reads (`read`, `find`) give element `ref`s and form state: field values, checked state, required fields, errors and alerts. `find` matches words from the label. `screenshot` shows the page; `clip` zooms into a region. Clicks (`input` action click, double_click, triple_click, right_click) take a `ref` or `x`,`y` in pixels of the latest screenshot; after a scroll or navigation take a new screenshot. Text (`type`) goes into the field at `ref` or the focused field; keys (`key`) take modifiers such as cmd+a or shift+Tab. Set selects and checkboxes with `set_value`. Scroll (`scroll`) at a `ref`, at `x`,`y` or at the centre. For a loading page pass `waitSeconds` to `read` or `screenshot`. Read and act on elements inside a frame with the `frameId` from `read.frames`.
+            - If Chrome is not running or the extension is not connected, tell the user in one sentence and continue independent work; do not restart Chrome and do not retry in a loop.
+            - Being signed in does not authorize new external actions: sending messages or applications, purchases and posts keep their usual approval rules.
+            """, language: language)
+    }
     static func userChromeInstructions(language: AppLanguage = L10n.language) -> String {
         L10n.text(
             """
@@ -943,10 +975,11 @@ public actor ClaudeIntegration: AgentIntegration {
     }
     /// The external boundary for a launch of this profile, or why it stays on the CLI sandbox; nil without a boundary runtime.
     /// Compiles the plan only; the token is read when a process actually starts.
-    private func boundaryPlan(profile: AgentPermissionProfile, cwd: String, skills: String?, scheduled: Bool, inbox: URL?) -> Result<ClaudeBoundaryLaunch, ClaudeBoundaryFallback>? {
+    private func boundaryPlan(profile: AgentPermissionProfile, cwd: String, skills: String?, scheduled: Bool, inbox: URL?,
+                              userChromeReady: Bool) -> Result<ClaudeBoundaryLaunch, ClaudeBoundaryFallback>? {
         guard let runtime = boundaryRuntime, let home, let executable else { return nil }
         if let reason = ExternalSandboxPlanner.eligibility(profile) { return .failure(.planner(reason)) }
-        if !scheduled, !Self.boundaryCandidate(profile, userChromeEnabled: userChrome) { return .failure(.userChrome) }
+        if !scheduled, !Self.boundaryCandidate(profile, userChromeEnabled: userChrome, userChromeReady: userChromeReady) { return .failure(.userChrome) }
         let helper = runtime.helper()
         var input = ExternalSandboxPlanner.Input(project: cwd, profile: profile, providerHome: home, providerExecutable: executable,
                                                  resources: resources, home: runtime.home)
@@ -970,7 +1003,7 @@ public actor ClaudeIntegration: AgentIntegration {
         let host = ExternalSandboxHost(plan: plan, resources: resources)
         do { try await host.start() } catch { plan.removeWorkerFolder(); throw error }
         do {
-            let rewritten = try boundary.rewrite(arguments, appServers: ["switchboard_browser", ChatDirectory.serverName])
+            let rewritten = try boundary.rewrite(arguments, appServers: ["switchboard_browser", ChatDirectory.serverName, Self.userChromeServerName])
             // The real binary: nono resolves grants on canonical paths, and the versions folder is the one granted.
             let command = boundary.command(claude: boundaryRuntime?.binary(executable) ?? executable.resolvingSymlinksInPath(), arguments: rewritten)
             try await wire.start(executable: command.executable, arguments: command.arguments, environment: boundary.environment(base: environment),
@@ -1011,7 +1044,8 @@ public actor ClaudeIntegration: AgentIntegration {
         case "Agent", "Task", "SendMessage": return .subagent
         case "AskUserQuestion": return .question
         default:
-            if tool.hasPrefix("mcp__switchboard_browser__") || tool.hasPrefix("mcp__claude-in-chrome__") { return .browser }
+            if tool.hasPrefix("mcp__switchboard_browser__") || tool.hasPrefix("mcp__claude-in-chrome__")
+                || tool.hasPrefix("mcp__" + userChromeServerName + "__") { return .browser }
             if tool.hasPrefix(connectorToolPrefix) {
                 return connectorApprovalRules.contains { rule in ClaudeToolRule.matches(tool, rule) } ? .connectorWrite : .connector
             }
@@ -1198,7 +1232,8 @@ public actor ClaudeIntegration: AgentIntegration {
             if Self.ownSubagent(input["to"].string ?? "", started: subagents[id]?.startedIDs ?? []) { await allow("roleAllows"); return }
             await deny(Self.sendRefusal(), reason: "notOwnSubagent"); return
         default:
-            if name.hasPrefix("mcp__switchboard_browser__") || name.hasPrefix("mcp__claude-in-chrome__") { await allow("roleAllows"); return }
+            if name.hasPrefix("mcp__switchboard_browser__") || name.hasPrefix("mcp__claude-in-chrome__")
+                || name.hasPrefix("mcp__" + Self.userChromeServerName + "__") { await allow("roleAllows"); return }
             // The chat directory only reads the app's snapshot; it is attached only to chats the user opted in.
             if name.hasPrefix("mcp__" + ChatDirectory.serverName + "__") { await allow("roleAllows"); return }
             // The user approved this project server in the project's permissions; its tools run without a prompt.

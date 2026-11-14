@@ -4,6 +4,10 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- The Switchboard Chrome extension can click by screenshot coordinates, double-, triple- and right-click, type into the focused field, press key chords, scroll at a point, zoom screenshots, set selects and checkboxes, read form values and errors, and act inside same-process frames. Reload the extension in `chrome://extensions` after updating.
+
+- Claude chats with the My Chrome add-on now run under the external boundary: they reach your Chrome through the paired Switchboard extension instead of falling back to the CLI sandbox with approval prompts. Without a paired extension the notice names the setting to fix.
+
 - Fix "Find with agent" chat search running on Codex instead of Claude, and stop rewriting unchanged app state and usage rows to disk.
 
 - Fix chats being unable to open a screenshot dropped from its floating thumbnail or the Desktop when macOS hands it over through the SwiftUI drag cache.

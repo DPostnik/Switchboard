@@ -371,6 +371,38 @@ class Transport(unittest.TestCase):
         with self.assertRaisesRegex(server.Rejected, 'tab_leased'):
             self.coordinator.execute(self.request('select', 'select', tabId=5, userSelected=True))
 
+    def test_newer_input_arguments_require_a_reloaded_extension(self):
+        _, output = self.execute_fake(self.request('open', url='https://example.test'), {'tabId': 5})
+        lease = output['result']['leaseId']
+        self.assertEqual(self.coordinator.links['profile']['revision'], 1)
+        newer = [('input', {'action': 'click', 'x': 10, 'y': 20}), ('input', {'action': 'triple_click', 'ref': 'ref_1'}),
+                 ('input', {'action': 'type', 'text': 'a'}), ('input', {'action': 'key', 'key': 'cmd+a', 'ref': 'ref_1'}),
+                 ('input', {'action': 'click', 'ref': 'ref_1', 'frameId': 'child'}), ('screenshot', {'clip': {'x': 0, 'y': 0, 'width': 1, 'height': 1}}),
+                 ('read', {'waitSeconds': 1})]
+        for index, (operation, params) in enumerate(newer):
+            request = self.request(operation, 'newer-%d' % index, **params)
+            request['leaseId'] = lease
+            with self.assertRaisesRegex(server.Rejected, 'extension_update_required'):
+                self.coordinator.execute(request)
+        # Refused before the journal: the same action ID still dispatches after the reload.
+        self.coordinator.links['profile']['revision'] = 2
+        request = self.request('input', 'newer-0', action='click', x=10, y=20)
+        request['leaseId'] = lease
+        wire, output = self.execute_fake(request, {'performed': 'click'})
+        self.assertEqual(wire['params']['x'], 10)
+        self.assertEqual(output['result']['performed'], 'click')
+        self.assertEqual(server.required_revision('input', {'action': 'click', 'ref': 'ref_1'}), 1)
+        self.assertEqual(server.required_revision('input', {'action': 'key', 'key': 'Enter', 'ref': 'ref_1'}), 1)
+
+    def test_screenshot_metadata_reaches_the_model_beside_the_image(self):
+        schema = server.tool_schema('input')['inputSchema']['properties']['params']['properties']
+        self.assertIn('triple_click', schema['action']['enum'])
+        self.assertNotIn('hover', schema['action']['enum'])
+        for field in ('x', 'y', 'value', 'checked'):
+            self.assertIn(field, schema)
+        self.assertIn('clip', server.tool_schema('screenshot')['inputSchema']['properties']['params']['properties'])
+        self.assertTrue(server.tool_schema('screenshot')['annotations']['readOnlyHint'])
+
     def test_upload_requires_project_path_and_bounded_file(self):
         _, output = self.execute_fake(self.request('open'), {'tabId': 5})
         lease = output['result']['leaseId']

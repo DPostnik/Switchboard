@@ -81,7 +81,9 @@ public struct ClaudeBoundaryRuntime: Sendable {
 enum ClaudeBoundaryFallback: Error, Equatable, Sendable {
     case planner(ExternalSandboxPlanner.Ineligible)
     case token(ClaudeTokenFailure)
-    /// The CLI's own Claude in Chrome bridge is not verified under nono.
+    /// The role has the user's Chrome, but the app's own Chrome extension gave this chat no grant (not installed, not
+    /// paired, switched off). The CLI's Claude in Chrome bridge (`--chrome`) is not verified under nono, so the chat
+    /// keeps it on the CLI sandbox.
     case userChrome
     /// Role-defined native paths are expected and logged, not shown: an unrestricted role, a role without network.
     var isExpected: Bool {
@@ -94,7 +96,8 @@ enum ClaudeBoundaryFallback: Error, Equatable, Sendable {
         case .token(.missing): L10n.text("вход в Claude в профиле приложения не найден", "the app profile's Claude sign-in was not found", language: language)
         case .token(.expiring): L10n.text("срок входа в Claude скоро истекает; CLI обновит его в этом запуске",
                                           "the Claude sign-in expires soon; the CLI renews it in this launch", language: language)
-        case .userChrome: L10n.text("Chrome пользователя пока не проверен внутри границы", "the user's Chrome is not yet verified inside the boundary", language: language)
+        case .userChrome: L10n.text("расширение Switchboard для Chrome не связано с приложением (Настройки → Браузер → Мой Chrome), а Claude in Chrome под границей не работает",
+                                    "the Switchboard extension for Chrome is not paired with the app (Settings → Browser → My Chrome), and Claude in Chrome does not run under the boundary", language: language)
         }
     }
     /// The chat notice: once per change of reason, RU/EN.
@@ -171,10 +174,25 @@ extension ClaudeIntegration {
             - In the project of the running Switchboard app, read the app's log with the `app_log` tool (not `log show`) and request a restart after a successful build and tests once with the `request_app_restart` tool (not `scripts/request-app-restart.sh`); then end the turn and wait.
             """, language: language) + "\n" + SettingsProposalInbox.boundaryCommandRule(language: language)
     }
-    /// Whether a chat of this profile is a candidate for the boundary before the planner decides: the user's Chrome keeps it
-    /// on the CLI sandbox (`boundaryPlan`). Shared with the settings proposal review, so the rule lives in one place.
-    public static func boundaryCandidate(_ profile: AgentPermissionProfile, userChromeEnabled: Bool) -> Bool {
-        !ClaudeLaunchPolicy(profile, scheduled: false, userChromeEnabled: userChromeEnabled).userChrome
+    /// The app's own server for the user's Chrome (channel 3). Under the boundary it replaces the CLI's `--chrome`.
+    public static let userChromeServerName = "switchboard_user_chrome"
+    /// The command line (after `/usr/bin/python3`) of the app's user Chrome adapter for one chat, from the grant the app
+    /// issued for it; nil without a valid grant or the bundled runtime. The capability stays in its private file.
+    static func userChromeServer(resources: URL?, grant: AgentUserChromeGrant?) -> [String]? {
+        guard let resources, let grant, !grant.chatID.isEmpty, UUID(uuidString: grant.profileID) != nil,
+              grant.stateDirectory.isFileURL, grant.capabilityFile.isFileURL,
+              grant.capabilityFile.standardizedFileURL.path.hasPrefix(grant.stateDirectory.standardizedFileURL.path + "/") else { return nil }
+        let script = resources.appendingPathComponent("UserChromeRuntime/server.py")
+        guard FileManager.default.fileExists(atPath: script.path) else { return nil }
+        return ["-I", script.path, "mcp", "--state-dir", grant.stateDirectory.path, "--chat-id", grant.chatID,
+                "--profile-id", grant.profileID, "--capability-file", grant.capabilityFile.path]
+    }
+    /// Whether a chat of this profile is a candidate for the boundary before the planner decides. A chat with the user's
+    /// Chrome is one only when the app's own Chrome extension serves it (`userChromeReady`): that server runs outside
+    /// behind the relay. Otherwise the chat keeps the CLI's `--chrome` on the CLI sandbox (`boundaryPlan`). Shared with
+    /// the settings proposal review, so the rule lives in one place.
+    public static func boundaryCandidate(_ profile: AgentPermissionProfile, userChromeEnabled: Bool, userChromeReady: Bool = false) -> Bool {
+        userChromeReady || !ClaudeLaunchPolicy(profile, scheduled: false, userChromeEnabled: userChromeEnabled).userChrome
     }
     /// The refusal of a file tool outside the boundary, naming the standard route. A path inside the settings proposal
     /// `inbox` (its root, another chat's folder, a subfolder) is a misplaced proposal, not a missing folder: the text

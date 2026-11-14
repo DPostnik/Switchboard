@@ -210,11 +210,11 @@ Do not reopen these without the user.
 | Prompts for commands | None: `externalSandbox`, `approvalPolicy: never` | Under the boundary none except the role's ask list (hook); ledger reason `boundary`. On the fallback: as phase A (CLI sandbox, `trusts`, ask or deny) |
 | File tools | Share the session union (approximation: access-set paths are writable to them) | Answered by roots in `permission()` (inner check, stricter than the session union); under the boundary a path outside is denied without a prompt, reason `outsideBoundary`, text names the settings proposal |
 | Leaving the sandbox | Not possible; mediated commands (`pgrep`, `codesign`/`security`, `gh`, `git` by access set; `security` only `find-identity …` and the exact reads of the project's Keychain items) and relay tools only | Under the boundary not possible (`dangerouslyDisableSandbox` changes nothing); mediated `pgrep`, `codesign`/`security`, `gh`, `git` by access set (`security` only `find-identity …` and the project's Keychain items). On the fallback: flag + trusted command; Keychain items not enforced |
-| App-owned tools | Through the relay. `project_diagnostics` (diagnostics server) for every role with a shell; `app_log` and `request_app_restart` only where the running app bundle lies inside the project | Under the boundary through the relay (`switchboard_browser`, chat directory with `project_diagnostics`, `app_log`, `request_app_restart` under the same gates); project `.mcp.json` servers inside. On the fallback: direct |
+| App-owned tools | Through the relay. `project_diagnostics` (diagnostics server) for every role with a shell; `app_log` and `request_app_restart` only where the running app bundle lies inside the project | Under the boundary through the relay (`switchboard_browser`, chat directory with `project_diagnostics`, `app_log`, `request_app_restart` under the same gates, and since 2026-11-13 `switchboard_user_chrome` for chats with the My Chrome add-on and the app's grant, in place of the CLI's `--chrome`); project `.mcp.json` servers inside. On the fallback: direct, and the user's Chrome is the CLI's own Claude in Chrome bridge (`--chrome`) |
 | Access requests (channel 4) | Under the boundary: the worker's own inbox folder is a writable grant and `$SWITCHBOARD_SETTINGS_PROPOSALS` points there; the format has no `chat`. A worker serves one chat for its life, so the folder is the thread ID when the worker starts for an existing thread, else an app token (`codex-<uuid>`) that the app maps to the new thread's ID once `thread/start` returns (`settings-proposals-authors.json`, next to the inbox, outside every grant). Native path: none | The session's own inbox folder, named by its session ID, writable in the CLI sandbox and under the boundary; the format has no `chat` |
 | Request card and continuation | The author is the chat whose folder holds the file (`SettingsProposalInbox.load`); a `chat` field in a folder file is ignored. A root file (sessions started before 2026-11-12's per-chat folders) keeps the old rule: its `chat` must name an existing, unarchived, non-scheduled chat. A known author gets a card in that chat (Apply, Reject; waiting state in the sidebar, Needs you, palette, dock, notch and Fringe). Apply saves the settings, removes the file, queues one fixed message; Reject removes the file, queues one fixed rejection. Only a removed file continues its chat, once. Other proposals keep the global sheet, which says in one sentence that the requesting chat is unknown and the task will not continue by itself | Same (shared code in `DeskModel`) |
 | Credentials | `CODEX_HOME` auth file inside the provider home | The app reads its profile's Keychain item with `/usr/bin/security` outside; the bare token goes as the first stdin line to a zsh launcher that moves it to fd 3 (option d). The CLI cannot refresh it: a live worker is replaced at the next turn once less than 30 minutes remain; a launch with a missing or expiring token falls back to the CLI sandbox, whose CLI renews the Keychain item itself (assumption, unverified live) |
-| Ineligible cases | Operator role, role without network, command sandbox off, helper not verified, a trusted project command the boundary cannot run (inventory, same planner input as Claude; `ps` and `sysctl -n` exempt): native sandbox with prompts. Visible RU/EN chat notice (`CodexBoundaryNotices`, text from `ExternalSandboxPlanner.fallbackNotice`), once per chat and reason, when a worker starts; role-defined cases (unrestricted, no network, command sandbox off) only logged | Codex's cases, plus: the user's Chrome (`--chrome`) enabled, token missing or expiring. Visible RU/EN chat notice, once per session and reason; role-defined cases (unrestricted, no network) only logged (`externalSandbox`); command sandbox off is shown |
+| Ineligible cases | Operator role, role without network, command sandbox off, helper not verified, a trusted project command the boundary cannot run (inventory, same planner input as Claude; `ps` and `sysctl -n` exempt): native sandbox with prompts. Visible RU/EN chat notice (`CodexBoundaryNotices`, text from `ExternalSandboxPlanner.fallbackNotice`), once per chat and reason, when a worker starts; role-defined cases (unrestricted, no network, command sandbox off) only logged | Codex's cases, plus: the My Chrome add-on without a grant from the app's own Chrome extension (not installed, not paired, switched off; the chat then keeps the CLI's `--chrome`), token missing or expiring. Visible RU/EN chat notice, once per session and reason; role-defined cases (unrestricted, no network) only logged (`externalSandbox`); command sandbox off is shown |
 | Revocation | A changed scope replaces the worker at the next send | A changed plan authority or launch replaces the process at the next turn: process group SIGTERM, wait up to 3 s, SIGKILL, relay host stopped, worker folder removed, then the new process; per-session epoch for pending interactions. A running turn is not stopped by a settings change (both providers) |
 
 Claude phases B2+B3 were published as `524ba0e` (with the relay fix: app-owned servers start in the
@@ -551,8 +551,16 @@ Known gaps. Check this list before you treat a failure as a new defect.
 - The Codex fallback notice appears when a worker starts (new chat, scope change), not on every
   turn: a chat whose worker is kept shows it once. Claude shows a notice for "command sandbox off";
   Codex treats it as role-defined and only logs it, as the brief of 2026-11-12 asked.
-- Claude's own Claude in Chrome bridge (`--chrome`) is not verified under nono, so chats with the
-  user's Chrome stay on the CLI sandbox.
+- Claude's own Claude in Chrome bridge (`--chrome`) is not verified under nono. Since 2026-11-13 a
+  Claude chat with the My Chrome add-on runs under the boundary with the app-owned
+  `switchboard_user_chrome` server behind the relay (channel 3, the server Codex uses; no `--chrome`),
+  when the app issued the chat a grant (Switchboard extension installed, paired, enabled). Without a
+  grant it stays on the CLI sandbox with `--chrome` and the notice names the pairing. Claude chats
+  outside the boundary (Operator, any fallback) keep `--chrome`, so the two paths have different tool
+  sets. A grant's capability rotates after an hour without a send; the changed launch then replaces
+  the process at the next turn, also one kept for background tasks. The settings proposal review
+  treats "extension installed" as "grant available" (`UserChromeControl.isInstalled`). Not checked
+  live yet: see section 5.
 - Access requests: eligible cards reach the mobile app (pending live verification); all target
   projects must be shared. A proposal without a known author (a root
   file without a valid `chat`, a folder of no current chat: unknown, archived, a scheduled run, an
@@ -735,3 +743,16 @@ running old workers require replacement/restart. This preserves the existing Cla
 store-wide attachment policy; per-chat attachment isolation is not introduced.
 No role setting, access set, ledger reason, approval or taken decision changes.
 Regression checks and live verification: see docs/improvements.md.
+
+User Chrome extension tools (2026-11-14): channel 3, the existing `switchboard_user_chrome`
+server and extension. New typed arguments only: `x,y` (pixels of the extension's own latest
+screenshot of the leased tab, refused after a scroll, resize or navigation), click variants,
+a closed key list with modifier chords, `set_value` (select option or checkbox state),
+`waitSeconds` (at most 10) and a screenshot `clip`. No caller code, CDP command, selector or
+path is accepted. The sensitive-field rule now also covers a point under a coordinate click,
+the focused element for type and printable keys without a ref, and file inputs (use upload).
+Reads report form values of non-sensitive controls only. Input by ref works in same-process
+frames; out-of-process frames stay refused. Hover, drag and authenticated fetch were left out
+(handoff defaults, not user decisions). Observation stays read-only (`readOnlyHint`), input
+stays destructive. The extension reports a feature revision; the coordinator refuses newer
+arguments for an old extension before journaling. No grant, lease, journal or boundary change.

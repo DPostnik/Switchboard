@@ -398,10 +398,10 @@ private func waitForJSON(_ file: URL) async throws -> JSONValue {
 }
 private func interactiveRequest(context: AgentContext, root: URL, session: AgentSessionReference? = nil, prompt: String = "hello", id: UUID = UUID(),
                                 fullAccess: Bool = false, kind: AgentExecutionRequest.Kind = .interactive, model: String = "",
-                                effort: String? = nil, role: AgentPermissionProfile? = nil) -> AgentExecutionRequest {
+                                effort: String? = nil, role: AgentPermissionProfile? = nil, userChromeGrant: AgentUserChromeGrant? = nil) -> AgentExecutionRequest {
     .init(id: id, conversation: ConversationID(), session: session, kind: kind, prompt: prompt, projectPath: root.path,
           permissions: role.map { .profile($0, root: root.path) } ?? (fullAccess ? .unrestricted(approval: .never) : .workspaceWrite(root: root.path, network: false, approval: .ask)),
-          model: .init(context: context, model: model, effort: effort), route: .direct)
+          model: .init(context: context, model: model, effort: effort), route: .direct, userChromeGrant: userChromeGrant)
 }
 
 @Test func claudeEditorWritesInsideTheProjectWithoutAsking() async throws {
@@ -2518,6 +2518,61 @@ private func boundaryDeveloper(_ root: URL, sharedRoots: [AgentPermissionProfile
     // Role-defined native paths are not announced in the chat.
     #expect(ClaudeBoundaryFallback.planner(.unrestricted).isExpected && ClaudeBoundaryFallback.planner(.networkOff).isExpected)
     #expect(!ClaudeBoundaryFallback.planner(.trustedCommandOutside("/usr/bin/log show")).isExpected)
+    await adapter.disconnect()
+}
+
+@Test func claudeBoundaryServesTheUsersChromeThroughTheRelayAndFallsBackWithoutAGrant() async throws {
+    let fixture = try boundaryFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let runtime = fixture.resources.appendingPathComponent("UserChromeRuntime")
+    try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
+    try Data().write(to: runtime.appendingPathComponent("server.py"))
+    let state = fixture.root.appendingPathComponent("user-chrome")
+    func grant(_ token: String) -> AgentUserChromeGrant {
+        .init(chatID: "chat-1", profileID: "47AE98A1-1237-47B7-BA25-EF173ED84BB2", stateDirectory: state,
+              capabilityFile: state.appendingPathComponent("client-grants/\(token).token"))
+    }
+    let adapter = ClaudeIntegration(boundary: fixture.runtime), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: fixture.binary, home: fixture.home, resources: fixture.resources, userChromeEnabled: true)).value()
+    let chrome = AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: Project(path: fixture.root.path), addOns: [.userChrome])
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: fixture.root, role: chrome)).value()
+    func send(_ count: Int, grant: AgentUserChromeGrant?) async throws {
+        _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: fixture.root, session: session, role: chrome, userChromeGrant: grant)).value()
+        try await waitFor { await events.completionCount() == count }
+    }
+    // With the app's grant the chat runs under the boundary: the relay stands in for the server, no `--chrome`.
+    try await send(1, grant: grant("a"))
+    #expect(fixture.helperArguments().count == 1)
+    let inside = try #require(fixture.launches().first)
+    let relayed = inside["mcp"]["mcpServers"][ClaudeIntegration.userChromeServerName]["args"].array.compactMap(\.string)
+    #expect(relayed.count == 4 && relayed.first == "-I" && relayed.last == ClaudeIntegration.userChromeServerName)
+    #expect(inside["argv"].array.compactMap(\.string).contains("--chrome") == false && inside["fd_token"].string == fixture.token)
+    // The grant and its capability file never reach the CLI's arguments or prompt; they stay in the worker's server list.
+    #expect(!inside["argv"].array.compactMap(\.string).contains { $0.contains("client-grants") || $0.contains("--capability-file") })
+    #expect(inside["prompt"].string?.contains("mcp__switchboard_user_chrome__") == true)
+    #expect(await events.diagnostics().filter { $0.hasPrefix("External boundary unavailable") || $0.hasPrefix("Внешняя граница недоступна") }.isEmpty)
+    // The same grant keeps the warm process; a rotated capability replaces it at the next turn.
+    try await send(2, grant: grant("a"))
+    #expect(fixture.launches().count == 1)
+    try await send(3, grant: grant("b"))
+    #expect(fixture.launches().count == 2 && fixture.helperArguments().count == 2)
+    // Negative: no grant (extension not paired or switched off). The chat keeps the CLI's bridge on the CLI sandbox, with one notice.
+    try await send(4, grant: nil)
+    try await send(5, grant: nil)
+    #expect(fixture.launches().count == 3 && fixture.helperArguments().count == 2)
+    let outside = try #require(fixture.launches().last)
+    #expect(outside["argv"].array.compactMap(\.string).contains("--chrome") && outside["fd_token"] == .null)
+    #expect(outside["mcp"]["mcpServers"][ClaudeIntegration.userChromeServerName] == .null && outside["settings"]["sandbox"]["enabled"] == .bool(true))
+    #expect(await events.diagnostics().filter { $0 == ClaudeBoundaryFallback.userChrome.notice() }.count == 1)
+    #expect(ClaudeBoundaryFallback.userChrome.notice(language: .english).contains("Settings → Browser → My Chrome")
+            && ClaudeBoundaryFallback.userChrome.notice(language: .russian).contains("Настройки → Браузер → Мой Chrome"))
+    // Negative: an invalid grant (capability file outside the state folder) is no grant.
+    let stray = AgentUserChromeGrant(chatID: "chat-1", profileID: UUID().uuidString, stateDirectory: state, capabilityFile: fixture.root.appendingPathComponent("x.token"))
+    #expect(ClaudeIntegration.userChromeServer(resources: fixture.resources, grant: stray) == nil)
+    #expect(ClaudeIntegration.userChromeServer(resources: fixture.root.appendingPathComponent("none"), grant: grant("a")) == nil)
+    #expect(ClaudeIntegration.userChromeServer(resources: fixture.resources, grant: grant("a"))?.suffix(2) == ["--capability-file", grant("a").capabilityFile.path])
     await adapter.disconnect()
 }
 

@@ -24,8 +24,10 @@ enum AgentIntegrationFactory {
     static let claudeBoundaryOffKey = "ClaudeExternalBoundaryOff"
     /// One provider's chats for the settings proposal review (`SettingsProposalBoundary`): the adapter's own planner input
     /// and the checks it makes before planning (Claude: the rollback switch and the user's Chrome). Nil for a provider
-    /// without the external boundary.
+    /// without the external boundary. `userChromeReady` is an approximation here: the app's Chrome extension is installed
+    /// (a launch asks for the chat's grant, which also needs a paired profile).
     static func proposalBoundaryKind(_ profile: AgentProfile, home: URL, executable: URL?, resources: URL?, userChromeEnabled: Bool,
+                                     userChromeReady: Bool = UserChromeControl.isInstalled,
                                      permissions: @escaping (Project) -> AgentPermissionProfile) -> SettingsProposalBoundary.Kind? {
         let executable = executable ?? URL(fileURLWithPath: "/usr/bin/true")
         if profile.engine == .codex {
@@ -37,7 +39,7 @@ enum AgentIntegrationFactory {
         guard profile.engine == .claude, !UserDefaults.standard.bool(forKey: claudeBoundaryOffKey) else { return nil }
         return .init(provider: profile.name) { project in
             let permissions = permissions(project)
-            guard ClaudeIntegration.boundaryCandidate(permissions, userChromeEnabled: userChromeEnabled) else { return nil }
+            guard ClaudeIntegration.boundaryCandidate(permissions, userChromeEnabled: userChromeEnabled, userChromeReady: userChromeReady) else { return nil }
             var input = ExternalSandboxPlanner.Input(project: project.path, profile: permissions, providerHome: home,
                                                      providerExecutable: executable, resources: resources)
             input.settingsFile = true

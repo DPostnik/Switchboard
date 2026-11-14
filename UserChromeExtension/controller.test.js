@@ -1,13 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
-import {Controller, validateFiles, websiteURL} from './controller.js';
+import {Controller, validateFiles, validateInput, keyEvents, jpegSize, websiteURL} from './controller.js';
 globalThis.crypto ||= webcrypto;
 const event = () => ({addListener() {}});
+// A minimal JPEG header: SOI and a baseline start-of-frame marker with the given size.
+function jpeg(width, height) {
+  const bytes = [0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0x00, 0x00, 0xff, 0xc0, 0x00, 0x11, 0x08, height >> 8, height & 255, width >> 8, width & 255, 3, 0, 0, 0, 0];
+  return Buffer.from(bytes).toString('base64');
+}
 function mockChrome(stored = {}) {
   const calls = [], tabs = new Map([[10, {id: 10, url: 'https://example.org/', title: 'Existing'}]]);
   const chrome = {
-    calls, tabsById: tabs,
+    calls, tabsById: tabs, page: {}, viewport: {pageX: 0, pageY: 0, clientWidth: 800, clientHeight: 600}, jpeg: jpeg(800, 600),
     storage: {local: {async get() {return structuredClone(stored);}, async set(value) {Object.assign(stored, structuredClone(value));}}},
     runtime: {id: 'testextension', connectNative() {return {onMessage: event(), onDisconnect: event(), postMessage(value) {calls.push(['post', value]);}};}},
     alarms: {async create() {}},
@@ -25,9 +30,16 @@ function mockChrome(stored = {}) {
         calls.push(['cdp', method, params]);
         if (method === 'Page.getFrameTree') return {frameTree: {frame: {id: 'frame1', url: tabs.get(target.tabId).url}}};
         if (method === 'Page.createIsolatedWorld') return {executionContextId: 1};
-        if (method === 'Runtime.evaluate') return {result: {value: {url: tabs.get(target.tabId).url, documentToken: 'doc1', x: 30, y: 40}}};
-        if (method === 'Page.getLayoutMetrics') return {cssVisualViewport: {pageX: 0, pageY: 0, clientWidth: 800, clientHeight: 600}};
-        if (method === 'Page.captureScreenshot') return {data: 'AA=='};
+        if (method === 'Runtime.evaluate') {
+          const name = params.expression.match(/^\(function (\w+)/)?.[1];
+          const base = {url: tabs.get(target.tabId).url, documentToken: 'doc1', x: 30, y: 40};
+          const page = chrome.page[name];
+          return {result: {value: typeof page === 'function' ? page(JSON.parse(params.expression.slice(params.expression.lastIndexOf(')(') + 2, -1)), params) : {...base, ...page}}};
+        }
+        if (method === 'Page.getLayoutMetrics') return {cssVisualViewport: {...chrome.viewport}};
+        if (method === 'Page.captureScreenshot') return {data: chrome.jpeg};
+        if (method === 'DOM.getFrameOwner') return {backendNodeId: 7};
+        if (method === 'DOM.getBoxModel') return {model: {content: [100, 200, 500, 200, 500, 500, 100, 500]}};
         return {};
       }
     }
@@ -345,4 +357,161 @@ test('rename publishes Unicode metadata without reconnecting or revoking leases'
   assert.equal(controller.port, port);
   assert.equal(controller.session, session);
   assert.equal(controller.leases.size, 1);
+});
+
+const observed = {expectedURL: 'https://example.org/', documentToken: 'doc1'};
+const inputs = calls => calls.filter(c => c[0] === 'cdp' && c[1].startsWith('Input.')).map(c => c[2]);
+async function shot(controller) {
+  return controller.dispatch(request(controller, 'screenshot', {}, {leaseId: 'lease1'}));
+}
+
+test('input arguments are validated before Chrome is touched', () => {
+  for (const bad of [
+    {action: 'click'}, {action: 'click', ref: 'ref_1', x: 1, y: 2}, {action: 'click', x: 1}, {action: 'click', ref: 'button'},
+    {action: 'hover', x: 1, y: 2}, {action: 'type', text: ''}, {action: 'type', text: 'a', x: 1, y: 2},
+    {action: 'key', key: 'F13'}, {action: 'key', key: 'cmd+cmd+a'}, {action: 'key', key: 'Enter;rm'},
+    {action: 'scroll', deltaY: 0}, {action: 'scroll', deltaY: 9000}, {action: 'scroll_to'},
+    {action: 'set_value', ref: 'ref_1'}, {action: 'set_value', ref: 'ref_1', value: 'a', checked: true}
+  ]) assert.throws(() => validateInput(bad), undefined, JSON.stringify(bad));
+  for (const good of [
+    {action: 'click', ref: 'ref_1'}, {action: 'click', x: 10, y: 20}, {action: 'triple_click', x: 0, y: 0},
+    {action: 'type', text: 'hi'}, {action: 'key', key: 'shift+Tab'}, {action: 'key', key: 'cmd+a'},
+    {action: 'scroll', deltaY: 300}, {action: 'scroll', x: 5, y: 5, deltaY: -300}, {action: 'set_value', ref: 'ref_2', checked: false}
+  ]) assert.doesNotThrow(() => validateInput(good), JSON.stringify(good));
+});
+
+test('key chords follow the closed list with CDP modifiers and editing commands', () => {
+  const [down, up] = keyEvents('cmd+a');
+  assert.equal(down.type, 'rawKeyDown');
+  assert.equal(down.modifiers, 4);
+  assert.deepEqual(down.commands, ['selectAll']);
+  assert.equal(up.type, 'keyUp');
+  assert.equal(keyEvents('shift+Tab')[0].modifiers, 8);
+  assert.equal(keyEvents('Enter')[0].text, '\r');
+  assert.equal(keyEvents('shift+a')[0].text, 'A');
+  assert.equal(keyEvents('ctrl+c')[0].text, undefined);
+  assert.equal(keyEvents('F5'), null);
+});
+
+test('screenshot reports its pixel size, document and viewport; JPEG size is read from the image', async () => {
+  assert.deepEqual(jpegSize(jpeg(1280, 720)), {width: 1280, height: 720});
+  assert.equal(jpegSize('AA=='), null);
+  const controller = await paired(); await select(controller);
+  controller.chrome.page.pageInfo = {devicePixelRatio: 2};
+  controller.chrome.viewport = {pageX: 0, pageY: 0, clientWidth: 1600, clientHeight: 1000};
+  controller.chrome.jpeg = jpeg(1280, 800);
+  const result = await shot(controller);
+  assert.equal(result.width, 1280);
+  assert.equal(result.height, 800);
+  assert.equal(result.documentToken, 'doc1');
+  assert.deepEqual(result.viewport, {width: 1600, height: 1000});
+  const capture = controller.chrome.calls.find(c => c[1] === 'Page.captureScreenshot')[2];
+  assert.equal(capture.clip.scale, 1280 / (1600 * 2));
+});
+
+test('coordinate click maps screenshot pixels to CSS pixels and needs a current screenshot', async () => {
+  const controller = await paired(); await select(controller);
+  const click = {action: 'click', x: 640, y: 400, ...observed};
+  await assert.rejects(controller.dispatch(request(controller, 'input', click, {leaseId: 'lease1'})), /screenshot_required/);
+  controller.chrome.viewport = {pageX: 0, pageY: 0, clientWidth: 1600, clientHeight: 1000};
+  controller.chrome.jpeg = jpeg(1280, 800);
+  await shot(controller);
+  controller.chrome.calls.length = 0;
+  const result = await controller.dispatch(request(controller, 'input', click, {leaseId: 'lease1'}));
+  assert.equal(result.performed, 'click');
+  const events = inputs(controller.chrome.calls);
+  assert.deepEqual(events.map(e => e.type), ['mouseMoved', 'mousePressed', 'mouseReleased']);
+  assert.equal(events[1].x, 800);
+  assert.equal(events[1].y, 500);
+  // Scrolling moves what lies under the pixels: the old screenshot no longer maps.
+  controller.chrome.viewport = {...controller.chrome.viewport, pageY: 300};
+  controller.chrome.calls.length = 0;
+  await assert.rejects(controller.dispatch(request(controller, 'input', click, {leaseId: 'lease1'})), /screenshot_stale/);
+  await assert.rejects(controller.dispatch(request(controller, 'input', {...click, y: 900}, {leaseId: 'lease1'})), /screenshot_stale|coordinates_outside/);
+  assert.equal(inputs(controller.chrome.calls).length, 0);
+});
+
+test('coordinate click refuses sensitive fields and file inputs under the point', async () => {
+  const controller = await paired(); await select(controller);
+  await shot(controller);
+  controller.chrome.calls.length = 0;
+  for (const [page, error] of [[{found: true, sensitive: true}, /sensitive_input/], [{found: true, file: true}, /file_input_use_upload/]]) {
+    controller.chrome.page.inspectPoint = page;
+    await assert.rejects(controller.dispatch(request(controller, 'input', {action: 'click', x: 10, y: 10, ...observed}, {leaseId: 'lease1'})), error);
+  }
+  assert.equal(inputs(controller.chrome.calls).length, 0);
+});
+
+test('double, triple and right clicks send counted presses', async () => {
+  const controller = await paired(); await select(controller);
+  for (const [action, button, counts] of [['double_click', 'left', [1, 2]], ['triple_click', 'left', [1, 2, 3]], ['right_click', 'right', [1]]]) {
+    controller.chrome.calls.length = 0;
+    await controller.dispatch(request(controller, 'input', {action, ref: 'ref_1', ...observed}, {leaseId: 'lease1'}));
+    const presses = inputs(controller.chrome.calls).filter(e => e.type === 'mousePressed');
+    assert.deepEqual(presses.map(e => e.clickCount), counts);
+    assert.ok(presses.every(e => e.button === button));
+  }
+});
+
+test('typing without a ref goes to a verified, non-sensitive focused field', async () => {
+  const controller = await paired(); await select(controller);
+  const type = {action: 'type', text: 'hello', ...observed};
+  controller.chrome.page.inspectFocus = {focused: true, crossFrame: false, sensitive: true, editable: true};
+  await assert.rejects(controller.dispatch(request(controller, 'input', type, {leaseId: 'lease1'})), /sensitive_input/);
+  controller.chrome.page.inspectFocus = {focused: false};
+  await assert.rejects(controller.dispatch(request(controller, 'input', type, {leaseId: 'lease1'})), /no_focused_element/);
+  controller.chrome.page.inspectFocus = {focused: true, crossFrame: true};
+  await assert.rejects(controller.dispatch(request(controller, 'input', type, {leaseId: 'lease1'})), /focused_element_unverified/);
+  assert.equal(inputs(controller.chrome.calls).length, 0);
+  controller.chrome.page.inspectFocus = {focused: true, crossFrame: false, sensitive: false, editable: true};
+  await controller.dispatch(request(controller, 'input', type, {leaseId: 'lease1'}));
+  assert.deepEqual(inputs(controller.chrome.calls), [{text: 'hello'}]);
+});
+
+test('scroll goes to a point or the viewport centre, never a fixed corner', async () => {
+  const controller = await paired(); await select(controller);
+  await controller.dispatch(request(controller, 'input', {action: 'scroll', deltaY: 300, ...observed}, {leaseId: 'lease1'}));
+  const wheel = inputs(controller.chrome.calls).find(e => e.type === 'mouseWheel');
+  assert.deepEqual([wheel.x, wheel.y, wheel.deltaY], [400, 300, 300]);
+});
+
+test('input by ref inside a frame is offset by the frame position', async () => {
+  const controller = await paired(); await select(controller);
+  const original = controller.chrome.debugger.sendCommand;
+  controller.chrome.debugger.sendCommand = async (target, method, params) => method === 'Page.getFrameTree'
+    ? {frameTree: {frame: {id: 'frame1', url: 'https://example.org/'}, childFrames: [{frame: {id: 'child', url: 'https://forms.example.org/'}}]}}
+    : original(target, method, params);
+  await controller.dispatch(request(controller, 'input', {action: 'click', ref: 'ref_1', frameId: 'child', ...observed}, {leaseId: 'lease1'}));
+  const press = inputs(controller.chrome.calls).find(e => e.type === 'mousePressed');
+  assert.deepEqual([press.x, press.y], [130, 240]);
+  await assert.rejects(controller.dispatch(request(controller, 'input', {action: 'click', x: 1, y: 1, frameId: 'child', ...observed}, {leaseId: 'lease1'})), /coordinates_are_tab_pixels/);
+});
+
+test('set_value clicks a checkbox only when its state differs and selects options by label', async () => {
+  const controller = await paired(); await select(controller);
+  controller.chrome.page.resolveElement = {checked: true, type: 'checkbox'};
+  const same = await controller.dispatch(request(controller, 'input', {action: 'set_value', ref: 'ref_1', checked: true, ...observed}, {leaseId: 'lease1'}));
+  assert.equal(same.unchanged, true);
+  assert.equal(inputs(controller.chrome.calls).length, 0);
+  await controller.dispatch(request(controller, 'input', {action: 'set_value', ref: 'ref_1', checked: false, ...observed}, {leaseId: 'lease1'}));
+  assert.equal(inputs(controller.chrome.calls).filter(e => e.type === 'mousePressed').length, 1);
+  controller.chrome.page.resolveElement = {checked: true, type: 'radio'};
+  await assert.rejects(controller.dispatch(request(controller, 'input', {action: 'set_value', ref: 'ref_1', checked: false, ...observed}, {leaseId: 'lease1'})), /radio_cannot_be_unchecked/);
+  controller.chrome.page.selectOption = {selected: 'Poland'};
+  const chosen = await controller.dispatch(request(controller, 'input', {action: 'set_value', ref: 'ref_3', value: 'Poland', ...observed}, {leaseId: 'lease1'}));
+  assert.equal(chosen.selected, 'Poland');
+});
+
+test('a zoomed screenshot keeps the full screenshot mapping', async () => {
+  const controller = await paired(); await select(controller);
+  controller.chrome.viewport = {pageX: 0, pageY: 0, clientWidth: 1600, clientHeight: 1000};
+  controller.chrome.jpeg = jpeg(1280, 800);
+  await shot(controller);
+  const zoom = await controller.dispatch(request(controller, 'screenshot', {clip: {x: 100, y: 100, width: 200, height: 100}}, {leaseId: 'lease1'}));
+  assert.deepEqual(zoom.zoom, {x: 100, y: 100, width: 200, height: 100});
+  const capture = controller.chrome.calls.filter(c => c[1] === 'Page.captureScreenshot').at(-1)[2];
+  assert.deepEqual([capture.clip.x, capture.clip.y, capture.clip.width, capture.clip.height], [125, 125, 250, 125]);
+  assert.equal(controller.shots.get(10).imageWidth, 1280);
+  await assert.rejects(controller.dispatch(request(controller, 'screenshot', {clip: {x: 1200, y: 0, width: 200, height: 10}}, {leaseId: 'lease1'})), /clip_outside_screenshot/);
+  await assert.rejects(controller.dispatch(request(controller, 'screenshot', {waitSeconds: 60}, {leaseId: 'lease1'})), /invalid_wait_seconds/);
 });

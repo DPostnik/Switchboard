@@ -51,7 +51,7 @@
     "message": "This action ID was already dispatched. Observe the page before continuing."
   },
   "frameInputUnsupported": {
-    "message": "Input in this frame is not supported. Ask the user to interact with it."
+    "message": "Input in this frame is not supported: it runs in another browser process. Click it by screenshot coordinates or ask the user to interact with it."
   },
   "copyCode": {
     "message": "Copy code"

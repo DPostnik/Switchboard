@@ -64,22 +64,56 @@ Operations and parameters:
 - `open`: `{url}`. Creates an inactive tab in the chat's Switchboard group.
 - `select`: `{tabId,userSelected:true}`. Coordinator must verify the user's explicit
   request. Existing tabs stay in their original groups and remain open.
-- `read`, `find`, `verify`: optional `{frameId,query}`; find requires nonempty query.
-  Returns bounded page text, controls with `ref`, `documentToken`, URL, and frame IDs.
+- `read`, `find`, `verify`: optional `{frameId,query}`; find requires nonempty query;
+  read also takes `waitSeconds` (0.1-10, a pause before observing).
+  Returns bounded page text, controls with `ref`, `documentToken`, URL, `alerts`
+  (`role=alert`, `aria-live=assertive`) and frame IDs. Open shadow roots are walked.
+  Controls carry form state: `value` (bounded; selected option labels, chosen file
+  names), `checked`, `required`, `invalid`, `error` (`aria-errormessage` or the
+  browser validation message) and `description` (`aria-describedby`); links carry
+  `href`. Sensitive fields (password, hidden, one-time-code, `cc-*`) never report a
+  value. Find ranks controls lexically over name, value, description, link address
+  and role words (ru/en) and returns at most 50 with a `score`.
   Verify is a fresh observation for the caller to compare with its expected result.
-- `screenshot`: JPEG viewport, maximum side 1280, `{mimeType,base64}` response.
+- `screenshot`: JPEG of the main-frame viewport, longer side at most 1280 image pixels
+  (device pixel ratio included). Response `{mimeType,base64,width,height,url,
+  documentToken,viewport:{width,height}}`. The extension keeps the latest full
+  screenshot's pixel mapping per tab for input by `x,y`. `clip:{x,y,width,height}` in
+  pixels of that screenshot returns a zoomed region (`zoom`) at up to native
+  resolution and keeps the mapping. Optional `waitSeconds` as for read.
   Rejects output over 700,000 base64 characters.
 Pointer and key input select the leased tab before dispatch because Chrome can
 acknowledge input to inactive tabs without delivering DOM events. The browser
 window is not foregrounded, and no later action restores an earlier selected tab.
 Reads and screenshots remain in the background.
 
-- `input`: `{action,expectedURL,documentToken,ref,...}`. Click and type use an
-  observed main-frame ref. Type additionally takes `text` (up to 5,000 characters).
-  Key takes `ref,key` and supports Enter, Tab, Escape, Backspace, and arrows.
-  Scroll takes `deltaY` and optional `deltaX` (absolute maximum 2,000 each).
-  Dialog takes `accept` and optional `promptText`, requires an observed document
-  and matching JavaScript dialog event, and bypasses blocked page evaluation.
+- `input`: `{action,expectedURL,documentToken,frameId?,ref?|x,y,...}`. Arguments are
+  validated before Chrome is touched.
+  - `click`, `double_click`, `triple_click`, `right_click`: exactly one of `ref` and
+    `x,y`. `x,y` are pixels of the latest full screenshot of the tab (no `frameId`);
+    they are refused (`screenshot_stale`) when the document, URL, viewport size or
+    scroll position changed since it. The element under the point is classified
+    first, through same-origin frames and open shadow roots: sensitive fields and
+    file inputs are refused (`file_input_use_upload`); a point in a frame the
+    debugger cannot enter is clicked and reported `classified:false`.
+  - `type`: `text` (1-5,000 characters). With `ref` it clicks and focuses the field;
+    without it inserts into the focused element, which must be verifiable, editable
+    and not sensitive.
+  - `key`: a closed list (Enter, Tab, Escape, Backspace, Delete, Space, arrows, Home,
+    End, PageUp, PageDown, one printable ASCII character) with modifier chords
+    (`cmd+a`, `shift+Tab`, `ctrl+c`), at `ref` or the focused element. A printable key
+    without a ref follows the sensitive-field rule of type.
+  - `scroll`: `deltaY`/`deltaX` (absolute maximum 5,000), at `ref`, at `x,y` or at the
+    viewport centre. `scroll_to`: `ref`, scrolls it into view without a click.
+  - `set_value`: `ref` plus `value` (label or value of a native select option) or
+    `checked` (checkbox, switch or radio; clicked only when the state differs; a
+    radio cannot be unchecked).
+  - `dialog`: `accept` and optional `promptText`; requires an observed document and
+    a matching JavaScript dialog event, and bypasses blocked page evaluation.
+  Input by ref works in frames this tab's debugger can enter (same-process frames,
+  `frameId` from read); positions are offset by the frame's box
+  (`DOM.getFrameOwner`, `DOM.getBoxModel`). Frames in another process are refused
+  with `frame_input_unsupported`.
 - `upload`: `{expectedURL,documentToken,ref,files:[{name,mimeType,base64}]}`. The
   coordinator approves project paths and reads bytes. The extension accepts no
   paths; it sets a file input using bounded File/DataTransfer objects. At most ten
@@ -113,7 +147,8 @@ Service-worker recovery reconnects transport only. Old requests are never retrie
 User-owned tabs are never moved, closed, or restored from disk.
 
 Cross-origin frames can be selected for reads when Chrome exposes their debugger
-execution context. Cross-frame coordinate input is explicitly rejected in v1.
+execution context. Out-of-process frames would need `Target.setAutoAttach` child
+sessions (Chrome 125+); they are not attached, so input there needs coordinates.
 Out-of-process frame coverage, JS dialogs, File/DataTransfer upload acceptance,
 and real signed-in session behavior require the manual fixture acceptance gate;
 mock tests do not establish browser compatibility. Closed shadow DOM, native

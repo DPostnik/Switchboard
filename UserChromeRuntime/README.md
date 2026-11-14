@@ -62,7 +62,7 @@ then exits and removes its socket within 250 ms. Before replacing runtime files,
 the installer must receive that acknowledgement and verify socket disappearance.
 Never retry a shutdown with an uncertain outcome; inspect status first.
 
-`status` is a bounded metadata snapshot with wire `version`, `runtimeRevision` (3),
+`status` is a bounded metadata snapshot with wire `version`, `runtimeRevision` (4),
 `shuttingDown`, `enabled`, `selectedProfileId`,
 `profiles` (`id`, `name`, `connected`, `paired`; compatibility `profileId`/`profileName`),
 and active leases. It never includes pairing or capability secrets.
@@ -90,6 +90,14 @@ The extension never receives the app's chat grant or control token. Responses ar
 `{type:"response",id,result}` or `{type:"response",id,error:{code,message}}`.
 
 Operations are status/list/select/open/read/find/screenshot/input/verify/upload/release.
+Their arguments are documented in `UserChromeExtension/README.md`. The extension's
+`hello` carries a feature `revision` (absent means 1; current 2). The coordinator refuses
+arguments newer than the connected extension with `extension_update_required` before
+the action journal, so the same action ID works after a reload: revision 2 covers
+coordinate input, double/triple/right click, `scroll_to`, `set_value`, type and key
+without a ref, key chords, scroll at a ref, input with `frameId`, and `waitSeconds`/`clip`.
+The MCP adapter returns a screenshot as an image plus a text block with its metadata
+(`width`, `height`, `url`, `documentToken`, `viewport`, `zoom`).
 Open/select receive an app-issued lease ID and return `tabId`. Explicit existing-tab
 selection requires `userSelected:true`. Every other tab operation checks the durable
 (profile, tab, chat) lease. Input/upload require the last observation's exact URL and

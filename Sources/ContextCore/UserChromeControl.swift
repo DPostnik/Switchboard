@@ -9,6 +9,8 @@ public actor UserChromeControl {
     public static let hostName = "local.daniil.switchboard.browser"
     public static var directory: URL { Locations.root.appendingPathComponent("user-chrome") }
     public static var extensionDirectory: URL { directory.appendingPathComponent("extension") }
+    /// The extension runtime was installed from the app's settings (its control token exists). Pairing is not checked.
+    public static var isInstalled: Bool { FileManager.default.fileExists(atPath: directory.appendingPathComponent("control-token").path) }
     private var coordinator: Process?
 
     public struct Profile: Decodable, Identifiable, Sendable {

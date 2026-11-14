@@ -76,8 +76,15 @@ public actor ClaudeJobRunner: AgentScheduledExecutor {
     public static func browserArguments(_ server: [String]) throws -> [String] { try mcpArguments(browser: server) }
     /// One `--mcp-config` with the app's browser server (when given) and the project's approved servers.
     /// Only the browser's tools are pre-allowed; project tools go through the app's `can_use_tool` answers.
-    static func mcpArguments(browser server: [String]?, project: [String: JSONValue] = [:], chats: [String]? = nil) throws -> [String] {
+    static func mcpArguments(browser server: [String]?, project: [String: JSONValue] = [:], chats: [String]? = nil,
+                             userChrome: [String]? = nil) throws -> [String] {
         var servers = project
+        // The app's adapter for the user's Chrome (chats under the boundary). Not pre-allowed: the app answers each call.
+        if let userChrome {
+            servers[ClaudeIntegration.userChromeServerName] = .object([
+                "type": .string("stdio"), "command": .string("/usr/bin/python3"), "args": .array(userChrome.map(JSONValue.string))
+            ])
+        }
         if let server {
             servers["switchboard_browser"] = .object([
                 "type": .string("stdio"), "command": .string("/usr/bin/python3"), "args": .array(server.map(JSONValue.string))
