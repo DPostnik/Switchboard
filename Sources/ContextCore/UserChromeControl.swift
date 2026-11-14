@@ -72,6 +72,12 @@ public actor UserChromeControl {
         try await ensureStarted()
         _ = try await command(["select-profile", "--profile-id", id], control: true)
     }
+    /// Resolves metadata only. Pairing still requires explicit confirmation and revalidates the code.
+    public func resolvePairingCode(_ code: String) async throws -> Profile {
+        try await ensureStarted()
+        return try JSONDecoder().decode(Profile.self, from: await command(
+            ["resolve-pairing-code", "--code", code], control: true))
+    }
     public func pair(profile: String, code: String) async throws {
         try await ensureStarted()
         _ = try await command(["pair", "--profile-id", profile, "--code", code], control: true)
@@ -152,8 +158,11 @@ public actor UserChromeControl {
                 let object = errorBytes.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: String] }
                 let code = object?["error"] ?? ""
                 switch code {
-                case "pairing_code_mismatch":
-                    throw ClientFailure(L10n.text("Код не совпал. Проверь профиль и код в расширении.", "The code did not match. Check the profile and the code in the extension."))
+                case "pairing_code_ambiguous":
+                    throw ClientFailure(L10n.text("Несколько профилей показывают одинаковый код. Перезагрузи расширение в нужном Chrome и введи новый код.",
+                                                 "Several profiles show the same code. Reload the extension in the Chrome you want and enter its new code."))
+                case "invalid_pairing_code", "pairing_code_mismatch":
+                    throw ClientFailure(L10n.text("Код не найден. Открой расширение в нужном Chrome и скопируй текущий код.", "Code not found. Open the extension in the Chrome you want and copy its current code."))
                 case "profile_not_paired":
                     throw ClientFailure(L10n.text("Сначала свяжи выбранный профиль.", "Pair the selected profile first."))
                 case "coordinator_busy":

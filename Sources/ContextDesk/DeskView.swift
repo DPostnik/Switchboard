@@ -1765,6 +1765,7 @@ struct SettingsView: View {
                 .tag("advanced")
         }
         .frame(height: 600)
+        .disclosureGroupStyle(PointerDisclosureStyle())
     }
 
     private var generalSettings: some View {
@@ -1888,52 +1889,69 @@ struct SettingsView: View {
     }
 
     private var browserSettings: some View {
-        Form {
-            Section(L10n.text("Браузер агента", "Agent browser")) {
-                Toggle(L10n.text("Использовать Chrome DevTools", "Use Chrome DevTools"),
+        ScrollView {
+            VStack(alignment: .leading, spacing: .ui(20)) {
+            GroupBox(L10n.text("Мой Chrome", "My Chrome")) {
+                VStack(alignment: .leading, spacing: .ui(16)) {
+                Toggle(L10n.text("Разрешить подключение моего Chrome", "Allow my Chrome to connect"),
+                       isOn: Binding(get: { model.state.userChromeEnabled != false }, set: { model.selectUserChromeEnabled($0) }))
+                UserChromeSetupView(enabled: model.state.userChromeEnabled != false)
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(.ui(12))
+            }
+            GroupBox(L10n.text("Браузер агента", "Agent browser")) {
+                VStack(alignment: .leading, spacing: .ui(12)) {
+                Toggle(L10n.text("Включить отдельный браузер для агентов", "Enable a separate browser for agents"),
                        isOn: Binding(get: { model.state.browserEnabled == true }, set: {
                            model.selectBrowserEnabled($0); browserApply.schedule(model: model)
                        }))
-                Text(L10n.text("У каждого чата свой Chrome for Testing и сохранённый профиль. Чаты работают параллельно. В меню «Браузер» можно импортировать входы из выбранного профиля Chrome или войти на сайты вручную. Браузеры остаются открытыми после переподключения.", "Each chat has its own Chrome for Testing and saved profile. Chats work in parallel. Use the Browser menu to import sign-ins from a selected Chrome profile, or sign in manually. Browsers stay open after reconnecting."))
+                Text(L10n.text("Отдельный Chrome со своим профилем для каждого чата. Войти на сайты можно вручную или импортировать входы через меню браузера чата.",
+                               "A separate Chrome with its own profile for each chat. Sign in manually or import sign-ins through the chat’s browser menu."))
                     .font(.ui(.callout)).foregroundStyle(.secondary)
-                Picker(L10n.text("Одновременно открытых браузеров", "Simultaneously open browsers"),
-                       selection: Binding(get: { parallelBrowserLimit }, set: {
-                           guard $0 != parallelBrowserLimit else { return }
-                           parallelBrowserLimit = $0; browserApply.schedule(model: model)
-                       })) {
-                    ForEach(1...8, id: \.self) { Text(String($0)).tag($0) }
-                }
-                Text(L10n.text("По умолчанию — 2. При достижении лимита заверши неиспользуемый Chrome через Cmd+Q; открытые браузеры автоматически не закрываются.", "Default: 2. At the limit, quit an unused Chrome with Cmd+Q; open browsers are never closed automatically."))
-                    .font(.ui(.caption)).foregroundStyle(.secondary)
                 if browserApply.pending {
                     Label(L10n.text("Применится, когда чаты освободятся", "Applies when chats are idle"), systemImage: "clock")
                         .font(.ui(.callout)).foregroundStyle(DeskPalette.attentionInk)
-                    Text(L10n.text("Codex переподключится сам, когда не будет выполняющихся ходов, одобрений, сообщений в очереди и фоновых задач. Действия не повторяются.",
-                                   "Codex reconnects on its own once no turn, approval, queued message or background task is active. No action is replayed."))
-                        .font(.ui(.caption)).foregroundStyle(.secondary)
                 } else if model.connecting {
                     Label(L10n.text("Подключение…", "Connecting…"), systemImage: "arrow.triangle.2.circlepath")
                         .font(.ui(.callout)).foregroundStyle(.secondary)
-                } else {
-                    Text(L10n.text("Изменения применяются сами: Codex переподключается, когда все чаты свободны. Браузер открывается при первом обращении агента.",
-                                   "Changes apply on their own: Codex reconnects once every chat is idle. The browser opens on the agent’s first browser request."))
-                        .font(.ui(.caption)).foregroundStyle(.secondary)
                 }
-                Button(L10n.text("Инструкция по установке", "Installation instructions")) {
-                    if let resources = Bundle.main.resourceURL {
-                        NSWorkspace.shared.open(resources.appendingPathComponent("BrowserRuntime/README.md"))
-                    }
+                DisclosureGroup(L10n.text("Дополнительные настройки", "Advanced settings")) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Picker(L10n.text("Одновременно открытых браузеров", "Simultaneously open browsers"),
+                               selection: Binding(get: { parallelBrowserLimit }, set: {
+                                   guard $0 != parallelBrowserLimit else { return }
+                                   parallelBrowserLimit = $0; browserApply.schedule(model: model)
+                               })) {
+                            ForEach(1...8, id: \.self) { Text(String($0)).tag($0) }
+                        }
+                        Text(L10n.text("По умолчанию — 2. При достижении лимита закрой неиспользуемый браузер. Приложение не закрывает его автоматически.",
+                                       "Default: 2. At the limit, close an unused browser. The app does not close it automatically."))
+                            .font(.ui(.caption)).foregroundStyle(.secondary)
+                        Text(L10n.text("Управление работает через Chrome DevTools. Браузер открывается при первом обращении агента.",
+                                       "Control uses Chrome DevTools. The browser opens on the agent’s first request."))
+                            .font(.ui(.caption)).foregroundStyle(.secondary)
+                        Button(L10n.text("Техническая инструкция", "Technical instructions")) {
+                            if let resources = Bundle.main.resourceURL {
+                                NSWorkspace.shared.open(resources.appendingPathComponent("BrowserRuntime/README.md"))
+                            }
+                        }
+                    }.padding(.top, 8)
                 }
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(.ui(12))
             }
-            Section(L10n.text("Мой Chrome", "My Chrome")) {
-                Toggle(L10n.text("Разрешить агентам управлять моим Chrome", "Let agents control my Chrome"),
-                       isOn: Binding(get: { model.state.userChromeEnabled != false }, set: { model.selectUserChromeEnabled($0) }))
-                UserChromeSetupView(enabled: model.state.userChromeEnabled != false)
-                Text(L10n.text("Claude продолжает использовать расширение Claude in Chrome со своим аккаунтом Claude.", "Claude continues to use the Claude in Chrome extension with its Claude account."))
+            DisclosureGroup(L10n.text("Совместимость", "Compatibility")) {
+                VStack(alignment: .leading, spacing: .ui(10)) {
+                Text(L10n.text("Codex и чаты Claude под внешней границей используют расширение Switchboard. Чаты Claude без внешней границы используют Claude in Chrome.",
+                               "Codex and Claude chats under the external boundary use the Switchboard extension. Claude chats outside the boundary use Claude in Chrome."))
                     .font(.ui(.caption)).foregroundStyle(.secondary)
-                Text(L10n.text("Codex переподключится автоматически, когда приложение освободится. Claude переподключается сразу, если его чаты свободны; иначе переключи настройку после завершения задач.", "Codex reconnects automatically once the app is idle. Claude reconnects immediately if its chats are idle; otherwise switch the setting after tasks finish."))
+                Text(L10n.text("Изменения применяются, когда чаты свободны. Выполненные действия не повторяются.",
+                               "Changes apply when chats are idle. Completed actions are not replayed."))
                     .font(.ui(.caption)).foregroundStyle(.secondary)
+                }.padding(.top, .ui(8))
             }
-        }.formStyle(.grouped)
+            }
+            .font(.ui(.body))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.ui(20))
+        }
     }
 }

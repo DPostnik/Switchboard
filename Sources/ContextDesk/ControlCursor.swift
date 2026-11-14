@@ -1,4 +1,5 @@
 import AppKit
+import ContextCore
 import ContextTranscript
 import SwiftUI
 
@@ -30,8 +31,14 @@ struct PointerDisclosureStyle: DisclosureGroupStyle {
                     Image(systemName: configuration.isExpanded ? "chevron.down" : "chevron.right")
                         .font(.ui(.caption))
                     configuration.label
-                }.contentShape(Rectangle())
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, minHeight: .ui(32), alignment: .leading)
+                .contentShape(Rectangle())
             }.buttonStyle(PointerButtonStyle(base: .plain))
+                .accessibilityValue(configuration.isExpanded
+                    ? L10n.text("Развёрнуто", "Expanded")
+                    : L10n.text("Свёрнуто", "Collapsed"))
             if configuration.isExpanded { configuration.content }
         }
     }

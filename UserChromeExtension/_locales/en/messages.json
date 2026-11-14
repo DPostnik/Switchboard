@@ -6,7 +6,7 @@
     "message": "Connect selected Chrome tabs to Switchboard through a local native helper."
   },
   "pairInstructions": {
-    "message": "Enter this code in Switchboard to pair this Chrome profile."
+    "message": "Open Browser settings in Switchboard and paste this code under Connect my Chrome."
   },
   "profileName": {
     "message": "Profile name"
@@ -24,7 +24,7 @@
     "message": "Stop all chats"
   },
   "reconnect": {
-    "message": "Connect"
+    "message": "Reconnect"
   },
   "stopNotice": {
     "message": "Stop cancels queued actions and detaches Switchboard. It cannot undo completed website actions. Your tabs stay open."
@@ -45,12 +45,30 @@
     "message": "Switchboard is disconnected"
   },
   "lease": {
-    "message": "Chat $1 · Tab $2"
+    "message": "A chat is controlling tab $2"
   },
   "outcomeUnknown": {
     "message": "This action ID was already dispatched. Observe the page before continuing."
   },
   "frameInputUnsupported": {
     "message": "Input in this frame is not supported. Ask the user to interact with it."
+  },
+  "copyCode": {
+    "message": "Copy code"
+  },
+  "codeCopied": {
+    "message": "Code copied. Paste it in Switchboard settings."
+  },
+  "copyFailed": {
+    "message": "Could not copy. Select the code and copy it manually."
+  },
+  "nameSaved": {
+    "message": "Name saved."
+  },
+  "profileSettings": {
+    "message": "Profile name and details"
+  },
+  "nextStep": {
+    "message": "Profile connected. Turn on My Chrome in the role menu of the Switchboard chat that needs it."
   }
 }

@@ -714,3 +714,12 @@ Profile rename correction (2026-11-14): extension Save sends profileRenamed meta
 the existing native connection (channel 3). Only that connection's profile name changes,
 including its saved paired name; grants, pairing, sessions and tab leases stay unchanged.
 No permission invariant or decision changes. Live verification is pending.
+
+Chrome setup UX (2026-11-14): code-first discovery uses the existing app-owned
+native coordinator (channel 3). resolve-pairing-code is authenticated with the
+app's control token; it returns metadata only for a unique live unpaired profile.
+Missing/duplicate codes fail closed; explicit Pair still revalidates the code.
+Discovery and automatic status refresh never pair/select/grant. Saved profile
+selection remains explicit and does not move existing chat grants. Clipboard copy
+runs only on the user's popup click, with no new extension permission.
+No role, boundary, grant invariant or taken decision changes. Live UI checks pending.

@@ -9,3 +9,9 @@ button { cursor: pointer; margin-top: 8px; }
 #profile { overflow-wrap: anywhere; font-size: 11px; } .note { opacity: .75; font-size: 11px; }
 .stop { background: #af2020; color: white; margin-right: 8px; }button:disabled { opacity: .5; cursor: default; }
 ul { padding-left: 20px; max-height: 180px; overflow: auto; } [hidden] { display: none !important; }
+
+section { padding: 12px; border: 1px solid #8886; border-radius: 10px; }
+details { margin-top: 16px; } summary { cursor: pointer; margin-bottom: 8px; }
+#feedback { color: light-dark(#126737, #8ce7ae); }
+#status { font-weight: 600; }
+#code { flex: 1; }

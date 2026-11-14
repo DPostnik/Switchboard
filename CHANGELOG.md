@@ -4,6 +4,10 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Simplify Chrome setup with visible code entry, profile discovery, one saved-profile list, automatic status updates, and clearer extension guidance.
+
+- Keep browser connection code entry readable at larger interface sizes and make disclosure headers clickable across their full row in all settings tabs.
+
 - Fix Chrome profile names saved in the extension not reaching Switchboard's connection picker.
 
 - Release the installed verification build after live checks finish, without waiting for publication; record failed live checks explicitly with `fail-live`.

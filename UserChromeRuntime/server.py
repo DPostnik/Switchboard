@@ -158,7 +158,16 @@ class Coordinator:
         command = request.get('command')
         with self.lock:
             require(not self.shutting_down, 'coordinator_shutting_down')
-            if command == 'select-profile':
+            if command == 'resolve-pairing-code':
+                code = request.get('code')
+                require(isinstance(code, str) and len(code) == 6 and code.isascii() and code.isdigit(), 'invalid_pairing_code')
+                matches = [(key, link) for key, link in self.links.items()
+                           if not link['paired'] and hmac.compare_digest(link['pairingCode'], code)]
+                require(matches, 'pairing_code_mismatch')
+                require(len(matches) == 1, 'pairing_code_ambiguous')
+                key, link = matches[0]
+                return {'id': key, 'name': link['profileName'], 'connected': True, 'paired': False}
+            elif command == 'select-profile':
                 profile = request.get('profileId')
                 require(profile in self.state['profiles'], 'profile_not_paired')
                 self.state['selectedProfileId'] = profile
@@ -643,7 +652,7 @@ def mcp(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=('serve', 'native', 'mcp', 'status', 'pair', 'grant', 'revoke', 'set-enabled', 'select-profile', 'shutdown-if-idle'))
+    parser.add_argument('command', choices=('serve', 'native', 'mcp', 'status', 'resolve-pairing-code', 'pair', 'grant', 'revoke', 'set-enabled', 'select-profile', 'shutdown-if-idle'))
     parser.add_argument('--state-dir', required=True)
     parser.add_argument('--extension-id')
     parser.add_argument('--chat-id')

@@ -253,6 +253,35 @@ class Transport(unittest.TestCase):
                 self.assertEqual(saved['profiles']['profile']['name'], 'Даниил Посник')
             self.coordinator.links['profile']['profileName'] = 'Fixture'
 
+    def test_code_lookup_is_unique_authenticated_and_does_not_pair(self):
+        self.coordinator.links['profile']['paired'] = False
+        self.coordinator.state['profiles'].pop('profile')
+        before = json.dumps(self.coordinator.state, sort_keys=True)
+        result = self.control('resolve-pairing-code', code='123456')
+        self.assertEqual(result, dict(id='profile', name='Fixture', connected=True, paired=False))
+        self.assertEqual(json.dumps(self.coordinator.state, sort_keys=True), before)
+        for code in ('000000', '１２３４５６', '12345', None):
+            with self.assertRaises(server.Rejected):
+                self.control('resolve-pairing-code', code=code)
+        with self.assertRaisesRegex(server.Rejected, 'control_denied'):
+            self.coordinator.control(dict(command='resolve-pairing-code', controlToken='wrong', code='123456'))
+        self.coordinator.links['other'] = dict(self.coordinator.links['profile'], pairingCode='999999')
+        self.assertEqual(self.control('resolve-pairing-code', code='123456')['id'], 'profile')
+        self.coordinator.links['other']['pairingCode'] = '123456'
+        try:
+            with self.assertRaisesRegex(server.Rejected, 'pairing_code_ambiguous'):
+                self.control('resolve-pairing-code', code='123456')
+        finally:
+            self.coordinator.links.pop('other')
+        self.coordinator.links['profile']['pairingCode'] = '654321'
+        with self.assertRaisesRegex(server.Rejected, 'pairing_code_mismatch'):
+            self.control('pair', profileId=result['id'], code='123456')
+        self.assertNotIn('profile', self.coordinator.state['profiles'])
+
+    def test_code_lookup_excludes_already_paired_profiles(self):
+        with self.assertRaisesRegex(server.Rejected, 'pairing_code_mismatch'):
+            self.control('resolve-pairing-code', code='123456')
+
     def test_grant_renewal_and_default_profile(self):
         renewed = self.control('grant', chatId='chat', projectRoot=str(self.root))
         self.assertEqual(renewed['capability'], self.grant['capability'])

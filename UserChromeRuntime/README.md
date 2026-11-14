@@ -125,3 +125,12 @@ Profile display names can change on the existing native connection: the extensio
 `{type:"event",event:"profileRenamed",profileName:"Name"}` (1-80 characters).
 The coordinator updates only this connection's live and saved name. Authentication,
 grants and leases do not change. Authenticated reconnect also refreshes the saved name.
+
+## Code-first setup
+The app-only control command `resolve-pairing-code --code CODE` requires the private
+control token. It returns only {id,name,connected,paired} for one live unpaired
+profile matching six ASCII digits. No match or multiple matches fail closed.
+It does not pair, select, grant, or expose any secret in its result.
+The user then confirms the returned profile; the existing pair command revalidates
+its code and connection. Names need not be unique. Already paired profiles use
+select-profile without generating a new pairing secret.
