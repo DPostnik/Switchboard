@@ -261,6 +261,9 @@ class Coordinator:
         with self.lock:
             require(profile not in self.links, 'profile_already_connected')
             self.links[profile] = info
+            if paired:
+                paired['name'] = info['profileName']
+                self.save()
             self.welcome(profile)
         try:
             while True:
@@ -268,7 +271,14 @@ class Coordinator:
                 if message is None:
                     break
                 with self.lock:
-                    if message.get('type') == 'event' and message.get('event') == 'stop':
+                    if message.get('type') == 'event' and message.get('event') == 'profileRenamed':
+                        name = message.get('profileName')
+                        require(isinstance(name, str) and 0 < len(name) <= 80, 'invalid_profile_name')
+                        info['profileName'] = name
+                        if profile in self.state['profiles']:
+                            self.state['profiles'][profile]['name'] = name
+                            self.save()
+                    elif message.get('type') == 'event' and message.get('event') == 'stop':
                         self.revoke(message.get('chatId'), profile, message.get('tabId'))
                     elif message.get('type') == 'event' and message.get('event') == 'detached':
                         tab = message.get('tabId')

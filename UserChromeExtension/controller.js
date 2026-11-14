@@ -56,6 +56,13 @@ export class Controller {
       paired: !!this.session, connected: !!this.port, error: this.error,
       leases: [...this.leases.values()].map(({leaseId, chatId, tabId, created}) => ({leaseId, chatId, tabId, created}))};
   }
+  async rename(name) {
+    this.profileName = name.trim() || 'Chrome';
+    await this.chrome.storage.local.set({profileName: this.profileName});
+    // Metadata only: preserve the connection, grants and active tab leases.
+    this.send({type: 'event', event: 'profileRenamed', profileName: this.profileName});
+    return this.status();
+  }
   async connect() {
     if (this.quarantined) { this.error = 'previous_operation_still_pending'; return; }
     if (this.port) return;

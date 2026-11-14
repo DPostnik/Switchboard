@@ -120,3 +120,8 @@ Real installed-extension, debugger upload, dialogs, cross-origin frame, signed-i
 page and Codex discovery verification remain separate acceptance gates. Local tests
 do not prove those gates. The Python helper is not a separately compiled signed
 native executable; the app packaging signs its containing resources/launcher.
+
+Profile display names can change on the existing native connection: the extension sends
+`{type:"event",event:"profileRenamed",profileName:"Name"}` (1-80 characters).
+The coordinator updates only this connection's live and saved name. Authentication,
+grants and leases do not change. Authenticated reconnect also refreshes the saved name.

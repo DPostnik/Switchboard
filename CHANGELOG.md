@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Fix Chrome profile names saved in the extension not reaching Switchboard's connection picker.
+
 - Release the installed verification build after live checks finish, without waiting for publication; record failed live checks explicitly with `fail-live`.
 
 - Sub-agent chips above the message field are as wide as their names instead of stretching to a fixed width.

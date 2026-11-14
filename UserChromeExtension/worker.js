@@ -14,9 +14,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     if (message?.type === 'stop') return controller.stop();
     if (message?.type === 'connect') { await controller.connect(); return controller.status(); }
     if (message?.type === 'rename' && typeof message.name === 'string' && message.name.trim().length <= 80) {
-      controller.profileName = message.name.trim() || 'Chrome';
-      await chrome.storage.local.set({profileName: controller.profileName});
-      return controller.status();
+      return controller.rename(message.name);
     }
     throw new Error('unsupported_popup_action');
   }).then(reply, error => reply({error: error.code || error.message}));

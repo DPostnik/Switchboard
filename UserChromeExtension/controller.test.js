@@ -330,3 +330,19 @@ test('input selects only its leased tab; reads stay in the background and failed
   await assert.rejects(controller.dispatch(request(controller, 'input', params, {leaseId: 'lease1'})), /activation failed/);
   assert.equal(calls.some(c => c[0] === 'cdp' && c[1].startsWith('Input.')), false);
 });
+
+test('rename publishes Unicode metadata without reconnecting or revoking leases', async () => {
+  const chrome = mockChrome();
+  const controller = await paired(chrome);
+  await controller.connect();
+  await select(controller);
+  const session = controller.session;
+  const port = controller.port;
+  await controller.rename(' Даниил Посник ');
+  assert.equal(controller.status().profileName, 'Даниил Посник');
+  assert.equal((await chrome.storage.local.get()).profileName, 'Даниил Посник');
+  assert.deepEqual(chrome.calls.at(-1), ['post', {type: 'event', event: 'profileRenamed', profileName: 'Даниил Посник'}]);
+  assert.equal(controller.port, port);
+  assert.equal(controller.session, session);
+  assert.equal(controller.leases.size, 1);
+});

@@ -709,3 +709,8 @@ per file, and are recorded in `docs/access-reviews.md`.
 | Agent-facing instructions and refusal texts | `Sources/ContextCore/AgentAutonomy.swift`, `sandboxCommandInstructions` in `ClaudeIntegration.swift`, `boundaryCommandInstructions` and the refusal texts in `ClaudeBoundary.swift` |
 | Build under the boundary | `scripts/swift-task.py` (`SWITCHBOARD_EXTERNAL_SANDBOX`) |
 | Skills in chats (user and project) | `Sources/ContextCore/ProjectSkills.swift`, `Sources/ClaudeAdapter/ClaudeSkills.swift`, `CodexClient.swift` (`refreshProjectSkills`) |
+
+Profile rename correction (2026-11-14): extension Save sends profileRenamed metadata over
+the existing native connection (channel 3). Only that connection's profile name changes,
+including its saved paired name; grants, pairing, sessions and tab leases stay unchanged.
+No permission invariant or decision changes. Live verification is pending.

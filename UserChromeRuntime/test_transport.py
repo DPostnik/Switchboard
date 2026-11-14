@@ -234,6 +234,25 @@ class Transport(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         return wire, output
 
+    def test_rename_updates_live_and_saved_names_without_changing_authority(self):
+        session = self.coordinator.links['profile']['sessionId']
+        for paired in (True, False):
+            if not paired:
+                self.coordinator.state['profiles'].pop('profile')
+            server.write_frame(self.stream, {'type': 'event', 'event': 'profileRenamed',
+                                            'profileName': 'Даниил Посник'})
+            deadline = time.monotonic() + 1
+            while self.coordinator.links['profile']['profileName'] != 'Даниил Посник' and time.monotonic() < deadline:
+                time.sleep(0.005)
+            profile = self.coordinator.status()['profiles'][0]
+            self.assertEqual(profile['name'], 'Даниил Посник')
+            self.assertEqual(profile['paired'], paired)
+            self.assertEqual(self.coordinator.links['profile']['sessionId'], session)
+            if paired:
+                saved = json.loads((self.root / 'state.json').read_text())
+                self.assertEqual(saved['profiles']['profile']['name'], 'Даниил Посник')
+            self.coordinator.links['profile']['profileName'] = 'Fixture'
+
     def test_grant_renewal_and_default_profile(self):
         renewed = self.control('grant', chatId='chat', projectRoot=str(self.root))
         self.assertEqual(renewed['capability'], self.grant['capability'])
