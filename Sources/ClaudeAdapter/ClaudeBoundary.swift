@@ -29,8 +29,13 @@ protocol ClaudeTokenSource: Sendable {
 
 enum ClaudeBoundaryToken {
     /// A launch needs this much token lifetime left, and a live worker is relaunched at a turn boundary once less is left.
-    /// The CLI cannot refresh a token handed over on fd 3 (B1: no `oauth_token_refresh` after a 401).
-    static let minimumLifetime: TimeInterval = 30 * 60
+    /// The CLI cannot refresh a token handed over on fd 3 (B1: no `oauth_token_refresh` after a 401; CLI 2.1.323 asks its
+    /// host only for the `claude-desktop`, `local-agent` and `claude-vscode` entrypoints). On the CLI sandbox fallback the
+    /// CLI renews the Keychain item itself, but only once less than 5 minutes remain (2.1.323: `now + 300000 >= expiresAt`,
+    /// no command forces it earlier). Every launch inside this margin falls back, so it is kept short: 10 minutes leave
+    /// about 5 minutes of fallback per token, and a boundary turn that runs longer than its remaining lifetime ends with an
+    /// authentication error (user decision 2026-11-14, was 30 minutes).
+    static let minimumLifetime: TimeInterval = 10 * 60
     /// The OAuth document's `claudeAiOauth.accessToken` and `expiresAt` (milliseconds since 1970).
     static func parse(_ data: Data, now: Date = Date()) -> Result<ClaudeAccessToken, ClaudeTokenFailure> {
         guard let document = try? JSONDecoder().decode(JSONValue.self, from: data),

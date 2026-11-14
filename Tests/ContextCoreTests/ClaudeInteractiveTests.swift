@@ -2663,7 +2663,9 @@ private func boundaryDeveloper(_ root: URL, sharedRoots: [AgentPermissionProfile
         Data(#"{"claudeAiOauth":{"accessToken":"\#(token)","refreshToken":"r","expiresAt":\#(Int(expires.timeIntervalSince1970 * 1000))}}"#.utf8)
     }
     #expect(try ClaudeBoundaryToken.parse(document(now.addingTimeInterval(3600)), now: now).get().value == "sk-ant-oat01-x")
-    #expect(ClaudeBoundaryToken.parse(document(now.addingTimeInterval(600)), now: now) == .failure(.expiring))
+    // Ten minutes of margin (user decision 2026-11-14): 20 minutes left still runs under the boundary, 9 falls back.
+    #expect(try ClaudeBoundaryToken.parse(document(now.addingTimeInterval(1200)), now: now).get().value == "sk-ant-oat01-x")
+    #expect(ClaudeBoundaryToken.parse(document(now.addingTimeInterval(540)), now: now) == .failure(.expiring))
     #expect(ClaudeBoundaryToken.parse(Data("{}".utf8), now: now) == .failure(.missing))
     #expect(ClaudeBoundaryToken.parse(document(now.addingTimeInterval(3600), token: "a\\nb"), now: now) == .failure(.missing))
     let item = ClaudeKeychainTokenSource.item(home: URL(fileURLWithPath: "/tmp/profile"))

@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Claude chats fall back to the CLI sandbox for about 5 minutes per sign-in token instead of about 25: the boundary now needs 10 minutes of token lifetime instead of 30.
+
 - The Switchboard Chrome extension can click by screenshot coordinates, double-, triple- and right-click, type into the focused field, press key chords, scroll at a point, zoom screenshots, set selects and checkboxes, read form values and errors, and act inside same-process frames. Reload the extension in `chrome://extensions` after updating.
 
 - Claude chats with the My Chrome add-on now run under the external boundary: they reach your Chrome through the paired Switchboard extension instead of falling back to the CLI sandbox with approval prompts. Without a paired extension the notice names the setting to fix.
