@@ -18,7 +18,7 @@ struct AgentAppTraits: OptionSet, Sendable {
     /// Models come from the app's catalog (`AgentProfile.modelCatalog`) with fixed effort levels and the advisor setting,
     /// instead of the engine's model discovery and the free-form efforts of the selected model.
     static let catalogModels = Self(rawValue: 1 << 3)
-    /// Chats can get the app's chat-directory and chat-search tools; chat search runs on this agent.
+    /// Chats can get the app's chat-directory and chat-search tools.
     static let chatDirectory = Self(rawValue: 1 << 4)
     /// The phone may change a chat's model and role.
     static let remoteChatSettings = Self(rawValue: 1 << 5)
@@ -28,6 +28,9 @@ struct AgentAppTraits: OptionSet, Sendable {
     /// new chats keep a default model of their own (`SavedState.agentModels`) instead of sharing `SavedState.model`.
     /// Efforts are sent only when the selected model lists them.
     static let sessionModels = Self(rawValue: 1 << 7)
+    /// "Find with agent" chat search runs on the first agent with this trait (its recipe and model are Claude's).
+    /// Separate from `chatDirectory`: other agents may get the chat tools without hosting the search.
+    static let chatSearchHost = Self(rawValue: 1 << 8)
 }
 
 /// Whether an agent's CLI is present, for agents the app does not ship or install itself. A missing CLI keeps the agent

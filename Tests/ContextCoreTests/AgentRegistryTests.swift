@@ -80,7 +80,9 @@ private let thirdProfile = AgentProfile(
     #expect(model.connection(for: JobEngine(rawValue: "unknown")) == nil)
     // Only the factory's traits tell agents apart.
     #expect(model.traits(.originalCodex).isSuperset(of: [.connectsAtLaunch, .sharedEngine, .optimizerPlugins, .remoteChatSettings]))
-    #expect(model.traits(.appClaude).isSuperset(of: [.catalogModels, .chatDirectory, .adapterHistory]))
+    #expect(model.traits(.appClaude).isSuperset(of: [.catalogModels, .chatDirectory, .chatSearchHost, .adapterHistory]))
+    // Codex gets the chat tools too, but chat search stays on Claude.
+    #expect(model.traits(.originalCodex).contains(.chatDirectory) && !model.traits(.originalCodex).contains(.chatSearchHost))
     #expect(model.traits(.appClaude).isDisjoint(with: [.connectsAtLaunch, .sharedEngine, .optimizerPlugins]))
     #expect(model.optimizerHost == .originalCodex && model.chatSearchAgent == .appClaude)
     // An unknown connection is never served, never named as another agent and has no traits.

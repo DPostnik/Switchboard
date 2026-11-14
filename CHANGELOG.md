@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Fix "Find with agent" chat search running on Codex instead of Claude, and stop rewriting unchanged app state and usage rows to disk.
+
 - Fix chats being unable to open a screenshot dropped from its floating thumbnail or the Desktop when macOS hands it over through the SwiftUI drag cache.
 
 - Fix sandboxed Codex chats being unable to open dropped screenshots and mobile photo attachments without a separate folder grant.

@@ -115,9 +115,11 @@ public struct RemotePresence: Equatable, Sendable {
         return try await withCheckedThrowingContinuation { continuation in
             waiters[id] = continuation
             Task { @MainActor [weak self] in
+                // Closed before this task started: the waiter was already failed; never touch the closed socket.
+                guard let self, waiters[id] != nil else { return }
                 let result: Result<String, Error>
                 do { result = .success(try await operation(base)) } catch { result = .failure(error) }
-                self?.waiters.removeValue(forKey: id)?.resume(with: result)
+                waiters.removeValue(forKey: id)?.resume(with: result)
             }
         }
     }

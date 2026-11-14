@@ -72,7 +72,7 @@ enum AgentIntegrationFactory {
 
     static let claudeProfile = AgentProfile(
         connection: .appClaude, engine: .claude, name: "Claude", productName: "Claude Code",
-        traits: [.catalogModels, .chatDirectory, .adapterHistory],
+        traits: [.catalogModels, .chatDirectory, .chatSearchHost, .adapterHistory],
         accountLine: { $0.authenticated ? L10n.text("Claude · подключён", "Claude · connected") : L10n.text("Claude · вход не выполнен", "Claude · not signed in") },
         accountLabel: { $0.authenticated ? L10n.text("Вход выполнен", "Signed in") : L10n.text("Вход не выполнен", "Not signed in") },
         signInPrompt: { L10n.text("Войди по подписке Claude в отдельный профиль приложения.", "Sign in with your Claude subscription in the app’s separate profile.") },

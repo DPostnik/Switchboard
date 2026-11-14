@@ -4,6 +4,10 @@ Heuristic, not a proof: the nightly full run is the safety net. A changed test
 file is always selected. For a changed source file, the declarations touched
 by each diff hunk (the nearest enclosing func/property/type) are looked up by
 name in the test sources. Build-graph changes select the full suite.
+
+`paths` limits the selection to the task's own files (files or folders): in a
+shared working tree other chats' uncommitted edits would otherwise widen it,
+often to the full suite.
 """
 from pathlib import Path
 import re
@@ -25,6 +29,9 @@ PATH_TESTS = {
     'Tests/Fixtures/compat/': ['CompatibilitySnapshotTests', 'ACPSnapshotTests'],
     'Tests/Fixtures/acp/': ['ACPIntegrationTests'],
     'scripts/compat-snapshot.py': ['CompatibilitySnapshotTests', 'ACPSnapshotTests'],
+    # Registry behaviour is derived from the profiles' traits (for example `chatSearchAgent` from a trait set), so a
+    # profile edit changes it without naming anything the registry tests reference.
+    'Sources/ContextDesk/AgentIntegrationFactory.swift': ['AgentRegistryTests'],
 }
 COMMON = {'body', 'init', 'main', 'description', 'hash', 'encode', 'decode', 'value', 'state', 'title', 'text', 'name', 'path', 'items', 'error', 'result', 'update', 'start', 'stop', 'reset', 'load', 'save', 'Self'}
 
@@ -33,9 +40,12 @@ def git(*args):
     return subprocess.run(['git', *args], capture_output=True, text=True, check=True).stdout
 
 
-def changed_files(base):
+def changed_files(base, paths=None):
     names = set(git('diff', '--name-only', base, '--').split())
     names |= set(git('ls-files', '--others', '--exclude-standard').split())
+    if paths:
+        scopes = [p.rstrip('/') for p in paths]
+        names = {n for n in names if any(n == s or n.startswith(s + '/') for s in scopes)}
     return sorted(names)
 
 
@@ -83,11 +93,11 @@ def touched_names(path, numbers):
     return names
 
 
-def select(base='HEAD'):
+def select(base='HEAD', paths=None):
     """Return (test file stems, reason). Stems None means run the full suite."""
-    files = changed_files(base)
+    files = changed_files(base, paths)
     if not files:
-        return [], f'no changes relative to {base}'
+        return [], f'no changes relative to {base}' + (' in the given paths' if paths else '')
     if any(f == g or (g.endswith('/') and f.startswith(g)) for f in files for g in GLOBAL):
         return None, 'build configuration changed'
     test_files = sorted(TESTS.glob('*.swift'))
@@ -128,6 +138,6 @@ def select(base='HEAD'):
 
 if __name__ == '__main__':
     import sys
-    stems, reason = select(sys.argv[1] if len(sys.argv) > 1 else 'HEAD')
+    stems, reason = select(sys.argv[1] if len(sys.argv) > 1 else 'HEAD', sys.argv[2:] or None)
     print(reason)
     print('\n'.join(stems) if stems is not None else '(full suite)')

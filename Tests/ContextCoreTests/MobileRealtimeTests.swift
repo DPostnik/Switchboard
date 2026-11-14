@@ -44,8 +44,10 @@ import Testing
     }
 }
 
-@MainActor private func eventually(_ predicate: () -> Bool) async throws {
-    for _ in 0..<200 {
+/// Waits for a state by time, not by a number of polls: a throttled run (the nightly job, a loaded Mac) wakes late.
+@MainActor private func eventually(within limit: Duration = .seconds(5), _ predicate: () -> Bool) async throws {
+    let deadline = ContinuousClock.now + limit
+    while ContinuousClock.now < deadline {
         if predicate() { return }
         try await Task.sleep(for: .milliseconds(5))
     }
@@ -63,7 +65,8 @@ private let remoteTestDevice = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
     let client = RemoteRealtime(role: "phone", device: "phone", credentials: { credentials() }, ready: {
         #expect(socket.sent.contains { $0["event"] as? String == "phx_join" })
         reads += 1
-    }, factory: { _ in socket }, heartbeatInterval: .milliseconds(15), deadline: .milliseconds(8), monitorNetwork: false)
+    // Heartbeats are acknowledged here, so the deadline only has to outlast a slow subscribe on a loaded Mac.
+    }, factory: { _ in socket }, heartbeatInterval: .milliseconds(15), deadline: .seconds(2), monitorNetwork: false)
     client.onChange = { events.append($0) }
     client.start(); client.start()
     try await eventually { client.state == .connected }
@@ -101,7 +104,9 @@ private let remoteTestDevice = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         let socket = ScriptedRemoteSocket(); socket.acknowledgeJoin = join; socket.acknowledgeHeartbeat = false
         var reads = 0
         let client = RemoteRealtime(role: "phone", device: "phone", credentials: { credentials() }, ready: { reads += 1 },
-            factory: { _ in socket }, heartbeatInterval: .milliseconds(15), deadline: .milliseconds(8), monitorNetwork: false)
+            // One deadline covers the subscribe and the heartbeat reply. It must outlast a subscribe on a loaded Mac
+            // (8 ms and 150 ms both expired before `ready` in parallel runs), so `reads` tells the two cases apart.
+            factory: { _ in socket }, heartbeatInterval: .milliseconds(15), deadline: .milliseconds(500), monitorNetwork: false)
         client.start()
         try await eventually { client.state == .retrying }
         #expect(reads == (join ? 1 : 0))
@@ -237,31 +242,32 @@ private let remoteTestDevice = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 @Test @MainActor func eventWorkCoalescesRequestsForTheDelayAndASoonerRequestCutsTheWaitShort() async throws {
     let work = RemoteEventWork()
     var runs = 0
-    let operation: @MainActor () async throws -> Void = { runs += 1 }
-    let failure: @MainActor (Error) -> Void = { _ in Issue.record("Unexpected work failure") }
+    // Only lower bounds on time: sleeps never end early, but a throttled run may wake late.
     let clock = ContinuousClock(), start = clock.now
+    var ranAt: [ContinuousClock.Instant] = []
+    let operation: @MainActor () async throws -> Void = { runs += 1; ranAt.append(clock.now) }
+    let failure: @MainActor (Error) -> Void = { _ in Issue.record("Unexpected work failure") }
     for _ in 0..<5 {
         work.enqueue(delay: .seconds(1), operation: operation, failure: failure)
         try await Task.sleep(for: .milliseconds(20))
     }
-    try await Task.sleep(for: .milliseconds(500))
-    #expect(runs == 0)
-    for _ in 0..<120 where runs == 0 { try await Task.sleep(for: .milliseconds(10)) }
-    #expect(runs == 1)
-    #expect(clock.now - start >= .seconds(1))
+    // The five requests are merged into one run, and that run waits out the delay of the first.
+    try await eventually { runs == 1 }
+    #expect(ranAt.first.map { $0 - start >= .seconds(1) } == true)
     try await Task.sleep(for: .milliseconds(50))
     #expect(runs == 1)
 
-    work.enqueue(delay: .seconds(1), operation: operation, failure: failure)
+    // A sooner request cuts a pending long wait short: the run comes long before the 60 s delay.
+    work.enqueue(delay: .seconds(60), operation: operation, failure: failure)
     try await Task.sleep(for: .milliseconds(50))
     #expect(runs == 1)
     let urgent = clock.now
     work.enqueue(delay: .zero, operation: operation, failure: failure)
-    for _ in 0..<120 where runs == 1 { try await Task.sleep(for: .milliseconds(5)) }
-    #expect(runs == 2)
-    #expect(clock.now - urgent < .milliseconds(700))
+    try await eventually { runs == 2 }
+    #expect(ranAt.count == 2 && ranAt[1] - urgent < .seconds(30))
     try await Task.sleep(for: .milliseconds(30))
     #expect(runs == 2)
+    work.cancel()
 }
 
 @Test func snapshotPatchAndDeltaPreserveUnchangedChatsAndRejectStaleRevisions() throws {

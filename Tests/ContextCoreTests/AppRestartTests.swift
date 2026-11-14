@@ -26,13 +26,16 @@ import ContextCore
     owner.executableURL = URL(fileURLWithPath: "/bin/sleep")
     owner.arguments = ["1"]
     try owner.run()
+    let started = ContinuousClock.now
     let helper = Process()
     helper.executableURL = URL(fileURLWithPath: "/bin/sh")
     helper.arguments = ["-c", AppRestartController.helperScript.replacingOccurrences(of: "/usr/bin/open", with: "/usr/bin/touch"),
                         "test-relaunch", String(owner.processIdentifier), marker.path]
     try helper.run()
     try await Task.sleep(for: .milliseconds(200))
-    #expect(!FileManager.default.fileExists(atPath: marker.path))
+    let reopenedEarly = FileManager.default.fileExists(atPath: marker.path)
+    // A throttled run may wake after the owner exited; then only the final check below applies.
+    if ContinuousClock.now - started < .milliseconds(800) { #expect(!reopenedEarly) }
     for _ in 0..<60 {
         if !helper.isRunning { break }
         try await Task.sleep(for: .milliseconds(100))

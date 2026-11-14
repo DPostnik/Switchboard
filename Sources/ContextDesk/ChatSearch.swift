@@ -70,8 +70,8 @@ extension DeskModel {
         Task { await openChat(chat) }
     }
 
-    /// Chat search runs on the agent that hosts the chat-directory tools.
-    var chatSearchAgent: AgentConnectionID? { firstAgent(with: .chatDirectory) }
+    /// Chat search runs on the agent that hosts it (Claude), not on every agent with the chat tools.
+    var chatSearchAgent: AgentConnectionID? { firstAgent(with: .chatSearchHost) }
     var canStartChatSearch: Bool { agentState(chatSearchAgent).connected && agentState(chatSearchAgent).authenticated }
 
     func prepareChatSearchRecipe() throws {

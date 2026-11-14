@@ -76,6 +76,9 @@ public actor AppStore {
     /// Bytes of each usage row as last written by this instance; a report that changes nothing is not written again.
     private var writtenUsage: [String: Data] = [:]
     private var usageFlushTask: Task<Void, Never>?
+    /// Sorted keys: JSONEncoder's key order is not stable between calls, and app state and usage rows skip a write when
+    /// the new bytes equal the stored ones.
+    private static let stableEncoder: JSONEncoder = { let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys; return encoder }()
     /// Number of usage write transactions; exposed for tests.
     var usageWriteCount = 0
 
@@ -277,7 +280,7 @@ public actor AppStore {
     }
     public func save(_ state: SavedState) throws {
         let migrated = try ConversationIdentity.migrated(state)
-        let bytes = try JSONEncoder().encode(migrated)
+        let bytes = try Self.stableEncoder.encode(migrated)
         try withDatabase { db in
             if try cachedApp(db).bytes == bytes { return }
             try putApp(db, bytes: bytes, state: migrated)
@@ -286,7 +289,7 @@ public actor AppStore {
     }
     public func saveDeletingChat(_ state: SavedState, threadID: String) throws {
         let migrated = try ConversationIdentity.migrated(state)
-        let bytes = try JSONEncoder().encode(migrated)
+        let bytes = try Self.stableEncoder.encode(migrated)
         try withDatabase { db in
             guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else {
                 throw ClientFailure(L10n.text("Не удалось начать удаление чата", "Could not begin deleting the chat"))
@@ -325,7 +328,7 @@ public actor AppStore {
     /// a report identical to the row already written is skipped. `flushTranscripts()` (deactivation, sleep, quit) writes
     /// pending rows at once; a crash loses at most the last ~2 s of usage figures.
     public func saveUsage(threadID: String, snapshot: UsageSnapshot) throws {
-        let bytes = try JSONEncoder().encode(snapshot)
+        let bytes = try Self.stableEncoder.encode(snapshot)
         if pendingUsage[threadID] == nil, writtenUsage[threadID] == bytes { return }
         pendingUsage[threadID] = bytes
         guard usageFlushTask == nil else { return }
@@ -381,7 +384,7 @@ public actor AppStore {
     }
     public func saveArchivingChats(_ state: SavedState, summaries: [ArchiveSummaryRecord]) throws {
         let migrated = try ConversationIdentity.migrated(state)
-        let bytes = try JSONEncoder().encode(migrated)
+        let bytes = try Self.stableEncoder.encode(migrated)
         try withDatabase { db in
             let failure = ClientFailure(L10n.text("Не удалось сохранить архив", "Could not save archive"))
             try transaction(db, failure: failure) {

@@ -38,7 +38,8 @@ private func savedChat(_ store: AppStore, id: String = "chat") async throws -> (
 @Test func recordedItemsAreReadableBeforeTheFlushAndByAnotherInstanceAfterIt() async throws {
     let file = temporaryStoreFile()
     defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
-    let store = AppStore(file: file)
+    // The default first delay (1 s) with a 1 s interval: the scheduled flush below waits about 1 s instead of 10 s.
+    let store = AppStore(file: file, flushDelay: .seconds(1), flushInterval: .seconds(1))
     let (chat, source) = try await savedChat(store)
     try await store.recordTranscriptItem(TranscriptItem(id: "a", kind: "user", text: "Hello"), conversationID: chat.id, source: source)
     try await store.recordTranscriptItem(TranscriptItem(id: "b", kind: "assistant", text: "Answer"), conversationID: chat.id, source: source)
@@ -54,8 +55,8 @@ private func savedChat(_ store: AppStore, id: String = "chat") async throws -> (
     #expect(restored.items.map(\.text) == ["Hello", "Answer"] && restored.completeness == .partial)
     #expect(try await store.loadTranscript(conversationID: chat.id) == restored)
     #expect(try withRawDatabase(file) { try rawBlob($0, "transcript-revision:" + chat.id) } != nil)
-    // The scheduled flush writes without an explicit call (about 10 s after the previous write; a loaded test run may
-    // delay the task).
+    // The scheduled flush writes without an explicit call (`flushInterval` after the previous write; a loaded test run
+    // may delay the task).
     try await store.recordTranscriptItem(TranscriptItem(id: "c", kind: "assistant", text: "Later"), conversationID: chat.id, source: source)
     let deadline = Date().addingTimeInterval(25)
     while await store.transcriptWriteCount < 2, Date() < deadline { try await Task.sleep(for: .milliseconds(100)) }
@@ -347,23 +348,32 @@ private func savedChat(_ store: AppStore, id: String = "chat") async throws -> (
     let store = AppStore(file: file, flushDelay: .seconds(30), flushInterval: .seconds(30), usageDelay: .milliseconds(200))
     _ = try await savedChat(store)
     // A streaming turn reports usage many times: one transaction after the delay carries the last value of each chat.
+    let began = ContinuousClock.now
     for index in 0..<20 {
         try await store.saveUsage(threadID: "a", snapshot: UsageSnapshot(output: index, measuredAt: Date(timeIntervalSince1970: Double(index))))
         try await store.saveUsage(threadID: "b", snapshot: UsageSnapshot(output: -index, measuredAt: Date(timeIntervalSince1970: Double(index))))
     }
-    #expect(await store.usageWriteCount == 0)
+    let early = await store.usageWriteCount
+    // On a loaded Mac the 40 reports can take longer than the delay; then the rows are split over more writes, and the
+    // exact count is checked only for a run that reported everything within the delay.
+    let reportedInTime = ContinuousClock.now - began < .milliseconds(200)
+    if reportedInTime { #expect(early == 0) }
+    // The scheduled write happens without an explicit call.
     let deadline = Date().addingTimeInterval(15)
     while await store.usageWriteCount < 1, Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
-    #expect(await store.usageWriteCount == 1)
+    #expect(await store.usageWriteCount >= 1)
+    await store.flushUsage()
+    let writes = await store.usageWriteCount
+    if reportedInTime { #expect(writes == 1) }
     let written = try await AppStore(file: file).loadUsage()
     #expect(written["a"]?.output == 19 && written["b"]?.output == -19)
     // A report identical to the written row is not written again.
     try await store.saveUsage(threadID: "a", snapshot: UsageSnapshot(output: 19, measuredAt: Date(timeIntervalSince1970: 19)))
     await store.flushUsage()
-    #expect(await store.usageWriteCount == 1)
+    #expect(await store.usageWriteCount == writes)
     // Quit (flushTranscripts) writes what is pending without waiting for the delay.
     try await store.saveUsage(threadID: "a", snapshot: UsageSnapshot(output: 20, measuredAt: Date(timeIntervalSince1970: 20)))
     await store.flushTranscripts()
-    #expect(await store.usageWriteCount == 2)
+    #expect(await store.usageWriteCount == writes + 1)
     #expect(try await AppStore(file: file).loadUsage()["a"]?.output == 20)
 }

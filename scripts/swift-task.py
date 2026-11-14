@@ -118,6 +118,8 @@ def main():
     parser.add_argument('--filter', action='append', default=[], help='Swift Testing filter regex (repeatable); a test file name such as QueueTests selects that file')
     parser.add_argument('--changed', action='store_true', help='Run only test files affected by changes relative to --base (heuristic)')
     parser.add_argument('--base', default='HEAD', help='Git revision for --changed (default: HEAD, i.e. uncommitted changes)')
+    parser.add_argument('--paths', nargs='+', default=None, metavar='PATH',
+                        help="With --changed: only these files or folders (the task's own), not other chats' edits in the tree")
     parser.add_argument('--verbose', action='store_true', help='Stream full test output instead of failures and the summary')
     args = parser.parse_args()
     os.chdir(ROOT)
@@ -126,7 +128,7 @@ def main():
     filters = list(args.filter)
     if args.changed:
         from affected_tests import select
-        stems, reason = select(args.base)
+        stems, reason = select(args.base, args.paths)
         if stems == []:
             print(f'NO TESTS RUN: {reason}. Use --base REV for committed changes or omit --changed for the full suite.')
             return

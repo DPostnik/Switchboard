@@ -192,6 +192,8 @@ private let sampleItems = [
     defer { try? FileManager.default.removeItem(at: root) }
     let store = AppStore(file: root.appendingPathComponent("metadata.sqlite"))
     let model = DeskModel(store: store, summaryResources: nil)
+    // The busy chat would make each pass pause 1 s per chat; the pause has its own test below.
+    model.activityCleanupBusyPause = .zero
     let project = Project(path: "/fixture")
     func chat(_ id: String, archived: Bool) -> Chat {
         var chat = Chat(id: id, projectID: project.id, title: id, model: "model"); chat.archived = archived; return chat
