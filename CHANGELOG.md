@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Fix chats being unable to open a screenshot dropped from its floating thumbnail or the Desktop when macOS hands it over through the SwiftUI drag cache.
+
 - Fix sandboxed Codex chats being unable to open dropped screenshots and mobile photo attachments without a separate folder grant.
 
 - Codex sub-agent steps no longer stop with "Could not read sub-agent steps … is empty" when they are read right after the sub-agent starts.

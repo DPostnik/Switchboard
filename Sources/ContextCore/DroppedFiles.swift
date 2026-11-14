@@ -27,8 +27,17 @@ public enum DroppedFiles {
 
     /// A screenshot thumbnail hands over a file in a temporary folder (`…/T/TemporaryItems/NSIRD_screencaptureui_…`)
     /// and removes it once the drop ends, so its path would point at nothing by the time the agent reads it.
-    public static func isTemporary(_ url: URL, temporaryDirectory: URL = FileManager.default.temporaryDirectory) -> Bool {
+    /// A drop that SwiftUI resolves itself (a file promise, e.g. a screenshot's floating thumbnail) arrives as a copy in
+    /// `~/Library/Caches/com.apple.SwiftUI.Drag-<UUID>/`: outside every agent boundary and cleaned up by the system.
+    public static func isTemporary(_ url: URL, temporaryDirectory: URL = FileManager.default.temporaryDirectory,
+                                   cachesDirectory: URL? = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first) -> Bool {
         guard url.isFileURL else { return false }
+        if let cachesDirectory {
+            let caches = cachesDirectory.standardizedFileURL.resolvingSymlinksInPath().pathComponents
+            let components = url.standardizedFileURL.resolvingSymlinksInPath().pathComponents
+            if components.count > caches.count + 1, Array(components.prefix(caches.count)) == caches,
+               components[caches.count].hasPrefix("com.apple.SwiftUI.Drag-") { return true }
+        }
         // Foundation spells /var and /tmp with or without /private depending on the call, so compare without it.
         func normalized(_ url: URL) -> String {
             let path = url.standardizedFileURL.resolvingSymlinksInPath().path
@@ -56,9 +65,10 @@ public enum DroppedFiles {
     /// Copies temporary files into `directory` (each into its own folder, keeping the file name) and returns
     /// the paths to use. Other files, and any file that cannot be copied, keep their original path.
     public static func preserving(_ urls: [URL], in directory: URL, temporaryDirectory: URL = FileManager.default.temporaryDirectory,
+                                  cachesDirectory: URL? = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first,
                                   fileManager: FileManager = .default) -> [URL] {
         urls.map { url in
-            guard isTemporary(url, temporaryDirectory: temporaryDirectory) else { return url }
+            guard isTemporary(url, temporaryDirectory: temporaryDirectory, cachesDirectory: cachesDirectory) else { return url }
             let folder = directory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             let copy = folder.appendingPathComponent(url.lastPathComponent)
             do {

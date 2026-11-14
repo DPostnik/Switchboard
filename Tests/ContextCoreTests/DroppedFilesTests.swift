@@ -40,6 +40,15 @@ import Testing
         #expect(!DroppedFiles.isTemporary(shot, temporaryDirectory: tmp))
         #expect(!DroppedFiles.isTemporary(URL(string: "https://example.com/a.png")!, temporaryDirectory: tmp))
     }
+    @Test func swiftUIDragCopiesAreTemporary() {
+        let tmp = URL(fileURLWithPath: "/var/folders/8h/abc/T/", isDirectory: true)
+        let caches = URL(fileURLWithPath: "/Users/me/Library/Caches", isDirectory: true)
+        let drag = caches.appendingPathComponent("com.apple.SwiftUI.Drag-4C4D2BF5-7507-43F4-BA8A-0ECE83D688BA/Screenshot 2026-11-14 at 14.43.19.png")
+        #expect(DroppedFiles.isTemporary(drag, temporaryDirectory: tmp, cachesDirectory: caches))
+        #expect(!DroppedFiles.isTemporary(caches.appendingPathComponent("com.apple.SwiftUI.Drag-X"), temporaryDirectory: tmp, cachesDirectory: caches))
+        #expect(!DroppedFiles.isTemporary(caches.appendingPathComponent("com.example.app/a.png"), temporaryDirectory: tmp, cachesDirectory: caches))
+        #expect(!DroppedFiles.isTemporary(drag, temporaryDirectory: tmp, cachesDirectory: nil))
+    }
     @Test func temporaryFilesAreCopiedAndOthersKept() throws {
         let fm = FileManager.default
         let source = fm.temporaryDirectory.appendingPathComponent("dropped-\(UUID().uuidString)", isDirectory: true)
