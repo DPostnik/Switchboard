@@ -198,4 +198,65 @@ extension CodexSubagentTests {
     } catch { await client.stop(); throw error }
 }
 
+@Test func codexChildHistoryWaitsForAnUnwrittenRollout() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let executable = root.appendingPathComponent("engine.py")
+    try Data(#"""
+    #!\#(fixturePython)
+    import json, sys
+    reads = 0
+    for line in sys.stdin:
+        m = json.loads(line)
+        if 'id' not in m: continue
+        method, p = m.get('method'), m.get('params', {})
+        result = {}
+        if method == 'initialize': result = {'userAgent':'fixture'}
+        if method == 'test/spawn':
+            print(json.dumps({'method':'item/completed','params':{'threadId':'parent','item':{'id':'spawn','type':'subAgentActivity','agentThreadId':'child','agentPath':'/root/research','kind':'started'}}}), flush=True)
+        if method == 'thread/read':
+            reads += 1
+            # Codex 0.167.0 right after spawn: the rollout file exists without `session_meta`.
+            if reads == 1:
+                print(json.dumps({'id':m['id'],'error':{'code':-32603,'message':'failed to read thread: thread-store internal error: failed to read session metadata /tmp/rollout-child.jsonl: rollout at /tmp/rollout-child.jsonl is empty'}}), flush=True)
+                continue
+            result = {'thread':{'id':p['threadId'],'turns':[{'id':'child-turn','status':'inProgress','items':[
+                {'id':'message','type':'agentMessage','text':'Reading source'}]}]}}
+        print(json.dumps({'id':m['id'],'result':result}), flush=True)
+    """#.utf8).write(to: executable)
+    try installFixtureExecutable(at: executable)
+    let transport = CodexConnection()
+    let client = CodexClient(transport: transport)
+    try await client.start(executable: executable, home: root)
+    do {
+        let steps = Task {
+            var diagnostics: [String] = []
+            for await event in client.events {
+                if case .diagnostic(let text) = event.payload { diagnostics.append(text) }
+                if case .subagents(let agents) = event.payload,
+                   agents.first?.steps.contains(where: { $0.text == "Reading source" }) == true { return diagnostics }
+            }
+            throw CancellationError()
+        }
+        _ = try await transport.request("test/spawn")
+        let diagnostics = try await withThrowingTaskGroup(of: [String].self) { group in
+            group.addTask { try await steps.value }
+            group.addTask { try await Task.sleep(for: .seconds(10)); steps.cancel(); throw CancellationError() }
+            defer { group.cancelAll() }
+            return try await group.next()!
+        }
+        #expect(diagnostics.isEmpty)
+        await client.stop()
+    } catch { await client.stop(); throw error }
+}
+
+@Test func unwrittenRolloutMatchesOnlyTheEmptyRolloutError() {
+    struct Failure: LocalizedError { let errorDescription: String? }
+    #expect(CodexClient.isUnwrittenRollout(Failure(errorDescription:
+        "failed to read thread: thread-store internal error: failed to read session metadata /a.jsonl: rollout at /a.jsonl is empty")))
+    #expect(!CodexClient.isUnwrittenRollout(Failure(errorDescription: "list_turns is not supported yet")))
+    #expect(!CodexClient.isUnwrittenRollout(Failure(errorDescription: "failed to read session metadata /a.jsonl: permission denied")))
+}
+
 }

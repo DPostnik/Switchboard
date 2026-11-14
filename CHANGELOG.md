@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Codex sub-agent steps no longer stop with "Could not read sub-agent steps … is empty" when they are read right after the sub-agent starts.
+
 - Simplify Chrome setup with visible code entry, profile discovery, one saved-profile list, automatic status updates, and clearer extension guidance.
 
 - Keep browser connection code entry readable at larger interface sizes and make disclosure headers clickable across their full row in all settings tabs.

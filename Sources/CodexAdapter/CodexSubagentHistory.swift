@@ -9,9 +9,11 @@ extension CodexClient {
         guard subagentHistoryTasks[parent] == nil, !subagentTracker.historyIDs(parent: parent).isEmpty else { return }
         let epoch = interactionEpoch
         subagentHistoryTasks[parent] = Task { [weak self] in
+            var unwritten: [String: Int] = [:]
             while !Task.isCancelled {
                 guard let self else { return }
-                guard await self.refreshSubagentHistory(parent: parent) else { break }
+                guard let next = await self.refreshSubagentHistory(parent: parent, unwritten: unwritten) else { break }
+                unwritten = next
                 do { try await Task.sleep(for: .seconds(3)) } catch { break }
             }
             await self?.finishSubagentHistory(parent: parent, epoch: epoch)
@@ -22,25 +24,46 @@ extension CodexClient {
         if interactionEpoch == epoch { subagentHistoryTasks[parent] = nil }
     }
 
-    private func refreshSubagentHistory(parent: String) async -> Bool {
+    /// Polls a just-spawned child before its rollout has a first line this many times.
+    static let unwrittenChildPolls = 5
+
+    /// One polling round. Returns the per-child count of reads that found an unwritten rollout,
+    /// or nil to stop the watcher.
+    private func refreshSubagentHistory(parent: String, unwritten: [String: Int]) async -> [String: Int]? {
         let children = subagentTracker.historyIDs(parent: parent)
-        guard !children.isEmpty else { return false }
+        guard !children.isEmpty else { return nil }
         let epoch = interactionEpoch
+        var unwritten = unwritten
         for child in children {
             do {
                 let response = try await readChildThread(child)
-                guard epoch == interactionEpoch, !Task.isCancelled else { return false }
+                guard epoch == interactionEpoch, !Task.isCancelled else { return nil }
+                unwritten[child] = nil
                 for event in subagentTracker.history(response, child: child) { eventSink.yield(event) }
             } catch {
-                // Stop this watcher after a failed read. Never replay an uncertain operation.
-                guard epoch == interactionEpoch else { return false }
+                guard epoch == interactionEpoch else { return nil }
+                // Codex creates the child's rollout file before it writes `session_meta`; a read in
+                // that window fails with "... is empty" (seen 2026-11-14, Codex 0.167.0). These are
+                // read-only requests, so polling again on the next round replays no side effect.
+                let polls = unwritten[child, default: 0]
+                if Self.isUnwrittenRollout(error), polls < Self.unwrittenChildPolls {
+                    unwritten[child] = polls + 1
+                    continue
+                }
+                // Any other failure stops this watcher and is reported once.
                 eventSink.yield(.init(session: .init(connection: .originalCodex, nativeID: parent), payload: .diagnostic(L10n.text(
                     "Не удалось прочитать шаги подагента: \(error.localizedDescription)",
                     "Could not read sub-agent steps: \(error.localizedDescription)"))))
-                return false
+                return nil
             }
         }
-        return true
+        return unwritten
+    }
+
+    /// The thread store found the child's rollout file without its first line yet.
+    static func isUnwrittenRollout(_ error: any Error) -> Bool {
+        let text = error.localizedDescription
+        return text.contains("failed to read session metadata") && text.hasSuffix(" is empty")
     }
 
     /// A child thread shaped as a `thread/read` response with its latest turns and their latest items.
