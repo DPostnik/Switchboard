@@ -48,7 +48,7 @@ git add VERSION CHANGELOG.md
 git commit -q -m "Release $version"
 print "release: committed $(git rev-parse --short HEAD) Release $version"
 
-zsh scripts/build-app.sh
+zsh scripts/build-app.sh --release
 git tag -a "v$version" -m "Switchboard $version"
 print "release: tagged v$version"
 if $push; then

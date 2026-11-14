@@ -15,7 +15,9 @@ for path in sorted([root / 'Package.swift', root / 'Package.resolved'] + list((r
     if path.is_file():
         digest.update(str(path.relative_to(root)).encode() + b'\0' + path.read_bytes())
 if digest.hexdigest() != metadata['sourceSHA256']:
-    sys.exit('App does not match current sources. Run zsh scripts/build-app.sh first.')
+    sys.exit('App does not match current sources. Run zsh scripts/build-app.sh --release first.')
+if metadata.get('configuration', 'release') != 'release':
+    sys.exit('App is a debug build. Run zsh scripts/build-app.sh --release first.')
 PY
 mkdir -p dist
 archive="$PWD/dist/Switchboard-macOS.zip"

@@ -121,6 +121,9 @@ def main():
     parser.add_argument('--paths', nargs='+', default=None, metavar='PATH',
                         help="With --changed: only these files or folders (the task's own), not other chats' edits in the tree")
     parser.add_argument('--verbose', action='store_true', help='Stream full test output instead of failures and the summary')
+    parser.add_argument('--release', action='store_true',
+                        help='Build the app optimized (releases, packaging, performance probes). The everyday build is debug: '
+                             'incremental per file and sharing its build products with the debug test build')
     args = parser.parse_args()
     os.chdir(ROOT)
     lock = take_build_lock()  # noqa: F841 - kept open for the whole task
@@ -177,8 +180,9 @@ def main():
             (OUT / 'sdk-probe-error.log').write_text(result.stderr)
     if sdk is None:
         raise RuntimeError('No compatible SDK. See .build/local-build/sdk-probe-error.log. Install a matching Xcode/Command Line Tools release or set SWITCHBOARD_SDK.')
+    configuration = 'release' if args.release else 'debug'
     if args.task == 'build' or args.verbose:
-        print(f'Compiler: {version}\nSDK: {sdk}', flush=True)
+        print(f'Compiler: {version}\nSDK: {sdk}' + (f'\nConfiguration: {configuration}' if args.task == 'build' else ''), flush=True)
     if args.task == 'test':
         log.write(f'Compiler: {version}\nSDK: {sdk}\n')
     health = subprocess.run([swift, 'package', '--version'], capture_output=True, text=True)
@@ -213,6 +217,12 @@ def main():
             if result.returncode != 0:
                 (OUT / 'testing-probe-error.log').write_text(result.stdout + result.stderr)
                 raise RuntimeError('Swift Testing framework/macros are incompatible with this toolchain. Tests did not run. Install a matching Command Line Tools or Xcode release; see guides/building.md and .build/local-build/testing-probe-error.log.')
+    # Swift Testing flags for SwiftPM; the debug app build passes them too (see the build task).
+    test_swiftpm_flags = []
+    if macros.is_dir():
+        test_swiftpm_flags += ['-Xswiftc', '-plugin-path', '-Xswiftc', macros]
+    if has_testing_framework:
+        test_swiftpm_flags += ['-Xswiftc', '-F', '-Xswiftc', frameworks, '-Xlinker', '-F', '-Xlinker', frameworks, '-Xlinker', '-rpath', '-Xlinker', frameworks, '-Xlinker', '-rpath', '-Xlinker', testing_libraries]
     # Agents never read the index store; it is rewritten on every compile. Opt in with SWITCHBOARD_INDEX_STORE=1.
     index_flags = [] if os.environ.get('SWITCHBOARD_INDEX_STORE') == '1' else ['--disable-index-store']
     # Under Switchboard's external boundary (nono) SwiftPM cannot start its own nested sandbox for manifests and plugins.
@@ -221,16 +231,15 @@ def main():
     if not direct:
         # A source/build/test failure must fail, never trigger a fallback or reuse an old binary.
         if args.task == 'build':
-            command = [swift, 'build', '--sdk', sdk, '-c', 'release', '--product', 'ContextDesk', '--force-resolved-versions'] + index_flags
+            # A debug app build passes the test build's compiler and linker flags, so both share one build directory and
+            # an edit is compiled once for the app and the tests.
+            shared = [] if args.release else test_swiftpm_flags
+            command = [swift, 'build', '--sdk', sdk, '-c', configuration, '--product', 'ContextDesk', '--force-resolved-versions'] + index_flags + shared
             run(command)
-            bin_path = capture([swift, 'build', '--sdk', sdk, '-c', 'release', '--show-bin-path'])
+            bin_path = capture([swift, 'build', '--sdk', sdk, '-c', configuration, '--show-bin-path'] + index_flags + shared)
             clone(Path(bin_path) / 'ContextDesk', OUT / 'ContextDesk')
         else:
-            command = [swift, 'test', '--sdk', sdk, '--disable-xctest', '--force-resolved-versions'] + index_flags
-            if macros.is_dir():
-                command += ['-Xswiftc', '-plugin-path', '-Xswiftc', macros]
-            if has_testing_framework:
-                command += ['-Xswiftc', '-F', '-Xswiftc', frameworks, '-Xlinker', '-F', '-Xlinker', frameworks, '-Xlinker', '-rpath', '-Xlinker', frameworks, '-Xlinker', '-rpath', '-Xlinker', testing_libraries]
+            command = [swift, 'test', '--sdk', sdk, '--disable-xctest', '--force-resolved-versions'] + index_flags + test_swiftpm_flags
             # Full-suite checks cover process fixtures with fixed deadlines; execute those serially.
             run_tests(execute, command, filters, serial=not filters)
     else:
@@ -247,7 +256,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix='compile-', dir=OUT) as tmp:
             work = Path(tmp)
             base = [compiler] + macro_flags + ['-sdk', sdk, '-swift-version', '6', '-target', target, '-parse-as-library', '-I', work, '-I', ROOT / 'Sources/CSQLite', '-L', work]
-            base += ['-Onone', '-enable-testing'] if args.task == 'test' else ['-O']
+            base += ['-O'] if args.task == 'build' and args.release else ['-Onone', '-enable-testing']
             modules = [('AgentContract', 'Sources/AgentContract'), ('FringeProtocol', 'Sources/FringeProtocol'), ('TOMLDecoder', '.build/checkouts/TOMLDecoder/Sources/TOMLDecoder'), ('ContextCore', 'Sources/ContextCore'), ('CodexAdapter', 'Sources/CodexAdapter'), ('ClaudeAdapter', 'Sources/ClaudeAdapter'), ('ContextTranscript', 'Sources/ContextTranscript')]
             if args.task == 'test':
                 # The app does not link ACPAdapter yet; only the tests use it.
@@ -275,7 +284,7 @@ def main():
         for path in sorted([ROOT / 'Package.swift', ROOT / 'Package.resolved'] + list((ROOT / 'Sources').rglob('*')) + list((ROOT / 'Skills').rglob('*')) + browser_resources + [ROOT / 'ChatDirectoryRuntime/server.py']):
             if path.is_file():
                 digest.update(str(path.relative_to(ROOT)).encode() + b'\0' + path.read_bytes())
-        (OUT / 'build-info.json').write_text(json.dumps({'builtAt': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'compiler': version, 'sdk': str(sdk), 'backend': 'swiftc' if direct else 'SwiftPM', 'sourceSHA256': digest.hexdigest()}, indent=2) + '\n')
+        (OUT / 'build-info.json').write_text(json.dumps({'builtAt': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'compiler': version, 'sdk': str(sdk), 'backend': 'swiftc' if direct else 'SwiftPM', 'configuration': configuration, 'sourceSHA256': digest.hexdigest()}, indent=2) + '\n')
 
 
 if __name__ == '__main__':

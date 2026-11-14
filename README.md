@@ -48,12 +48,12 @@ git clone https://github.com/DPostnik/Switchboard.git
 cd Switchboard
 python3 --version
 xcrun swift --version
-zsh scripts/build-app.sh
+zsh scripts/build-app.sh --release
 zsh scripts/test.sh
 open 'build/Switchboard.app'
 ```
 
-The build creates an ad-hoc signed local app. It does not need an Apple Developer subscription, a DMG, Headroom, Node.js or a model account. The build runner uses Python; ordinary Direct chats do not run a Headroom process.
+The build creates an ad-hoc signed local app; without `--release` it is an unoptimized development build that rebuilds faster after an edit. It does not need an Apple Developer subscription, a DMG, Headroom, Node.js or a model account. The build runner uses Python; ordinary Direct chats do not run a Headroom process.
 
 To **use agents**, install the [official Codex CLI](https://learn.chatgpt.com/docs/codex/cli), or have a supported ChatGPT/Codex desktop installation. To keep Codex independent of desktop app updates, run `zsh scripts/install-codex-cli.sh` (requires npm). Switchboard prefers this verified CLI in its own application support folder; without it, it discovers the desktop or system CLI. Codex is not bundled. On AC power, after a clean nightly suite, Switchboard stages newer stable npm releases separately and checks their protocol, account/model discovery, isolation and plugin chat resume in a temporary profile. Only a clean pass selects the tested binary for the next connection; the previous installation remains available. Open a disposable project folder, choose **Sign in**, and complete the separate ChatGPT sign-in. An account with Codex access and network access are required; normal account limits apply. Select an available model and keep **No plugin** selected for the first run.
 
