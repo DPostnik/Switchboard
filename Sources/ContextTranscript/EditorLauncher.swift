@@ -95,6 +95,69 @@ import os
         }
     }
 
+    public enum CommandLaunch: Equatable { case prefilled, copied, failed }
+
+    /// Opens a Terminal window in `folder` with `command` typed at the zsh prompt but not run.
+    /// Other terminals and shells cannot be prefilled: the folder opens there and the command goes to the pasteboard.
+    public static func openTerminal(_ folder: String?, command: String, pasteboard: NSPasteboard = .general) -> CommandLaunch {
+        var directory: ObjCBool = false
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let folder = folder.flatMap { FileManager.default.fileExists(atPath: $0, isDirectory: &directory) && directory.boolValue ? $0 : nil } ?? home
+        guard let chosen = preferredTerminal else {
+            log.error("Terminal not opened: no terminal is installed")
+            NSSound.beep(); return .failed
+        }
+        let shell = loginShell
+        if chosen.terminal.bundleID == "com.apple.Terminal", TerminalPrefill.supports(shell: shell),
+           let launcher = writePrefill(command: command, folder: folder, shell: shell) {
+            NSWorkspace.shared.open([launcher], withApplicationAt: chosen.app, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+                let log = Logger(subsystem: "local.daniil.switchboard", category: "editor")
+                if let error {
+                    log.error("Terminal did not open a command: \(error.localizedDescription, privacy: .public)")
+                    try? FileManager.default.removeItem(at: launcher.deletingLastPathComponent())
+                } else { log.info("Opened Terminal with a prefilled command") }
+            }
+            return .prefilled
+        }
+        pasteboard.clearContents()
+        guard pasteboard.setString(command, forType: .string) else { return .failed }
+        openTerminal(folder)
+        return .copied
+    }
+
+    /// The user's login shell from the account database; `SHELL` of the app may be stale.
+    private static var loginShell: String {
+        if let entry = getpwuid(getuid()), let shell = entry.pointee.pw_shell { return String(cString: shell) }
+        return ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+    }
+
+    /// Writes the launcher folder; folders left by launches that never started are removed after an hour.
+    private static func writePrefill(command: String, folder: String, shell: String) -> URL? {
+        let manager = FileManager.default
+        let temporary = manager.temporaryDirectory
+        if let old = try? manager.contentsOfDirectory(at: temporary, includingPropertiesForKeys: [.creationDateKey]) {
+            for url in old where url.lastPathComponent.hasPrefix(TerminalPrefill.folderPrefix) {
+                let created = (try? url.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? .distantPast
+                if created < Date().addingTimeInterval(-3600) { try? manager.removeItem(at: url) }
+            }
+        }
+        let directory = temporary.appendingPathComponent(TerminalPrefill.folderPrefix + UUID().uuidString, isDirectory: true)
+        do {
+            try manager.createDirectory(at: directory.appendingPathComponent("zdot"), withIntermediateDirectories: true,
+                                        attributes: [.posixPermissions: 0o700])
+            try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            for file in TerminalPrefill.files(command: command, folder: folder, shell: shell, directory: directory.path) {
+                try Data(file.contents.utf8).write(to: URL(fileURLWithPath: file.path))
+                try manager.setAttributes([.posixPermissions: file.executable ? 0o700 : 0o600], ofItemAtPath: file.path)
+            }
+            return directory.appendingPathComponent(TerminalPrefill.launcherName)
+        } catch {
+            log.error("Terminal command not prepared: \(error.localizedDescription, privacy: .public)")
+            try? manager.removeItem(at: directory)
+            return nil
+        }
+    }
+
     public static func openTitle(_ app: String) -> String { L10n.text("Открыть в \(app)", "Open in \(app)") }
 
     public static var preferred: ExternalEditors.Installed? {

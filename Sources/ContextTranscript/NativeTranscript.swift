@@ -1551,6 +1551,23 @@ public struct NativeTranscript: NSViewRepresentable {
         return result
     }
 
+    /// "Terminal" in a shell block's header: opens a terminal with the block's commands at the prompt, not run.
+    func terminalControl(attributes: [NSAttributedString.Key: Any]) -> NSAttributedString {
+        let description = L10n.text("Открыть терминал в папке чата с этой командой в строке ввода. Она запустится, только когда вы нажмёте Return",
+                                    "Open a terminal in the chat’s folder with this command at the prompt. It runs only when you press Return")
+        let color = DeskPalette.ns.accentDeep
+        let attachment = NSTextAttachment()
+        attachment.image = Self.controlImage("apple.terminal", size: 11, color: color, description: description)
+        attachment.bounds = NSRect(x: 0, y: -2, width: 14, height: 14)
+        let result = NSMutableAttributedString(attachment: attachment)
+        result.append(NSAttributedString(string: " " + L10n.text("В терминал", "Open in Terminal"), attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: color
+        ]))
+        result.addAttributes(attributes, range: NSRange(location: 0, length: result.length))
+        result.addAttribute(.toolTip, value: description, range: NSRange(location: 0, length: result.length))
+        return result
+    }
+
     private func applyMessageStyle(_ item: TranscriptItem, to text: NSMutableAttributedString, range: NSRange) {
         if item.kind == TranscriptChangesCard.itemKind, let container = transcript.textContainer {
             TranscriptChangesCard.restyle(text, range: range, width: container.containerSize.width, padding: container.lineFragmentPadding)
@@ -1723,6 +1740,17 @@ public struct NativeTranscript: NSViewRepresentable {
             if let storage = transcript.textStorage, charIndex >= 0, charIndex < storage.length,
                let text = storage.attribute(.blockCopy, at: charIndex, effectiveRange: nil) as? String {
                 TranscriptTextWindow.show(text, relativeTo: window)
+            }
+            return true
+        }
+        if value == "contextdesk-code-terminal" {
+            guard let storage = transcript.textStorage, charIndex >= 0, charIndex < storage.length,
+                  let text = storage.attribute(.blockCopy, at: charIndex, effectiveRange: nil) as? String else { return true }
+            // Only Terminal with zsh can hold the command at the prompt; elsewhere it is copied, so say so on the copy button.
+            if EditorLauncher.openTerminal(projectPath, command: text, pasteboard: pasteboard) == .copied,
+               let block = storage.attribute(.quoteIndex, at: charIndex, effectiveRange: nil) as? Int,
+               let index = ranges.firstIndex(where: { NSLocationInRange(charIndex, $0) }) {
+                showCopyFeedback(id: previous[index].id, succeeded: true, block: block)
             }
             return true
         }

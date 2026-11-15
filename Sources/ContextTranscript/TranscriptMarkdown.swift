@@ -311,6 +311,10 @@ final class TableBox: NSObject {
         let copyText = code.copyText
         let feedback = view.copyFeedback.flatMap { $0.id == item.id && $0.block == index ? $0.succeeded : nil }
         let commandsOnly = copyText != code.text
+        if code.isShell, !copyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            header.append(view.terminalControl(attributes: [.link: "contextdesk-code-terminal", .blockCopy: copyText, .quoteIndex: index]))
+            header.append(NSAttributedString(string: "    ", attributes: [.font: NSFont.systemFont(ofSize: 11)]))
+        }
         header.append(view.copyControl(
             feedback: feedback,
             description: commandsOnly ? L10n.text("Скопировать команды без приглашения и вывода", "Copy the commands without prompts or output")

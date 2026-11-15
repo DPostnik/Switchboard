@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Open a shell code block in Terminal from its header: the commands wait at the zsh prompt in the chat's folder and run only after Return.
+
 - Always show the copy button beside answer section headings, so it no longer blinks while scrolling.
 
 - Distinguish permission refusals from SwiftPM nested-sandbox startup failures while preserving the external boundary, including current developer guidance in resumed Codex chats.
