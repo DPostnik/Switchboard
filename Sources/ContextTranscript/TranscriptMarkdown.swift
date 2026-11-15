@@ -11,7 +11,6 @@ extension NSAttributedString.Key {
     static let diffLine = NSAttributedString.Key("ContextDeskDiffLine")
     static let calloutCard = NSAttributedString.Key("ContextDeskCalloutCard")
     static let horizontalRule = NSAttributedString.Key("ContextDeskHorizontalRule")
-    static let sectionKey = NSAttributedString.Key("ContextDeskSection")
     static let blockCopy = NSAttributedString.Key("ContextDeskBlockCopy")
     static let tableData = NSAttributedString.Key("ContextDeskTableData")
     /// Slug of a heading, the target of `#anchor` links.
@@ -51,13 +50,11 @@ final class TableBox: NSObject {
         let nodes = MarkdownBlocks.nodes(item.text)
         let lines = MarkdownBlocks.lines(item.text)
         let cache = view.renderCache
-        var section: String?
         for (index, node) in nodes.enumerated() {
             let start = result.length
             var sectionCopy: (String, String)?
             if case .heading = node.block {
-                section = "\(item.id)#s\(index)"
-                sectionCopy = (section!, MarkdownBlocks.section(of: nodes, at: index, lines: lines))
+                sectionCopy = ("\(item.id)#s\(index)", MarkdownBlocks.section(of: nodes, at: index, lines: lines))
             }
             let next = index + 1 < nodes.count ? nodes[index + 1].block : nil
             let nextIsListItem: Bool = { if case .listItem = next { return true }; return false }()
@@ -82,9 +79,6 @@ final class TableBox: NSObject {
                         expanded: expandedKeys(from: blockStart, count: blockCounter - blockStart),
                         feedback: copyFeedback(from: copyStart, count: copyIndex - copyStart)), item: item.id, block: index)
                 }
-            }
-            if let section, result.length > start {
-                result.addAttribute(.sectionKey, value: section, range: NSRange(location: start, length: result.length - start))
             }
         }
         cache.trim(item: item.id, blockCount: nodes.count)
@@ -193,13 +187,14 @@ final class TableBox: NSObject {
         let font = NSFont.systemFont(ofSize: sizes[min(level, 6) - 1], weight: level <= 1 ? .bold : .semibold)
         let line = NSMutableAttributedString(attributedString: inline(text, font: font,
                                                                       color: level >= 4 ? DeskPalette.ns.muted : .labelColor))
-        if let (key, source) = sectionCopy, !source.isEmpty {
+        // Always shown, like a table's copy buttons: tied to the pointer, it blinked as sections moved under a still
+        // pointer while scrolling.
+        if let (_, source) = sectionCopy, !source.isEmpty {
             let index = copyIndex; copyIndex += 1
             let feedback = view.copyFeedback.flatMap { $0.id == item.id && $0.block == index ? $0.succeeded : nil }
             line.append(NSAttributedString(string: "  ", attributes: [.font: font]))
             line.append(view.copyControl(feedback: feedback,
                                          description: L10n.text("Скопировать раздел в Markdown", "Copy this section as Markdown"),
-                                         visible: { [weak view] in view?.hoveredSection == key },
                                          attributes: [.link: "contextdesk-block-copy", .blockCopy: source, .quoteIndex: index]))
         }
         let before: CGFloat = first ? 2 : [18, 16, 12, 10, 10, 10][min(level, 6) - 1]

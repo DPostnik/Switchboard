@@ -103,8 +103,6 @@ public struct NativeTranscript: NSViewRepresentable {
     private(set) var copyFeedback: (id: String, succeeded: Bool, block: Int?)?
     /// Collapsible code, `<details>` and source lists the user opened, keyed by item and block.
     private(set) var expandedBlocks: Set<String> = []
-    /// Answer section under the pointer; its heading shows a copy control.
-    private(set) var hoveredSection: String?
     private(set) var projectPath: String?
     /// Previews a file the user clicked in an answer (URL and optional line); without it files open externally.
     public var onOpenFile: ((URL, Int?) -> Void)?
@@ -315,7 +313,7 @@ public struct NativeTranscript: NSViewRepresentable {
     private func switchRenderedChat(to next: String?, isWorking: Bool) -> Bool {
         if let id = conversationID, let position = pendingPosition ?? capturePosition() { positions.values[id] = position }
         pendingPosition = nil; needsEndScroll = false; deferredEndScroll = nil
-        hoveredItemID = nil; hoveredSection = nil
+        hoveredItemID = nil
         // Swapping the text resizes the text view and moves the viewport while `previous` and `ranges` still describe the
         // chat being left: saved as its reading place, that move reopened it near the top.
         let wasChanging = changingLayout
@@ -1197,7 +1195,6 @@ public struct NativeTranscript: NSViewRepresentable {
 
     private func updateHover(at point: NSPoint?) {
         var id: String?
-        var section: String?
         if let point, let manager = transcript.layoutManager, let container = transcript.textContainer,
            let storage = transcript.textStorage, storage.length > 0 {
             let local = NSPoint(x: point.x - transcript.textContainerOrigin.x, y: point.y - transcript.textContainerOrigin.y)
@@ -1206,15 +1203,14 @@ public struct NativeTranscript: NSViewRepresentable {
             let line = manager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
             if line.minY - 8 <= local.y, local.y <= line.maxY + 8 {
                 let character = manager.characterIndexForGlyph(at: glyph)
-                if character < storage.length { section = storage.attribute(.sectionKey, at: character, effectiveRange: nil) as? String }
                 if let index = ranges.firstIndex(where: { NSLocationInRange(character, $0) }), index < previous.count,
                    previous[index].showsCopyControl {
                     id = previous[index].id
                 }
             }
         }
-        guard id != hoveredItemID || section != hoveredSection else { return }
-        hoveredItemID = id; hoveredSection = section
+        guard id != hoveredItemID else { return }
+        hoveredItemID = id
         transcript.setNeedsDisplay(transcript.visibleRect)
     }
 
@@ -1535,7 +1531,7 @@ public struct NativeTranscript: NSViewRepresentable {
         let attachment = NSTextAttachment()
         let image = Self.controlImage(symbol, size: label == nil ? 13 : 11, color: color, description: description)
         if visible != nil || hoverItemID != nil, feedback == nil {
-            // Message and section copy controls appear while the pointer is over their content.
+            // A message's copy control appears while the pointer is over the message.
             let cell = HoverAttachmentCell(imageCell: image ?? NSImage())
             if let visible { cell.isVisible = { MainActor.assumeIsolated { visible() } } }
             else if let itemID = hoverItemID { cell.isVisible = { [weak self] in self?.hoveredItemID == itemID } }
@@ -2023,9 +2019,14 @@ private final class TranscriptTextView: NSTextView {
         super.mouseEntered(with: event)
         hoverChanged?(convert(event.locationInWindow, from: nil))
     }
+    /// After a scroll AppKit rebuilds the tracking area and sends an exit while the pointer is still over the text; that
+    /// exit came after the last viewport change, so a message's copy control went out once scrolling stopped and stayed
+    /// out until the mouse moved. The pointer's actual place decides.
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
-        hoverChanged?(nil)
+        guard let window else { hoverChanged?(nil); return }
+        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        hoverChanged?(visibleRect.contains(point) ? point : nil)
     }
 }
 

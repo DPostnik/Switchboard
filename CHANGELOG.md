@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Always show the copy button beside answer section headings, so it no longer blinks while scrolling.
+
 - Distinguish permission refusals from SwiftPM nested-sandbox startup failures while preserving the external boundary, including current developer guidance in resumed Codex chats.
 
 - Tell agents the app-selected model on every turn, keeping orchestration guidance current after model switches.
