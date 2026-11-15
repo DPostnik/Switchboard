@@ -323,6 +323,12 @@ private func writeProposal(_ name: String, chat: String, reason: String, change:
     return texts
 }
 
+// proposalDesk uses CodexIntegration; every continuation fixture below has an empty model override.
+// Keep the complete fixed message and the exact app-owned context: no proposal-authored text may leak.
+private func proposalTurnTexts(_ messages: [String]) -> [String] {
+    messages.map { $0 + AgentModelContext.instructions(model: "", provider: .codex) }
+}
+
 @Test @MainActor func decidedProposalsContinueTheirChatOnceWithFixedTextOnly() async throws {
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -358,7 +364,7 @@ private func writeProposal(_ name: String, chat: String, reason: String, change:
     #expect(!FileManager.default.fileExists(atPath: inbox.appendingPathComponent("p1.json").path))
     #expect(model.currentSettingsProposal == nil)
     var texts = try await waitForTurns(connection, 1)
-    #expect(texts == [SettingsProposalOutcome.applied.message()])
+    #expect(texts == proposalTurnTexts([SettingsProposalOutcome.applied.message()]))
     // A second click (or a second window) finds no proposal and sends nothing.
     model.applySettingsProposal("p1.json")
 
@@ -366,7 +372,7 @@ private func writeProposal(_ name: String, chat: String, reason: String, change:
     model.rejectSettingsProposal("p2.json")
     #expect(model.state.projects[0].sandboxCommands == nil)
     texts = try await waitForTurns(connection, 2)
-    #expect(texts == [SettingsProposalOutcome.applied.message(), SettingsProposalOutcome.rejected.message()])
+    #expect(texts == proposalTurnTexts([SettingsProposalOutcome.applied.message(), SettingsProposalOutcome.rejected.message()]))
     #expect(!texts.contains { $0.contains("SECRET-PATH") || $0.contains("IGNORE PREVIOUS") || $0.contains("payload") || $0.contains(extra) })
 
     // Archived and unknown chats: the decision applies, no chat receives anything.
@@ -409,11 +415,11 @@ private func writeProposal(_ name: String, chat: String, reason: String, change:
     #expect(model.state.projects[0].accessPresets == ["node"])
     #expect(!FileManager.default.fileExists(atPath: inbox.appendingPathComponent("a/p1.json").path))
     var texts = try await waitForTurns(connection, 1)
-    #expect(texts == [SettingsProposalOutcome.applied.message()])
+    #expect(texts == proposalTurnTexts([SettingsProposalOutcome.applied.message()]))
     model.rejectSettingsProposal("b/p2.json")
     #expect(model.state.projects[0].sandboxCommands == nil)
     texts = try await waitForTurns(connection, 2)
-    #expect(texts == [SettingsProposalOutcome.applied.message(), SettingsProposalOutcome.rejected.message()])
+    #expect(texts == proposalTurnTexts([SettingsProposalOutcome.applied.message(), SettingsProposalOutcome.rejected.message()]))
     let threads = try await connection.request("test/requests").array.filter { $0["method"].string == "turn/start" }.compactMap { $0["params"]["threadId"].string }
     #expect(threads == ["a", "b"])
     // The root file without an author continues nothing.
@@ -446,7 +452,7 @@ private func writeProposal(_ name: String, chat: String, reason: String, change:
     #expect(!requests.contains { $0["method"].string == "turn/interrupt" || $0["method"].string == "turn/steer" })
     model.finishActiveTurn(threadID: "t", turnID: "v1", status: .completed, hasError: false)
     let texts = try await waitForTurns(connection, 2)
-    #expect(texts == ["First", SettingsProposalOutcome.applied.message()])
+    #expect(texts == proposalTurnTexts(["First", SettingsProposalOutcome.applied.message()]))
     requests = try await connection.request("test/requests").array
     #expect(requests.filter { $0["method"].string == "turn/start" }.count == 2)
 
@@ -694,11 +700,11 @@ private func keychainReview(_ project: Project, add: [AgentPermissionProfile.Key
     model.applySettingsProposal("p1.json")
     #expect(model.state.projects[0].sandboxCommands == ["scripts/transcribe-audio"])
     var texts = try await waitForTurns(connection, 1)
-    #expect(texts == [SettingsProposalOutcome.appliedWithoutEffect.message()])
+    #expect(texts == proposalTurnTexts([SettingsProposalOutcome.appliedWithoutEffect.message()]))
     // Negative: a project whose chats are not under the boundary gets the normal continuation.
     model.applySettingsProposal("p2.json")
     texts = try await waitForTurns(connection, 2)
-    #expect(texts == [SettingsProposalOutcome.appliedWithoutEffect.message(), SettingsProposalOutcome.applied.message()])
+    #expect(texts == proposalTurnTexts([SettingsProposalOutcome.appliedWithoutEffect.message(), SettingsProposalOutcome.applied.message()]))
 }
 
 @Test func agentInstructionsSayATrustedCommandDoesNotLeaveTheBoundary() {

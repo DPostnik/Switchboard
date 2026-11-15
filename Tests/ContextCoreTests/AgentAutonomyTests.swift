@@ -46,6 +46,24 @@ import ClaudeAdapter
     }
 }
 
+@Test func refusalGuidanceLimitsSwiftPMCorrectionToConfirmedOuterBoundary() {
+    let ru = AgentAutonomy.instructions(language: .russian)
+    let en = AgentAutonomy.instructions(language: .english)
+    for text in [ru, en] {
+        #expect(text.contains("SWITCHBOARD_EXTERNAL_SANDBOX=1"))
+        #expect(text.contains("swift build --disable-sandbox") && text.contains("swift test --disable-sandbox"))
+        #expect(text.contains("sandbox-exec: sandbox_apply: Operation not permitted"))
+        #expect(text.contains("PostgreSQL") && text.contains("shmget") && text.contains("rm -rf"))
+    }
+    #expect(en.contains("Without a confirmed external boundary, do not disable the sandbox"))
+    #expect(ru.contains("Без подтверждённой внешней границы не отключай песочницу"))
+    #expect(en.contains("preserving nono and all external grants") && ru.contains("сохраняя nono и все внешние разрешения"))
+    #expect(en.contains("build, test and plugin execution have not started") && ru.contains("сборка, тесты и плагины ещё не начались"))
+    #expect(en.contains("does not authorize repeating an action with an uncertain outcome") && ru.contains("не разрешение повторять действие с неопределённым результатом"))
+    #expect(en.contains("only when a specific missing grant is identified") && ru.contains("только если определён конкретный недостающий доступ"))
+    #expect(en.contains("Another interpreter for deletion is forbidden") && ru.contains("Другой интерпретатор для удаления недопустим"))
+}
+
 @Test func chatReferenceRuleNamesTheInspectTool() {
     let ru = AgentAutonomy.instructions(language: .russian)
     let en = AgentAutonomy.instructions(language: .english)

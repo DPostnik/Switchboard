@@ -22,7 +22,7 @@ private func commandFixture() throws -> (URL, URL) {
         if method == 'test/calls': result = calls
         else:
             calls.append({'method': method, 'params': p})
-            if method == 'initialize': result = {'userAgent': 'fixture'}
+            if method == 'initialize': result = {'userAgent': (root/'user-agent').read_text() if (root/'user-agent').exists() else 'fixture'}
             if method == 'thread/start': result = {'thread': {'id': (root/'session-id').read_text() if (root/'session-id').exists() else 'native-session'}}
             if method == 'thread/resume' and (root/'lose-resume').exists():
                 with (root/'resume-dispatches').open('a') as capture: capture.write('sent\n')
@@ -60,6 +60,58 @@ private func commandFixture() throws -> (URL, URL) {
     return (root, executable)
 }
 
+// Wire contract: rust-v0.167.0 app-server-protocol/src/protocol/v2/turn.rs
+// additionalContext: map of {kind: application, value: string}; application is developer authority.
+@Test func applicationGuidanceUsesExactProtocolShapeAndReplacesOlderAppGuidance() {
+    let value = CodexClient.applicationGuidance("current guidance", language: .english)
+    #expect(value == .object(["switchboard_guidance_0000": .object([
+        "kind": .string("application"),
+        "value": .string("[Switchboard guidance 3719ab1824f31a7cd7b7672e32a716682f04ad969fe30fb6c4dfb2a533ca6a7c, part 1/1]\nThese are the current developer instructions from the Switchboard application. All parts of this update together replace the entire earlier developer guidance block supplied by Switchboard. Other developer and user instructions remain in force.\n\ncurrent guidance")
+    ])]))
+    #expect(CodexClient.applicationGuidance("updated guidance", language: .english) != value)
+    #expect(CodexProtocolCompatibility.supportsApplicationGuidance(userAgent: "codex/0.167.0"))
+    for unsupported in [nil, "fixture", "codex/0.160.0", "codex/0.167.1", "codex/0.168.0"] {
+        #expect(!CodexProtocolCompatibility.supportsApplicationGuidance(userAgent: unsupported))
+    }
+}
+
+@Test func applicationGuidancePreservesEveryUnicodeByteBelowProviderCap() {
+    for language in [AppLanguage.english, .russian] {
+        let guidance = AgentAutonomy.instructions(language: language) + "\n"
+            + SettingsProposalInbox.instructions(language: language) + String(repeating: "👩🏽‍💻 конец end ", count: 900)
+        let short = CodexClient.applicationGuidance("", language: language).object.values.first!["value"].string!.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)[1]
+        let values = CodexClient.applicationGuidance(guidance, language: language).object
+        #expect(values.count > 10)
+        let chunks = values.keys.sorted().map { values[$0]!["value"].string! }
+        #expect(chunks.allSatisfy { $0.utf8.count <= 2_000 })
+        let content = chunks.map { String($0.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)[1]) }.joined()
+        #expect(content == String(short) + guidance)
+        #expect(values.values.allSatisfy { $0["kind"].string == "application" })
+    }
+}
+
+@Test func currentApplicationGuidanceTravelsWithNewAndResumedTurnsWithoutChangingUserInput() async throws {
+    let (root, executable) = try commandFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try Data("codex/0.167.0".utf8).write(to: root.appendingPathComponent("user-agent"))
+    let wire = CodexConnection(), client = CodexClient(transport: wire)
+    try await client.start(executable: executable, home: root)
+    let session = try await client.createSession(projectPath: "/workspace", access: .standard, model: "", route: .direct)
+    _ = try await client.send("literal user input", to: session, projectPath: "/workspace", access: .standard, model: "", effort: "")
+    try await client.resume(session, projectPath: "/workspace", access: .standard, route: .direct)
+    _ = try await client.send("resumed input", to: session, projectPath: "/workspace", access: .standard, model: "", effort: "")
+    let calls = try await wire.request("test/calls").array
+    let starts = calls.filter { $0["method"].string == "turn/start" }
+    #expect(starts.count == 2)
+    for (index, expected) in ["literal user input", "resumed input"].enumerated() {
+        #expect(starts[index]["params"]["input"].array.first?["text"].string == expected)
+        #expect(starts[index]["params"]["input"].array.count == 2)
+        #expect(starts[index]["params"]["additionalContext"] == CodexClient.applicationGuidance(AgentAutonomy.instructions()))
+    }
+    #expect(!calls.contains { $0["method"].string == "thread/inject_items" })
+    await client.stop()
+}
+
 @Test func typedCommandsPreserveNativeRoutingAndPermissionPayloads() async throws {
     let (root, executable) = try commandFixture()
     defer { try? FileManager.default.removeItem(at: root) }
@@ -82,6 +134,7 @@ private func commandFixture() throws -> (URL, URL) {
     let starts = calls.filter { $0["method"].string == "turn/start" }
     #expect(starts.count == 2)
     #expect(starts[0]["params"]["threadId"].string == session.nativeID)
+    #expect(starts[0]["params"]["additionalContext"] == .null)
     #expect(starts[0]["params"]["input"].array.first?["text"].string == "literal $() and `data`")
     #expect(starts[0]["params"]["sandboxPolicy"]["networkAccess"].bool == false)
     #expect(starts[0]["params"]["sandboxPolicy"]["writableRoots"] == .array([.string("/workspace")]))

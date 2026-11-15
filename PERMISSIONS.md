@@ -58,14 +58,34 @@ Rules for the channels:
 
 ### After a refusal
 
+Codex 0.167.0 delivery (2026-11-15): the existing developerInstructions override does
+not update an established resumed model context. The adapter also sends the same
+fixed app-owned guidance through turn/start additionalContext application fragments
+(developer authority), gated to this exact checked protocol. UTF-8 chunks preserve
+the provider's 1,000-token per-value cap. No user input, permission, grant or retry
+policy changes. Cold resume may repeat the current update once; compaction rebuilds
+the current configured developer bundle. Runtime instruction mutation without worker
+replacement is outside this contract. Live verification remains required.
+
 Decided by the user on 2026-11-12. A refusal must cost one step, not twenty minutes of workarounds.
 
-1. A refusal names the standard route when the app knows one: the app-owned tool to use, or the
-   setting to request. A bare `Operation not permitted` is a defect in the refusal, not in the agent.
-2. One refusal, one request. If the agent knows the standard tool, it uses it. If not, it sends one
-   access request (channel 4) with the exact folder, access set or command and the reason. It does
-   not search for another command, interpreter, path or flag that reaches the same effect: a
-   workaround is a boundary bypass, even when it succeeds.
+1. Classify the exact error before choosing a route: command-policy denial, missing resource, or
+   known nested-sandbox startup incompatibility. Bare `Operation not permitted` alone does not
+   identify a missing folder or access set. Preserve the exact error and the active boundary facts.
+2. For a real command or resource denial, use the standard app-owned tool when available. Otherwise
+   send one access request (channel 4) only for an identified missing grant that can resolve the
+   failure; report other blockers without speculative broad grants. Do not search for another
+   command, interpreter, path or flag with the denied effect. Denied deletion (`rm -rf`) uses an
+   explicit approved route when available; otherwise report the blocker. Never use an alternate interpreter. Narrow exception (invariant 8):
+   with confirmed `SWITCHBOARD_EXTERNAL_SANDBOX=1`, proactively use SwiftPM `swift build
+   --disable-sandbox` / `swift test --disable-sandbox`, or the existing project wrapper. This is
+   channel 1: only the inner SwiftPM sandbox is disabled; nono and every external grant stay.
+   The known `sandbox-exec: sandbox_apply: Operation not permitted` during manifest-evaluation
+   startup permits this correction only before build, test or plugin execution starts. No uncertain
+   action is replayed. Without confirmed external enforcement, do not disable the sandbox.
+   Other EPERM, file, network, command-policy and PostgreSQL `shmget` failures are excluded.
+   PostgreSQL needs a separately available, authorized isolated test database; otherwise report
+   the blocker, never broader grants, the user's database or removal of the external boundary.
 3. The agent continues the independent part of the task while the request waits, and reports the
    request in its final message if it is still open.
 4. The user answers once, on the request card in the requesting chat. The grant is a project
@@ -123,6 +143,7 @@ Enforcement
    grant a chat something. They leak to other chats, roles and the user's own CLIs.
 8. A nested-sandbox failure is fixed by turning the inner sandbox off (`--disable-sandbox`,
    `-Xfrontend -disable-sandbox`, the CLI's `sandbox` setting) while the external boundary stays.
+   Only with confirmed external enforcement; see the narrow SwiftPM startup rule above.
    Never by removing the outer one or granting the home folder.
 9. The external boundary is used only when it is eligible (`ExternalSandboxPlanner.eligibility`).
    Otherwise the chat falls back to the provider's native path with prompts. The fallback is logged
@@ -271,6 +292,11 @@ Delivered in steps 2-4 (live status in the paragraph above):
 - The "After a refusal" rule is in `AgentAutonomy`, which every chat of every project gets (Claude
   chats, Claude scheduled jobs, Codex threads), RU and EN. The heavy-work rule there names
   `project_diagnostics` first and no longer tells Claude to leave the sandbox for `sysctl`.
+  Follow-up 2026-11-15: shared RU/EN guidance classifies failures before requesting access and
+  names the narrow, confirmed-boundary SwiftPM startup correction (channel 1, invariant 8).
+  Claude boundary instructions defer to that shared rule; Codex start/resume and Claude chat/job
+  wiring already deliver it. No policy, grant, role, tool or ledger change. Source and existing wrapper gating reviewed;
+  current build, affected-test and live-validation results are recorded in `docs/improvements.md`.
 - Refusal texts that name the route (Claude): the role deny list (`denyList`: no workaround; the
   browser tools for `osascript`, `request_app_restart` for `launchctl`; report to the user), every
   `unattended` refusal including the hook's unattended ask-list hit and the unattended unsandboxed

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import AgentContract
 import ContextCore
 
@@ -14,6 +15,8 @@ public actor CodexClient {
     var knownSessions = Set<AgentSessionReference>()
     private var diagnosticScopes: [AgentSessionReference: (project: String, shell: AgentPermissionProfile.Shell, route: RequestRoute, scheduled: Bool, browser: AgentPermissionProfile.Browser, userChromeGrant: AgentUserChromeGrant?)] = [:]
     private var chatDirectories: [AgentSessionReference: [String]] = [:]
+    /// Matches the configured initial bundle so compaction and resumed-turn delivery use the same guidance.
+    private var sessionGuidance: [AgentSessionReference: String] = [:]
     private var diagnosticsResources: URL?
     /// The running app's bundle and executable: `app_log` and `request_app_restart` reach a thread only when the bundle
     /// lies inside its project (`ChatDirectory.hostApplication`). Tests replace it; agents cannot.
@@ -79,7 +82,7 @@ public actor CodexClient {
         }
         generatedImagesHome = home.appendingPathComponent("generated_images", isDirectory: true)
         generatedImageBaselines.removeAll()
-        diagnosticScopes.removeAll(); chatDirectories.removeAll()
+        diagnosticScopes.removeAll(); chatDirectories.removeAll(); sessionGuidance.removeAll()
         self.diagnosticsResources = diagnosticsResources
         self.browserResources = browserResources
         self.browserRoot = browserRoot
@@ -128,7 +131,7 @@ public actor CodexClient {
         if rootChanged { try await registerWorkflows(at: workflowDirectories) }
         else { _ = try await transport.request("skills/list", params: .object(["cwds": .array([.string(projectPath)]), "forceReload": .bool(true)])) }
     }
-    public func stop() async { resetInteractions(); await transport.stop(); await stopBoundary() }
+    public func stop() async { resetInteractions(); sessionGuidance.removeAll(); await transport.stop(); await stopBoundary() }
     deinit { for task in subagentHistoryTasks.values { task.cancel() }; eventTask?.cancel(); eventSink.finish() }
 
     public func account() async throws -> CodexAccount {
@@ -184,14 +187,15 @@ public actor CodexClient {
         params["config"] = try relayed(params["config"] ?? .object([:]))
         params["cwd"] = .string(projectPath)
         params["modelProvider"] = .string(route.providerID)
-        params["developerInstructions"] = .string(AgentAutonomy.instructions() + (UserChromeConfiguration.allowed(enabled: userChromeEnabled, permissions: permissions, scheduled: scheduled, grant: userChromeGrant) ? "\n" + UserChromeConfiguration.instructions : "")
-            + (Self.settingsProposalInstructions(boundary: boundary != nil).map { "\n" + $0 } ?? ""))
+        let guidance = developerGuidance(permissions: permissions, scheduled: scheduled, userChromeGrant: userChromeGrant)
+        params["developerInstructions"] = .string(guidance)
         if !model.isEmpty { params["model"] = .string(model) }
         let result = try await transport.request("thread/start", params: .object(params))
         guard let id = result["thread"]["id"].string, !id.isEmpty else {
             throw ClientFailure(L10n.text("Не получен ID разговора", "No conversation ID received"))
         }
         let session = AgentSessionReference(connection: .originalCodex, nativeID: id)
+        sessionGuidance[session] = guidance
         try await verifyUserChromeDiscovery(session: session, permissions: permissions, scheduled: scheduled, grant: userChromeGrant)
         if let grant { try profiles.acknowledge(grant, session: session) }
         chatDirectories[session] = chatDirectory
@@ -214,11 +218,12 @@ public actor CodexClient {
         params["config"] = try relayed(params["config"] ?? .object([:]))
         params["cwd"] = .string(projectPath)
         params["modelProvider"] = .string(route.providerID)
-        params["developerInstructions"] = .string(AgentAutonomy.instructions() + (UserChromeConfiguration.allowed(enabled: userChromeEnabled, permissions: permissions, scheduled: scheduled, grant: userChromeGrant) ? "\n" + UserChromeConfiguration.instructions : "")
-            + (Self.settingsProposalInstructions(boundary: boundary != nil).map { "\n" + $0 } ?? ""))
+        let guidance = developerGuidance(permissions: permissions, scheduled: scheduled, userChromeGrant: userChromeGrant)
+        params["developerInstructions"] = .string(guidance)
         // The reply is not read. Without turns it stays small: a long chat's full history can exceed the line limit.
         params["excludeTurns"] = .bool(true)
         _ = try await transport.request("thread/resume", params: .object(params))
+        sessionGuidance[session] = guidance
         try await verifyUserChromeDiscovery(session: session, permissions: permissions, scheduled: scheduled, grant: userChromeGrant)
         if let grant { try profiles.acknowledge(grant, session: session) }
         chatDirectories[session] = chatDirectory
@@ -229,7 +234,7 @@ public actor CodexClient {
     func release(_ session: AgentSessionReference) async throws {
         let id = try nativeID(session)
         let status = try await transport.request("thread/unsubscribe", params: .object(["threadId": .string(id)]))["status"].string
-        diagnosticScopes[session] = nil; chatDirectories[session] = nil
+        diagnosticScopes[session] = nil; chatDirectories[session] = nil; sessionGuidance[session] = nil
         guard status == "unsubscribed" else { return }
         for _ in 0..<50 {
             let loaded = try await transport.request("thread/loaded/list", params: .object([:]))["data"].array
@@ -347,7 +352,50 @@ public actor CodexClient {
         params.merge(permissions.codexTurnParameters(projectPath: projectPath, external: boundary != nil)) { _, new in new }
         if !model.isEmpty { params["model"] = .string(model) }
         if !effort.isEmpty { params["effort"] = .string(effort) }
+        if CodexProtocolCompatibility.supportsApplicationGuidance(userAgent: await transport.serverUserAgent),
+           let guidance = sessionGuidance[session] {
+            params["additionalContext"] = Self.applicationGuidance(guidance)
+        }
         return try await transport.request("turn/start", params: .object(params), timeout: 60)["turn"]["id"].string
+    }
+
+    private func developerGuidance(permissions: AgentPermissionProfile, scheduled: Bool, userChromeGrant: AgentUserChromeGrant?) -> String {
+        AgentAutonomy.instructions()
+            + (UserChromeConfiguration.allowed(enabled: userChromeEnabled, permissions: permissions, scheduled: scheduled, grant: userChromeGrant) ? "\n" + UserChromeConfiguration.instructions : "")
+            + (Self.settingsProposalInstructions(boundary: boundary != nil).map { "\n" + $0 } ?? "")
+    }
+
+    /// 0.167 keeps the old developer bundle on resume. Application context is a developer fragment,
+    /// deduplicated by this stable key in the provider. It shares turn/start's existing no-retry path.
+    static func applicationGuidance(_ guidance: String, language: AppLanguage = L10n.language) -> JSONValue {
+        let notice = L10n.text(
+            "Это актуальные инструкции разработчика от приложения Switchboard. Все части этого обновления вместе заменяют весь прежний блок инструкций разработчика от приложения Switchboard. Остальные инструкции разработчика и пользователя сохраняют силу.",
+            "These are the current developer instructions from the Switchboard application. All parts of this update together replace the entire earlier developer guidance block supplied by Switchboard. Other developer and user instructions remain in force.", language: language)
+        // 0.167 truncates each additional-context value at 1,000 estimated tokens (4,000 UTF-8
+        // bytes). Keep every chunk below half that limit, preserving Unicode and all instructions.
+        let complete = notice + "\n\n" + guidance
+        let digest = SHA256.hash(data: Data(complete.utf8)).map { String(format: "%02x", $0) }.joined()
+        var chunks: [String] = [], remaining = complete[...]
+        while !remaining.isEmpty {
+            var end = remaining.startIndex, bytes = 0, whitespace: String.Index?
+            while end < remaining.endIndex {
+                let next = remaining.unicodeScalars.index(after: end), count = remaining[end..<next].utf8.count
+                if bytes + count > 1_800 { break }
+                bytes += count
+                if remaining.unicodeScalars[end].properties.isWhitespace { whitespace = next }
+                end = next
+            }
+            // Prefer complete words/newlines; a single huge token falls back to Unicode scalar boundaries.
+            if end < remaining.endIndex, let whitespace { end = whitespace }
+            chunks.append(String(remaining[..<end])); remaining = remaining[end...]
+        }
+        return .object(Dictionary(uniqueKeysWithValues: chunks.enumerated().map { index, value in
+            let header = L10n.text("[Инструкции Switchboard \(digest), часть \(index + 1)/\(chunks.count)]",
+                                   "[Switchboard guidance \(digest), part \(index + 1)/\(chunks.count)]", language: language)
+            // The provider sorts context keys; padding preserves instruction order across 10+ chunks.
+            return (String(format: "switchboard_guidance_%04d", index),
+                    .object(["kind": .string("application"), "value": .string(header + "\n" + value)]))
+        }))
     }
     // Legacy entry points: the old access modes stand for the editor and operator roles.
     public func createSession(projectPath: String, access: AccessMode, model: String, route: RequestRoute,
@@ -399,6 +447,7 @@ public actor CodexClient {
     public func setArchived(_ archived: Bool, session: AgentSessionReference) async throws {
         _ = try await transport.request(archived ? "thread/archive" : "thread/unarchive",
                                        params: .object(["threadId": .string(try nativeID(session))]))
+        if archived { sessionGuidance[session] = nil }
     }
     public func delete(_ session: AgentSessionReference) async throws {
         let id = try nativeID(session)
@@ -408,6 +457,7 @@ public actor CodexClient {
             // Codex confirms there is no persisted thread to delete (including an unused new chat).
             // Match only this thread's exact response; transport failures and other errors still fail closed.
         }
+        sessionGuidance[session] = nil
     }
     public func history(_ session: AgentSessionReference) async throws -> [CodexHistoryTurn] {
         let turns = try await read(session)["turns"].array

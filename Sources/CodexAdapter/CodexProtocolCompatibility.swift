@@ -25,6 +25,12 @@ enum CodexProtocolCompatibility {
 
     static func accepts(userAgent: String) -> Bool { verdict(userAgent: userAgent) != .rejected }
 
+    /// Experimental application-context delivery checked against the exact 0.167.0 protocol/source.
+    /// This does not change the separate engine admission policy or admit same-minor drift here.
+    static func supportsApplicationGuidance(userAgent: String?) -> Bool {
+        userAgent.flatMap(version(userAgent:)) == "0.167.0"
+    }
+
     /// The engine as the descriptor reports it; nil when the version is rejected.
     static func engine(userAgent: String, verifiedInstall: String? = nil) -> AgentEngineVersion? {
         guard let version = version(userAgent: userAgent) else { return nil }

@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Distinguish permission refusals from SwiftPM nested-sandbox startup failures while preserving the external boundary, including current developer guidance in resumed Codex chats.
+
 - Tell agents the app-selected model on every turn, keeping orchestration guidance current after model switches.
 
 - Select reasoning effort from a dropdown for Codex and Claude scheduled tasks, using the selected agent’s available levels.

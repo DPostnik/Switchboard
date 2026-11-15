@@ -2408,8 +2408,11 @@ private func boundaryDeveloper(_ root: URL, sharedRoots: [AgentPermissionProfile
     let other = try #require(SettingsProposalInbox.chatFolder("other-" + UUID().uuidString, create: true))
     defer { try? manager.removeItem(at: own); try? manager.removeItem(at: other) }
     try manager.createDirectory(at: own.appendingPathComponent("nested"), withIntermediateDirectories: true)
-    try Data("{}".utf8).write(to: other.appendingPathComponent("taken.json"))
-    try manager.createSymbolicLink(at: own.appendingPathComponent("link.json"), withDestinationURL: other.appendingPathComponent("taken.json"))
+    let linkDestination = other.appendingPathComponent("taken.txt")
+    try Data("{}".utf8).write(to: linkDestination)
+    // The global inbox scanner discards JSON symlinks AND invalid JSON proposals. Keep both
+    // ends outside its inputs so the real-path refusal cannot race with target deletion.
+    try manager.createSymbolicLink(at: own.appendingPathComponent("link.txt"), withDestinationURL: linkDestination)
     var turns = 1
     func request(_ tool: String, _ path: String) async throws {
         let input = String(decoding: try JSONEncoder().encode(["file_path": path, "content": "{}", "old_string": "{", "new_string": "{"]), as: UTF8.self)
@@ -2441,14 +2444,28 @@ private func boundaryDeveloper(_ root: URL, sharedRoots: [AgentPermissionProfile
     })
     // Negative: another chat's folder, the inbox root, a subfolder, `..` into another folder, a link out of the folder.
     let misplaced = [other.path + "/proposal.json", inbox.path + "/proposal.json", own.path + "/nested/proposal.json",
-                     own.path + "/../" + other.lastPathComponent + "/proposal.json", own.path + "/link.json"]
+                     own.path + "/../" + other.lastPathComponent + "/proposal.json", own.path + "/link.txt"]
     // Negative: the authors file next to the inbox and a plain outside path keep the old refusal.
     let elsewhere = [SettingsProposalInbox.authorsFile().path, "/outside-project/file"]
-    for path in misplaced + elsewhere { try await request("Write", path) }
+    for path in misplaced + elsewhere {
+        if path == own.path + "/link.txt" {
+            #expect(try manager.destinationOfSymbolicLink(atPath: path) == linkDestination.path)
+            #expect(try Data(contentsOf: linkDestination) == Data("{}".utf8))
+        }
+        try await request("Write", path)
+        if path == own.path + "/link.txt" {
+            #expect(try manager.destinationOfSymbolicLink(atPath: path) == linkDestination.path)
+            #expect(try Data(contentsOf: linkDestination) == Data("{}".utf8))
+        }
+    }
     let later = await events.capabilities().filter { ["Write", "Edit"].contains($0.tool) }.dropFirst(allowed.count)
-    #expect(!later.contains { $0.decision == .allowed })
+    let permissionTrace = later.map { "target=\($0.target ?? "nil") decision=\($0.decision) reason=\($0.reason ?? "nil")" }.joined(separator: "; ")
+    #expect(!later.contains { $0.decision == .allowed }, "\(permissionTrace)")
     let answers = Array(fixture.answers().dropFirst(allowed.count))
-    #expect(answers.count == misplaced.count + elsewhere.count && answers.allSatisfy { $0["response"]["behavior"].string == "deny" })
+    let answerTrace = zip(misplaced + elsewhere, answers).map { path, answer in
+        "target=\(path) behavior=\(answer["response"]["behavior"].string ?? "nil")"
+    }.joined(separator: "; ")
+    #expect(answers.count == misplaced.count + elsewhere.count && answers.allSatisfy { $0["response"]["behavior"].string == "deny" }, "\(answerTrace)")
     if boundary {
         #expect(await events.interactions().isEmpty)
         #expect(later.allSatisfy { $0.decision == .denied && $0.reason == "outsideBoundary" })
