@@ -10,6 +10,15 @@ LOGS="$HOME/Library/Logs/Switchboard/nightly-tests"
 mkdir -p "$LOGS" "${WORK:h}"
 # One line per day of SSD wear counters, before the suite adds its own writes.
 zsh "$REPO/scripts/perf/ssd-wear-log.sh"
+# On battery macOS keeps the sleeping Mac only in short DarkWake windows: on 2026-11-15
+# the build took 2.8 hours and tests with timeouts failed across sleep. Skip such nights
+# instead of reporting false failures; keep the previous result in the status line.
+if ! pmset -g batt 2>/dev/null | head -1 | grep -q "'AC Power'"; then
+  previous=$(head -1 "$LOGS/latest-status" 2>/dev/null)
+  [[ $previous == skipped:* ]] && previous=${${(M)previous:#*\| last run: *}#*\| last run: }
+  echo "skipped: battery $(date +%Y-%m-%dT%H:%M:%S)${previous:+ | last run: $previous}" >"$LOGS/latest-status"
+  exit 0
+fi
 stamp=$(date +%Y-%m-%d_%H%M)
 log="$LOGS/$stamp.log"
 
@@ -24,7 +33,8 @@ commit=$(git -C "$WORK" rev-parse --short HEAD 2>/dev/null || echo unknown)
 echo "Nightly full suite: $BRANCH @ $commit, $(date)" >>"$log"
 
 start=$SECONDS
-(cd "$WORK" && zsh scripts/test.sh --verbose) >>"$log" 2>&1
+# caffeinate holds the Mac awake (system sleep is preventable on AC power only) for the suite.
+(cd "$WORK" && caffeinate -i -s zsh scripts/test.sh --verbose) >>"$log" 2>&1
 code=$?
 summary=$(grep -m1 ' Test run with ' "$log" || grep -E '^FAILED|error:' "$log" | tail -1)
 flaky=$(grep -m1 '^FLAKY' "$log" | sed 's/\. Not a regression.*//')
