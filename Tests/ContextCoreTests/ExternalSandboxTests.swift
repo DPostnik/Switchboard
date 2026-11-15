@@ -953,3 +953,52 @@ private extension ExternalSandboxCommand.ArgumentRule {
         #expect(try ExternalSandboxPlanner.plan(input, helper: .success(helper)).get().authority == before.authority)
     }
 }
+
+/// The same saved roots compile differently after a resource appears; neither its parent nor siblings are substituted.
+@Test func missingExplicitFolderChangesEffectiveAuthorityForBothProvidersWhenCreated() throws {
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    // The fixture's provider executable lives directly under root, which is intentionally read-granted.
+    // Put the future folder in a separate container so its parent must never become a replacement grant.
+    let container = root.appendingPathComponent("destinations")
+    let sibling = container.appendingPathComponent("sibling")
+    try FileManager.default.createDirectory(at: sibling, withIntermediateDirectories: true)
+    let missing = container.appendingPathComponent("future-folder")
+    let inbox = root.appendingPathComponent("inbox")
+    var project = Project(path: root.appendingPathComponent("project").path)
+    project.accessPresets = []
+    project.extraRoots = [.init(path: missing.path, writable: true)]
+    let profile = AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: project)
+    let inputs = [claudeInput(root, project: project, workerID: "pending-claude"),
+                  CodexIntegration.boundaryInput(project: project.path, profile: profile, root: root, inbox: inbox)]
+    let before = try inputs.map { try ExternalSandboxPlanner.plan($0, helper: .success(helper)).get() }
+    let path = missing.resolvingSymlinksInPath().path
+    for plan in before {
+        #expect(plan.missingFolders == [path])
+        #expect(!plan.grants.contains { $0.path == path || $0.path == container.resolvingSymlinksInPath().path })
+        #expect(!plan.grants.contains { $0.mode == .allow && path.hasPrefix($0.path + "/") })
+        for language in [AppLanguage.russian, .english] {
+            #expect(plan.missingFoldersNotice(language: language)?.contains(path) == true)
+        }
+    }
+    #expect(!FileManager.default.fileExists(atPath: missing.path))
+    try FileManager.default.createDirectory(at: missing, withIntermediateDirectories: true)
+    let after = try inputs.map { try ExternalSandboxPlanner.plan($0, helper: .success(helper)).get() }
+    for (old, new) in zip(before, after) {
+        #expect(new.missingFolders.isEmpty && new.missingFoldersNotice() == nil)
+        #expect(new.grants.contains(.init(.allow, path)))
+        #expect(new.authority != old.authority)
+        #expect(!new.grants.contains { $0.path == sibling.resolvingSymlinksInPath().path })
+        #expect(!new.grants.contains { $0.mode == .allow && path.hasPrefix($0.path + "/") })
+    }
+    #expect(try inputs.map { try ExternalSandboxPlanner.plan($0, helper: .success(helper)).get().authority } == after.map(\.authority))
+    func scope(_ plan: ExternalSandboxPlan) -> CodexIntegration.ChromeScope {
+        .init(grant: nil, project: project.path, permissions: profile, route: .direct, scheduled: false,
+              chatDirectory: nil, projectSkills: nil, boundaryAuthority: plan.authority, inboxFolder: "original-token")
+    }
+    // Same settings, different effective authority must replace Codex's worker; unchanged authority must keep it.
+    #expect(scope(before[1]) != scope(after[1]))
+    let unchanged = try ExternalSandboxPlanner.plan(inputs[1], helper: .success(helper)).get()
+    #expect(scope(after[1]) == scope(unchanged))
+}

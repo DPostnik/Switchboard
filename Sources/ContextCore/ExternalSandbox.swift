@@ -230,12 +230,21 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
     public let workerID: String
     public let project: String
     public let grants: [Grant]
+    /// Explicit saved folder grants omitted because the resource does not exist. Optional preset paths are excluded.
+    public let missingFolders: [String]
     public let commands: [ExternalSandboxCommand]
     public let executableDirectories: [String]
     public let worker: URL
     public let socket: URL
     public let relay: URL
     public let temporary: URL
+    public func missingFoldersNotice(language: AppLanguage = L10n.language) -> String? {
+        guard !missingFolders.isEmpty else { return nil }
+        let paths = missingFolders.joined(separator: ", ")
+        return L10n.text(
+            "Доступ к папкам сохранён, но эти пути отсутствуют и не вошли во внешнюю границу: \(paths). Приложение не создаёт их и не даёт доступ к родительским папкам. После создания папки приложение заново скомпилирует сохранённые права со следующего сообщения. Повторный запрос доступа не нужен.",
+            "Folder access is saved, but these paths do not exist and were omitted from the external boundary: \(paths). The app does not create them or grant their parent folders. After a folder is created, the app recompiles saved grants on the next message. No repeated access request is needed.", language: language)
+    }
     public var policyFile: URL { worker.appendingPathComponent("policy.json") }
     /// Provider settings the app writes before launch (Claude `--settings`); granted read-only when the plan asks for it.
     public var settingsFile: URL { worker.appendingPathComponent("settings.json") }
@@ -503,6 +512,8 @@ public enum ExternalSandboxPlanner {
             try? manager.createDirectory(atPath: folder, withIntermediateDirectories: true)
             add(.allow, folder)
         }
+        let missingFolders = effective.extraRoots.map { canonical(expand($0.path, home: input.home)) }
+            .filter { !manager.fileExists(atPath: $0) && $0 != protected && !$0.hasPrefix(protected + "/") && !protected.hasPrefix($0 + "/") }
         for root in effective.extraRoots { add(root.writable && !readOnly ? .allow : .read, root.path) }
         if let sandbox = effective.commandSandbox, effective.shell == .on {
             for path in sandbox.write { add(.allow, path) }
@@ -580,7 +591,7 @@ public enum ExternalSandboxPlanner {
                 return .failure(.trustedCommandOutside(command))
             }
         }
-        return .success(.init(workerID: input.workerID, project: project, grants: grants, commands: commands,
+        return .success(.init(workerID: input.workerID, project: project, grants: grants, missingFolders: missingFolders, commands: commands,
                               executableDirectories: executableDirectories, worker: worker, socket: socket,
                               relay: resources.appendingPathComponent("SandboxRuntime/mcp_relay.py"), temporary: temporary))
     }

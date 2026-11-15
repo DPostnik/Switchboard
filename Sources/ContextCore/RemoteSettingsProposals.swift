@@ -71,6 +71,7 @@ extension SettingsProposalReview {
             for id in diff.removePresets { lines += [text("− Набор доступа: ", "− Access set: ") + id] }
             for root in diff.addFolders {
                 lines += [text("+ Папка: ", "+ Folder: ") + root.path + (root.writable ? text(" (чтение и запись)", " (read and write)") : text(" (только чтение)", " (read only)"))]
+                if missingFolders.contains(root.path) { lines += ["! " + Self.missingFolderWarning(language: language)] }
             }
             for path in diff.removeFolders { lines += [text("− Папка: ", "− Folder: ") + path] }
             for command in diff.addCommands { lines += [text("! Доверенная команда: ", "! Trusted command: ") + command] }

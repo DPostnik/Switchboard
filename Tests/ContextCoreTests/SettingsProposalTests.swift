@@ -358,13 +358,14 @@ private func proposalTurnTexts(_ messages: [String]) -> [String] {
     let before = try await turnTexts(connection)
     #expect(model.queuedMessages.isEmpty && before.isEmpty)
 
-    // Apply while idle: settings saved, file gone, one fixed message sent now.
+    // Apply while idle: the absent folder grant is saved without creating it; one fixed pending message is sent.
     model.applySettingsProposal("p1.json")
     #expect(model.state.projects[0].extraRoots == [.init(path: extra, writable: false)])
+    #expect(!FileManager.default.fileExists(atPath: extra))
     #expect(!FileManager.default.fileExists(atPath: inbox.appendingPathComponent("p1.json").path))
     #expect(model.currentSettingsProposal == nil)
     var texts = try await waitForTurns(connection, 1)
-    #expect(texts == proposalTurnTexts([SettingsProposalOutcome.applied.message()]))
+    #expect(texts == proposalTurnTexts([SettingsProposalOutcome.appliedPendingFolders.message()]))
     // A second click (or a second window) finds no proposal and sends nothing.
     model.applySettingsProposal("p1.json")
 
@@ -372,7 +373,7 @@ private func proposalTurnTexts(_ messages: [String]) -> [String] {
     model.rejectSettingsProposal("p2.json")
     #expect(model.state.projects[0].sandboxCommands == nil)
     texts = try await waitForTurns(connection, 2)
-    #expect(texts == proposalTurnTexts([SettingsProposalOutcome.applied.message(), SettingsProposalOutcome.rejected.message()]))
+    #expect(texts == proposalTurnTexts([SettingsProposalOutcome.appliedPendingFolders.message(), SettingsProposalOutcome.rejected.message()]))
     #expect(!texts.contains { $0.contains("SECRET-PATH") || $0.contains("IGNORE PREVIOUS") || $0.contains("payload") || $0.contains(extra) })
 
     // Archived and unknown chats: the decision applies, no chat receives anything.
@@ -716,4 +717,39 @@ private func keychainReview(_ project: Project, add: [AgentPermissionProfile.Key
     }
     #expect(SettingsProposalInbox.boundaryCommandRule(language: .english).contains("`addCommands` does not take a command outside"))
     #expect(SettingsProposalInbox.boundaryCommandRule(language: .russian).contains("`addCommands` не выводит команду наружу"))
+}
+
+@Test func missingFolderReviewAndContinuationDistinguishSavedAccessFromEffectiveAccess() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    var state = SavedState()
+    let project = Project(path: root.path)
+    state.projects = [project]
+    let folder = root.appendingPathComponent("future")
+    var change = SettingsProposal.Change(project: project.path)
+    change.addFolders = [.init(path: folder.path, writable: true)]
+    let review = SettingsProposalReview(id: "future.json", proposal: .init(changes: [change]), state: state)
+    #expect(review.missingFolders == [folder.path])
+    #expect(SettingsProposalOutcome.afterApply(review, notes: []) == .appliedPendingFolders)
+    for language in [AppLanguage.russian, .english] {
+        let warning = SettingsProposalReview.missingFolderWarning(language: language)
+        #expect(review.remoteDetails(language: language).contains(warning))
+        #expect(SettingsProposalInbox.instructions(language: language).contains(SettingsProposalInbox.folderBoundaryRule(language: language)))
+        #expect(!SettingsProposalOutcome.appliedPendingFolders.message(language: language).contains(folder.path)) // fixed app text
+    }
+    let continuation = SettingsProposalOutcome.appliedPendingFolders.message(language: .english)
+    #expect(continuation.contains("Access is saved") && continuation.contains("Do not submit the same request again"))
+    #expect(!continuation.contains("Retry the step"))
+    let applied = state.apply(review)
+    #expect(applied)
+    #expect(!FileManager.default.fileExists(atPath: folder.path)) // Apply grants no parent and creates nothing.
+    #expect(state.projects[0].extraRoots == change.addFolders)
+    let duplicate = SettingsProposalReview(id: "again.json", proposal: .init(changes: [change]), state: state)
+    #expect(duplicate.projects.isEmpty)
+    #expect(SettingsProposalOutcome.alreadyGranted.message(language: .english).contains("Saved access may not yet be effective"))
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    #expect(review.missingFolders.isEmpty)
+    #expect(SettingsProposalOutcome.afterApply(review, notes: []) == .applied)
+    #expect(SettingsProposalOutcome.applied.message(language: .english).contains("never repeat an action with an uncertain outcome"))
 }

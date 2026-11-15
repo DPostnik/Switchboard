@@ -127,6 +127,7 @@ extension SettingsProposalOutcome {
     /// trusted commands the requesting chat's boundary keeps inside (each has a `noExtraAccess` note for that chat's kind),
     /// else `.applied`.
     public static func afterApply(_ review: SettingsProposalReview, notes: [SettingsProposalBoundaryNote]) -> Self {
+        if !review.missingFolders.isEmpty { return .appliedPendingFolders }
         let commands = review.projects.flatMap { diff in diff.addCommands.map { (diff.projectID, $0) } }
         guard !commands.isEmpty,
               review.projects.allSatisfy({ $0.addPresets.isEmpty && $0.addFolders.isEmpty && $0.addKeychainItems.isEmpty && $0.sandbox == nil }),

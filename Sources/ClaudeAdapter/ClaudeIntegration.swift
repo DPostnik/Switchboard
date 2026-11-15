@@ -438,6 +438,9 @@ public actor ClaudeIntegration: AgentIntegration {
                     if case .token = fallback { wireArguments[id] = ["--token-fallback"] } else { wireArguments[id] = launch }
                 }
                 noteFallback(fallback, session: id, project: record.cwd)
+                if case nil = fallback, let text = boundary?.plan.missingFoldersNotice() {
+                    sink.yield(.init(session: reference(id), payload: .diagnostic(text)))
+                }
                 sessionEpochs[id] = UUID()
                 wires[id] = wire; backgroundTasks[id] = []; stopWaiting(id); wirePlugins[id] = plugins
                 if scheduled { scheduledWires.insert(id) } else { scheduledWires.remove(id) }

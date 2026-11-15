@@ -87,6 +87,9 @@ struct SettingsProposalChanges: View {
             ForEach(diff.addFolders, id: \.path) { root in
                 line("+", L10n.text("Папка: ", "Folder: ") + root.path + (root.writable ? L10n.text(" — чтение и запись", " — read and write") : L10n.text(" — только чтение", " — read only")),
                      warning: root.writable)
+                if review.missingFolders.contains(root.path) {
+                    line("!", SettingsProposalReview.missingFolderWarning(), warning: true)
+                }
             }
             ForEach(diff.removeFolders, id: \.self) { line("−", L10n.text("Убрать папку: ", "Remove folder: ") + $0) }
             ForEach(diff.addCommands, id: \.self) { command in

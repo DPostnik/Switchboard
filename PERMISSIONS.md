@@ -659,6 +659,27 @@ No permission invariant or taken decision changes. PostgreSQL database tests rem
 blocked inside the external boundary by its shared-memory refusal (the user ran the suite successfully in Terminal); a trusted Python command
 would not remove that boundary and is not a valid workaround.
 
+### Missing explicit folders (2026-11-15, implementation pending verification)
+
+Channel 1 fixes compilation of existing grants, without changing an invariant or taken decision.
+A saved explicit folder that does not exist remains omitted from nono, never replaced by its
+parent and never created by the planner. Both providers diagnose these exact omitted roots in
+the chat on launch. These diagnostics are UI events, not model context. Optional absent preset
+paths stay quiet. Existing proposal review (Mac and phone) warns before Apply, and its fixed
+continuation distinguishes saved access from effective access. Duplicate proposals keep the
+existing `alreadyGranted` outcome; shared RU/EN instructions explain the distinction and forbid
+repeated proposals, parent grants as a workaround and uncertain action replay.
+
+Codex now recomputes the existing plan at each prepare/submit and includes `plan.authority`
+in its existing dedicated-worker scope. Claude already compares that authority each turn.
+A filesystem change that changes compiled grants replaces the worker on the next message,
+including its background descendants; it does not hot-patch a running process or retry a turn.
+Codex keeps a new thread's original token inbox while comparing plans, so the first subsequent
+message alone does not change authority. Replacement releases the old thread writer, stops the
+old worker tree before resuming the new worker, and clears a failed replacement's scope.
+No filesystem watcher, new policy layer, app-owned tool, fallback or additional grant is added.
+Live checks and required sandbox probes remain pending; see `docs/improvements.md`.
+
 ## 6. How to fix a defect in this area
 
 1. **Capture the real failure first.** `inspect_chat` or `zsh scripts/chat-lookup.sh <ID>` for the

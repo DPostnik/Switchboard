@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Explain saved access to missing folders and refresh both providers’ effective sandbox grants when those folders appear.
+
 - Routine run history loads in pages of 40 and collapses consecutive "nothing new" skips into one card with the last check time, so long histories scroll smoothly.
 
 - Open a shell code block in Terminal from its header: the commands wait at the zsh prompt in the chat's folder and run only after Return.

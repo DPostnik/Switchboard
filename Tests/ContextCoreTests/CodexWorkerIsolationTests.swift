@@ -419,3 +419,30 @@ func explicitSignOutStopsDedicatedWorkerWithoutAccountNotification(mode: String)
     #expect(!calls.contains { ["thread/resume", "thread/unsubscribe"].contains($0["method"].string ?? "") })
     await app.stop()
 }
+
+@Test func failedWorkerReplacementDoesNotKeepDeadScopeOrReplayTheTurn() async throws {
+    let (root, executable) = try workerFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let app = AgentClient(integration: CodexIntegration())
+    _ = try await app.start(.init(executable: executable, home: root))
+    let developer = AgentRoleCatalog.preset(AgentRoleID.developer).profile
+    let reader = AgentRoleCatalog.preset(AgentRoleID.reader).profile
+    let session = try await app.createSession(projectPath: root.path, permissions: developer, model: "", route: .direct)
+    try Data().write(to: root.appendingPathComponent("require-rollout"))
+    do {
+        _ = try await app.send("children", to: session, projectPath: root.path, permissions: reader, model: "", effort: "")
+        Issue.record("Missing rollout must reject the replacement resume")
+    } catch {}
+    let before = try String(contentsOf: root.appendingPathComponent("calls.jsonl"), encoding: .utf8)
+        .split(separator: "\n").map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+    #expect(!before.contains { $0["method"].string == "turn/start" })
+    let oldPID = Int32(try #require(before.first { $0["method"].string == "thread/start" }?["pid"].int))
+    #expect(Darwin.kill(oldPID, 0) != 0) // old process ends before replacement resume
+    // Supply the missing fixture rollout, then make a new, explicit send. The rejected turn was never replayed.
+    try Data().write(to: root.appendingPathComponent("rollout-" + session.nativeID))
+    _ = try await app.send("children", to: session, projectPath: root.path, permissions: reader, model: "", effort: "")
+    let after = try String(contentsOf: root.appendingPathComponent("calls.jsonl"), encoding: .utf8)
+        .split(separator: "\n").map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) }
+    #expect(after.filter { $0["method"].string == "turn/start" }.count == 1)
+    await app.stop()
+}

@@ -14,7 +14,7 @@ public actor CodexIntegration: AgentIntegration {
     private var providerClients: [AgentRoute: CodexClient] = [:]
     private var providerObservers: [AgentRoute: Task<Void, Never>] = [:]
     private var observer: Task<Void, Never>?
-    private struct ChromeScope: Equatable {
+    struct ChromeScope: Equatable {
         let grant: AgentUserChromeGrant?
         let project: String
         let permissions: AgentPermissionProfile
@@ -23,6 +23,8 @@ public actor CodexIntegration: AgentIntegration {
         let chatDirectory: [String]?
         /// The project's skill link folder (`ProjectSkills`); its appearance or removal changes the worker's grants.
         let projectSkills: URL?
+        let boundaryAuthority: [String]?
+        let inboxFolder: String
     }
     private var chromeWorkers: [AgentSessionReference: CodexClient] = [:]
     private var chromeObservers: [AgentSessionReference: Task<Void, Never>] = [:]
@@ -271,10 +273,10 @@ public actor CodexIntegration: AgentIntegration {
         let descriptor = try await current()
         if let reason = descriptor.validate(request) { throw IntegrationRejection(reason) }
     }
-    private func chromeScope(_ request: AgentExecutionRequest) throws -> ChromeScope {
+    private func chromeScope(_ request: AgentExecutionRequest, boundary: ExternalSandboxLaunch?, inboxFolder: String) throws -> ChromeScope {
         ChromeScope(grant: request.userChromeGrant, project: request.projectPath, permissions: try access(request.permissions),
                     route: request.route, scheduled: request.kind == .scheduled, chatDirectory: request.chatDirectory,
-                    projectSkills: projectSkills(request.projectPath)?.folder)
+                    projectSkills: projectSkills(request.projectPath)?.folder, boundaryAuthority: boundary?.plan.authority, inboxFolder: inboxFolder)
     }
     /// The project's skills from `.agents/skills` and `.claude/skills` as the app's link folder, read at every turn; a folder
     /// the app cannot update leaves the chat without project skills rather than failing the turn.
@@ -403,22 +405,34 @@ public actor CodexIntegration: AgentIntegration {
         if let text = boundaryNotices.note(reason, session: session) { sink.yield(.init(session: session, payload: .diagnostic(text))) }
     }
     private func refreshChromeWorker(_ request: AgentExecutionRequest, session: AgentSessionReference) async throws {
-        let scope = try chromeScope(request)
+        // Recompile the effective grants, as Claude does: unchanged settings may now resolve to an existing folder.
+        // Keep a new thread's original token inbox; changing it to the thread ID would replace an unchanged worker.
+        let folder = chromeScopes[session]?.inboxFolder ?? Self.inboxFolderName(for: session)
+        let decision = try await boundary(project: request.projectPath, permissions: try access(request.permissions), route: request.route,
+                                          inboxFolder: folder)
+        let scope = try chromeScope(request, boundary: decision.launch, inboxFolder: folder)
         guard chromeScopes[session] != scope else { return }
-        let decision = try await boundary(project: scope.project, permissions: scope.permissions, route: request.route,
-                                          inboxFolder: Self.inboxFolderName(for: session))
         let fresh = try await worker(for: request.route).isolatedSibling(
             permissionArguments: scope.permissions.codexProcessArguments(projectPath: scope.project),
             boundary: decision.launch, projectSkills: projectSkills(scope.project))
         do {
             // The process that loaded the thread holds its writer lock; the cold worker cannot resume it until it is released.
             try await (chromeWorkers[session] ?? worker(for: request.route)).release(session)
+            // Stop the old process tree (including subagents) before the new worker claims the changed authority.
+            await bindChromeWorker(fresh, session: session, scope: scope)
             try await fresh.resume(session, projectPath: request.projectPath, permissions: scope.permissions,
                                    route: route(request.route), scheduled: scope.scheduled, userChromeGrant: request.userChromeGrant,
                                    chatDirectory: request.chatDirectory)
-        } catch { await fresh.stop(); throw error }
-        await bindChromeWorker(fresh, session: session, scope: scope)
+        } catch {
+            if chromeWorkers[session] === fresh {
+                chromeWorkers[session] = nil; chromeScopes[session] = nil
+                chromeObservers.removeValue(forKey: session)?.cancel()
+                resolveChromeInteractions(session)
+            }
+            await fresh.stop(); throw error
+        }
         noteFallback(decision.fallback, session: session)
+        if let text = decision.launch?.plan.missingFoldersNotice() { sink.yield(.init(session: session, payload: .diagnostic(text))) }
     }
     public func prepare(_ request: AgentExecutionRequest) async -> AgentResult<AgentSessionReference> {
         do {
@@ -444,8 +458,9 @@ public actor CodexIntegration: AgentIntegration {
                                                              userChromeGrant: request.userChromeGrant, chatDirectory: request.chatDirectory)
                 } catch { await worker.stop(); throw error }
                 if decision.launch?.settingsInbox != nil { SettingsProposalInbox.recordAuthor(folder: folder, session: session.nativeID) }
-                await self.bindChromeWorker(worker, session: session, scope: try self.chromeScope(request))
+                await self.bindChromeWorker(worker, session: session, scope: try self.chromeScope(request, boundary: decision.launch, inboxFolder: folder))
                 self.noteFallback(decision.fallback, session: session)
+                if let text = decision.launch?.plan.missingFoldersNotice() { self.sink.yield(.init(session: session, payload: .diagnostic(text))) }
                 self.sessionRoutes[session] = (request.route, request.model.context)
                 return session
             }

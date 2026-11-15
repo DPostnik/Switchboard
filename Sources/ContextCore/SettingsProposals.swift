@@ -159,6 +159,15 @@ public struct SettingsProposalReview: Identifiable, Equatable, Sendable {
                   language: language)
     }
 
+    /// Display and Apply use a fresh filesystem check, not proposal-time state. This never creates a folder.
+    public var missingFolders: [String] {
+        projects.flatMap(\.addFolders).map(\.path).filter { !FileManager.default.fileExists(atPath: $0) }
+    }
+    public static func missingFolderWarning(language: AppLanguage = L10n.language) -> String {
+        L10n.text("Папка отсутствует. Доступ сохранится, но внешняя граница не включит этот путь до создания папки. Приложение не создаст её и не даст доступ к родительской папке. После создания граница заново скомпилирует сохранённые права со следующего сообщения; повторный запрос не нужен.",
+                  "The folder does not exist. Access will be saved, but the external boundary omits this path until the folder exists. The app will not create it or grant its parent. After creation, the boundary recompiles saved grants on the next message; no repeated request is needed.", language: language)
+    }
+
     /// `~/` expanded, standardized; nil for relative paths and `..` components.
     static func absolute(_ raw: String, home: String) -> String? {
         var path = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -203,22 +212,25 @@ public enum SettingsProposalOutcome: Sendable {
     /// `unusable`: not a decision. The file in the chat's own folder did not decode or changed nothing, so the app removed
     /// it unseen; the chat learns that and gets the format once more instead of believing the request waits.
     /// `alreadyGranted`: not a decision either. The file named a known project and asked only for settings it already has,
-    /// so the access the chat lacks is something else; it must report the real refusal instead of asking again.
-    case applied, appliedWithoutEffect, rejected, unusable, alreadyGranted
+    /// so it must distinguish saved settings from the process's effective grants and report the refusal, not ask again.
+    case applied, appliedPendingFolders, appliedWithoutEffect, rejected, unusable, alreadyGranted
     public func message(language: AppLanguage = L10n.language) -> String {
         switch self {
         case .alreadyGranted: L10n.text(
-            "Switchboard: твой запрос на изменение настроек проекта ничего не меняет: всё запрошенное у проекта уже есть. Приложение удалило файл, пользователь его не видел. Не отправляй этот запрос снова. Причина отказа в другом: сообщи пользователю точную команду или путь и полный текст ошибки, затем продолжай независимую часть задачи.",
-            "Switchboard: your project settings request changes nothing: the project already has everything it asks for. The app removed the file and the user never saw it. Do not send this request again. The refusal has another cause: report the exact command or path and the full error text to the user, then continue the independent part of the task.",
+            "Switchboard: твой запрос на изменение настроек проекта ничего не меняет: всё запрошенное у проекта уже есть. Приложение удалило файл, пользователь его не видел. Не отправляй этот запрос снова. Сохранённый доступ может ещё не действовать в процессе: отсутствующая папка не входит во внешнюю границу; после её создания процесс обновится со следующего сообщения. Не создавай её через обход и не запрашивай родительскую папку. Сообщи точную команду или путь и полный текст ошибки, затем продолжай независимую часть задачи.",
+            "Switchboard: your project settings request changes nothing: the project already has everything it asks for. The app removed the file and the user never saw it. Do not send this request again. Saved access may not yet be effective in the process: a missing folder is omitted from the external boundary; after creation the process refreshes on the next message. Do not create it through a workaround or request its parent. Report the exact command or path and full error text, then continue independent work.",
             language: language)
         case .unusable: L10n.text(
             "Switchboard: твой запрос на изменение настроек проекта не принят: файл не соответствует формату или ничего не меняет (например, указан неизвестный проект). Приложение удалило его, пользователь его не видел. Если доступ всё ещё нужен, запиши запрос заново в папку \"$\(SettingsProposalInbox.environmentKey)\" строго в формате: \(SettingsProposalInbox.format()). Не придумывай другие поля.",
             "Switchboard: your project settings request was not accepted: the file does not match the format or changes nothing (for example, an unknown project). The app removed it and the user never saw it. If you still need the access, write the request again into the folder \"$\(SettingsProposalInbox.environmentKey)\" in exactly this format: \(SettingsProposalInbox.format()). Do not invent other fields.",
             language: language)
         case .applied: L10n.text(
-            "Switchboard: пользователь применил твой запрос на изменение настроек проекта. Новые права действуют с этого сообщения. Повтори шаг, которому не хватало доступа, и продолжай задачу.",
-            "Switchboard: the user applied your project settings request. The new access applies from this message. Retry the step that lacked access and continue the task.",
+            "Switchboard: пользователь применил твой запрос на изменение настроек проекта. Процесс обновит доступ с этого сообщения. Отсутствующие папки не входят во внешнюю границу до их создания и следующего сообщения. Можно повторить только шаг с подтверждённым отказом до выполнения; действие с неопределённым результатом не повторяй. Продолжай задачу.",
+            "Switchboard: the user applied your project settings request. The process refreshes access from this message. Missing folders remain outside the external boundary until created and the next message starts. Retry only a step confirmed refused before execution; never repeat an action with an uncertain outcome. Continue the task.",
             language: language)
+        case .appliedPendingFolders: L10n.text(
+            "Switchboard: пользователь применил настройки проекта. Доступ сохранён, но некоторые добавленные папки отсутствуют: внешняя граница пока не включает их. Приложение не создаёт папки и не даёт доступ к их родителям. Сообщи, какая папка отсутствует; после её создания доступ обновится со следующего сообщения. Не отправляй тот же запрос снова и не повторяй действие с неопределённым результатом. Продолжай независимую часть задачи.",
+            "Switchboard: the user applied the project settings. Access is saved, but some added folders do not exist: the external boundary omits them for now. The app does not create folders or grant their parents. Report the missing folder; after creation access refreshes on the next message. Do not submit the same request again or replay an action with an uncertain outcome. Continue independent work.", language: language)
         case .appliedWithoutEffect: L10n.text(
             "Switchboard: пользователь применил твой запрос на изменение настроек проекта, но этот чат работает под внешней границей: добавленная доверенная команда всё равно выполняется внутри неё и не получает дополнительного доступа. Не повторяй тот же шаг. Сообщи, что задача заблокирована, или запроси правильный доступ: набор доступа с командой-посредником, папку, запись Связки ключей (`addKeychainItems`) или инструмент приложения.",
             "Switchboard: the user applied your project settings request, but this chat runs under the external boundary: the added trusted command still runs inside it and gets no extra access. Do not retry the same step. Report that the task is blocked, or request the right access: an access set with a mediated command, a folder, a Keychain item (`addKeychainItems`) or an app-owned tool.",
@@ -370,6 +382,7 @@ public enum SettingsProposalInbox {
             - Запиши один JSON-файл в папку "$\(environmentKey)" (она доступна на запись в песочнице), например "$\(environmentKey)/<короткое-имя>.json". Формат: \(format). Пропускай ненужные поля; в одном файле может быть несколько проектов. Причина (`reason`) - до \(SettingsProposalReview.maximumText) символов, остальное обрезается.
             \(author)
             - Наборы: \(presets).
+            \(folderBoundaryRule(language: .russian))
             \(boundaryCommandRule(language: .russian))
             \(keychainItemRule(language: .russian))
             \(gitBoundaryRule(language: .russian))
@@ -381,6 +394,7 @@ public enum SettingsProposalInbox {
             - Write one JSON file into the folder "$\(environmentKey)" (writable inside the sandbox), for example "$\(environmentKey)/<short-name>.json". Format: \(format). Omit fields you do not need; one file may cover several projects. Keep `reason` within \(SettingsProposalReview.maximumText) characters; the rest is cut.
             \(author)
             - Sets: \(presets).
+            \(folderBoundaryRule(language: .english))
             \(boundaryCommandRule(language: .english))
             \(keychainItemRule(language: .english))
             \(gitBoundaryRule(language: .english))
@@ -396,6 +410,11 @@ public enum SettingsProposalInbox {
                   "- Git under the external boundary: only `git push`, `git fetch` and `git ls-remote` get credentials. Instead of `git pull` run `git fetch`, then `git merge` (or `git rebase`, `git merge --ff-only`): the result is the same. Get a private repository with `git init`, `git remote add origin <https url>`, `git fetch`, `git checkout <branch>`; `git clone` runs without credentials, for public repositories only. https only; git gets a Keychain password for `github.com` only.",
                   language: language)
     }
+    public static func folderBoundaryRule(language: AppLanguage = L10n.language) -> String {
+        L10n.text("- Сохранённый доступ к папке и доступ работающего процесса могут отличаться. Отсутствующий путь не входит во внешнюю границу; после его создания процесс обновится со следующего сообщения. Не отправляй тот же запрос снова, не запрашивай родительскую папку и не создавай путь обходом после отказа. Сообщи точный путь и ошибку; продолжай независимую работу. Права подагентов обновляются вместе с процессом родителя, а не внутри уже работающего процесса. Не повторяй действия с неопределённым результатом.",
+                  "- Saved folder access and a running process's access can differ. A missing path is omitted from the external boundary; after creation the process refreshes on the next message. Do not submit the same request again, request the parent folder, or create the path through a workaround after refusal. Report the exact path and error; continue independent work. Subagent access refreshes with the parent process, never inside an already running process. Never replay actions with uncertain outcomes.", language: language)
+    }
+
     public static func boundaryCommandRule(language: AppLanguage = L10n.language) -> String {
         L10n.text("- Под внешней границей (`SWITCHBOARD_EXTERNAL_SANDBOX=1`) `addCommands` не выводит команду наружу: она всё равно выполняется внутри. Для записи Связки ключей запрашивай `addKeychainItems`, для учётных данных или сетевой идентичности - набор доступа с командой-посредником (`addPresets`), но не доверенную команду.",
                   "- Under the external boundary (`SWITCHBOARD_EXTERNAL_SANDBOX=1`) `addCommands` does not take a command outside: it still runs inside. For a Keychain item request `addKeychainItems`; for a credential or a network identity, an access set with a mediated command (`addPresets`); never a trusted command.",
