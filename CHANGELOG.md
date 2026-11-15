@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Select reasoning effort from a dropdown for Codex and Claude scheduled tasks, using the selected agent’s available levels.
+
 - Choose Codex task models from a dropdown using the connected agent’s model list.
 
 - Separate old schedules from routine tasks, default to enabled tasks, add project filters and an enabled/paused switch and a dedicated run history tab with compact controls matching the app chrome and smooth tab transitions.

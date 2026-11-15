@@ -339,10 +339,17 @@ struct JobEditor: View {
         self.model = model; self._job = State(initialValue: job)
         self._mode = State(initialValue: job.schedule.once != nil ? "once" : job.schedule.rule.isEmpty ? "manual" : "rule")
     }
-    /// The job's agent picks models from the app catalog (Claude) or takes a route and free-form effort (Codex).
+    /// Model and effort choices come from the selected agent's catalog or discovered model list.
     private var catalog: AgentModelCatalog? { model.modelCatalog(model.connection(for: job.engine)) }
     private var catalogModels: Bool { catalog != nil }
     private var listedModels: [AgentModelInfo] { model.agentState(model.connection(for: job.engine)).models }
+    private var effortLevels: [AgentModelCatalog.Level] {
+        if let catalog { return catalog.efforts }
+        let selected = job.model.isEmpty
+            ? listedModels.first(where: \.isDefault)
+            : listedModels.first { $0.id == job.model }
+        return (selected?.efforts ?? []).map { .init(id: $0, title: $0) }
+    }
     private var optimizerPlugins: Bool { model.traits(model.connection(for: job.engine)).contains(.optimizerPlugins) }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -428,17 +435,21 @@ struct JobEditor: View {
                     Picker(L10n.text("Маршрут", "Route"), selection: $job.route) { ForEach(model.availableRoutes, id: \.self) { route in
                         Text(model.routeTitle(route)).tag(route).disabled(model.routeCompatibilityIssue(route) != nil)
                     } }
-                    TextField(L10n.text("Рассуждение", "Reasoning effort"), text: $job.effort, prompt: Text(L10n.text("По умолчанию", "Default")))
                 }
+                Picker(L10n.text("Рассуждение", "Reasoning effort"), selection: $job.effort) {
+                    Text(L10n.text("По умолчанию", "Default")).tag("")
+                    ForEach(effortLevels, id: \.id) { level in
+                        Text(level.title).tag(level.id)
+                    }
+                    if !job.effort.isEmpty, !effortLevels.contains(where: { $0.id == job.effort }) {
+                        Text(job.effort).tag(job.effort)
+                    }
+                }.pickerStyle(.menu)
                 ScheduledBrowserImportEditor(policy: $job.browserSessionImport)
                 if catalogModels {
                     if job.route != .direct {
                         Text(model.routeCompatibilityIssue(job.route, agent: job.engine.agentID) ?? "").foregroundStyle(DeskPalette.attention).font(.ui(.caption))
                         Button(L10n.text("Работать напрямую", "Work directly")) { job.route = .direct }
-                    }
-                    Picker(L10n.text("Рассуждение", "Reasoning effort"), selection: $job.effort) {
-                        Text(L10n.text("Как в CLI", "CLI default")).tag("")
-                        ForEach(catalog?.efforts ?? [], id: \.id) { level in Text(level.title).tag(level.id) }
                     }
                     Text(L10n.text("Claude работает в профиле Claude приложения, как обычный чат: каждый запуск появляется чатом, который можно продолжить. Разрешения задаёт режим доступа проекта; при полном доступе действия коннекторов claude.ai (Gmail, Calendar…) выполняются без подтверждения. Нужен вход по подписке Claude в настройках.", "Claude runs in the app's Claude profile like a regular chat: each run appears as a chat you can continue. The project's access mode sets permissions; with full access, claude.ai connector actions (Gmail, Calendar…) run without approval. Requires signing in with your Claude subscription in settings.")).font(.ui(.caption)).frame(maxWidth: 460, alignment: .leading).fixedSize(horizontal: false, vertical: true)
                 }
