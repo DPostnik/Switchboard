@@ -15,6 +15,9 @@ struct JobsView: View {
     @State private var showEnabled = true
     @State private var showingSources = false
     @State private var showingHistory = false
+    /// History entries rendered so far; "Show more" adds a page, switching tasks resets it.
+    @State private var historyLimit = JobsView.historyPage
+    static let historyPage = 40
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var visibleJobs: [ManagedJob] {
@@ -289,7 +292,44 @@ struct JobsView: View {
                 if !model.jobLedger.runs.contains(where: { $0.jobID == job.id }) {
                     RoutineNotice(icon: "clock", text: L10n.text("Запусков пока нет. Здесь появятся результаты и ссылки на чаты.", "No runs yet. Results and conversation links will appear here."))
                 }
-                ForEach(model.jobLedger.runs.filter { $0.jobID == job.id }.sorted { $0.started > $1.started }) { run in
+                let entries = RunHistoryEntry.group(model.jobLedger.runs.filter { $0.jobID == job.id }.sorted { $0.started > $1.started })
+                LazyVStack(alignment: .leading, spacing: 18) {
+                ForEach(entries.prefix(historyLimit)) { entry in
+                    switch entry {
+                    case .skipped(let runs): skippedSummary(runs, zone: job.schedule.timeZone)
+                    case .run(let run): runCard(run, job: job)
+                    }
+                }
+                if entries.count > historyLimit {
+                    Button(L10n.text("Показать ещё (\(entries.count - historyLimit))", "Show more (\(entries.count - historyLimit))")) { historyLimit += Self.historyPage }
+                }
+                }
+                }.transition(.opacity)
+                }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .onChange(of: job.id) { _, _ in historyLimit = Self.historyPage }
+    }
+    /// One card for consecutive checks whose pre-run command found nothing new: no agent ran, so there is nothing to open.
+    private func skippedSummary(_ runs: [JobRun], zone: String) -> some View {
+        RoutineCard {
+            HStack(alignment: .firstTextBaseline) {
+                Image(systemName: "checkmark.circle").foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(L10n.text("Нового нет · последняя проверка \(jobDate(runs[0].started, zone: zone))",
+                                   "Nothing new · last check \(jobDate(runs[0].started, zone: zone))")).font(.ui(.callout))
+                    Text(runs.count == 1
+                         ? L10n.text("Проверка перед запуском не нашла нового; агент не запускался.", "The pre-run check found nothing new; the agent did not run.")
+                         : L10n.text("Проверок: \(runs.count), с \(jobDate(runs[runs.count - 1].started, zone: zone)). Агент не запускался, лимиты не тратились.",
+                                     "\(runs.count) checks since \(jobDate(runs[runs.count - 1].started, zone: zone)). The agent did not run and used no limits."))
+                        .font(.ui(.caption)).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+        }
+    }
+    private func runCard(_ run: JobRun, job: ManagedJob) -> some View {
                     RoutineCard {
                         HStack {
                             Text(jobDate(run.started, zone: job.schedule.timeZone)).font(.ui(.callout))
@@ -319,12 +359,29 @@ struct JobsView: View {
                         }
                         if run.status == .uncertain { Text(L10n.text("Результат этого запуска не подтверждён. Автоматического повтора не было; настройки расписания не изменились. Перед ручным повтором проверь результат.", "This run's outcome is unconfirmed. No automatic retry was made; schedule settings are unchanged. Check the outcome before retrying manually.")).font(.ui(.caption)).foregroundStyle(DeskPalette.attention) }
                     }
-                }
-                }.transition(.opacity)
-                }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-            }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Run history row: a real run, or consecutive "nothing new" skips collapsed into one entry (newest first).
+enum RunHistoryEntry: Identifiable {
+    case run(JobRun)
+    case skipped([JobRun])
+    var id: UUID {
+        switch self {
+        case .run(let run): return run.id
+        case .skipped(let runs): return runs[0].id
         }
+    }
+    static func group(_ runs: [JobRun]) -> [RunHistoryEntry] {
+        var result: [RunHistoryEntry] = []
+        var pending: [JobRun] = []
+        for run in runs {
+            if run.status == .skipped && run.threadID == nil && run.output.isEmpty { pending.append(run); continue }
+            if !pending.isEmpty { result.append(.skipped(pending)); pending = [] }
+            result.append(.run(run))
+        }
+        if !pending.isEmpty { result.append(.skipped(pending)) }
+        return result
     }
 }
 

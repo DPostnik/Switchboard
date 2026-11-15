@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Routine run history loads in pages of 40 and collapses consecutive "nothing new" skips into one card with the last check time, so long histories scroll smoothly.
+
 - Open a shell code block in Terminal from its header: the commands wait at the zsh prompt in the chat's folder and run only after Return.
 
 - Always show the copy button beside answer section headings, so it no longer blinks while scrolling.
