@@ -10,6 +10,31 @@ struct JobsView: View {
     @State private var showingRoutines = false
     @State private var search = ""
     @State private var refreshing = false
+    @State private var projectFilter: UUID?
+    @State private var showEnabled = true
+    @State private var showingSources = false
+    @State private var showingHistory = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var visibleJobs: [ManagedJob] {
+        model.jobLedger.jobs.filter {
+            (projectFilter == nil || $0.projectID == projectFilter) &&
+            $0.enabled == showEnabled &&
+            (search.isEmpty || $0.name.localizedCaseInsensitiveContains(search))
+        }
+    }
+    private var routineProjects: [Project] {
+        let ids = Set(model.jobLedger.jobs.compactMap(\.projectID))
+        return model.state.projects.filter { ids.contains($0.id) }
+    }
+    private var visibleIDs: [String] {
+        showingSources
+            ? model.jobs.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }.map { "source:" + $0.id }
+            : visibleJobs.map { $0.id.uuidString }
+    }
+    private func reconcileSelection() {
+        if !visibleIDs.contains(selection ?? "") { model.selectedScheduledJobID = visibleIDs.first }
+    }
     var body: some View {
         VStack(spacing: 0) {
             ViewThatFits(in: .horizontal) {
@@ -24,16 +49,52 @@ struct JobsView: View {
             HSplitView {
                 VStack(spacing: 0) {
                 DeskSearchField(prompt: L10n.text("Найти задание", "Find a task"), text: $search).padding(12)
+                VStack(alignment: .leading, spacing: 4) {
+                    Menu {
+                        menuChoice(L10n.text("Рутины", "Routines"), selection: $showingSources, value: false)
+                        menuChoice(L10n.text("Старые расписания", "Old schedules"), selection: $showingSources, value: true)
+                    } label: {
+                        filterLabel(showingSources ? L10n.text("Старые расписания", "Old schedules") : L10n.text("Рутины", "Routines"), icon: showingSources ? "archivebox" : "repeat")
+                    }
+                    if !showingSources {
+                        Menu {
+                            menuChoice(L10n.text("Все проекты", "All projects"), selection: $projectFilter, value: nil)
+                            ForEach(routineProjects) { project in
+                                menuChoice(project.name, selection: $projectFilter, value: Optional(project.id))
+                            }
+                        } label: {
+                            filterLabel(model.state.projects.first { $0.id == projectFilter }?.name ?? L10n.text("Все проекты", "All projects"), icon: "folder")
+                        }
+                        HStack(spacing: 8) {
+                            Text(L10n.text("На паузе", "Paused"))
+                                .foregroundStyle(showEnabled ? Color.secondary : Color.primary)
+                            Toggle(L10n.text("Показать включённые рутины", "Show enabled routines"), isOn: $showEnabled)
+                                .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                            Text(L10n.text("Включены", "Enabled"))
+                                .foregroundStyle(showEnabled ? Color.primary : Color.secondary)
+                        }.font(.ui(.caption)).padding(.horizontal, 9).padding(.vertical, 4)
+
+                    }
+                }
+                .menuStyle(.button).menuIndicator(.hidden).buttonStyle(ChipButtonStyle())
+                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12).padding(.bottom, 8)
                 List(selection: $model.selectedScheduledJobID) {
+                    if !showingSources {
                     Section("Switchboard") {
-                        ForEach(model.jobLedger.jobs.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }) { job in
+                        ForEach(visibleJobs) { job in
                             VStack(alignment: .leading, spacing: 6) {
                                 Text(job.name).font(.ui(.callout).weight(.medium))
                                 Text(job.engine.title + " · " + (job.enabled ? L10n.text("Включено", "Enabled") : L10n.text("Пауза", "Paused"))).font(.ui(.caption)).foregroundStyle(.secondary)
+                                Text(model.state.projects.first { $0.id == job.projectID }?.name ?? L10n.text("Проект недоступен", "Project unavailable"))
+                                    .font(.ui(.caption)).foregroundStyle(.secondary)
+                                if job.enabled, let next = job.nextRun {
+                                    Text(jobDate(next, zone: job.schedule.timeZone)).font(.ui(.caption)).foregroundStyle(.secondary)
+                                }
                             }.padding(.vertical, 6).tag(job.id.uuidString)
                         }
                     }
-                    if !model.jobs.isEmpty {
+                    }
+                    if showingSources {
                     Section(L10n.text("Доступны для импорта", "Available to import")) {
                         ForEach(model.jobs.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }) { job in
                             VStack(alignment: .leading) { Text(job.name); Text(job.engine.title).font(.ui(.caption)).foregroundStyle(.secondary) }.tag("source:" + job.id)
@@ -42,7 +103,7 @@ struct JobsView: View {
                     }
                 }.listStyle(.sidebar).scrollContentBackground(.hidden)
                     .overlay {
-                        if !search.isEmpty && !model.jobLedger.jobs.contains(where: { $0.name.localizedCaseInsensitiveContains(search) }) && !model.jobs.contains(where: { $0.name.localizedCaseInsensitiveContains(search) }) {
+                        if visibleIDs.isEmpty {
                             Text(L10n.text("Ничего не найдено", "No results")).font(.ui(.callout)).foregroundStyle(.secondary)
                         }
                     }
@@ -63,11 +124,10 @@ struct JobsView: View {
                 }
             }
         }
-        .onAppear { if selection == nil { model.selectedScheduledJobID = model.jobLedger.jobs.first?.id.uuidString } }
-        .onChange(of: model.jobLedger.jobs.map(\.id)) { _, ids in
-            if selection == nil || (selection?.hasPrefix("source:") == false && !ids.contains(where: { $0.uuidString == selection })) {
-                model.selectedScheduledJobID = ids.first?.uuidString
-            }
+        .onAppear { reconcileSelection() }
+        .onChange(of: visibleIDs) { _, _ in reconcileSelection() }
+        .onChange(of: routineProjects.map(\.id)) { _, ids in
+            if let projectFilter, !ids.contains(projectFilter) { self.projectFilter = nil }
         }
         .background(DeskPalette.canvas)
         .buttonStyle(DeskButtonStyle())
@@ -77,6 +137,36 @@ struct JobsView: View {
             Button(L10n.text("Удалить", "Delete"), role: .destructive) { if let job = deleting { Task { await model.deleteJob(job.id) } }; deleting = nil }
         }
     }
+    private func filterLabel(_ title: String, icon: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon).foregroundStyle(.secondary).frame(width: 14)
+            Text(title).lineLimit(1).truncationMode(.middle)
+            Image(systemName: "chevron.down").font(.ui(.caption2)).foregroundStyle(.tertiary)
+        }.help(title)
+    }
+    /// Direct menu items avoid the nested submenu produced by a menu-style Picker.
+    private func menuChoice<Value: Equatable>(_ title: String, selection: Binding<Value>, value: Value) -> some View {
+        Toggle(title, isOn: Binding(get: { selection.wrappedValue == value }, set: { selected in
+            if selected { selection.wrappedValue = value }
+        }))
+    }
+    private func detailTab(_ title: String, icon: String, history: Bool) -> some View {
+        let selected = showingHistory == history
+        return Button {
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) { showingHistory = history }
+        } label: {
+            VStack(spacing: 8) {
+                Label(title, systemImage: icon)
+                    .font(.ui(.callout).weight(selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? DeskPalette.accentDeep : Color.secondary)
+                    .padding(.horizontal, 12)
+                Rectangle().fill(selected ? DeskPalette.accentDeep : .clear).frame(height: 2)
+            }.padding(.top, 8).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .fixedSize().pointingHandCursor()
+    }
     private var pageTitle: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(L10n.text("Рутины и расписание", "Routines and schedules")).font(.ui(.title2).bold())
@@ -85,11 +175,13 @@ struct JobsView: View {
     }
     private var pageActions: some View {
         HStack {
-            Button(L10n.text("Библиотека рутин", "Routine library")) { showingRoutines = true }
+            Button { showingRoutines = true } label: { Label(L10n.text("Библиотека", "Library"), systemImage: "books.vertical") }.buttonStyle(ChipButtonStyle()).fixedSize()
             if refreshing { ProgressView().uiSmallSpinner() }
-            Button(L10n.text("Обновить", "Refresh")) {
+            Button {
                 Task { refreshing = true; await model.refreshJobs(); refreshing = false }
-            }.disabled(refreshing)
+            } label: { Image(systemName: "arrow.clockwise") }
+                .buttonStyle(ChipButtonStyle()).fixedSize()
+                .help(L10n.text("Обновить", "Refresh")).accessibilityLabel(L10n.text("Обновить", "Refresh")).disabled(refreshing)
             Button(L10n.text("Создать", "New task"), systemImage: "plus") {
                 var job = ManagedJob(); job.projectID = model.projectID; let current = model.profile(model.currentAgent)?.engine == job.engine; job.model = current ? model.currentModel : model.state.model; job.effort = current ? model.effort : ""; job.route = model.defaultRoute; editing = job
             }.disabled(!model.schedulerReady)
@@ -154,6 +246,15 @@ struct JobsView: View {
                     HStack { taskActions(job, active: active != nil) }
                     VStack(alignment: .leading) { taskActions(job, active: active != nil) }
                 }
+                HStack(spacing: 4) {
+                    detailTab(L10n.text("Настройки", "Settings"), icon: "slider.horizontal.3", history: false)
+                    detailTab(L10n.text("История запусков", "Run history"), icon: "clock.arrow.circlepath", history: true)
+                    Spacer()
+                }
+                Divider()
+                ZStack(alignment: .topLeading) {
+                if !showingHistory {
+                VStack(alignment: .leading, spacing: 18) {
                 RoutineCard {
                 LabeledContent(L10n.text("Исполнитель", "Agent"), value: job.engine.title)
                 if let routine = job.routine {
@@ -180,12 +281,14 @@ struct JobsView: View {
                     Text(L10n.text("Инструкции", "Instructions")).font(.ui(.headline))
                     Text(job.prompt).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                 }
-                Divider()
+                }.transition(.opacity)
+                } else {
+                VStack(alignment: .leading, spacing: 18) {
                 Text(L10n.text("История запусков", "Run history")).font(.ui(.headline))
                 if !model.jobLedger.runs.contains(where: { $0.jobID == job.id }) {
                     RoutineNotice(icon: "clock", text: L10n.text("Запусков пока нет. Здесь появятся результаты и ссылки на чаты.", "No runs yet. Results and conversation links will appear here."))
                 }
-                ForEach(model.jobLedger.runs.filter { $0.jobID == job.id }) { run in
+                ForEach(model.jobLedger.runs.filter { $0.jobID == job.id }.sorted { $0.started > $1.started }) { run in
                     RoutineCard {
                         HStack {
                             Text(jobDate(run.started, zone: job.schedule.timeZone)).font(.ui(.callout))
@@ -216,6 +319,9 @@ struct JobsView: View {
                         if run.status == .uncertain { Text(L10n.text("Результат этого запуска не подтверждён. Автоматического повтора не было; настройки расписания не изменились. Перед ручным повтором проверь результат.", "This run's outcome is unconfirmed. No automatic retry was made; schedule settings are unchanged. Check the outcome before retrying manually.")).font(.ui(.caption)).foregroundStyle(DeskPalette.attention) }
                     }
                 }
+                }.transition(.opacity)
+                }
+                }.frame(maxWidth: .infinity, alignment: .leading)
             }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
         }
     }
