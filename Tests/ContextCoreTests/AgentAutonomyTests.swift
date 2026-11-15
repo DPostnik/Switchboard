@@ -13,7 +13,7 @@ import ClaudeAdapter
     #expect(arguments.contains("dontAsk"))
     #expect(!arguments.contains("bypassPermissions"))
     #expect(arguments.filter { $0 == "--append-system-prompt" }.count == 1)
-    #expect(arguments.contains(AgentAutonomy.instructions()))
+    #expect(arguments.contains(AgentAutonomy.instructions() + "\n\n" + AgentModelContext.instructions(model: "model", provider: .claude)))
 }
 
 @Test func heavyWorkRuleIsSharedInBothLanguages() {

@@ -67,7 +67,7 @@ public actor ClaudeJobRunner: AgentScheduledExecutor {
     }
     public static func arguments(model: String, effort: String?) -> [String] {
         ["--print", "--output-format", "json", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--no-session-persistence"]
-            + ["--append-system-prompt", AgentAutonomy.instructions()]
+            + ["--append-system-prompt", AgentAutonomy.instructions() + "\n\n" + AgentModelContext.instructions(model: model, provider: .claude)]
             + (model.isEmpty ? [] : ["--model", model])
             // Only a documented level is forwarded; an unset value leaves the CLI default in place.
             + (ClaudeEffort.accepted(effort).map { ["--effort", $0.rawValue] } ?? [])

@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Tell agents the app-selected model on every turn, keeping orchestration guidance current after model switches.
+
 - Select reasoning effort from a dropdown for Codex and Claude scheduled tasks, using the selected agent’s available levels.
 
 - Choose Codex task models from a dropdown using the connected agent’s model list.

@@ -69,11 +69,20 @@ enum CodexDecoding {
         return item
     }
 
+    /// The app adds one final context block after the unchanged user input. Never hide a sole user block.
+    private static func userContent(_ item: JSONValue) -> [JSONValue] {
+        let content = item["content"].array
+        guard content.count > 1, content.last?["type"].string == "text", let text = content.last?["text"].string,
+              text.hasPrefix(AgentModelContext.openingMarker + "\n"),
+              text.hasSuffix("\n" + AgentModelContext.closingMarker) else { return content }
+        return Array(content.dropLast())
+    }
+
     private static func plainItem(_ raw: JSONValue) -> TranscriptItem? {
         guard let id = raw["id"].string, let type = raw["type"].string else { return nil }
         switch type {
         case "userMessage":
-            return TranscriptItem(id: id, kind: "user", text: raw["content"].array.compactMap { $0["text"].string }.joined(separator: "\n"))
+            return TranscriptItem(id: id, kind: "user", text: userContent(raw).compactMap { $0["text"].string }.joined(separator: "\n"))
         case "agentMessage": return TranscriptItem(id: id, kind: "assistant", text: raw["text"].string ?? "", phase: raw["phase"].string)
         case "contextCompaction": return TranscriptItem(id: id, kind: "compaction", text: L10n.text("Контекст разговора сжат", "Conversation context compacted"), phase: "completed")
         case "commandExecution":
@@ -167,7 +176,7 @@ enum CodexDecoding {
                 let text: String
                 if kind == "agentMessage" { text = item["text"].string ?? "" }
                 else if kind == "userMessage" {
-                    text = item["content"].array.map { content in
+                    text = userContent(item).map { content in
                         if let text = content["text"].string { return text }
                         omittedDetails = true
                         return "[Non-text input: \(content["type"].string ?? "unknown")]"

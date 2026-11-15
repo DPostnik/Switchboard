@@ -339,7 +339,10 @@ public actor CodexClient {
         }
         var params: [String: JSONValue] = [
             "threadId": .string(try nativeID(session)),
-            "input": .array([.object(["type": .string("text"), "text": .string(text), "text_elements": .array([])])])
+            "input": .array([
+                .object(["type": .string("text"), "text": .string(text), "text_elements": .array([])]),
+                .object(["type": .string("text"), "text": .string(AgentModelContext.instructions(model: model, provider: .codex)), "text_elements": .array([])])
+            ])
         ]
         params.merge(permissions.codexTurnParameters(projectPath: projectPath, external: boundary != nil)) { _, new in new }
         if !model.isEmpty { params["model"] = .string(model) }

@@ -468,7 +468,10 @@ public actor ClaudeIntegration: AgentIntegration {
             let command = UUID().uuidString.lowercased()
             commands[id] = (command, false, false)
             try await wire.send(.object(["type": .string("user"), "session_id": .string(id), "uuid": .string(command),
-                "message": .object(["role": .string("user"), "content": .string(request.prompt)])]))
+                "message": .object(["role": .string("user"), "content": .array([
+                    .object(["type": .string("text"), "text": .string(request.prompt)]),
+                    .object(["type": .string("text"), "text": .string(AgentModelContext.instructions(model: selection.model, provider: .claude))])
+                ])])]))
             return .success(.init(context: context, requestID: request.id, session: reference(id), turnID: turn))
         } catch {
             if delivered { finish(id, outcome: .uncertain) }

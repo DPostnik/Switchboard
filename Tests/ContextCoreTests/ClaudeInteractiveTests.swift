@@ -175,8 +175,10 @@ private func interactiveFixture(_ root: URL) throws -> URL {
         elif value['type']=='user':
             record=json.loads((home/'contextdesk-sessions'/(sid+'.json')).read_text())
             assert record['active'] and record['sent']
-            append('submitted',json.dumps({'prompt':value['message']['content'],'args':sys.argv,'pid':os.getpid(),'env':{k:os.environ[k] for k in ['MCP_TIMEOUT','MCP_TOOL_TIMEOUT','CLAUDE_CODE_DISABLE_CLAUDE_MDS','CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES','MCP_CONNECTION_NONBLOCKING'] if k in os.environ}})+'\n')
-            prompt=value['message']['content']
+            content=value['message']['content']
+            prompt=content[0]['text'] if isinstance(content,list) else content
+            model_context=content[1]['text'] if isinstance(content,list) and len(content)>1 else ''
+            append('submitted',json.dumps({'prompt':prompt,'model_context':model_context,'args':sys.argv,'pid':os.getpid(),'env':{k:os.environ[k] for k in ['MCP_TIMEOUT','MCP_TOOL_TIMEOUT','CLAUDE_CODE_DISABLE_CLAUDE_MDS','CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES','MCP_CONNECTION_NONBLOCKING'] if k in os.environ}})+'\n')
             if prompt=='broken': print('invalid-json',flush=True); continue
             if prompt=='notified':
                 # A resumed CLI first answers a notification about the previous process's task, with the message still queued.
@@ -1173,7 +1175,7 @@ func claudeBashUnderTheSandboxFollowsTheCLIFlag(_ command: String, _ flag: Bool,
     let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
     let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
     _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "background-hang",
-                                                    model: "claude-opus-5-5", effort: "high")).value()
+                                                    model: "claude-fable-5-2", effort: "high")).value()
     try await waitFor { await events.completionCount() == 1 }
     if refused { try Data().write(to: home.appendingPathComponent("refuse-flags")) }
     // A different effort and model would need another launch; the running sub-agent keeps its CLI instead.
@@ -1182,6 +1184,9 @@ func claudeBashUnderTheSandboxFollowsTheCLIFlag(_ command: String, _ flag: Bool,
     try await waitFor { await events.completionCount() == 2 }
     let submitted = try lines("submitted")
     #expect(submitted.count == 2 && Set(submitted.map { $0["pid"] }).count == 1)
+    #expect(submitted[0]["model_context"].string == AgentModelContext.instructions(model: "claude-fable-5-2", provider: .claude))
+    #expect(submitted[1]["model_context"].string == AgentModelContext.instructions(model: refused ? "claude-fable-5-2" : "claude-sonnet-5-5", provider: .claude))
+    #expect(submitted[1]["prompt"].string == "hello")
     #expect(try String(contentsOf: home.appendingPathComponent("launches"), encoding: .utf8).split(separator: "\n").count == 1)
     let applied = try lines("controls").filter { $0["request"]["subtype"].string == "apply_flag_settings" }
     #expect(applied.map { $0["request"]["settings"] } == [.object(["model": .string("claude-sonnet-5-5"), "effortLevel": .string("medium")])])
@@ -2289,7 +2294,12 @@ private func boundaryFixture(token: Result<ClaudeAccessToken, ClaudeTokenFailure
             append('answers',json.dumps(v['response'])+'\n')
             result()
         elif v['type']=='user':
-            p=v['message']['content']; n+=1
+            content=v['message']['content']
+            p=content[0]['text'] if isinstance(content,list) else content
+            if isinstance(content,list):
+                assert len(content)==2 and content[1]['type']=='text'
+                assert content[1]['text'].startswith('<switchboard-current-turn-context>\n')
+            n+=1
             if p.startswith('tool:'):
                 name,inp=p[5:].split(' ',1)
                 out({'type':'control_request','request_id':'r%d-%d'%(os.getpid(),n),'request':{'subtype':'can_use_tool','tool_name':name,'input':json.loads(inp)}})

@@ -401,3 +401,39 @@ private func commandFixture() throws -> (URL, URL) {
     ])])
     #expect(CodexClient.chatDirectoryConfiguration(base, arguments: nil)["mcp_servers.switchboard_diagnostics"] == base["mcp_servers.switchboard_diagnostics"])
 }
+
+@Test func codexCurrentTurnModelContextRefreshesAfterResumeAndModelChanges() async throws {
+    let (root, executable) = try commandFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let wire = CodexConnection(), client = CodexClient(transport: wire)
+    try await client.start(executable: executable, home: root)
+    let session = try await client.createSession(projectPath: "/workspace", access: .standard, model: "gpt-6-astra", route: .direct)
+    for model in ["gpt-6-astra", "gpt-6.1-sol", ""] {
+        try await client.resume(session, projectPath: "/workspace", access: .standard, route: .direct)
+        _ = try await client.send("literal user text", to: session, projectPath: "/workspace", access: .standard, model: model, effort: "")
+    }
+    let starts = try await wire.request("test/calls").array.filter { $0["method"].string == "turn/start" }
+    #expect(starts.count == 3)
+    for (turn, model) in zip(starts, ["gpt-6-astra", "gpt-6.1-sol", ""]) {
+        let input = turn["params"]["input"].array
+        #expect(input.count == 2)
+        #expect(input.first?["text"].string == "literal user text")
+        #expect(input.last?["text"].string == AgentModelContext.instructions(model: model, provider: .codex))
+        #expect(turn["params"]["model"] == (model.isEmpty ? .null : .string(model)))
+    }
+    await client.stop()
+}
+
+@Test func codexTranscriptHidesOnlyTheFinalAppContextBlock() throws {
+    let context = AgentModelContext.instructions(model: "gpt-6-astra", provider: .codex)
+    let user = JSONValue.object(["type": .string("text"), "text": .string("original user text")])
+    let app = JSONValue.object(["type": .string("text"), "text": .string(context)])
+    func item(_ content: [JSONValue]) -> JSONValue {
+        .object(["id": .string("user"), "type": .string("userMessage"), "content": .array(content)])
+    }
+    #expect(CodexDecoding.transcriptItem(item([user, app]))?.text == "original user text")
+    #expect(CodexDecoding.transcriptItem(item([app]))?.text == context)
+    #expect(CodexDecoding.transcriptItem(item([app, user]))?.text == context + "\noriginal user text")
+    let truncated = JSONValue.object(["type": .string("text"), "text": .string(AgentModelContext.openingMarker)])
+    #expect(CodexDecoding.transcriptItem(item([user, truncated]))?.text == "original user text\n" + AgentModelContext.openingMarker)
+}
