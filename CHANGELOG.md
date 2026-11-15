@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Copy archived chat IDs and agent references from the archive card context menu without restoring the chat.
+
 - Preserve Claude sign-in scopes under the external boundary so authorized mail and other claude.ai connectors can load.
 
 - The nightly test run skips nights on battery power (the status keeps the last result) and keeps the Mac awake on AC power, so sleep no longer causes false failures.

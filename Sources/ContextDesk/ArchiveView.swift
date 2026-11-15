@@ -243,6 +243,17 @@ struct ArchiveView: View {
                 Task { await model.setChatArchived(chat.id, archived: false) }
             }.buttonStyle(DeskButtonStyle(kind: .text)).disabled(!model.canDeleteChat(chat.id))
         }.padding(16).background(DeskPalette.subtle, in: RoundedRectangle(cornerRadius: 12))
+            .contentShape(Rectangle())
+            .contextMenu {
+                Button(L10n.text("Скопировать ID чата", "Copy chat ID")) {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(ChatReference.link(chat), forType: .string)
+                }
+                Button(L10n.text("Скопировать ссылку на чат для агента", "Copy chat reference for an agent")) {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(ChatReference.text(chat, projectPath: listing.projects[chat.projectID]?.path), forType: .string)
+                }
+            }
     }
 
     nonisolated static func chatCount(_ count: Int, language: AppLanguage = L10n.language) -> String {
