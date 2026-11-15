@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Choose Codex task models from a dropdown using the connected agent’s model list.
+
 - Separate old schedules from routine tasks, default to enabled tasks, add project filters and an enabled/paused switch and a dedicated run history tab with compact controls matching the app chrome and smooth tab transitions.
 
 - Copy archived chat IDs and agent references from the archive card context menu without restoring the chat.

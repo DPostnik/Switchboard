@@ -1,6 +1,7 @@
 import SwiftUI
 import ContextTranscript
 import ContextCore
+import AgentContract
 
 struct JobsView: View {
     @ObservedObject var model: DeskModel
@@ -341,6 +342,7 @@ struct JobEditor: View {
     /// The job's agent picks models from the app catalog (Claude) or takes a route and free-form effort (Codex).
     private var catalog: AgentModelCatalog? { model.modelCatalog(model.connection(for: job.engine)) }
     private var catalogModels: Bool { catalog != nil }
+    private var listedModels: [AgentModelInfo] { model.agentState(model.connection(for: job.engine)).models }
     private var optimizerPlugins: Bool { model.traits(model.connection(for: job.engine)).contains(.optimizerPlugins) }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -373,21 +375,31 @@ struct JobEditor: View {
                     let role = job.role(project: project, catalog: model.roleCatalog)
                     Text(L10n.text("Запуски пойдут с ролью «\(role.title)»: \(role.summary) Роль не поднимается выше роли проекта для заданий.", "Runs use the \(role.title) role: \(role.summary) Never above the project's job role.")).font(.ui(.caption)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
-                HStack {
-                    TextField(L10n.text("Модель", "Model"), text: $job.model, prompt: Text(L10n.text("По умолчанию", "Default")))
-                    if catalogModels {
-                        Menu(L10n.text("Выбрать", "Choose")) {
-                            Button(L10n.text("Как в CLI", "CLI default")) { job.model = "" }
-                            Divider()
-                            ForEach(catalog?.current ?? []) { entry in
-                                Button(entry.menuTitle) { job.model = entry.id }
-                            }
-                            Menu(L10n.text("Предыдущие поколения", "Previous generations")) {
-                                ForEach(catalog?.previous ?? []) { entry in
+                if !catalogModels {
+                    Picker(L10n.text("Модель", "Model"), selection: $job.model) {
+                        Text(L10n.text("По умолчанию", "Default")).tag("")
+                        ForEach(listedModels, id: \.id) { entry in
+                            Text(entry.displayName).tag(entry.id)
+                        }
+                        if !job.model.isEmpty, !listedModels.contains(where: { $0.id == job.model }) {
+                            Text(job.model).tag(job.model)
+                        }
+                    }.pickerStyle(.menu)
+                } else {
+                    HStack {
+                        TextField(L10n.text("Модель", "Model"), text: $job.model, prompt: Text(L10n.text("По умолчанию", "Default")))
+                            Menu(L10n.text("Выбрать", "Choose")) {
+                                Button(L10n.text("Как в CLI", "CLI default")) { job.model = "" }
+                                Divider()
+                                ForEach(catalog?.current ?? []) { entry in
                                     Button(entry.menuTitle) { job.model = entry.id }
                                 }
-                            }
-                        }.fixedSize()
+                                Menu(L10n.text("Предыдущие поколения", "Previous generations")) {
+                                    ForEach(catalog?.previous ?? []) { entry in
+                                        Button(entry.menuTitle) { job.model = entry.id }
+                                    }
+                                }
+                            }.fixedSize()
                     }
                 }
                 }
