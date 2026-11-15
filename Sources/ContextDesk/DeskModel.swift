@@ -1977,12 +1977,14 @@ private struct ChatRunState: Equatable {
         let permissions = project.map { chat.resolvedRole(in: $0, catalog: roleCatalog).profile(for: $0, addOns: chat.resolvedAddOns(in: $0), sharedRoots: sharedRoots) }
         let diagnostics = permissions?.shell != nil && permissions?.shell != .off ? workingDirectory(forChat: id) : nil
         // `app_log` and `request_app_restart` only where the running app bundle lies inside the diagnostics project.
-        let host = diagnostics.flatMap { ChatDirectory.hostApplication(bundle: hostBundle.bundle, executable: hostBundle.executable, project: $0, permissions: permissions) }
+        let host = diagnostics.flatMap { ChatDirectory.hostApplication(bundle: hostBundle.bundle, executable: hostBundle.executable, project: $0) }
+        let mobile = permissions.map(ChatDirectory.mobileInstallationAllowed) ?? false
         guard chat.chatDirectoryAccess == true else {
-            return scopedChatDirectoryArguments(id: id, script: script, diagnostics: diagnostics, host: host)
+            return scopedChatDirectoryArguments(id: id, script: script, diagnostics: diagnostics, host: host, mobile: mobile)
         }
         return ChatDirectory.serverArguments(script: script.path, snapshot: chatDirectoryFile.path, chat: id, index: chatSearchIndexFile.path,
-                                             recipe: chat.chatSearch == true ? chatSearchRecipe.path : nil, root: root, diagnosticsProject: diagnostics, host: host)
+                                             recipe: chat.chatSearch == true ? chatSearchRecipe.path : nil, root: root, diagnosticsProject: diagnostics, host: host,
+                                             mobileInstall: mobile)
     }
     /// Reserve the final tool scope before Codex creates an in-memory-only empty thread.
     func initialChatDirectoryArguments(id: String, agent: AgentConnectionID, projectPath: String,
@@ -1991,16 +1993,17 @@ private struct ChatRunState: Equatable {
         guard traits(agent).contains(.chatDirectory), let script,
               FileManager.default.fileExists(atPath: script.path) else { return nil }
         let diagnostics = permissions.shell == .off ? nil : projectPath
-        let host = diagnostics.flatMap { ChatDirectory.hostApplication(bundle: hostBundle.bundle, executable: hostBundle.executable, project: $0, permissions: permissions) }
-        return scopedChatDirectoryArguments(id: id, script: script, diagnostics: diagnostics, host: host)
+        let host = diagnostics.flatMap { ChatDirectory.hostApplication(bundle: hostBundle.bundle, executable: hostBundle.executable, project: $0) }
+        return scopedChatDirectoryArguments(id: id, script: script, diagnostics: diagnostics, host: host,
+                                            mobile: ChatDirectory.mobileInstallationAllowed(permissions))
     }
-    private func scopedChatDirectoryArguments(id: String, script: URL, diagnostics: String?, host: ChatDirectory.HostApplication?) -> [String]? {
+    private func scopedChatDirectoryArguments(id: String, script: URL, diagnostics: String?, host: ChatDirectory.HostApplication?, mobile: Bool) -> [String]? {
         if !ChatReferences.load(chat: id).isEmpty, let references = ChatReferences.file(chat: id) {
             return ChatDirectory.serverArguments(script: script.path, snapshot: nil, chat: id, root: Locations.root.path,
-                                                 references: references.path, diagnosticsProject: diagnostics, host: host)
+                                                 references: references.path, diagnosticsProject: diagnostics, host: host, mobileInstall: mobile)
         }
         guard let diagnostics else { return nil }
-        return ChatDirectory.serverArguments(script: script.path, snapshot: nil, chat: id, diagnosticsProject: diagnostics, host: host)
+        return ChatDirectory.serverArguments(script: script.path, snapshot: nil, chat: id, diagnosticsProject: diagnostics, host: host, mobileInstall: mobile)
     }
     /// Remembers the chats the user names in a message to this chat (`switchboard-chat:<ID>`, a chat ID or its agent
     /// session ID), so this chat may inspect them. IDs of unknown chats are ignored.

@@ -20,18 +20,22 @@ class MobileInstallToolTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.project = self.root / 'project'
-        (self.project / 'Mobile/ContextMobile.xcodeproj').mkdir(parents=True)
-        self.bundle = self.project / server.MOBILE_ARTIFACT
-        self.bundle.mkdir(parents=True)
-        (self.bundle / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': server.MOBILE_BUNDLE,
-                                                               'CFBundleSupportedPlatforms': ['iPhoneOS']}))
-        (self.bundle / 'ContextMobile').write_bytes(b'fixture')
-        self.options = argparse.Namespace(diagnostics_project=str(self.project), host={'bundle': 'trusted'}, mobile_install=True)
+        self.bundle = self.make_bundle(self.project, 'ios-device', 'pl.example.app')
+        # Not the running app's project: the installer no longer needs a host app.
+        self.options = argparse.Namespace(diagnostics_project=str(self.project), host=None, mobile_install=True)
         self.calls = []
         self.state = self.root / 'host-state'
         self.addCleanup(patch.stopall)
         patch.object(server, 'MOBILE_INSTALL_ROOT', self.state).start()
         patch.object(server.subprocess, 'run', self.run_process).start()
+
+    def make_bundle(self, project, folder, identifier, configuration='Debug-iphoneos', name='App.app'):
+        bundle = project / '.build' / folder / 'Build/Products' / configuration / name
+        bundle.mkdir(parents=True)
+        (bundle / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': identifier,
+                                                           'CFBundleSupportedPlatforms': ['iPhoneOS']}))
+        (bundle / 'App').write_bytes(b'fixture')
+        return bundle
 
     def run_process(self, argv, **kwargs):
         self.calls.append(argv)
@@ -56,7 +60,32 @@ class MobileInstallToolTests(unittest.TestCase):
         self.assertNotIn('--deep', verify)
         self.assertTrue(any('--deep' in call and '-R' not in call for call in self.calls))
         self.assertIn(server.MOBILE_TEAM, verify[-2])
+        self.assertIn('identifier "pl.example.app"', verify[-2])
+        self.assertEqual(first['source'], '.build/ios-device/Build/Products/Debug-iphoneos/App.app')
         self.assertEqual(list(self.state.glob('stage-*')), [])
+
+    def test_app_id_stays_with_the_first_project(self):
+        self.assertEqual(server.install_mobile_app(self.options, {})['status'], 'installed')
+        other = self.root / 'other'
+        self.make_bundle(other, 'ios-device', 'pl.example.app')
+        foreign = argparse.Namespace(diagnostics_project=str(other), host=None, mobile_install=True)
+        with self.assertRaises(ValueError): server.install_mobile_app(foreign, {})
+        self.assertEqual(len([c for c in self.calls if c[0] == '/usr/bin/xcrun']), 1)
+
+    def test_picks_newest_device_build_and_ignores_simulator(self):
+        import os, time
+        old = self.make_bundle(self.project, 'old-device', 'pl.example.app')
+        os.utime(old / 'Info.plist', (time.time() - 3600, time.time() - 3600))
+        os.utime(self.bundle / 'Info.plist', (time.time() - 60, time.time() - 60))
+        self.make_bundle(self.project, 'sim', 'pl.example.sim', configuration='Debug-iphonesimulator')
+        newest = self.make_bundle(self.project, 'release', 'pl.example.app', configuration='Release-iphoneos', name='New.app')
+        self.assertEqual(server.mobile_artifact(self.project.resolve()), newest.resolve())
+
+    def test_without_a_build_nothing_runs(self):
+        import shutil
+        shutil.rmtree(self.project / '.build')
+        with self.assertRaises(ValueError): server.install_mobile_app(self.options, {})
+        self.assertEqual(self.calls, [])
 
     def test_timeout_remains_uncertain_and_is_never_redispatched(self):
         original = self.run_process
@@ -76,12 +105,15 @@ class MobileInstallToolTests(unittest.TestCase):
         self.options.mobile_install = False
         with self.assertRaises(ValueError): server.install_mobile_app(self.options, {})
         self.options.mobile_install = True
-        self.options.host = None
+        self.options.diagnostics_project = None
         with self.assertRaises(ValueError): server.install_mobile_app(self.options, {})
         self.assertEqual(self.calls, [])
 
     def test_wrong_bundle_and_symlinks_fail_closed(self):
-        (self.bundle / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': 'other'}))
+        (self.bundle / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': 'pl.example.app'}))
+        with self.assertRaises(ValueError): server.install_mobile_app(self.options, {})
+        (self.bundle / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': 'x" or true',
+                                                                'CFBundleSupportedPlatforms': ['iPhoneOS']}))
         with self.assertRaises(ValueError): server.install_mobile_app(self.options, {})
         (self.bundle / 'linked').symlink_to('/etc/passwd')
         with self.assertRaises(ValueError): server.install_mobile_app(self.options, {})

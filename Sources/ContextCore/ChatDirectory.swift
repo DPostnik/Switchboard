@@ -73,9 +73,12 @@ public enum ChatDirectory {
     /// (the app's data folder) adds `inspect_chat`, limited to the chats in `references` when that file is given.
     public static func serverArguments(script: String, snapshot: String?, chat: String, index: String? = nil, recipe: String? = nil,
                                        root: String? = nil, references: String? = nil, diagnosticsProject: String? = nil,
-                                       host: HostApplication? = nil) -> [String] {
+                                       host: HostApplication? = nil, mobileInstall: Bool = false) -> [String] {
         var diagnostics: [String] = []
-        if let diagnosticsProject { diagnostics = ["--diagnostics-project", diagnosticsProject, "--language", L10n.language.rawValue] + (host?.arguments ?? []) }
+        if let diagnosticsProject {
+            diagnostics = ["--diagnostics-project", diagnosticsProject, "--language", L10n.language.rawValue] + (host?.arguments ?? [])
+                + (mobileInstall ? ["--mobile-install"] : [])
+        }
         return [script] + (snapshot.map { ["--snapshot", $0] } ?? []) + ["--chat", chat] + (index.map { ["--index", $0] } ?? []) + diagnostics
             + (recipe.map { ["--recipe", $0] } ?? []) + (root.map { ["--root", $0] } ?? []) + (references.map { ["--references", $0] } ?? [])
     }
@@ -86,8 +89,7 @@ public enum ChatDirectory {
     public struct HostApplication: Equatable, Sendable {
         public let executable: String
         public let subsystem: String
-        public var mobileInstall = false
-        public var arguments: [String] { ["--host-app", executable, "--log-subsystem", subsystem] + (mobileInstall ? ["--mobile-install"] : []) }
+        public var arguments: [String] { ["--host-app", executable, "--log-subsystem", subsystem] }
     }
     /// The app's unified-log subsystem (`AppLog.subsystem`).
     public static let logSubsystem = Perf.subsystem
@@ -95,7 +97,7 @@ public enum ChatDirectory {
     /// `bundle` and `executable` are the running app's (`Bundle.main.bundleURL`, `Bundle.main.executableURL`); injected
     /// so tests can pass their own. The executable path keeps the bundle path as the app sees it: the restart request
     /// names that path, and the running app listens for exactly it.
-    public static func hostApplication(bundle: URL, executable: URL?, project: String, subsystem: String = logSubsystem, permissions: AgentPermissionProfile? = nil) -> HostApplication? {
+    public static func hostApplication(bundle: URL, executable: URL?, project: String, subsystem: String = logSubsystem) -> HostApplication? {
         guard bundle.isFileURL, bundle.pathExtension == "app", let executable, executable.isFileURL, !project.isEmpty else { return nil }
         let standardized = bundle.standardizedFileURL
         let name = executable.lastPathComponent
@@ -104,8 +106,11 @@ public enum ChatDirectory {
         let root = URL(fileURLWithPath: project).resolvingSymlinksInPath().standardizedFileURL.path
         let real = standardized.resolvingSymlinksInPath().path
         guard root != "/", real.hasPrefix(root + "/") else { return nil }
-        return HostApplication(executable: standardized.appendingPathComponent("Contents/MacOS/\(name)").path, subsystem: subsystem, mobileInstall: permissions.map(mobileInstallationAllowed) ?? false)
+        return HostApplication(executable: standardized.appendingPathComponent("Contents/MacOS/\(name)").path, subsystem: subsystem)
     }
+    /// Whether a chat's diagnostics server offers `install_mobile_app` (any project, user decision 2026-11-14): a shell and
+    /// network role that signs with the Apple signing set (`codesign`), or an unrestricted one. The server still decides the
+    /// artifact, team, device and bundle pinning itself; nothing comes from the agent.
     public static func mobileInstallationAllowed(_ profile: AgentPermissionProfile) -> Bool {
         guard profile.shell == .on, profile.network else { return false }
         if case .unrestricted = profile.effective.filesystem { return true }

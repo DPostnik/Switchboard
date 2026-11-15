@@ -335,6 +335,18 @@ therefore remain uncertain even when installation completed; never retry based o
 Native build and 68 selected tests passed. Mobile Decline and fixed chat continuation were verified
 live; persistent Apply is covered by automated tests, not claimed as a live UI check.
 
+Every signing project (user decision 2026-11-14): the same channel 3 tool now reaches any project whose
+chat profile passes the same role gate (shell, network, project filesystem with the Apple signing set's
+`codesign`, or unrestricted), for both providers; the running app no longer has to lie inside the
+project. The server, not the agent, picks the artifact: the newest `.app` matching
+`.build/*/Build/Products/{Debug,Release}-iphoneos/*.app` in the project (no links on the path). The
+app ID is read from the staged bundle and must pass `codesign -R` with team 4M74WJDNSW and that
+identifier. The first project that installs an app ID owns it (`bundle-<sha256>.json` beside the
+receipts, created exclusively); another project's install of that ID is refused, so a project cannot
+replace another project's app on the phone. Device and team stay fixed. Found because isostudio's
+Developer chat signed its app under the boundary but direct `devicectl` installation failed with the
+same Info.plist EPERM as above.
+
 Known gaps. Check this list before you treat a failure as a new defect.
 
 - Mediated `security` (2026-11-12): before, apple-signing mediated `/usr/bin/security` with Keychain read and no

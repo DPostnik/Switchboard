@@ -317,11 +317,12 @@ public actor CodexClient {
         if enabled, let script {
             arguments = ["-I", script.path, "--diagnostics-project", project, "--language", L10n.language.rawValue]
             if let host { arguments += host.arguments + (thread.map { ["--codex-thread", $0] } ?? []) }
+            if ChatDirectory.mobileInstallationAllowed(permissions) { arguments.append("--mobile-install") }
         }
         config["mcp_servers.switchboard_diagnostics"] = .object([
             "command": .string(enabled ? "/usr/bin/python3" : "/usr/bin/false"),
             "args": .array(arguments.map(JSONValue.string)),
-            "enabled": .bool(enabled), "required": .bool(false), "tool_timeout_sec": .number(host == nil ? 15 : 30)
+            "enabled": .bool(enabled), "required": .bool(false), "tool_timeout_sec": .number(host == nil && !ChatDirectory.mobileInstallationAllowed(permissions) ? 15 : 30)
         ])
         return .object(config)
     }

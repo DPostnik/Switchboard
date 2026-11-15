@@ -445,11 +445,14 @@ private func isError(_ reply: [String: Any]?) -> Bool { (reply?["result"] as? [S
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
     let project = root.appendingPathComponent("project")
-    let (_, executable) = try fakeHostApp(in: project)
-    try FileManager.default.createDirectory(at: project.appendingPathComponent("Mobile/ContextMobile.xcodeproj"), withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
     let list: [[String: Any]] = [["jsonrpc": "2.0", "id": 1, "method": "tools/list"]]
-    let base = ["--diagnostics-project", project.path, "--host-app", executable.path, "--log-subsystem", "local.daniil.switchboard"]
+    // Any project with the app's grant, not only the one that holds the running app.
+    let base = ["--diagnostics-project", project.path]
     #expect(toolNames(try serve(list, arguments: base + ["--mobile-install"])[1]).contains("install_mobile_app"))
     #expect(!toolNames(try serve(list, arguments: base)[1]).contains("install_mobile_app"))
-    #expect(!toolNames(try serve(list, arguments: ["--diagnostics-project", project.path, "--mobile-install"])[1]).contains("install_mobile_app"))
+    #expect(!toolNames(try serve(list, arguments: ["--mobile-install"])[1]).contains("install_mobile_app"))
+    let arguments = ChatDirectory.serverArguments(script: "/s.py", snapshot: nil, chat: "c", diagnosticsProject: project.path, mobileInstall: true)
+    #expect(arguments.contains("--mobile-install"))
+    #expect(!ChatDirectory.serverArguments(script: "/s.py", snapshot: nil, chat: "c", root: "/r", mobileInstall: true).contains("--mobile-install"))
 }

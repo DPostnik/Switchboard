@@ -520,9 +520,11 @@ remains blocked by CoreDevice artifact access (Info.plist, EPERM); no automatic 
 Under the external boundary, use `python3 scripts/install-mobile-manual.py --sign-only`
 (or `--source PATH --sign-only` for a verified snapshot), then call `install_mobile_app`.
 The app-owned tool accepts no paths, commands or device identifiers. It verifies and installs
-the fixed signed Switchboard bundle on the configured iPhone. The source script refuses direct
-device installation inside the boundary. Existing swift/apple-signing access is required;
-Reader/Editor and unrelated projects do not receive this tool. Tool installation receipts live
+the newest signed `.app` under `.build/*/Build/Products/Debug-iphoneos/` (for this app
+`.build/mobile-device/...`) on the configured iPhone. The source script refuses direct
+device installation inside the boundary. Existing apple-signing access is required;
+Reader/Editor do not receive this tool. Since 2026-11-14 other signing projects get it too;
+an app ID stays with the first project that installed it. Tool installation receipts live
 in app-owned Switchboard-sandbox/mobile-installs and prevent redispatch after uncertain outcomes.
 Profile renewal remains a separate account-side operation. No extra signing credentials are copied.
 

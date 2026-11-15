@@ -179,26 +179,61 @@ REDACTIONS = [
 
 MOBILE_INSTALL_TOOL = {
     "name": "install_mobile_app",
-    "description": "Install this project's signed Switchboard iPhone app on the configured iPhone. "
-                   "No paths, device IDs or commands accepted. Verifies the Apple signature, team and app ID. "
-                   "One attempt per artifact; never retry an uncertain result. / "
-                   "Установить подписанное iPhone-приложение Switchboard из этого проекта на настроенный iPhone. "
-                   "Без путей, команд и ID устройств. Проверяет подпись Apple, команду и ID приложения. "
-                   "Одна попытка на сборку; не повторяй при неопределённом результате.",
+    "description": "Install this project's signed iPhone app on the configured iPhone. The app finds the newest build in "
+                   ".build/<folder>/Build/Products/Debug-iphoneos (or Release-iphoneos); build it unsigned and sign it with codesign first. "
+                   "No paths, device IDs or commands accepted. Verifies the Apple signature and team; an app ID stays with the first "
+                   "project that installed it. One attempt per artifact; never retry an uncertain result. / "
+                   "Установить подписанное iPhone-приложение этого проекта на настроенный iPhone. Приложение берёт самую новую сборку в "
+                   ".build/<папка>/Build/Products/Debug-iphoneos (или Release-iphoneos); сначала собери без подписи и подпиши через codesign. "
+                   "Без путей, команд и ID устройств. Проверяет подпись Apple и команду; ID приложения закрепляется за первым "
+                   "проектом, который его установил. Одна попытка на сборку; не повторяй при неопределённом результате.",
     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
 }
 MOBILE_DEVICE = "00008140-0016658A0E13001C"
-MOBILE_BUNDLE = "com.contextdesk.mobile"
 MOBILE_TEAM = "4M74WJDNSW"
 MOBILE_INSTALL_ROOT = Path.home() / "Library/Application Support/Switchboard-sandbox/mobile-installs"
-MOBILE_ARTIFACT = Path(".build/mobile-device/Build/Products/Debug-iphoneos/ContextMobile.app")
+# The only places an artifact is taken from: one derived-data folder under the project's .build, device products only.
+MOBILE_ARTIFACT_PATTERNS = (".build/*/Build/Products/Debug-iphoneos/*.app", ".build/*/Build/Products/Release-iphoneos/*.app")
+MOBILE_BUNDLE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,154}")
 
 
 def mobile_install_available(options):
-    project = getattr(options, "diagnostics_project", None)
-    return bool(getattr(options, "mobile_install", False) and getattr(options, "host", None)
-                and project and (Path(project) / "Mobile/ContextMobile.xcodeproj").is_dir())
+    return bool(getattr(options, "mobile_install", False) and getattr(options, "diagnostics_project", None))
+
+
+def mobile_artifact(project):
+    """The newest device build under the fixed patterns; links anywhere on its path are refused."""
+    candidates = []
+    for pattern in MOBILE_ARTIFACT_PATTERNS:
+        for source in project.glob(pattern):
+            cursor = source
+            while cursor != project:
+                if cursor.is_symlink():
+                    raise ValueError("Linked artifact paths are refused / Ссылки в пути сборки запрещены")
+                cursor = cursor.parent
+            if source.is_dir() and (source / "Info.plist").is_file() and source.resolve().is_relative_to(project):
+                candidates.append((os.stat(source / "Info.plist").st_mtime, str(source), source))
+    if not candidates:
+        raise ValueError("Build and sign the iPhone app first: no .app in .build/<folder>/Build/Products/Debug-iphoneos / "
+                         "Сначала собери и подпиши iPhone-приложение: нет .app в .build/<папка>/Build/Products/Debug-iphoneos")
+    return max(candidates)[2]
+
+
+def pin_mobile_bundle(project, bundle):
+    """Bind an app ID to the first project that installs it, so another project cannot replace that app on the iPhone."""
+    pin = MOBILE_INSTALL_ROOT / ("bundle-" + hashlib.sha256(bundle.encode()).hexdigest() + ".json")
+    try:
+        descriptor = os.open(pin, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        owner = json.loads(pin.read_text()).get("project")
+        if owner != str(project):
+            raise ValueError("This app ID belongs to another project / Этот ID приложения закреплён за другим проектом: " + bundle)
+        return
+    with os.fdopen(descriptor, "w") as stream:
+        json.dump({"bundle": bundle, "project": str(project)}, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
 def mobile_bundle_digest(bundle):
@@ -231,28 +266,21 @@ def install_mobile_app(options, arguments):
     if not mobile_install_available(options):
         raise ValueError("Mobile installation is not granted / Установка на iPhone не разрешена")
     project = Path(options.diagnostics_project).resolve(strict=True)
-    source = project / MOBILE_ARTIFACT
-    # Every source ancestor must remain inside the app-selected project.
-    cursor = source
-    while cursor != project:
-        if cursor.is_symlink():
-            raise ValueError("Linked artifact paths are refused / Ссылки в пути сборки запрещены")
-        cursor = cursor.parent
-    if not source.is_dir() or not source.resolve().is_relative_to(project):
-        raise ValueError("Build the signed iPhone app first / Сначала собери подписанное iPhone-приложение")
+    source = mobile_artifact(project)
     MOBILE_INSTALL_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     # This staging root is app-owned, outside every provider's writable roots. Copy links as links,
     # then reject them; copying must not read a link's target, even during a source mutation.
     with tempfile.TemporaryDirectory(prefix="stage-", dir=MOBILE_INSTALL_ROOT) as temporary:
-        staged = Path(temporary) / "ContextMobile.app"
+        staged = Path(temporary) / source.name
         shutil.copytree(source, staged, symlinks=True)
         artifact = mobile_bundle_digest(staged)
         info = plistlib.loads((staged / "Info.plist").read_bytes())
-        if info.get("CFBundleIdentifier") != MOBILE_BUNDLE or "iPhoneOS" not in info.get("CFBundleSupportedPlatforms", []):
-            raise ValueError("Unexpected iPhone application / Другое iPhone-приложение")
+        bundle = info.get("CFBundleIdentifier")
+        if not isinstance(bundle, str) or not MOBILE_BUNDLE_ID.fullmatch(bundle) or "iPhoneOS" not in info.get("CFBundleSupportedPlatforms", []):
+            raise ValueError("Not an iPhone application / Это не iPhone-приложение")
         environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(Path.home()),
                        "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer"}
-        requirement = '=anchor apple generic and certificate leaf[subject.OU] = "' + MOBILE_TEAM + '" and identifier "' + MOBILE_BUNDLE + '"'
+        requirement = '=anchor apple generic and certificate leaf[subject.OU] = "' + MOBILE_TEAM + '" and identifier "' + bundle + '"'
         integrity = subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(staged)],
                                    stdin=subprocess.DEVNULL, capture_output=True, timeout=5, env=environment, check=False)
         if integrity.returncode:
@@ -262,9 +290,10 @@ def install_mobile_app(options, arguments):
         if verified.returncode:
             detail = redact(verified.stderr.decode("utf-8", "replace"))[0][:400]
             raise ValueError("Apple signature/team verification failed / Подпись Apple или команда не прошла проверку: " + detail)
+        pin_mobile_bundle(project, bundle)
         key = hashlib.sha256((str(project) + MOBILE_DEVICE + artifact).encode()).hexdigest()
         receipt = MOBILE_INSTALL_ROOT / (key + ".json")
-        record = {"artifact": artifact, "device": MOBILE_DEVICE, "bundle": MOBILE_BUNDLE,
+        record = {"artifact": artifact, "device": MOBILE_DEVICE, "bundle": bundle, "source": str(source.relative_to(project)),
                   "status": "uncertain", "message": "Installation attempted; do not retry / Установка начата; не повторять"}
         try:
             descriptor = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
