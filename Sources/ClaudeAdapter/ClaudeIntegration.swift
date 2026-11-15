@@ -1006,7 +1006,7 @@ public actor ClaudeIntegration: AgentIntegration {
             let rewritten = try boundary.rewrite(arguments, appServers: ["switchboard_browser", ChatDirectory.serverName, Self.userChromeServerName])
             // The real binary: nono resolves grants on canonical paths, and the versions folder is the one granted.
             let command = boundary.command(claude: boundaryRuntime?.binary(executable) ?? executable.resolvingSymlinksInPath(), arguments: rewritten)
-            try await wire.start(executable: command.executable, arguments: command.arguments, environment: boundary.environment(base: environment),
+            try await wire.start(executable: command.executable, arguments: command.arguments, environment: boundary.environment(base: environment, scopes: token.scopes),
                                  cwd: URL(fileURLWithPath: cwd), firstLine: Data(token.value.utf8), processGroup: true,
                                  cleanup: { await host.stop(); plan.removeWorkerFolder() })
         } catch { await host.stop(); plan.removeWorkerFolder(); throw error }

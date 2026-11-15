@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Preserve Claude sign-in scopes under the external boundary so authorized mail and other claude.ai connectors can load.
+
 - The nightly test run skips nights on battery power (the status keeps the last result) and keeps the Mac awake on AC power, so sleep no longer causes false failures.
 
 - Claude chats fall back to the CLI sandbox for about 5 minutes per sign-in token instead of about 25: the boundary now needs 10 minutes of token lifetime instead of 30.

@@ -756,3 +756,11 @@ frames; out-of-process frames stay refused. Hover, drag and authenticated fetch 
 (handoff defaults, not user decisions). Observation stays read-only (`readOnlyHint`), input
 stays destructive. The extension reports a feature revision; the coordinator refuses newer
 arguments for an old extension before journaling. No grant, lease, journal or boundary change.
+
+Claude connector scopes (2026-11-15): the existing boundary launch preserves the
+profile OAuth document's actual scopes in CLAUDE_CODE_OAUTH_SCOPES. The access token
+still travels only through fd 3; no credential grant or role change. In installed
+Claude Code 2.1.325, AV defaults fd credentials to inference/upload scopes and the
+connector loader returns early without user:mcp_servers. Inherited scopes are
+replaced, never unioned; absent metadata adds no connector scope. Codex is unaffected
+because this is the Claude-specific credential transport. Live verification pending.

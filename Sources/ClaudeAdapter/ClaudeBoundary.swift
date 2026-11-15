@@ -13,6 +13,7 @@ import AgentContract
 struct ClaudeAccessToken: Equatable, Sendable {
     let value: String
     let expiresAt: Date
+    var scopes: [String] = []
 }
 
 enum ClaudeTokenFailure: Error, Equatable, Sendable {
@@ -43,7 +44,11 @@ enum ClaudeBoundaryToken {
               case .number(let milliseconds) = document["claudeAiOauth"]["expiresAt"] else { return .failure(.missing) }
         let expiresAt = Date(timeIntervalSince1970: milliseconds / 1000)
         guard expiresAt.timeIntervalSince(now) > minimumLifetime else { return .failure(.expiring) }
-        return .success(.init(value: value, expiresAt: expiresAt))
+        // Scope names are metadata, not credentials. Never split a malformed entry into extra grants.
+        let scopes = document["claudeAiOauth"]["scopes"].array.compactMap(\.string).filter {
+            !$0.isEmpty && !$0.contains(where: \.isWhitespace)
+        }
+        return .success(.init(value: value, expiresAt: expiresAt, scopes: scopes))
     }
 }
 
@@ -126,11 +131,13 @@ struct ClaudeBoundaryLaunch: Sendable {
     func command(claude: URL, arguments: [String]) -> (executable: URL, arguments: [String]) {
         launch.command(provider: URL(fileURLWithPath: "/bin/zsh"), arguments: Self.tokenLauncher + [claude.path] + arguments)
     }
-    func environment(base: [String: String]) -> [String: String] {
+    func environment(base: [String: String], scopes: [String] = []) -> [String: String] {
         var result = base
         for key in Self.strippedEnvironment { result.removeValue(forKey: key) }
         result.merge(plan.environment) { _, new in new }
         result.merge(Self.tokenEnvironment) { _, new in new }
+        // Override inherited scope metadata with this profile's actual grants only.
+        result["CLAUDE_CODE_OAUTH_SCOPES"] = scopes.joined(separator: " ")
         return result
     }
     /// The launch arguments under the boundary: `--settings` moves into the worker's `settings.json` (read-only grant), and
