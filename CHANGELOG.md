@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- My Chrome: closing one tab or revoking one chat no longer cancels browser operations running in other tabs and chats.
+
 - Explain saved access to missing folders and refresh both providers’ effective sandbox grants when those folders appear.
 
 - Routine run history loads in pages of 40 and collapses consecutive "nothing new" skips into one card with the last check time, so long histories scroll smoothly.

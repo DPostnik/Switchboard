@@ -224,6 +224,44 @@ test('closing an unowned tab and internal detach callbacks preserve other leases
   assert.equal(controller.chrome.calls.filter(x => x[0] === 'post' && x[1].event === 'detached').length, 1);
 });
 
+test('another tab closing or another chat being revoked does not cancel in-flight work', async () => {
+  const controller = await paired();
+  await controller.connect();
+  await select(controller);
+  await controller.dispatch(request(controller, 'open', {url: 'https://example.org/other'}, {leaseId: 'lease2', chatId: 'chat2'}));
+  let resume;
+  controller.chrome.debugger.attach = () => new Promise(resolve => {resume = resolve;});
+  const pending = controller.dispatch(request(controller, 'read', {}, {leaseId: 'lease1'}));
+  await new Promise(resolve => setImmediate(resolve));
+  await controller.detach(20);
+  await controller.revoke('chat2');
+  resume();
+  const result = await pending;
+  assert.equal(result.url, 'https://example.org/');
+  assert.equal(controller.leases.size, 1);
+});
+
+test('revoking a chat or its tab cancels only that work', async () => {
+  const controller = await paired();
+  await controller.connect();
+  await select(controller);
+  let resume;
+  controller.chrome.debugger.attach = () => new Promise(resolve => {resume = resolve;});
+  const read = controller.dispatch(request(controller, 'read', {}, {leaseId: 'lease1'}));
+  await new Promise(resolve => setImmediate(resolve));
+  await controller.detach(10);
+  resume();
+  await assert.rejects(read, /revoked/);
+  let finishCreate;
+  controller.chrome.tabs.create = value => new Promise(resolve => { finishCreate = () => resolve({id: 20, ...value}); });
+  const open = controller.dispatch(request(controller, 'open', {url: 'https://example.org/'}, {leaseId: 'lease3'}));
+  await new Promise(resolve => setImmediate(resolve));
+  await controller.revoke('chat1');
+  finishCreate();
+  await assert.rejects(open, /revoked/);
+  assert.equal(controller.leases.size, 0);
+  await controller.dispatch(request(controller, 'list', {}, {chatId: 'chat2'}));
+});
 
 test('opening after the last owned tab closes creates a fresh group without retry', async () => {
   const chrome = mockChrome(), groups = new Set();

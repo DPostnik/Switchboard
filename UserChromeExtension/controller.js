@@ -27,7 +27,11 @@ export class Controller {
     this.dialogWaiters = new Map();
     // Per tab: pixel mapping of the latest full screenshot, for input by x,y.
     this.shots = new Map();
+    // Global epoch: reconnection, a full stop or an expired operation invalidates everything in flight.
     this.generation = 0;
+    // Per-chat epochs: revoking one chat cancels only that chat's in-flight work. A single tab's
+    // revocation needs no epoch; removing its lease already fails every operation on that tab.
+    this.chatEpochs = new Map();
     this.queue = Promise.resolve();
     this.pending = 0;
     this.journal = {};
@@ -105,12 +109,12 @@ export class Controller {
         return;
       }
       this.pending++;
-      const generation = this.generation;
+      const live = this.liveToken(message);
       this.queue = this.queue.then(async () => {
         let reply;
         try {
-          if (generation !== this.generation) throw fail('revoked');
-          reply = {type: 'response', id: message.id, result: await this.boundedDispatch(message, generation)};
+          if (!this.isLive(live)) throw fail('revoked');
+          reply = {type: 'response', id: message.id, result: await this.boundedDispatch(message, live)};
         } catch (error) {
           reply = {type: 'response', id: message.id, error: {code: error.code || 'operation_failed', message: error.message}};
         }
@@ -131,13 +135,21 @@ export class Controller {
   authenticated(request) {
     return !!this.session && request.profileId === this.profileId && request.sessionId === this.session.sessionId && request.capability === this.session.capability;
   }
-  assertLive(generation, lease) {
-    if (generation !== this.generation || !this.session || (lease && this.leases.get(lease.leaseId) !== lease)) throw fail('revoked');
+  // The authority an operation started with: the global epoch and its chat's epoch.
+  liveToken(request) {
+    const chatId = request?.chatId;
+    return {generation: this.generation, chatId, epoch: this.chatEpochs.get(chatId) || 0};
   }
-  async boundedDispatch(request, generation = this.generation) {
+  isLive(live) {
+    return live.generation === this.generation && (this.chatEpochs.get(live.chatId) || 0) === live.epoch;
+  }
+  assertLive(live, lease) {
+    if (!this.isLive(live) || !this.session || (lease && this.leases.get(lease.leaseId) !== lease)) throw fail('revoked');
+  }
+  async boundedDispatch(request, live = this.liveToken(request)) {
     if (this.quarantined) throw fail('previous_operation_still_pending');
     let timeout;
-    const operation = this.dispatch(request, generation);
+    const operation = this.dispatch(request, live);
     try {
       return await Promise.race([operation, new Promise((_, reject) => {
         timeout = setTimeout(() => {
@@ -154,7 +166,10 @@ export class Controller {
     } finally { clearTimeout(timeout); }
   }
   async revoke(chatId, tabId, invalidate = true) {
-    if (invalidate) this.generation++;
+    if (invalidate) {
+      if (chatId) this.chatEpochs.set(chatId, (this.chatEpochs.get(chatId) || 0) + 1);
+      else if (!tabId) this.generation++;
+    }
     const leases = [...this.leases.values()].filter(lease => (!chatId || lease.chatId === chatId) && (!tabId || lease.tabId === tabId));
     for (const lease of leases) {
       this.leases.delete(lease.leaseId); this.stopped.add(lease.leaseId); this.documents.delete(lease.tabId); this.dialogs.delete(lease.tabId); this.shots.delete(lease.tabId);
@@ -196,7 +211,7 @@ export class Controller {
     this.journal = Object.fromEntries(entries);
     await this.chrome.storage.local.set({journal: this.journal});
   }
-  async dispatch(request, generation = this.generation) {
+  async dispatch(request, live = this.liveToken(request)) {
     if (!this.authenticated(request)) throw fail('unauthorized');
     if (JSON.stringify(request).length > MAX_FRAME || !identifier(request.id) || !identifier(request.chatId) || !OPERATIONS.has(request.operation)) throw fail('invalid_request');
     const mutation = MUTATIONS.has(request.operation);
@@ -204,30 +219,31 @@ export class Controller {
     const p = request.params || {};
     if (!p || typeof p !== 'object' || Array.isArray(p)) throw fail('invalid_params');
     if (mutation) await this.remember(request.id, 'dispatched', request.operation);
-    this.assertLive(generation);
-    let result;
+    this.assertLive(live);
+    let result, held;
     if (request.operation === 'status') result = this.status();
     else if (request.operation === 'list') {
       const tabs = await this.chrome.tabs.query({});
       result = {tabs: tabs.filter(x => !x.incognito && websiteURL(x.url)).slice(0, 300).map(x => ({tabId: x.id, title: x.title?.slice(0, 500), url: x.url?.slice(0, 8192), leased: [...this.leases.values()].some(l => l.tabId === x.id)}))};
-    } else if (['open', 'select'].includes(request.operation)) result = await this.acquire(request, generation);
+    } else if (['open', 'select'].includes(request.operation)) result = await this.acquire(request, live);
     else {
       const lease = this.leases.get(request.leaseId);
       if (!lease || lease.chatId !== request.chatId) throw fail('lease_required');
-      this.assertLive(generation, lease);
+      this.assertLive(live, lease);
       if (request.operation === 'release') {
         if (p.close === true && !lease.created) throw fail('existing_tab_preserved');
         await this.revoke(lease.chatId, lease.tabId, false);
-        this.assertLive(generation);
+        this.assertLive(live);
         if (p.close === true) await this.chrome.tabs.remove(lease.tabId);
         result = {released: true, closed: p.close === true};
-      } else result = await this.operate(request, lease, generation);
+      } else { held = lease; result = await this.operate(request, lease, live); }
     }
-    this.assertLive(generation);
+    // A tab revoked during the operation fails it, as its lease is gone; other tabs and chats continue.
+    this.assertLive(live, held);
     if (mutation) await this.remember(request.id, 'completed', request.operation);
     return result;
   }
-  async acquire(request, generation) {
+  async acquire(request, live) {
     const p = request.params;
     if (!identifier(request.leaseId) || this.stopped.has(request.leaseId)) throw fail('invalid_lease');
     if (this.leases.has(request.leaseId)) throw fail('lease_exists');
@@ -238,7 +254,7 @@ export class Controller {
     let groupId = created ? this.groups.get(request.chatId) : undefined;
     if (groupId !== undefined) {
       const groups = await this.chrome.tabGroups.query({});
-      this.assertLive(generation);
+      this.assertLive(live);
       if (!groups.some(group => group.id === groupId)) {
         this.groups.delete(request.chatId);
         groupId = undefined;
@@ -247,7 +263,7 @@ export class Controller {
     let tab;
     if (created) tab = await this.chrome.tabs.create({url: p.url, active: false});
     else tab = await this.chrome.tabs.get(p.tabId);
-    this.assertLive(generation);
+    this.assertLive(live);
     if (tab.incognito || !websiteURL(tab.url || p.url)) throw fail('unsupported_page');
     if ([...this.leases.values()].some(lease => lease.tabId === tab.id)) throw fail('tab_busy');
     const lease = {leaseId: request.leaseId, chatId: request.chatId, tabId: tab.id, created};
@@ -263,45 +279,45 @@ export class Controller {
         throw fail('tab_group_failed', error.message);
       }
     }
-    this.assertLive(generation, lease);
+    this.assertLive(live, lease);
     return {tabId: tab.id, leaseId: lease.leaseId, url: tab.url || p.url, created};
   }
-  async command(lease, generation, method, params = {}) {
-    this.assertLive(generation, lease);
+  async command(lease, live, method, params = {}) {
+    this.assertLive(live, lease);
     return this.chrome.debugger.sendCommand({tabId: lease.tabId}, method, params);
   }
   // Chrome can leave an input command pending until its JavaScript dialog is handled.
   // Return the observed dialog to the caller so the next authorized request can handle it.
   // The original command is never replayed; its eventual rejection remains consumed.
-  async inputCommand(lease, generation, method, params) {
+  async inputCommand(lease, live, method, params) {
     let opened;
     const dialog = new Promise(resolve => { opened = () => resolve(true); });
     this.dialogWaiters.set(lease.tabId, opened);
     try {
       const pending = await Promise.race([
-        this.command(lease, generation, method, params).then(() => false), dialog
+        this.command(lease, live, method, params).then(() => false), dialog
       ]);
-      this.assertLive(generation, lease);
+      this.assertLive(live, lease);
       return pending;
     } finally {
       if (this.dialogWaiters.get(lease.tabId) === opened) this.dialogWaiters.delete(lease.tabId);
     }
   }
-  async attach(lease, generation) {
+  async attach(lease, live) {
     if (this.attached.has(lease.tabId)) return;
-    this.assertLive(generation, lease);
+    this.assertLive(live, lease);
     try { await this.chrome.debugger.attach({tabId: lease.tabId}, '1.3'); }
     catch (error) { throw fail('debugger_conflict', error.message); }
-    try { this.assertLive(generation, lease); }
+    try { this.assertLive(live, lease); }
     catch (error) {
       try { await this.chrome.debugger.detach({tabId: lease.tabId}); } catch {}
       throw error;
     }
     this.attached.add(lease.tabId);
-    await this.command(lease, generation, 'Page.enable');
+    await this.command(lease, live, 'Page.enable');
   }
-  async world(lease, generation, frameId) {
-    const tree = await this.command(lease, generation, 'Page.getFrameTree');
+  async world(lease, live, frameId) {
+    const tree = await this.command(lease, live, 'Page.getFrameTree');
     const frames = [];
     const visit = (node, depth) => {
       if (depth > 3 || frames.length >= 50) return;
@@ -311,16 +327,16 @@ export class Controller {
     visit(tree.frameTree, 0);
     const frame = frameId ? frames.find(x => x.frameId === frameId) : frames[0];
     if (!frame || !websiteURL(frame.url)) throw fail('unsupported_frame');
-    const world = await this.command(lease, generation, 'Page.createIsolatedWorld', {frameId: frame.frameId, worldName: 'Switchboard bounded tools v1'});
+    const world = await this.command(lease, live, 'Page.createIsolatedWorld', {frameId: frame.frameId, worldName: 'Switchboard bounded tools v1'});
     return {contextId: world.executionContextId, frame, frames};
   }
-  async evaluate(lease, generation, contextId, fn, args) {
-    const result = await this.command(lease, generation, 'Runtime.evaluate', {
+  async evaluate(lease, live, contextId, fn, args) {
+    const result = await this.command(lease, live, 'Runtime.evaluate', {
       contextId, expression: `(${fn.toString()})(${JSON.stringify(args)})`, returnByValue: true, awaitPromise: false, timeout: 3000});
     if (result.exceptionDetails) throw fail('page_operation_failed', result.exceptionDetails.exception?.description?.slice(0, 500) || result.exceptionDetails.text);
     return result.result?.value;
   }
-  async operate(request, lease, generation) {
+  async operate(request, lease, live) {
     const p = request.params;
     if (request.operation === 'input') validateInput(p);
     if (['read', 'screenshot'].includes(request.operation) && p.waitSeconds !== undefined &&
@@ -330,43 +346,43 @@ export class Controller {
     if (p.expectedURL && p.expectedURL !== tab.url) throw fail('stale_navigation');
     const isMutation = ['input', 'upload'].includes(request.operation);
     if (isMutation && (!p.expectedURL || !identifier(p.documentToken))) throw fail('observation_required');
-    await this.attach(lease, generation);
+    await this.attach(lease, live);
     if (request.operation === 'input' && p.action === 'dialog') {
       const dialog = this.dialogs.get(lease.tabId);
       if (!dialog || dialog.documentToken !== p.documentToken || dialog.url !== p.expectedURL) throw fail('dialog_observation_required');
       if (typeof p.accept !== 'boolean' || (p.promptText && (typeof p.promptText !== 'string' || p.promptText.length > 5000))) throw fail('invalid_dialog');
-      await this.command(lease, generation, 'Page.handleJavaScriptDialog', {accept: p.accept, promptText: p.promptText || ''});
+      await this.command(lease, live, 'Page.handleJavaScriptDialog', {accept: p.accept, promptText: p.promptText || ''});
       return {handled: true};
     }
     if (p.waitSeconds !== undefined) {
       // A bounded pause before observing, for pages that are still loading or animating.
       await new Promise(resolve => setTimeout(resolve, p.waitSeconds * 1000));
-      this.assertLive(generation, lease);
+      this.assertLive(live, lease);
     }
-    if (request.operation === 'screenshot') return this.screenshot(lease, generation, p);
-    const world = await this.world(lease, generation, p.frameId);
+    if (request.operation === 'screenshot') return this.screenshot(lease, live, p);
+    const world = await this.world(lease, live, p.frameId);
     if (['read', 'find', 'verify'].includes(request.operation)) {
       if (request.operation === 'find' && (typeof p.query !== 'string' || !p.query.trim() || p.query.length > 500)) throw fail('query_required');
-      const result = await this.evaluate(lease, generation, world.contextId, observePage, {query: p.query});
+      const result = await this.evaluate(lease, live, world.contextId, observePage, {query: p.query});
       if (world.frame.main) this.documents.set(lease.tabId, result.documentToken);
       return {...result, tabId: lease.tabId, frameId: world.frame.frameId, frames: world.frames};
     }
     // Check the actual observed document in the isolated world immediately before every input.
-    const current = await this.evaluate(lease, generation, world.contextId, pageInfo, {});
+    const current = await this.evaluate(lease, live, world.contextId, pageInfo, {});
     if (current.documentToken !== p.documentToken) throw fail('stale_document');
     if (p.expectedURL !== tab.url) throw fail('stale_navigation');
     if (request.operation === 'upload') {
       validateFiles(p.files);
-      return this.evaluate(lease, generation, world.contextId, installUpload, {ref: p.ref, documentToken: p.documentToken, files: p.files});
+      return this.evaluate(lease, live, world.contextId, installUpload, {ref: p.ref, documentToken: p.documentToken, files: p.files});
     }
     if (request.operation !== 'input') throw fail('unsupported_operation');
     const byPoint = p.x !== undefined;
     // Coordinates are pixels of the latest screenshot of the whole tab: map them before anything can scroll.
-    const shotPoint = byPoint || (p.action === 'scroll' && !p.ref) ? await this.mapPoint(lease, generation, world, p) : null;
+    const shotPoint = byPoint || (p.action === 'scroll' && !p.ref) ? await this.mapPoint(lease, live, world, p) : null;
     // Element positions inside a frame are local to it; Chrome dispatches input in main-viewport CSS pixels.
-    const offset = world.frame.main ? {x: 0, y: 0} : await this.frameOffset(lease, generation, world.frame);
+    const offset = world.frame.main ? {x: 0, y: 0} : await this.frameOffset(lease, live, world.frame);
     const resolve = async (args) => {
-      const found = await this.evaluate(lease, generation, world.contextId, resolveElement, {ref: p.ref, documentToken: p.documentToken, ...args});
+      const found = await this.evaluate(lease, live, world.contextId, resolveElement, {ref: p.ref, documentToken: p.documentToken, ...args});
       return {...found, x: found.x + offset.x, y: found.y + offset.y};
     };
     if (p.action === 'scroll_to') {
@@ -377,14 +393,14 @@ export class Controller {
     // Select only this authorized lease; never foreground the browser window or switch back later.
     if (!tab.active) {
       await this.chrome.tabs.update(lease.tabId, {active: true});
-      this.assertLive(generation, lease);
+      this.assertLive(live, lease);
     }
     const pending = {dialogPending: true, observationRequired: true};
     const extra = {};
     if (POINTER[p.action] || (p.action === 'type' && p.ref) || p.action === 'set_value') {
       let point;
       if (p.action === 'set_value' && typeof p.value === 'string') {
-        const chosen = await this.evaluate(lease, generation, world.contextId, selectOption, {ref: p.ref, documentToken: p.documentToken, value: p.value});
+        const chosen = await this.evaluate(lease, live, world.contextId, selectOption, {ref: p.ref, documentToken: p.documentToken, value: p.value});
         return {performed: p.action, ...chosen, observationRequired: true};
       }
       if (p.action === 'set_value') {
@@ -395,52 +411,52 @@ export class Controller {
         point = found;
       } else if (byPoint) {
         point = shotPoint;
-        Object.assign(extra, await this.classifyPoint(lease, generation, world, point));
+        Object.assign(extra, await this.classifyPoint(lease, live, world, point));
       } else {
         point = await resolve({click: true});
       }
-      await this.assertInViewport(lease, generation, point);
+      await this.assertInViewport(lease, live, point);
       const [button, count] = POINTER[p.action] || POINTER.click;
       for (const event of mouseEvents(point, button, count)) {
-        if (await this.inputCommand(lease, generation, 'Input.dispatchMouseEvent', event)) return pending;
+        if (await this.inputCommand(lease, live, 'Input.dispatchMouseEvent', event)) return pending;
       }
       if (p.action === 'type') {
-        const afterClick = await this.evaluate(lease, generation, world.contextId, pageInfo, {});
+        const afterClick = await this.evaluate(lease, live, world.contextId, pageInfo, {});
         if (afterClick.documentToken !== p.documentToken) throw fail('stale_document');
         await resolve({focus: true});
-        if (await this.inputCommand(lease, generation, 'Input.insertText', {text: p.text})) return pending;
+        if (await this.inputCommand(lease, live, 'Input.insertText', {text: p.text})) return pending;
       }
     } else if (p.action === 'type') {
-      await this.assertFocus(lease, generation, world, {editable: true});
-      if (await this.inputCommand(lease, generation, 'Input.insertText', {text: p.text})) return pending;
+      await this.assertFocus(lease, live, world, {editable: true});
+      if (await this.inputCommand(lease, live, 'Input.insertText', {text: p.text})) return pending;
     } else if (p.action === 'key') {
       const events = keyEvents(p.key);
       if (p.ref) await resolve({focus: true, allowObscured: true});
       // A printable key would type into the focused element: the same sensitive-field rule as type.
-      else if (events[0].text) await this.assertFocus(lease, generation, world, {});
+      else if (events[0].text) await this.assertFocus(lease, live, world, {});
       for (const event of events) {
-        if (await this.inputCommand(lease, generation, 'Input.dispatchKeyEvent', event)) return pending;
+        if (await this.inputCommand(lease, live, 'Input.dispatchKeyEvent', event)) return pending;
       }
     } else if (p.action === 'scroll') {
       const point = p.ref ? await resolve({allowObscured: true, allowDisabled: true}) : shotPoint;
       for (const event of [{type: 'mouseMoved', x: point.x, y: point.y, button: 'none', buttons: 0},
         {type: 'mouseWheel', x: point.x, y: point.y, deltaX: p.deltaX || 0, deltaY: p.deltaY || 0}]) {
-        if (await this.inputCommand(lease, generation, 'Input.dispatchMouseEvent', event)) return pending;
+        if (await this.inputCommand(lease, live, 'Input.dispatchMouseEvent', event)) return pending;
       }
       return {performed: p.action, observationRequired: true, screenshotStale: true};
     } else throw fail('unsupported_input');
     return {performed: p.action, ...extra, observationRequired: true};
   }
-  async viewport(lease, generation) {
-    const metrics = await this.command(lease, generation, 'Page.getLayoutMetrics');
+  async viewport(lease, live) {
+    const metrics = await this.command(lease, live, 'Page.getLayoutMetrics');
     const viewport = metrics.cssVisualViewport || metrics.visualViewport;
     if (!viewport || !(viewport.clientWidth > 0) || !(viewport.clientHeight > 0)) throw fail('empty_viewport');
     return viewport;
   }
-  async screenshot(lease, generation, p) {
-    const world = await this.world(lease, generation);
-    const info = await this.evaluate(lease, generation, world.contextId, pageInfo, {});
-    const viewport = await this.viewport(lease, generation);
+  async screenshot(lease, live, p) {
+    const world = await this.world(lease, live);
+    const info = await this.evaluate(lease, live, world.contextId, pageInfo, {});
+    const viewport = await this.viewport(lease, live);
     const ratio = Number.isFinite(info.devicePixelRatio) && info.devicePixelRatio > 0 ? info.devicePixelRatio : 1;
     let region = {x: viewport.pageX, y: viewport.pageY, width: viewport.clientWidth, height: viewport.clientHeight};
     let zoom = null;
@@ -455,7 +471,7 @@ export class Controller {
       zoom = {x: c.x, y: c.y, width: c.width, height: c.height};
     }
     const scale = Math.min(1, MAX_IMAGE_SIDE / (Math.max(region.width, region.height) * ratio));
-    const result = await this.command(lease, generation, 'Page.captureScreenshot', {format: 'jpeg', quality: 60,
+    const result = await this.command(lease, live, 'Page.captureScreenshot', {format: 'jpeg', quality: 60,
       captureBeyondViewport: false, clip: {...region, scale}});
     if (typeof result.data !== 'string' || result.data.length > 700000) throw fail('screenshot_too_large');
     const size = jpegSize(result.data);
@@ -479,42 +495,42 @@ export class Controller {
     }
     return shot;
   }
-  async mapPoint(lease, generation, world, p) {
+  async mapPoint(lease, live, world, p) {
     if (!world.frame.main) throw fail('coordinates_are_tab_pixels', 'coordinates_are_tab_pixels: omit frameId with x,y');
-    const viewport = await this.viewport(lease, generation);
+    const viewport = await this.viewport(lease, live);
     if (p.x === undefined) return {x: viewport.clientWidth / 2, y: viewport.clientHeight / 2};
-    const info = await this.evaluate(lease, generation, world.contextId, pageInfo, {});
+    const info = await this.evaluate(lease, live, world.contextId, pageInfo, {});
     const shot = this.currentShot(lease, info, viewport);
     if (p.x < 0 || p.y < 0 || p.x > shot.imageWidth || p.y > shot.imageHeight) throw fail('coordinates_outside_screenshot');
     return {x: p.x * shot.cssWidth / shot.imageWidth, y: p.y * shot.cssHeight / shot.imageHeight};
   }
-  async assertInViewport(lease, generation, point) {
-    const viewport = await this.viewport(lease, generation);
+  async assertInViewport(lease, live, point) {
+    const viewport = await this.viewport(lease, live);
     if (!(point.x >= 0 && point.y >= 0 && point.x <= viewport.clientWidth && point.y <= viewport.clientHeight)) throw fail('element_outside_viewport');
   }
   // Top-viewport CSS content box {x, y, width, height} of a frame's owner element.
-  async frameOffset(lease, generation, frame) {
+  async frameOffset(lease, live, frame) {
     let owner;
-    try { owner = await this.command(lease, generation, 'DOM.getFrameOwner', {frameId: frame.frameId}); }
+    try { owner = await this.command(lease, live, 'DOM.getFrameOwner', {frameId: frame.frameId}); }
     catch (error) {
       if (error.code === 'revoked') throw error;
       throw fail('frame_input_unsupported', this.chrome.i18n?.getMessage('frameInputUnsupported') || error.message);
     }
-    const box = await this.command(lease, generation, 'DOM.getBoxModel', {backendNodeId: owner.backendNodeId});
+    const box = await this.command(lease, live, 'DOM.getBoxModel', {backendNodeId: owner.backendNodeId});
     const quad = box?.model?.content;
     if (!Array.isArray(quad) || quad.length < 8 || !quad.every(Number.isFinite)) throw fail('frame_position_unknown');
     return {x: quad[0], y: quad[1], width: quad[2] - quad[0], height: quad[5] - quad[1]};
   }
   // Risk of the element under a top-viewport point: sensitive fields and file inputs are refused.
-  async classifyPoint(lease, generation, world, point) {
-    let found = await this.evaluate(lease, generation, world.contextId, inspectPoint, point);
+  async classifyPoint(lease, live, world, point) {
+    let found = await this.evaluate(lease, live, world.contextId, inspectPoint, point);
     if (found.crossFrame) {
       found = null;
       // The innermost frame whose box contains the point, when this tab's debugger can enter it.
       let best = null;
       for (const frame of world.frames.filter(x => !x.main)) {
         try {
-          const offset = await this.frameOffset(lease, generation, frame);
+          const offset = await this.frameOffset(lease, live, frame);
           const area = offset.width * offset.height;
           if (point.x >= offset.x && point.y >= offset.y && point.x <= offset.x + offset.width && point.y <= offset.y + offset.height &&
               (!best || area < best.area)) best = {frame, offset, area};
@@ -522,8 +538,8 @@ export class Controller {
       }
       if (best) {
         try {
-          const inner = await this.world(lease, generation, best.frame.frameId);
-          found = await this.evaluate(lease, generation, inner.contextId, inspectPoint, {x: point.x - best.offset.x, y: point.y - best.offset.y});
+          const inner = await this.world(lease, live, best.frame.frameId);
+          found = await this.evaluate(lease, live, inner.contextId, inspectPoint, {x: point.x - best.offset.x, y: point.y - best.offset.y});
           if (found.crossFrame) found = null;
         } catch (error) { if (error.code === 'revoked') throw error; found = null; }
       }
@@ -535,14 +551,14 @@ export class Controller {
     return {};
   }
   // The focused element must be a verifiable, non-sensitive target before text or printable keys go to it.
-  async assertFocus(lease, generation, world, {editable}) {
-    let focus = await this.evaluate(lease, generation, world.contextId, inspectFocus, {});
+  async assertFocus(lease, live, world, {editable}) {
+    let focus = await this.evaluate(lease, live, world.contextId, inspectFocus, {});
     if (focus.crossFrame) {
       focus = null;
       for (const frame of world.frames.filter(x => !x.main)) {
         try {
-          const inner = await this.world(lease, generation, frame.frameId);
-          const found = await this.evaluate(lease, generation, inner.contextId, inspectFocus, {});
+          const inner = await this.world(lease, live, frame.frameId);
+          const found = await this.evaluate(lease, live, inner.contextId, inspectFocus, {});
           if (found.focused && !found.crossFrame) { focus = found; break; }
         } catch (error) { if (error.code === 'revoked') throw error; }
       }
