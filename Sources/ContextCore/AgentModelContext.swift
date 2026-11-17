@@ -8,6 +8,11 @@ public enum AgentModelContext {
 
     public enum Provider: Sendable, Equatable { case codex, claude }
 
+    /// GPT Astro / Astra of any generation (`gpt-6-astra`, `gpt-6.2-astra`); custom names stay plain models.
+    static func isAstra(_ model: String) -> Bool {
+        model.range(of: #"^gpt-[0-9]+(\.[0-9]+)?-astra$"#, options: .regularExpression) != nil
+    }
+
     public static func instructions(model: String, provider: Provider, language: AppLanguage = L10n.language) -> String {
         // Quote identifiers as data, including user-saved custom model names.
         let identifier = String(decoding: (try? JSONEncoder().encode(model)) ?? Data(), as: UTF8.self)
@@ -16,7 +21,7 @@ public enum AgentModelContext {
                         "No explicit model override was supplied for this turn; the CLI, thread or server selection applies. Do not invent its identifier.", language: language)
             : L10n.text("Выбранная в приложении модель для этого хода: \(identifier). Не спрашивай пользователя, какая модель выбрана.",
                         "The app-selected model for this turn is \(identifier). Do not ask the user which model is selected.", language: language)
-        let orchestrator = provider == .codex ? model == "gpt-6-astra" : model == "fable" || model.hasPrefix("claude-fable-")
+        let orchestrator = provider == .codex ? isAstra(model) : model == "fable" || model.hasPrefix("claude-fable-")
         let role: String
         if orchestrator {
             let executor = provider == .codex ? "gpt-6.1-sol (fork_turns: \"none\")" : "sonnet"

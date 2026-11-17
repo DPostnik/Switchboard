@@ -484,6 +484,8 @@ public actor CodexClient {
             ]))
         } catch is CodexReplyTooLarge {
             return try await readPaged(id)
+        } catch let failure as ClientFailure where Self.isPaginatedOnly(failure) {
+            return try await readPaged(id)
         }
         guard result["thread"]["id"].string == id else {
             throw ClientFailure(L10n.text("Получена история другого чата", "Received history for a different chat"))
@@ -493,6 +495,9 @@ public actor CodexClient {
         }
         return result["thread"]
     }
+    /// Codex 0.169.0 stores new threads as paginated; `thread/read` with `includeTurns` then fails with
+    /// "list_turns is not supported yet" (live check 2026-11-17), and the history is read in pages instead.
+    static func isPaginatedOnly(_ failure: ClientFailure) -> Bool { failure.message.contains("list_turns is not supported") }
     /// A history over the transport's line limit (large tool results) is read in pages of turns, then items.
     /// An item that alone exceeds the limit ends its turn's items there: the rest of that turn is left out.
     private func readPaged(_ id: String) async throws -> JSONValue {

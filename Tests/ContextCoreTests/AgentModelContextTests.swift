@@ -14,6 +14,11 @@ import ClaudeAdapter
         let unset = AgentModelContext.instructions(model: "", provider: .codex, language: language)
         #expect(!unset.contains("gpt-6-astra") && !unset.contains("gpt-6.1-sol"))
         #expect(astra != sol && sol != unset)
+        let astra62 = AgentModelContext.instructions(model: "gpt-6.2-astra", provider: .codex, language: language)
+        #expect(astra62.contains("gpt-6.2-astra") && astra62.contains("fork_turns"))
+        for plain in ["gpt-6.2-sol", "gpt-6.2-astra-preview", "my-gpt-6-astra"] {
+            #expect(!AgentModelContext.instructions(model: plain, provider: .codex, language: language).contains("fork_turns"))
+        }
     }
     let en = AgentModelContext.instructions(model: "gpt-6-astra", provider: .codex, language: .english)
     #expect(en.contains("not a verified provider backend") && en.contains("Subagents do not inherit this identity or role"))

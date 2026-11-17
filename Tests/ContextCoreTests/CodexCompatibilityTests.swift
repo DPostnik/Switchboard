@@ -174,16 +174,21 @@ private func liveCodexExecutable() throws -> URL {
                                   access: .standard, model: "gpt-6-astra", effort: "low")
         var completed = false
         for _ in 0..<100 {
-            let history: JSONValue
+            let turns: [JSONValue]
             do {
-                history = try await wire.request("thread/read", params: .object([
-                    "threadId": .string(first.nativeID), "includeTurns": .bool(true)]))
+                turns = try await wire.request("thread/read", params: .object([
+                    "threadId": .string(first.nativeID), "includeTurns": .bool(true)]))["thread"]["turns"].array
             } catch let error as ClientFailure where error.message.contains("rollout") && error.message.contains(" is empty") {
                 // 0.160 can acknowledge turn/start before initial rollout flush.
                 // Poll only this read; the local refusal turn is never resent.
                 try await Task.sleep(for: .milliseconds(50)); continue
+            } catch let error as ClientFailure where error.message.contains("list_turns is not supported") {
+                // 0.169 paginated threads: the latest turn comes from thread/turns/list.
+                turns = try await wire.request("thread/turns/list", params: .object([
+                    "threadId": .string(first.nativeID), "limit": .number(1), "sortDirection": .string("desc"),
+                    "itemsView": .string("notLoaded")]))["data"].array
             }
-            if history["thread"]["turns"].array.last?["status"].string == "failed" { completed = true; break }
+            if turns.last?["status"].string == "failed" { completed = true; break }
             try await Task.sleep(for: .milliseconds(50))
         }
         #expect(completed)

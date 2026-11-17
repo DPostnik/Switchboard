@@ -25,10 +25,11 @@ enum CodexProtocolCompatibility {
 
     static func accepts(userAgent: String) -> Bool { verdict(userAgent: userAgent) != .rejected }
 
-    /// Experimental application-context delivery checked against the exact 0.167.0 protocol/source.
+    /// Experimental application-context delivery checked against the exact 0.167.0 protocol/source;
+    /// 0.169.0 keeps the same `TurnStartParams.additionalContext` and `AdditionalContextEntry` schema (snapshot diff 2026-11-17).
     /// This does not change the separate engine admission policy or admit same-minor drift here.
     static func supportsApplicationGuidance(userAgent: String?) -> Bool {
-        userAgent.flatMap(version(userAgent:)) == "0.167.0"
+        ["0.167.0", "0.169.0"].contains(userAgent.flatMap(version(userAgent:)) ?? "")
     }
 
     /// The engine as the descriptor reports it; nil when the version is rejected.

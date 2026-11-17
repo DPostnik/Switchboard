@@ -40,6 +40,9 @@ private func commandFixture() throws -> (URL, URL) {
                 {'model': 'fixture-model', 'displayName': 'Fixture', 'isDefault': True,
                  'defaultReasoningEffort': 'low', 'supportedReasoningEfforts': [{'reasoningEffort': 'low'}]},
                 {'displayName': 'Missing identifier'}]}
+            if method == 'thread/read' and p.get('includeTurns') and (root/'paginated-only').exists():
+                print(json.dumps({'id': m['id'], 'error': {'code': -32603, 'message': 'list_turns is not supported yet'}}), flush=True)
+                continue
             if method == 'thread/read':
                 result = {'thread': {'id': p['threadId'], 'turns': []}}
                 if (root/'history').exists(): result = json.loads((root/'history').read_text())
@@ -70,7 +73,8 @@ private func commandFixture() throws -> (URL, URL) {
     ])]))
     #expect(CodexClient.applicationGuidance("updated guidance", language: .english) != value)
     #expect(CodexProtocolCompatibility.supportsApplicationGuidance(userAgent: "codex/0.167.0"))
-    for unsupported in [nil, "fixture", "codex/0.160.0", "codex/0.167.1", "codex/0.168.0"] {
+    #expect(CodexProtocolCompatibility.supportsApplicationGuidance(userAgent: "codex/0.169.0"))
+    for unsupported in [nil, "fixture", "codex/0.160.0", "codex/0.167.1", "codex/0.168.0", "codex/0.169.1"] {
         #expect(!CodexProtocolCompatibility.supportsApplicationGuidance(userAgent: unsupported))
     }
 }
@@ -211,6 +215,20 @@ private func commandFixture() throws -> (URL, URL) {
     // The second turn's page of ten was too large, so it was read item by item until one item alone exceeded the limit.
     let calls = try await wire.request("test/calls").array.filter { $0["method"].string == "thread/items/list" }
     #expect(calls.map { $0["params"]["limit"].int } == [10, 10, 1, 1])
+    await client.stop()
+}
+
+/// Codex 0.169.0 refuses a full `thread/read` of a paginated thread; the history is then read in pages.
+@Test func paginatedOnlyHistoryIsReadInPages() async throws {
+    let (root, executable) = try commandFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try Data().write(to: root.appendingPathComponent("paginated-only"))
+    let wire = CodexConnection(), client = CodexClient(transport: wire)
+    try await client.start(executable: executable, home: root)
+    let session = AgentSessionReference(connection: .originalCodex, nativeID: "paginated")
+    let turns = try await client.history(session)
+    #expect(turns.map(\.id) == ["t1", "t2"])
+    #expect(turns.first?.items.map(\.text) == ["a1", "a2"])
     await client.stop()
 }
 
