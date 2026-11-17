@@ -183,7 +183,19 @@ public struct JobLedger: Codable, Sendable {
     public var version = 1
     public var jobs: [ManagedJob] = []
     public var runs: [JobRun] = []
+    /// One-time move of Codex jobs from GPT-6.1 Sol to GPT-6.2 Sol (user decision 2026-11-17); later choices stay.
+    public var codexSol62Migrated: Bool?
     public init() {}
+
+    /// Returns true when it changed the ledger. Run history keeps the models it actually used.
+    public mutating func migrateCodexSol62() -> Bool {
+        guard codexSol62Migrated != true else { return false }
+        for index in jobs.indices where jobs[index].engine == .codex && jobs[index].model == CodexModelDefaults.previousSol {
+            jobs[index].model = CodexModelDefaults.model
+        }
+        codexSol62Migrated = true
+        return true
+    }
 }
 
 /// Single process owner plus write-before-dispatch ledger. A failed write never authorizes execution.
@@ -212,6 +224,7 @@ public actor JobStore {
         do {
             var value = FileManager.default.fileExists(atPath: file.path) ? try JSONDecoder().decode(JobLedger.self, from: Data(contentsOf: file)) : JobLedger()
             guard value.version == 1 else { throw JobSchedule.invalid }
+            _ = value.migrateCodexSol62()
             for index in value.runs.indices where value.runs[index].status.active {
                 value.runs[index].status = .uncertain; value.runs[index].finished = Date()
                 // The occurrence was consumed before dispatch. Keep the user's schedule

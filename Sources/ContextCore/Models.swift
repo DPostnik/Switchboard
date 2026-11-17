@@ -202,6 +202,8 @@ public struct SavedState: Codable, Sendable {
     public var model: String = CodexModelDefaults.model
     /// One-time adoption of the requested app default; later user choices remain authoritative.
     public var codexSolDefaultApplied: Bool?
+    /// One-time move of GPT-6.1 Sol defaults to GPT-6.2 Sol (`applyCodexSol62Default`).
+    public var codexSol62DefaultApplied: Bool?
     public init() {}
 
     /// Move onto a project's position: before it when moving up, after it when moving down.

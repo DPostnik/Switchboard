@@ -541,6 +541,7 @@ private struct ChatRunState: Equatable {
         if state.migrateRoles() { persist() }
         if state.migrateAccessPresets() { persist() }
         if state.applyCodexSolDefault() { persist() }
+        if state.applyCodexSol62Default() { persist() }
         // Sign the cookie-import consent files once, when the signing key is first created (audit H2).
         do {
             let signed = try ChromeSessionImportPolicy.adoptExistingPolicies()

@@ -24,7 +24,7 @@ public enum AgentModelContext {
         let orchestrator = provider == .codex ? isAstra(model) : model == "fable" || model.hasPrefix("claude-fable-")
         let role: String
         if orchestrator {
-            let executor = provider == .codex ? "gpt-6.1-sol (fork_turns: \"none\")" : "sonnet"
+            let executor = provider == .codex ? "gpt-6.2-sol (fork_turns: \"none\")" : "sonnet"
             role = L10n.text("Согласно постоянной инструкции пользователя, основной агент — оркестратор: любую порученную реализацию, включая мелкие исправления, передавай подагентам модели \(executor). Сам собирай контекст, планируй, координируй, проверяй результат и сообщай его. Обсуждение и запрос только плана не требуют запуска исполнителя. Если делегирование недоступно, сообщи блокер; не подменяй исполнителя собой.",
                              "Under the user's standing instruction, the primary agent is the orchestrator: delegate every authorized implementation, including small fixes, to subagents on \(executor). Gather context, plan, coordinate, review, verify and report the result. Discussion and plan-only requests do not require an executor. If delegation is unavailable, report the blocker; do not implement in the primary chat instead.", language: language)
         } else {
