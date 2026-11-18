@@ -182,8 +182,8 @@ public enum AttentionMarkers {
     /// Appended to every scheduled run so blockers reach the app's important messages.
     public static func instructions(language: AppLanguage = L10n.language) -> String {
         L10n.text(
-            "Если в этом запуске что-то блокирует задачу и требует действия или решения пользователя, в конце итогового ответа добавь по отдельной строке на каждый блокер в формате `BLOCKER: что мешает и что нужно сделать пользователю` (одно короткое предложение). Switchboard покажет эти строки в разделе «Важное», пока пользователь не отметит их решёнными. Не используй префикс BLOCKER: для частичных результатов, которые не требуют участия пользователя, и не пиши его, если блокеров нет.",
-            "If something in this run blocks the task and needs the user's action or decision, end your final answer with one line per blocker in the form `BLOCKER: what is blocked and what the user needs to do` (one short sentence). Switchboard shows these lines under Important until the user marks them resolved. Do not use the BLOCKER: prefix for partial results that need no user involvement, and omit it when there are no blockers.",
+            "В конце ответа добавь по строке `BLOCKER: что мешает и что сделать` для каждого препятствия, которое требует действия или решения пользователя. Иначе не используй этот префикс.",
+            "End with one `BLOCKER: what is blocked and what to do` line per issue that requires the user's action or decision. Omit the prefix otherwise.",
             language: language)
     }
 }

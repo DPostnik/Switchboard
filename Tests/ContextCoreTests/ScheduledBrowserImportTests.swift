@@ -14,17 +14,18 @@ import Testing
     let ru = try job.browserExecutionPrompt(language: .russian)
     let en = try job.browserExecutionPrompt(language: .english)
     #expect(ru.hasPrefix(job.prompt) && en.hasPrefix(job.prompt) && ru != en)
-    #expect(en.contains("browser_import_session") && en.contains("Do not ask again"))
-    #expect(en.contains("Do not close regular Chrome") && en.contains("does not expand authority"))
+    #expect(en.contains("browser_import_session") && en.contains("Every run may import cookies"))
+    #expect(en.contains("once with your tab's session and current expectedURL"))
+    #expect(en.contains("or close regular Chrome") && en.contains("External actions require separate authorization"))
     job.engine = .claude
     try job.validate()
     let claude = ScheduledBrowserImport.instructions(try #require(job.browserSessionImport), tool: ScheduledBrowserImport.claudeImportTool, language: .english)
-    #expect(claude.contains("call mcp__switchboard_browser__browser_import_session with"))
+    #expect(claude.contains("call mcp__switchboard_browser__browser_import_session once with"))
     #expect(ScheduledBrowserImport.instructions(try #require(job.browserSessionImport), tool: ScheduledBrowserImport.claudeImportTool, language: .russian)
         .contains("вызови mcp__switchboard_browser__browser_import_session"))
     let any = try ChromeSessionImportPolicy(profile: "Default", site: ChromeSessionImportPolicy.anySite)
-    #expect(ScheduledBrowserImport.instructions(any, language: .english).contains("any site where sign-in is missing"))
-    #expect(ScheduledBrowserImport.instructions(any, language: .russian).contains("любого сайта"))
+    #expect(ScheduledBrowserImport.instructions(any, language: .english).contains("any site the task needs"))
+    #expect(ScheduledBrowserImport.instructions(any, language: .russian).contains("любого нужного сайта"))
     job.browserSessionImport = any
     try job.validate()
     job.browserSessionImport = try JSONDecoder().decode(ChromeSessionImportPolicy.self, from: Data(#"{"profile":"Default","site":"not a domain"}"#.utf8))
@@ -174,11 +175,17 @@ import Testing
     let policy = try ChromeSessionImportPolicy(profile: "Default", site: "linkedin.com")
     let tool = ScheduledBrowserImport.claudeImportTool
     for language in [AppLanguage.russian, .english] {
-        let prompt = "Routine." + "\n\n" + ScheduledBrowserImport.instructions(policy, tool: tool, language: language) + "\n\nMarkers."
+        var job = ManagedJob()
+        job.engine = .claude
+        job.browserSessionImport = policy
+        job.prompt = JobPrecondition.prompt("Use only the sources with new items.", output: "mail: 2 new items", language: language)
+        let markers = AttentionMarkers.instructions(language: language)
+        let prompt = try job.browserExecutionPrompt(language: language) + "\n\n" + markers
         let imported = ScheduledBrowserImport.applying(.imported(verified: 7), policy: policy, to: prompt, tool: tool, language: language)
-        #expect(imported.hasPrefix("Routine.") && imported.hasSuffix("Markers."))
+        #expect(imported.hasPrefix(job.prompt) && imported.hasSuffix(markers))
+        #expect(imported.contains("```\nmail: 2 new items\n```"))
         #expect(!imported.contains(ScheduledBrowserImport.instructions(policy, tool: tool, language: language)))
-        #expect(imported.contains("7") && imported.contains("linkedin.com"))
+        #expect(imported.contains("linkedin.com"))
         let blocked = ScheduledBrowserImport.applying(.blocked(.keychain), policy: policy, to: prompt, tool: tool, language: language)
         #expect(blocked.contains(ChromeCookieError.keychain.message(language: language)))
         #expect(ScheduledBrowserImport.applying(.skipped, policy: policy, to: prompt, tool: tool, language: language) == prompt)
@@ -187,7 +194,9 @@ import Testing
     }
     let en = ScheduledBrowserImport.instructions(policy, preflight: .imported(verified: 3), tool: tool, language: .english)
     let ru = ScheduledBrowserImport.instructions(policy, preflight: .imported(verified: 3), tool: tool, language: .russian)
+    #expect(en.contains("Only if the task needs this site, open it and check protected content"))
+    #expect(ru.contains("Только если задаче нужен этот сайт, открой его и проверь защищённое содержимое"))
     #expect(en.contains("Do not call \(tool) in this run") && en.contains("sign in to linkedin.com in regular Chrome"))
-    #expect(ru.contains("Не вызывай \(tool) в этом запуске") && ru.contains("войди в linkedin.com в обычном Chrome"))
-    #expect(en.contains("does not expand authority") && ru.contains("не расширяет права"))
+    #expect(ru.contains("Не вызывай \(tool) в этом запуске") && ru.contains("войти в linkedin.com в обычном Chrome"))
+    #expect(en.contains("External actions require separate authorization") && ru.contains("Для внешних действий требуется отдельное разрешение"))
 }

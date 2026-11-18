@@ -8,17 +8,19 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 - New chats get a short local title if AI naming fails. Codex title generation waits up to 30 seconds for the model response.
 
+- Shorten scheduled task instructions and check imported browser sign-in only when the task needs the site.
+
 - Codex chats opened right after their run starts (for example scheduled routines) no longer show "list_turns is not supported yet": the history read waits briefly until Codex has indexed the chat.
 
 - GPT-6.2 Sol is the new default Codex model: the app default, project defaults and routines that used GPT-6.1 Sol move to it once, and GPT Astra orchestrators delegate to it.
 
 - GPT-6.2: GPT-6.2-Astra chats get the orchestrator role like GPT-6-Astra, and Codex 0.169.0 chat histories open (they are read in pages when the engine refuses a full read).
 
+- My Chrome: closing one tab or revoking one chat no longer cancels browser operations running in other tabs and chats.
+
 - My Chrome resumes tabs already controlled by the same chat and identifies the owning chat when a tab is busy. Release a managed tab from the control on the right side of its chat or from the Chrome extension popup to keep the page open.
 
 - My Chrome marks pages under agent control with a warm orange outline and a badge with a soft shadow below it. A separate pointer shows agent mouse movement.
-
-- My Chrome: closing one tab or revoking one chat no longer cancels browser operations running in other tabs and chats.
 
 - Explain saved access to missing folders and refresh both providers’ effective sandbox grants when those folders appear.
 

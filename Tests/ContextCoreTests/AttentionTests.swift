@@ -27,7 +27,8 @@ import Testing
 @Test func attentionInstructionsExistInBothLanguages() {
     let ru = AttentionMarkers.instructions(language: .russian), en = AttentionMarkers.instructions(language: .english)
     #expect(ru != en && ru.contains("BLOCKER:") && en.contains("BLOCKER:"))
-    #expect(ru.contains("Важное") && en.contains("Important"))
+    #expect(ru.contains("действия или решения пользователя") && en.contains("the user's action or decision"))
+    #expect(ru.contains("Иначе не используй этот префикс") && en.contains("Omit the prefix otherwise"))
 }
 
 @Test func attentionLedgerDeduplicatesAndKeepsBlockersUntilResolved() {

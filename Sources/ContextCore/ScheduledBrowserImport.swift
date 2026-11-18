@@ -25,11 +25,11 @@ public enum ScheduledBrowserImport {
 
     public static func instructions(_ policy: ChromeSessionImportPolicy, tool: String = "browser_import_session",
                                     language: AppLanguage = L10n.language) -> String {
-        let ru = policy.coversAnySite ? "любого сайта, на котором не хватает входа (только cookies, которые Chrome отправил бы этой странице)," : "сайта \(policy.site)"
-        let en = policy.coversAnySite ? "any site where sign-in is missing (only the cookies Chrome would send to that page)" : policy.site
+        let ru = policy.coversAnySite ? "любого нужного сайта" : "сайта \(policy.site)"
+        let en = policy.coversAnySite ? "any site the task needs" : policy.site
         return L10n.text(
-            "Для этой задачи постоянно разрешён импорт cookies \(ru) из выбранного пользователем профиля Chrome. Это разрешение действует в каждом запуске; повторно спрашивать разрешение на этот импорт не нужно. Сначала проверь вход обычным чтением страницы. Только при подтверждённом отсутствии авторизации вызови \(tool) с session своей вкладки и её текущим expectedURL. После подтверждённого импорта один раз обнови страницу отдельным действием и проверь доступ к защищённому содержимому; количество cookies не подтверждает вход. Не повторяй импорт в этом запуске и не повторяй действия с неизвестным исходом. Если инструмент недоступен, обычный Chrome не дал прочитать cookies, Связка ключей требует участия пользователя или вход не восстановлен — укажи конкретный blocker и продолжай независимые этапы исходной задачи. Не закрывай обычный Chrome автоматически. Сетевые ошибки, CAPTCHA и блокировки сайта не являются основанием для импорта. Это разрешение не расширяет права на отправку сообщений, приглашений, заявок или другие внешние действия.",
-            "This task has standing permission to import cookies for \(en) from the user-selected Chrome profile on every run. Do not ask again for permission to perform this import. First check sign-in by reading the page normally. Only after observing missing authentication, call \(tool) with your own tab's session and current expectedURL. After a confirmed import, reload once with a separate action and verify access to protected content; cookie counts do not confirm sign-in. Do not repeat import in this run or replay actions with unknown outcomes. If the tool is unavailable, regular Chrome blocked reading cookies, Keychain needs user interaction, or sign-in is not restored, report the specific blocker and continue independent stages of the original task. Do not close regular Chrome automatically. Network errors, CAPTCHA and site blocks are not reasons to import. This permission does not expand authority to send messages, invitations, applications or perform other external actions.", language: language)
+            "Во всех запусках разрешён импорт cookies \(ru) из выбранного профиля Chrome в браузер задания. Прочитай нужную страницу. Только если не выполнен вход, вызови \(tool) один раз с session своей вкладки и текущим expectedURL. При подтверждённом импорте отдельно обнови страницу один раз и проверь защищённое содержимое. Не импортируй из-за сетевой ошибки, CAPTCHA или блокировки сайта. Не повторяй действия с неизвестным исходом и не закрывай обычный Chrome. Если импорт недоступен или вход не восстановлен, укажи точную причину и продолжай независимую работу. Для внешних действий требуется отдельное разрешение.",
+            "Every run may import cookies for \(en) from the selected Chrome profile into the task browser. Read the required page. Only if sign-in is missing, call \(tool) once with your tab's session and current expectedURL. After a confirmed import, reload once separately and check protected content. Skip import for network errors, CAPTCHA, or site blocks. Never repeat uncertain actions or close regular Chrome. If import or sign-in fails, report the exact reason and continue independent work. External actions require separate authorization.", language: language)
     }
 
     public static var unavailable: ClientFailure {
@@ -105,28 +105,28 @@ extension ScheduledBrowserImport {
         }
     }
 
-    /// Run instructions after the preflight. The import step is replaced; the agent never imports again in this run.
+    /// Use the outcome when preflight ran, or keep the normal import instructions when it was skipped.
     public static func instructions(_ policy: ChromeSessionImportPolicy, preflight: ScheduledBrowserPreflight, tool: String = "browser_import_session",
                                     language: AppLanguage = L10n.language) -> String {
         let site = policy.site
         let tail = L10n.text(
-            " Не вызывай \(tool) в этом запуске и не закрывай обычный Chrome. Если вход недоступен, укажи один конкретный blocker и продолжай независимые этапы исходной задачи. Это не расширяет права на отправку сообщений, приглашений, заявок или другие внешние действия.",
-            " Do not call \(tool) in this run and do not close regular Chrome. If sign-in is unavailable, report one specific blocker and continue independent stages of the original task. This does not expand authority to send messages, invitations, applications or perform other external actions.", language: language)
+            " Не вызывай \(tool) в этом запуске, не повторяй действия с неизвестным исходом и не закрывай обычный Chrome. Если нужный сайт недоступен, укажи точную причину и продолжай независимую работу. Для внешних действий требуется отдельное разрешение.",
+            " Do not call \(tool) in this run, repeat uncertain actions, or close regular Chrome. If a required site is unavailable, report the exact reason and continue independent work. External actions require separate authorization.", language: language)
         switch preflight {
         case .skipped:
             return instructions(policy, tool: tool, language: language)
-        case .imported(let verified):
+        case .imported:
             return L10n.text(
-                "Switchboard до начала запуска перенёс в браузер этой задачи cookies сайта \(site) из выбранного профиля Chrome (подтверждено: \(verified)). Вход на сайте ещё не проверен: открой \(site) обычным действием и проверь доступ к защищённому содержимому. Если сайт всё равно просит войти, значит сессия в обычном Chrome истекла — blocker: «войди в \(site) в обычном Chrome».",
-                "Before this run, Switchboard transferred \(site) cookies from the selected Chrome profile into this task's browser (\(verified) confirmed). Website sign-in is not verified yet: open \(site) normally and check access to protected content. If the site still asks to sign in, the session in regular Chrome has expired — blocker: \"sign in to \(site) in regular Chrome\".", language: language) + tail
+                "Switchboard перенёс cookies сайта \(site) в браузер задания. Только если задаче нужен этот сайт, открой его и проверь защищённое содержимое. Если сайт просит войти, попроси пользователя войти в \(site) в обычном Chrome.",
+                "Switchboard imported \(site) cookies into the task browser. Only if the task needs this site, open it and check protected content. If prompted to sign in, ask the user to sign in to \(site) in regular Chrome.", language: language) + tail
         case .uncertain:
             return L10n.text(
-                "Switchboard пытался до начала запуска перенести cookies сайта \(site), но результат не подтверждён; повтора не было. Проверь вход обычным чтением страницы.",
-                "Before this run, Switchboard attempted to transfer \(site) cookies, but the outcome is unconfirmed; it was not retried. Check sign-in by reading the page normally.", language: language) + tail
+                "Результат импорта cookies сайта \(site) не подтверждён. Только если задаче нужен этот сайт, проверь вход обычным чтением страницы.",
+                "Cookie import for \(site) is unconfirmed. Only if the task needs this site, check sign-in by reading the page.", language: language) + tail
         case .blocked(let error):
             return L10n.text(
-                "Switchboard не смог до начала запуска перенести вход на сайт \(site): \(error.message(language: language)) Считай \(site) недоступным без входа в этом запуске.",
-                "Before this run, Switchboard could not transfer sign-in for \(site): \(error.message(language: language)) Treat \(site) as unavailable without sign-in in this run.", language: language) + tail
+                "Импорт cookies сайта \(site) не выполнен: \(error.message(language: language)) Если нужен вход, этот сайт недоступен в текущем запуске.",
+                "Cookie import for \(site) failed: \(error.message(language: language)) If sign-in is required, this site is unavailable for this run.", language: language) + tail
         }
     }
 
