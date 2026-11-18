@@ -62,10 +62,18 @@ then exits and removes its socket within 250 ms. Before replacing runtime files,
 the installer must receive that acknowledgement and verify socket disappearance.
 Never retry a shutdown with an uncertain outcome; inspect status first.
 
-`status` is a bounded metadata snapshot with wire `version`, `runtimeRevision` (4),
+`status` is a bounded metadata snapshot with wire `version`, `runtimeRevision` (5),
 `shuttingDown`, `enabled`, `selectedProfileId`,
 `profiles` (`id`, `name`, `connected`, `paired`; compatibility `profileId`/`profileName`),
-and active leases. It never includes pairing or capability secrets.
+and `leaseCount`. It never includes lease IDs, chat IDs, pairing secrets or capabilities.
+
+`list-leases` and `release-lease --lease-id LEASE` require the app's control token
+and are absent from the MCP tool list. The inventory returns each lease's `leaseId`,
+`profileId`, `profileName`, `chatId`, `tabId`, optional `title` and the oldest
+pending tab `operation` (or null for idle). Release takes away one acquisition's
+authority, detaches its debugger and leaves the Chrome tab open. It preserves
+the chat grant and other leases. With no acknowledgement, observe the inventory
+before taking another action.
 
 ## Wire protocol v1
 
@@ -80,7 +88,7 @@ a six-digit `pairingCode`, and, after pairing, persistent `pairingSecret`. The n
 helper wraps this as `{type:"native",origin,hello}`. The app pairs by matching the
 extension-displayed code. Pairing generates a random per-profile reconnect secret,
 stored only in private app state and extension local storage. A paired UUID alone
-never authenticates a reconnect. `welcome` contains `version`, `profileId`, `paired`,
+never authenticates a reconnect. `welcome` contains `version`, `runtimeRevision`, `profileId`, `paired`,
 `sessionId`, fresh session `capability`, and (only when authenticated/just paired)
 `pairingSecret`. Pairing sends another welcome over the existing connection.
 
@@ -91,11 +99,15 @@ The extension never receives the app's chat grant or control token. Responses ar
 
 Operations are status/list/select/open/read/find/screenshot/input/verify/upload/release.
 Their arguments are documented in `UserChromeExtension/README.md`. The extension's
-`hello` carries a feature `revision` (absent means 1; current 2). The coordinator refuses
+`hello` carries a feature `revision` (absent means 1; current 3). The coordinator refuses
 arguments newer than the connected extension with `extension_update_required` before
 the action journal, so the same action ID works after a reload: revision 2 covers
 coordinate input, double/triple/right click, `scroll_to`, `set_value`, type and key
 without a ref, key chords, scroll at a ref, input with `frameId`, and `waitSeconds`/`clip`.
+Revision 3 supports selecting a chat's existing lease, app-only exact-lease release,
+and lease-tagged tab metadata. The MCP list gives the caller its own `leaseId`
+for recovery, and an `ownerChatId` for a tab held by another chat. Selecting a tab
+with no lease still requires explicit user selection.
 The MCP adapter returns a screenshot as an image plus a text block with its metadata
 (`width`, `height`, `url`, `documentToken`, `viewport`, `zoom`).
 Open/select receive an app-issued lease ID and return `tabId`. Explicit existing-tab

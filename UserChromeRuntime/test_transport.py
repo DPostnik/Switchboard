@@ -368,8 +368,87 @@ class Transport(unittest.TestCase):
         self.assertEqual(output['result']['text'], 'Fixture')
         with self.assertRaisesRegex(server.Rejected, 'already_dispatched'):
             self.coordinator.execute(request)
-        with self.assertRaisesRegex(server.Rejected, 'tab_leased'):
+        with self.assertRaisesRegex(server.Rejected, 'extension_update_required'):
             self.coordinator.execute(self.request('select', 'select', tabId=5, userSelected=True))
+
+    def test_tab_list_and_select_report_ownership_and_resume_the_lease(self):
+        self.coordinator.links['profile']['revision'] = 3
+        _, opened = self.execute_fake(self.request('open', 'open'), {'tabId': 5, 'title': 'Example'})
+        lease = opened['result']['leaseId']
+        other = self.control('grant', chatId='other-chat', projectRoot=str(self.root))
+        tabs = [{'tabId': 5, 'leased': False}, {'tabId': 6, 'leased': True}]
+
+        _, mine = self.execute_fake(self.request('list', 'my-list'), {'tabs': tabs})
+        self.assertEqual(mine['result']['tabs'], [
+            {'tabId': 5, 'leased': True, 'ownership': 'this_chat', 'leaseId': lease},
+            {'tabId': 6, 'leased': False, 'ownership': 'available'}])
+        other_request = dict(self.request('list', 'their-list'), chatId='other-chat', capability=other['capability'])
+        _, theirs = self.execute_fake(other_request, {'tabs': tabs})
+        self.assertEqual(theirs['result']['tabs'][0], {
+            'tabId': 5, 'leased': True, 'ownership': 'other_chat', 'ownerChatId': 'chat'})
+        with self.assertRaisesRegex(server.Rejected, '^tab_leased_by_another_chat:chat$'):
+            self.coordinator.execute(dict(other_request, operation='select', id='other-select',
+                                          params={'tabId': 5, 'userSelected': True}))
+        with self.assertRaisesRegex(server.Rejected, 'explicit_tab_selection_required'):
+            self.coordinator.execute(self.request('select', 'unowned', tabId=6))
+
+        wire, resumed = self.execute_fake(self.request('select', 'resume', tabId=5),
+                                          {'tabId': 5, 'leaseId': lease, 'resumed': True})
+        self.assertEqual(wire['leaseId'], lease)
+        self.assertEqual(resumed['result']['leaseId'], lease)
+        self.assertEqual(self.coordinator.status()['leaseCount'], 1)
+        public_status = json.dumps(self.coordinator.execute(self.request('status')))
+        self.assertNotIn('leases', public_status)
+        self.assertNotIn(lease, public_status)
+
+    def test_app_release_fences_one_lease_and_preserves_the_grant(self):
+        self.coordinator.links['profile']['revision'] = 3
+        _, first = self.execute_fake(self.request('open', 'first'), {'tabId': 5, 'title': 'Example'})
+        _, second = self.execute_fake(self.request('open', 'second'), {'tabId': 6})
+        lease = first['result']['leaseId']
+        retained = second['result']['leaseId']
+        inventory = self.control('list-leases')['leases']
+        self.assertEqual(inventory[0], {'leaseId': lease, 'chatId': 'chat', 'profileId': 'profile',
+                                       'profileName': 'Fixture', 'tabId': 5, 'title': 'Example', 'operation': None})
+        for command in ('list-leases', 'release-lease'):
+            with self.assertRaisesRegex(server.Rejected, 'control_denied'):
+                self.coordinator.control({'command': command, 'controlToken': self.grant['capability'], 'leaseId': lease})
+            with self.assertRaisesRegex(server.Rejected, 'operation_denied'):
+                self.coordinator.execute(dict(self.request(command), leaseId=lease))
+
+        outcome = {}
+        def release():
+            try:
+                outcome['value'] = self.control('release-lease', leaseId=lease)
+            except Exception as error:
+                outcome['error'] = str(error)
+        worker = threading.Thread(target=release, daemon=True)
+        worker.start()
+        wire = server.read_frame(self.stream)
+        self.assertEqual(wire['type'], 'release-lease')
+        self.assertEqual(wire['leaseId'], lease)
+        self.assertEqual(wire['params'], {})
+        self.assertEqual(self.control('list-leases')['leases'][0]['operation'], 'release-lease')
+        with self.assertRaisesRegex(server.Rejected, 'tab_release_pending'):
+            self.coordinator.execute(dict(self.request('read', 'blocked-read'), leaseId=lease))
+        with self.assertRaisesRegex(server.Rejected, 'tab_release_pending'):
+            self.control('release-lease', leaseId=lease)
+        _, still_readable = self.execute_fake(dict(self.request('read', 'retained-read'), leaseId=retained), {'text': 'kept'})
+        self.assertEqual(still_readable['result']['text'], 'kept')
+        result = {'released': True, 'closed': False}
+        server.write_frame(self.stream, {'type': 'response', 'id': wire['id'], 'result': result})
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(outcome, {'value': result})
+        self.assertEqual(self.coordinator.state['grants']['chat'], self.grant)
+
+        _, selected = self.execute_fake(self.request('select', 'reacquire', tabId=5, userSelected=True), {'tabId': 5})
+        replacement = selected['result']['leaseId']
+        self.assertNotEqual(replacement, lease)
+        server.write_frame(self.stream, {'type': 'event', 'event': 'detached',
+                                        'profileId': 'profile', 'tabId': 5, 'leaseId': lease})
+        self.execute_fake(self.request('list', 'after-late-detach'), {'tabs': []})
+        self.assertEqual(set(self.coordinator.state['leases']), {retained, replacement})
 
     def test_newer_input_arguments_require_a_reloaded_extension(self):
         _, output = self.execute_fake(self.request('open', url='https://example.test'), {'tabId': 5})

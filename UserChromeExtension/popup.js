@@ -3,6 +3,9 @@ document.documentElement.lang = chrome.i18n.getUILanguage();
 for (const element of document.querySelectorAll('[data-i18n]')) element.textContent = t(element.dataset.i18n);
 const send = message => chrome.runtime.sendMessage(message);
 let nameDirty = false;
+let leaseList = '';
+const releasing = new Set();
+const releaseButtons = new Map();
 document.querySelector('#name').addEventListener('input', () => { nameDirty = true; });
 const feedback = key => { document.querySelector('#feedback').textContent = t(key); };
 async function refresh(state) {
@@ -16,13 +19,40 @@ async function refresh(state) {
   document.querySelector('#profile').textContent = `${t('profileIdentity')}: ${state.profileId || ''}`;
   const input = document.querySelector('#name');
   if (!nameDirty && document.activeElement !== input) input.value = state.profileName || '';
-  const list = document.querySelector('#leases'); list.replaceChildren();
-  for (const lease of state.leases || []) {
-    const li = document.createElement('li');
-    li.textContent = t('lease', [lease.chatId, String(lease.tabId)]);
-    list.append(li);
+  const leases = state.leases || [];
+  document.querySelector('#managed').hidden = !leases.length;
+  const signature = JSON.stringify(leases.map(({leaseId, title}) => [leaseId, title]));
+  if (signature === leaseList) return;
+  leaseList = signature;
+  const list = document.querySelector('#leases');
+  list.replaceChildren();
+  releaseButtons.clear();
+  for (const {leaseId, title} of leases) {
+    const row = document.createElement('li');
+    const name = document.createElement('span');
+    name.className = 'lease-title';
+    name.textContent = title?.trim() || t('untitledTab');
+    name.title = name.textContent;
+    const button = document.createElement('button');
+    button.className = 'release';
+    button.textContent = t('releaseTab');
+    button.setAttribute('aria-label', t('releaseNamedTab', name.textContent));
+    button.disabled = releasing.has(leaseId);
+    releaseButtons.set(leaseId, button);
+    button.addEventListener('click', async () => {
+      if (releasing.has(leaseId)) return;
+      releasing.add(leaseId);
+      button.disabled = true;
+      try { await action({type: 'release-tab', leaseId}); }
+      finally {
+        releasing.delete(leaseId);
+        const currentButton = releaseButtons.get(leaseId);
+        if (currentButton) currentButton.disabled = false;
+      }
+    });
+    row.append(name, button);
+    list.append(row);
   }
-  document.querySelector('#stop').disabled = !(state.leases || []).length;
 }
 async function action(message) {
   try {

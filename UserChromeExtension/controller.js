@@ -1,10 +1,10 @@
-import {observePage, pageInfo, resolveElement, inspectPoint, inspectFocus, selectOption, installUpload} from './page.js';
+import {observePage, pageInfo, resolveElement, inspectPoint, inspectFocus, selectOption, installUpload, renderTabOverlay} from './page.js';
 
 export const HOST = 'local.daniil.switchboard.browser';
 export const VERSION = 1;
 // Feature revision of the extension's operations within wire version 1. The coordinator rejects
 // arguments newer than the connected extension with a reload hint instead of a vague failure.
-export const REVISION = 2;
+export const REVISION = 3;
 const INPUT_ACTIONS = new Set(['click', 'double_click', 'triple_click', 'right_click', 'type', 'key', 'scroll', 'scroll_to', 'set_value', 'dialog']);
 const POINTER = {click: ['left', 1], double_click: ['left', 2], triple_click: ['left', 3], right_click: ['right', 1]};
 const MAX_IMAGE_SIDE = 1280;
@@ -21,6 +21,8 @@ export class Controller {
     this.session = null;
     this.leases = new Map();
     this.attached = new Set();
+    this.attaching = new Map();
+    this.detaching = new Map();
     this.groups = new Map();
     this.documents = new Map();
     this.dialogs = new Map();
@@ -60,13 +62,13 @@ export class Controller {
       await this.chrome.storage.local.set({pairingSecret: this.pairingSecret});
     }
     this.session = message.paired === true && identifier(message.sessionId) && identifier(message.capability)
-      ? {sessionId: message.sessionId, capability: message.capability} : null;
+      ? {sessionId: message.sessionId, capability: message.capability, runtimeRevision: message.runtimeRevision || 1} : null;
     this.error = null;
   }
   status() {
     return {profileId: this.profileId, profileName: this.profileName, pairingCode: this.session ? null : this.pairingCode,
       paired: !!this.session, connected: !!this.port, error: this.error,
-      leases: [...this.leases.values()].map(({leaseId, chatId, tabId, created}) => ({leaseId, chatId, tabId, created}))};
+      leases: [...this.leases.values()].map(({leaseId, chatId, tabId, created, title}) => ({leaseId, chatId, tabId, created, title}))};
   }
   async rename(name) {
     this.profileName = name.trim() || 'Chrome';
@@ -128,8 +130,15 @@ export class Controller {
           try { port?.disconnect(); } catch {}
         }
       });
-    } else if (message.type === 'revoke') {
-      if (this.authenticated(message)) void this.revoke(message.chatId, message.tabId);
+    } else if (message.type === 'release-lease') {
+      if (this.authenticated(message) && identifier(message.id)) void this.releaseFromApp(message);
+    } else if (message.type === 'revoke' && this.authenticated(message)) {
+      if (message.leaseId) {
+        const lease = this.leases.get(message.leaseId);
+        if (lease && lease.chatId === message.chatId && lease.tabId === message.tabId) void this.dropLease(lease);
+      } else {
+        void this.revoke(message.chatId, message.tabId);
+      }
     }
   }
   authenticated(request) {
@@ -165,44 +174,122 @@ export class Controller {
       })]);
     } finally { clearTimeout(timeout); }
   }
+  async releaseFromApp(message) {
+    const lease = this.leases.get(message.leaseId);
+    const reply = {type: 'response', id: message.id};
+    if (!lease || lease.chatId !== message.chatId) {
+      reply.error = {code: 'tab_lease_required'};
+    } else {
+      // Remove authority before any await, even when the ordinary request queue is busy.
+      await this.dropLease(lease);
+      reply.result = {released: true, closed: false};
+    }
+    if (this.authenticated(message)) {
+      try { this.send(reply); } catch { /* The app will report an unknown outcome. */ }
+    }
+  }
+  async releaseFromPopup(leaseId) {
+    const lease = this.leases.get(leaseId);
+    if (!lease) return this.status();
+    const cleanup = this.dropLease(lease);
+    this.announceDetached(lease);
+    await cleanup;
+    return this.status();
+  }
+  announceDetached({tabId, leaseId}) {
+    try { this.send({type: 'event', event: 'detached', profileId: this.profileId, tabId, leaseId}); }
+    catch { /* The coordinator discards disconnected leases. */ }
+  }
+  async dropLease(lease) {
+    const {leaseId, tabId} = lease;
+    this.leases.delete(leaseId);
+    this.stopped.add(leaseId);
+    this.documents.delete(tabId);
+    this.dialogs.delete(tabId);
+    this.shots.delete(tabId);
+    this.dialogWaiters.get(tabId)?.();
+    this.dialogWaiters.delete(tabId);
+    const overlay = lease.overlay;
+    clearInterval(overlay?.timer);
+    const cleanup = this.attached.delete(tabId)
+      ? this.removeOverlay(tabId, overlay).then(() => this.chrome.debugger.detach({tabId}))
+      : this.attaching.get(tabId);
+    if (cleanup) {
+      this.detaching.set(tabId, cleanup);
+      try { await cleanup; } catch { /* Already detached or attachment was cancelled. */ }
+      this.detaching.delete(tabId);
+    }
+  }
   async revoke(chatId, tabId, invalidate = true) {
-    if (invalidate) {
+    if (invalidate && !tabId) {
       if (chatId) this.chatEpochs.set(chatId, (this.chatEpochs.get(chatId) || 0) + 1);
-      else if (!tabId) this.generation++;
+      else this.generation++;
     }
     const leases = [...this.leases.values()].filter(lease => (!chatId || lease.chatId === chatId) && (!tabId || lease.tabId === tabId));
-    for (const lease of leases) {
-      this.leases.delete(lease.leaseId); this.stopped.add(lease.leaseId); this.documents.delete(lease.tabId); this.dialogs.delete(lease.tabId); this.shots.delete(lease.tabId);
-    }
-    for (const lease of leases) {
-      if (this.attached.delete(lease.tabId)) {
-        try { await this.chrome.debugger.detach({tabId: lease.tabId}); } catch { /* Already detached. */ }
-      }
-    }
+    await Promise.all(leases.map(lease => this.dropLease(lease)));
     // Empty groups may remain in Chrome; unrelated and borrowed tabs stay open.
   }
   async stop(chatId, tabId) {
     const leaseIds = [...this.leases.values()].filter(x => (!chatId || x.chatId === chatId) && (!tabId || x.tabId === tabId)).map(x => x.leaseId);
-    await this.revoke(chatId, tabId);
+    const cleanup = this.revoke(chatId, tabId);
     this.send({type: 'event', event: 'stop', version: VERSION, profileId: this.profileId, chatId, tabId, leaseIds});
+    await cleanup;
     return this.status();
   }
   onDebuggerEvent(source, method, params = {}) {
     const tabId = source.tabId;
     if (!tabId) return;
-    if (method === 'Page.frameNavigated' && !params.frame?.parentId) { this.documents.delete(tabId); this.dialogs.delete(tabId); this.shots.delete(tabId); }
+    if (source.sessionId) return;
+    if (method === 'Page.frameNavigated' && !params.frame?.parentId) {
+      this.documents.delete(tabId); this.dialogs.delete(tabId); this.shots.delete(tabId);
+      const lease = this.leaseForTab(tabId);
+      if (lease?.overlay) {
+        lease.overlay.contextId = undefined;
+        lease.overlay.point = undefined;
+        void this.refreshOverlay(lease);
+      }
+    }
+    if (method === 'Page.navigatedWithinDocument') {
+      const lease = this.leaseForTab(tabId);
+      if (lease?.overlay && lease.overlay.frameId === params.frameId) {
+        lease.overlay.point = undefined;
+        void this.refreshOverlay(lease);
+      }
+    }
+    if (method === 'Page.domContentEventFired') {
+      const lease = this.leaseForTab(tabId);
+      if (lease) void this.refreshOverlay(lease);
+    }
     if (method === 'Page.javascriptDialogOpening') {
       this.dialogs.set(tabId, {url: params.url, documentToken: this.documents.get(tabId)});
       this.dialogWaiters.get(tabId)?.();
     }
-    if (method === 'Page.javascriptDialogClosed') this.dialogs.delete(tabId);
+    if (method === 'Page.javascriptDialogClosed') {
+      this.dialogs.delete(tabId);
+      const lease = this.leaseForTab(tabId);
+      if (lease) void this.refreshOverlay(lease);
+    }
   }
-  async detach(tabId) {
-    // onRemoved covers every Chrome tab; internal detach callbacks arrive after revoke removed their lease.
-    // Neither event grants authority to invalidate unrelated chats or to disconnect the native protocol.
-    if (![...this.leases.values()].some(lease => lease.tabId === tabId)) return;
-    await this.revoke(undefined, tabId);
-    this.send({type: 'event', event: 'detached', profileId: this.profileId, tabId});
+  async detach(tabId, debuggerDetached = false) {
+    // Ignore our own debugger detach callback. onRemoved also covers tabs that never attached.
+    if (debuggerDetached && !this.attached.has(tabId)) return;
+    const lease = this.leaseForTab(tabId);
+    if (!lease) return;
+    if (debuggerDetached) this.attached.delete(tabId);
+    const cleanup = this.dropLease(lease);
+    this.announceDetached(lease);
+    await cleanup;
+  }
+  leaseForTab(tabId) {
+    return [...this.leases.values()].find(lease => lease.tabId === tabId);
+  }
+  titleChanged(tabId, title) {
+    const lease = this.leaseForTab(tabId);
+    if (!lease || typeof title !== 'string') return;
+    lease.title = title.slice(0, 500);
+    if ((this.session?.runtimeRevision || 0) < 5) return;
+    try { this.send({type: 'event', event: 'tabTitle', tabId, leaseId: lease.leaseId, title: lease.title}); }
+    catch { /* The coordinator clears lease metadata on disconnect. */ }
   }
   async remember(id, state, operation) {
     this.journal[id] = {state, operation, at: Date.now()};
@@ -225,8 +312,11 @@ export class Controller {
     else if (request.operation === 'list') {
       const tabs = await this.chrome.tabs.query({});
       result = {tabs: tabs.filter(x => !x.incognito && websiteURL(x.url)).slice(0, 300).map(x => ({tabId: x.id, title: x.title?.slice(0, 500), url: x.url?.slice(0, 8192), leased: [...this.leases.values()].some(l => l.tabId === x.id)}))};
-    } else if (['open', 'select'].includes(request.operation)) result = await this.acquire(request, live);
-    else {
+    } else if (['open', 'select'].includes(request.operation)) {
+      result = await this.acquire(request, live);
+      held = this.leases.get(result.leaseId);
+      if (!held) throw fail('revoked');
+    } else {
       const lease = this.leases.get(request.leaseId);
       if (!lease || lease.chatId !== request.chatId) throw fail('lease_required');
       this.assertLive(live, lease);
@@ -236,19 +326,37 @@ export class Controller {
         this.assertLive(live);
         if (p.close === true) await this.chrome.tabs.remove(lease.tabId);
         result = {released: true, closed: p.close === true};
-      } else { held = lease; result = await this.operate(request, lease, live); }
+      } else {
+        held = lease;
+        const overlay = lease.overlay;
+        if (overlay) {
+          overlay.active = true;
+          overlay.point = undefined;
+          if (p.action !== 'dialog') void this.refreshOverlay(lease);
+        }
+        try { result = await this.operate(request, lease, live); }
+        finally {
+          if (overlay) {
+            overlay.active = false;
+            if (p.action !== 'dialog') void this.refreshOverlay(lease);
+          }
+        }
+      }
     }
     // A tab revoked during the operation fails it, as its lease is gone; other tabs and chats continue.
     this.assertLive(live, held);
     if (mutation) await this.remember(request.id, 'completed', request.operation);
+    this.assertLive(live, held);
     return result;
   }
   async acquire(request, live) {
     const p = request.params;
     if (!identifier(request.leaseId) || this.stopped.has(request.leaseId)) throw fail('invalid_lease');
-    if (this.leases.has(request.leaseId)) throw fail('lease_exists');
     const created = request.operation === 'open';
-    if (created ? !websiteURL(p.url) : (!Number.isInteger(p.tabId) || p.userSelected !== true)) throw fail('explicit_tab_selection_required');
+    if (created ? !websiteURL(p.url) : !Number.isInteger(p.tabId)) throw fail('explicit_tab_selection_required');
+    const requested = this.leases.get(request.leaseId);
+    if (requested && (created || requested.tabId !== p.tabId || requested.chatId !== request.chatId)) throw fail('lease_exists');
+    if (!created && !requested && p.userSelected !== true) throw fail('explicit_tab_selection_required');
     // Chrome removes a group when its last tab closes. Verify the cached group before
     // creating a tab; a failed lookup must not turn into a mutation or a blind retry.
     let groupId = created ? this.groups.get(request.chatId) : undefined;
@@ -265,22 +373,35 @@ export class Controller {
     else tab = await this.chrome.tabs.get(p.tabId);
     this.assertLive(live);
     if (tab.incognito || !websiteURL(tab.url || p.url)) throw fail('unsupported_page');
-    if ([...this.leases.values()].some(lease => lease.tabId === tab.id)) throw fail('tab_busy');
-    const lease = {leaseId: request.leaseId, chatId: request.chatId, tabId: tab.id, created};
+    if (this.detaching.has(tab.id)) throw fail('tab_release_pending');
+    const existing = this.leaseForTab(tab.id);
+    if (existing) {
+      if (existing.chatId !== request.chatId) throw fail('tab_leased_by_another_chat:' + existing.chatId);
+      this.assertLive(live, existing);
+      return {tabId: tab.id, leaseId: existing.leaseId, url: tab.url, title: tab.title?.slice(0, 500),
+        created: existing.created, resumed: true};
+    }
+    if (requested) throw fail('revoked');
+    const lease = {leaseId: request.leaseId, chatId: request.chatId, tabId: tab.id, created, title: tab.title?.slice(0, 500)};
     this.leases.set(lease.leaseId, lease);
     // Existing user tabs are never moved into agent groups.
     if (created) {
       try {
         groupId = await this.chrome.tabs.group({tabIds: [tab.id], ...(groupId === undefined ? {} : {groupId})});
+        this.assertLive(live, lease);
         this.groups.set(request.chatId, groupId);
         await this.chrome.tabGroups.update(groupId, {title: `Switchboard ${request.chatId.slice(0, 8)}`, color: 'blue'});
       } catch (error) {
-        await this.revoke(request.chatId, tab.id);
+        if (this.leases.get(lease.leaseId) === lease) await this.dropLease(lease);
         throw fail('tab_group_failed', error.message);
       }
     }
     this.assertLive(live, lease);
-    return {tabId: tab.id, leaseId: lease.leaseId, url: tab.url || p.url, created};
+    lease.overlay = {active: false};
+    lease.overlay.timer = setInterval(() => { void this.refreshOverlay(lease); }, 5000);
+    lease.overlay.timer.unref?.();
+    void this.refreshOverlay(lease, true);
+    return {tabId: tab.id, leaseId: lease.leaseId, url: tab.url || p.url, title: lease.title, created};
   }
   async command(lease, live, method, params = {}) {
     this.assertLive(live, lease);
@@ -304,17 +425,27 @@ export class Controller {
     }
   }
   async attach(lease, live) {
-    if (this.attached.has(lease.tabId)) return;
+    const {tabId} = lease;
     this.assertLive(live, lease);
-    try { await this.chrome.debugger.attach({tabId: lease.tabId}, '1.3'); }
+    if (this.attaching.has(tabId)) return this.attaching.get(tabId);
+    if (this.attached.has(tabId)) return;
+    const attachment = (async () => {
+      await this.attachDebugger(lease, live);
+      await this.command(lease, live, 'Page.enable');
+    })();
+    this.attaching.set(tabId, attachment);
+    try { await attachment; } finally { this.attaching.delete(tabId); }
+  }
+  async attachDebugger(lease, live) {
+    const {tabId} = lease;
+    try { await this.chrome.debugger.attach({tabId}, '1.3'); }
     catch (error) { throw fail('debugger_conflict', error.message); }
     try { this.assertLive(live, lease); }
     catch (error) {
-      try { await this.chrome.debugger.detach({tabId: lease.tabId}); } catch {}
+      try { await this.chrome.debugger.detach({tabId}); } catch {}
       throw error;
     }
-    this.attached.add(lease.tabId);
-    await this.command(lease, live, 'Page.enable');
+    this.attached.add(tabId);
   }
   async world(lease, live, frameId) {
     const tree = await this.command(lease, live, 'Page.getFrameTree');
@@ -336,6 +467,61 @@ export class Controller {
     if (result.exceptionDetails) throw fail('page_operation_failed', result.exceptionDetails.exception?.description?.slice(0, 500) || result.exceptionDetails.text);
     return result.result?.value;
   }
+  async refreshOverlay(lease, attachForNewLease = false) {
+    const overlay = lease.overlay;
+    if (!overlay || !this.session || this.leases.get(lease.leaseId) !== lease || this.dialogs.has(lease.tabId)) return;
+    if (overlay.pending) {
+      overlay.dirty = true;
+      return;
+    }
+    overlay.pending = true;
+    const live = this.liveToken(lease);
+    try {
+      if (!this.attached.has(lease.tabId)) {
+        if (!attachForNewLease) return;
+        const tab = await this.chrome.tabs.get(lease.tabId);
+        this.assertLive(live, lease);
+        if (!websiteURL(tab.url) || tab.incognito) return;
+        await this.attach(lease, live);
+      }
+      if (overlay.contextId === undefined) {
+        const world = await this.world(lease, live);
+        overlay.contextId = world.contextId;
+        overlay.frameId = world.frame.frameId;
+      }
+      const label = this.chrome.i18n?.getMessage(overlay.active ? 'tabOverlayActive' : 'tabOverlayIdle') || 'Switchboard';
+      await this.evaluate(lease, live, overlay.contextId, renderTabOverlay, {active: overlay.active, point: overlay.point, label});
+    } catch {
+      // Transient navigation, debugger conflicts and unsupported pages do not change tool outcomes.
+      overlay.contextId = undefined;
+    } finally {
+      overlay.pending = false;
+      if (overlay.dirty) {
+        overlay.dirty = false;
+        void this.refreshOverlay(lease);
+      }
+    }
+  }
+  async removeOverlay(tabId, overlay) {
+    if (overlay?.contextId === undefined) return;
+    // The lease is already revoked. Remove only the fixed indicator in its last isolated world.
+    let timeout;
+    try {
+      await Promise.race([
+        this.chrome.debugger.sendCommand({tabId}, 'Runtime.evaluate', {
+          contextId: overlay.contextId, expression: `(${renderTabOverlay.toString()})({"remove":true})`, timeout: 300
+        }),
+        new Promise(resolve => { timeout = setTimeout(resolve, 300); })
+      ]);
+    } catch { /* Closed or replaced documents discard the indicator. Other failures expire locally. */ }
+    finally { clearTimeout(timeout); }
+  }
+  markPointer(lease, frame, point, documentToken) {
+    // Element coordinates from a subframe can be approximate (e.g. CSS transforms).
+    if (!frame.main || !lease.overlay) return;
+    lease.overlay.point = {x: point.x, y: point.y, documentToken, expires: Date.now() + 900};
+    void this.refreshOverlay(lease);
+  }
   async operate(request, lease, live) {
     const p = request.params;
     if (request.operation === 'input') validateInput(p);
@@ -347,6 +533,7 @@ export class Controller {
     const isMutation = ['input', 'upload'].includes(request.operation);
     if (isMutation && (!p.expectedURL || !identifier(p.documentToken))) throw fail('observation_required');
     await this.attach(lease, live);
+    if (p.action !== 'dialog') void this.refreshOverlay(lease);
     if (request.operation === 'input' && p.action === 'dialog') {
       const dialog = this.dialogs.get(lease.tabId);
       if (!dialog || dialog.documentToken !== p.documentToken || dialog.url !== p.expectedURL) throw fail('dialog_observation_required');
@@ -419,6 +606,7 @@ export class Controller {
       const [button, count] = POINTER[p.action] || POINTER.click;
       for (const event of mouseEvents(point, button, count)) {
         if (await this.inputCommand(lease, live, 'Input.dispatchMouseEvent', event)) return pending;
+        if (event.type === 'mouseMoved') this.markPointer(lease, world.frame, event, p.documentToken);
       }
       if (p.action === 'type') {
         const afterClick = await this.evaluate(lease, live, world.contextId, pageInfo, {});
@@ -442,6 +630,7 @@ export class Controller {
       for (const event of [{type: 'mouseMoved', x: point.x, y: point.y, button: 'none', buttons: 0},
         {type: 'mouseWheel', x: point.x, y: point.y, deltaX: p.deltaX || 0, deltaY: p.deltaY || 0}]) {
         if (await this.inputCommand(lease, live, 'Input.dispatchMouseEvent', event)) return pending;
+        if (event.type === 'mouseMoved') this.markPointer(lease, world.frame, event, p.documentToken);
       }
       return {performed: p.action, observationRequired: true, screenshotStale: true};
     } else throw fail('unsupported_input');

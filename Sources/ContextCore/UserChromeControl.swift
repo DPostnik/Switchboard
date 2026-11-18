@@ -24,6 +24,35 @@ public actor UserChromeControl {
         public let enabled: Bool
         public let selectedProfileId: String?
     }
+    public struct ManagedTab: Decodable, Identifiable, Equatable, Sendable {
+        public let leaseId: String
+        public let chatId: String
+        public let tabId: Int
+        public let title: String?
+        public let profileName: String?
+        public let operation: String?
+
+        public var id: String { leaseId }
+    }
+
+    /// Reads the running coordinator only. An idle app has no reason to start Chrome control.
+    public func managedTabs() async throws -> [ManagedTab] {
+        guard Self.isInstalled,
+              FileManager.default.fileExists(atPath: Self.directory.appendingPathComponent("coordinator.sock").path)
+        else { return [] }
+        struct Inventory: Decodable { let leases: [ManagedTab] }
+        return try JSONDecoder().decode(Inventory.self, from: await command(["list-leases"], control: true)).leases
+    }
+
+    /// A lease ID names one tab acquisition, even if the same tab is later acquired again.
+    public func releaseManagedTab(_ id: String) async throws {
+        struct Release: Decodable { let released: Bool; let closed: Bool }
+        let result = try JSONDecoder().decode(Release.self, from: await command(
+            ["release-lease", "--lease-id", id], control: true, timeout: 58))
+        guard result.released, !result.closed else {
+            throw failure("Не удалось подтвердить освобождение вкладки.", "Could not confirm that control of the tab ended.")
+        }
+    }
 
     public func install(resources: URL) async throws {
         if FileManager.default.fileExists(atPath: Self.directory.appendingPathComponent("runtime/server.py").path),
@@ -132,7 +161,7 @@ public actor UserChromeControl {
         }
         throw failure("Не удалось запустить соединение с расширением.", "Could not start the extension connection.")
     }
-    private func command(_ arguments: [String], control: Bool = false) async throws -> Data {
+    private func command(_ arguments: [String], control: Bool = false, timeout: TimeInterval = 10) async throws -> Data {
         let root = Self.directory
         let args = ["-B", root.appendingPathComponent("runtime/server.py").path] + arguments + ["--state-dir", root.path]
             + (control ? ["--control-token-file", root.appendingPathComponent("control-token").path] : [])
@@ -146,7 +175,7 @@ public actor UserChromeControl {
             process.standardInput = FileHandle.nullDevice; process.standardOutput = output; process.standardError = errors
             try process.run()
             let deadline = DispatchWorkItem { if process.isRunning { process.terminate() } }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 10, execute: deadline)
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: deadline)
             var bytes = Data()
             while let chunk = try output.fileHandleForReading.read(upToCount: 8192), !chunk.isEmpty {
                 bytes.append(chunk)

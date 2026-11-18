@@ -38,6 +38,7 @@ struct DeskView: View {
     @State private var showingLimits = false
     @State private var limitsPlacement = PopoverPlacement.fallback
     @State private var limitsAnchor = ScreenFrameProbe()
+    @State private var managedChrome = ManagedChromeInventory()
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     /// The sidebar state before a document preview was expanded, restored when it collapses.
     @State private var sidebarBeforeDocument: NavigationSplitViewVisibility?
@@ -58,6 +59,8 @@ struct DeskView: View {
         .toolbar(removing: .sidebarToggle)
         .modifier(GitStatusTracking(model: model))
         .modifier(PullRequestTracking(model: model))
+        .environment(managedChrome)
+        .task(id: managedChrome.presentedChatID) { await managedChrome.watch() }
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button {
@@ -82,7 +85,10 @@ struct DeskView: View {
             }
             applySearch(search)
         }
-        .onChange(of: model.chatID) { _, _ in
+        .onChange(of: model.chatID) { _, chatID in
+            if let ownerID = managedChrome.presentedChatID, ownerID != chatID {
+                managedChrome.closePanel()
+            }
             revealSelectedChat()
         }
         .onChange(of: model.documentExpanded) { _, expanded in
@@ -1090,6 +1096,7 @@ struct NeedsYouRowStyle: ButtonStyle {
 
 struct ChatView: View {
     @ObservedObject var model: DeskModel
+    @Environment(ManagedChromeInventory.self) private var managedChrome: ManagedChromeInventory?
     @State private var composerFocused = false
     @State private var composerHeight: CGFloat = 22
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -1304,6 +1311,9 @@ struct ChatView: View {
                     OpenTerminalButton(folder: folder)
                 }
                 if let chat = model.selectedChat {
+                    if let managedChrome {
+                        ManagedChromeTabButton(model: model, monitor: managedChrome, chatID: chat.id)
+                    }
                     if model.state.browserEnabled == true, let session = chat.nativeSession, model.isRegistered(session.connection) {
                         ChatBrowserControls(session: session, project: model.selectedWorkingDirectory ?? "",
                                             busy: model.isBusy(threadID: chat.id) || model.isChangingChat(chat.id),

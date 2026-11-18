@@ -3,15 +3,19 @@ const controller = new Controller(chrome);
 const ready = controller.initialize().then(() => controller.connect());
 chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === 'reconnect') void ready.then(() => controller.connect()); });
 chrome.runtime.onStartup.addListener(() => { void ready.then(() => controller.connect()); });
-chrome.debugger.onDetach.addListener(source => { if (source.tabId) void ready.then(() => controller.detach(source.tabId)); });
+chrome.debugger.onDetach.addListener(source => { if (source.tabId) void ready.then(() => controller.detach(source.tabId, true)); });
+chrome.tabs.onUpdated.addListener((tabId, change) => controller.titleChanged(tabId, change.title));
 chrome.tabs.onRemoved.addListener(tabId => { void ready.then(() => controller.detach(tabId)); });
 chrome.debugger.onEvent.addListener((source, method, params) => controller.onDebuggerEvent(source, method, params));
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
-  // Only our own popup can change pairing identity or stop execution.
+  // Only our own popup can change pairing identity, release a tab, or stop execution.
   if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('popup.html')) return false;
   void ready.then(async () => {
     if (message?.type === 'status') return controller.status();
     if (message?.type === 'stop') return controller.stop();
+    if (message?.type === 'release-tab' && typeof message.leaseId === 'string' && message.leaseId.length <= 160) {
+      return controller.releaseFromPopup(message.leaseId);
+    }
     if (message?.type === 'connect') { await controller.connect(); return controller.status(); }
     if (message?.type === 'rename' && typeof message.name === 'string' && message.name.trim().length <= 80) {
       return controller.rename(message.name);

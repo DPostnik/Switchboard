@@ -823,3 +823,24 @@ Claude Code 2.1.325, AV defaults fd credentials to inference/upload scopes and t
 connector loader returns early without user:mcp_servers. Inherited scopes are
 replaced, never unioned; absent metadata adds no connector scope. Codex is unaffected
 because this is the Claude-specific credential transport. Live verification pending.
+
+My Chrome tab ownership (2026-11-18): the app-owned coordinator and extension
+enforce per-chat tab leases through channel 3. Selection of a tab already leased
+to the requesting chat reuses its current lease under that chat's existing grant.
+A lease held by another chat blocks selection and identifies its owner. Selecting
+an unleased existing tab still requires explicit user selection. A single control
+on the right side of each chat opens a list of that chat's managed tabs and their
+activity. The user can release a single lease from this list or the
+Chrome extension popup. The app uses the coordinator's private control token.
+The extension verifies the popup sender and removes the exact lease before
+notifying the coordinator over the paired native connection. Release preserves
+the open Chrome page, the chat's My Chrome grant and other leases.
+External actions still require the applicable authorization. Transport errors
+with uncertain outcomes prohibit replay.
+
+My Chrome visual indicators (2026-11-18): channel 3 uses the extension's existing
+debugger access to draw a passive outline, a badge with a shadow below it, and a temporary agent pointer in the
+leased HTTP(S) tab's top-level document. The extension supplies the fixed overlay
+and draws the pointer from its own mouse dispatch coordinates. The overlay runs
+in an isolated world, ignores page input and follows the tab lease lifecycle.
+This uses the existing extension permissions and requires an active lease.

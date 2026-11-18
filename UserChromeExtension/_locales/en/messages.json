@@ -44,9 +44,6 @@
   "disconnected": {
     "message": "Switchboard is disconnected"
   },
-  "lease": {
-    "message": "A chat is controlling tab $2"
-  },
   "outcomeUnknown": {
     "message": "This action ID was already dispatched. Observe the page before continuing."
   },
@@ -70,5 +67,23 @@
   },
   "nextStep": {
     "message": "Profile connected. Turn on My Chrome in the role menu of the Switchboard chat that needs it."
+  },
+  "tabOverlayIdle": {
+    "message": "Switchboard · Tab connected"
+  },
+  "tabOverlayActive": {
+    "message": "Switchboard · Agent working"
+  },
+  "managedTabs": {
+    "message": "Managed tabs"
+  },
+  "untitledTab": {
+    "message": "Untitled tab"
+  },
+  "releaseTab": {
+    "message": "Release tab"
+  },
+  "releaseNamedTab": {
+    "message": "Release $1"
   }
 }

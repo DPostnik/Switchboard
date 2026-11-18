@@ -14,6 +14,10 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 - GPT-6.2: GPT-6.2-Astra chats get the orchestrator role like GPT-6-Astra, and Codex 0.169.0 chat histories open (they are read in pages when the engine refuses a full read).
 
+- My Chrome resumes tabs already controlled by the same chat and identifies the owning chat when a tab is busy. Release a managed tab from the control on the right side of its chat or from the Chrome extension popup to keep the page open.
+
+- My Chrome marks pages under agent control with a warm orange outline and a badge with a soft shadow below it. A separate pointer shows agent mouse movement.
+
 - My Chrome: closing one tab or revoking one chat no longer cancels browser operations running in other tabs and chats.
 
 - Explain saved access to missing folders and refresh both providers’ effective sandbox grants when those folders appear.

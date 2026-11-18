@@ -44,9 +44,6 @@
   "disconnected": {
     "message": "Switchboard отключён"
   },
-  "lease": {
-    "message": "Чат управляет вкладкой $2"
-  },
   "outcomeUnknown": {
     "message": "Действие с этим ID уже отправлено. Проверьте страницу перед продолжением."
   },
@@ -70,5 +67,23 @@
   },
   "nextStep": {
     "message": "Профиль подключён. В меню роли нужного чата Switchboard включи «Мой Chrome»."
+  },
+  "tabOverlayIdle": {
+    "message": "Switchboard · Вкладка подключена"
+  },
+  "tabOverlayActive": {
+    "message": "Switchboard · Агент работает"
+  },
+  "managedTabs": {
+    "message": "Управляемые вкладки"
+  },
+  "untitledTab": {
+    "message": "Вкладка без названия"
+  },
+  "releaseTab": {
+    "message": "Освободить вкладку"
+  },
+  "releaseNamedTab": {
+    "message": "Освободить вкладку «$1»"
   }
 }

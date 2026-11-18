@@ -69,7 +69,7 @@ test('explicit handoff and one chat lease protect existing tabs', async () => {
   const controller = await paired();
   await assert.rejects(controller.dispatch(request(controller, 'select', {tabId: 10}, {leaseId: 'lease1'})), /explicit_tab_selection_required/);
   await select(controller);
-  await assert.rejects(select(controller, {leaseId: 'lease2', chatId: 'chat2'}), /tab_busy/);
+  await assert.rejects(select(controller, {leaseId: 'lease2', chatId: 'chat2'}), /tab_leased_by_another_chat:chat1/);
   await assert.rejects(controller.dispatch(request(controller, 'read', {}, {leaseId: 'lease1', chatId: 'chat2'})), /lease_required/);
   await assert.rejects(controller.dispatch(request(controller, 'release', {close: true}, {leaseId: 'lease1'})), /existing_tab_preserved/);
   await controller.stop();
@@ -115,12 +115,15 @@ test('ambiguous mutation IDs survive worker restart and never replay', async () 
   assert.ok(!restarted.chrome.calls.some(x => x[0] === 'create'));
 });
 test('stop cancels an in-flight command before further commands', async () => {
-  const controller = await paired(); await select(controller);
+  const controller = await paired();
   let resume;
   controller.chrome.debugger.attach = () => new Promise(resolve => {resume = resolve;});
+  await select(controller);
   const pending = controller.dispatch(request(controller, 'read', {}, {leaseId: 'lease1'}));
   await new Promise(resolve => setImmediate(resolve));
-  await controller.stop(); resume();
+  const stop = controller.stop();
+  resume();
+  await stop;
   await assert.rejects(pending, /revoked/);
   assert.ok(!controller.chrome.calls.some(x => x[0] === 'cdp'));
   assert.ok(controller.chrome.calls.some(x => x[0] === 'detach'));
@@ -193,9 +196,9 @@ test('a hung tab close expires, invalidates authority, and never starts queued C
 
 test('a late Chrome response cannot continue input after its deadline', async () => {
   const controller = await paired(mockChrome(), {operationTimeoutMs: 10});
-  await select(controller);
   let finishAttach;
   controller.chrome.debugger.attach = () => new Promise(resolve => { finishAttach = resolve; });
+  await select(controller);
   await assert.rejects(controller.boundedDispatch(request(controller, 'input', {
     action: 'click', ref: 'ref_1', expectedURL: 'https://example.org/', documentToken: 'doc1'
   }, {leaseId: 'lease1'})), /operation_timeout_unknown_outcome/);
@@ -227,10 +230,13 @@ test('closing an unowned tab and internal detach callbacks preserve other leases
 test('another tab closing or another chat being revoked does not cancel in-flight work', async () => {
   const controller = await paired();
   await controller.connect();
+  let resume;
+  const attach = controller.chrome.debugger.attach;
+  controller.chrome.debugger.attach = target => target.tabId === 10
+    ? new Promise(resolve => { resume = resolve; })
+    : attach(target);
   await select(controller);
   await controller.dispatch(request(controller, 'open', {url: 'https://example.org/other'}, {leaseId: 'lease2', chatId: 'chat2'}));
-  let resume;
-  controller.chrome.debugger.attach = () => new Promise(resolve => {resume = resolve;});
   const pending = controller.dispatch(request(controller, 'read', {}, {leaseId: 'lease1'}));
   await new Promise(resolve => setImmediate(resolve));
   await controller.detach(20);
@@ -244,13 +250,14 @@ test('another tab closing or another chat being revoked does not cancel in-fligh
 test('revoking a chat or its tab cancels only that work', async () => {
   const controller = await paired();
   await controller.connect();
-  await select(controller);
   let resume;
   controller.chrome.debugger.attach = () => new Promise(resolve => {resume = resolve;});
+  await select(controller);
   const read = controller.dispatch(request(controller, 'read', {}, {leaseId: 'lease1'}));
   await new Promise(resolve => setImmediate(resolve));
-  await controller.detach(10);
+  const detach = controller.detach(10);
   resume();
+  await detach;
   await assert.rejects(read, /revoked/);
   let finishCreate;
   controller.chrome.tabs.create = value => new Promise(resolve => { finishCreate = () => resolve({id: 20, ...value}); });
@@ -391,7 +398,7 @@ test('rename publishes Unicode metadata without reconnecting or revoking leases'
   await controller.rename(' Даниил Посник ');
   assert.equal(controller.status().profileName, 'Даниил Посник');
   assert.equal((await chrome.storage.local.get()).profileName, 'Даниил Посник');
-  assert.deepEqual(chrome.calls.at(-1), ['post', {type: 'event', event: 'profileRenamed', profileName: 'Даниил Посник'}]);
+  assert.deepEqual(chrome.calls.filter(call => call[0] === 'post').at(-1), ['post', {type: 'event', event: 'profileRenamed', profileName: 'Даниил Посник'}]);
   assert.equal(controller.port, port);
   assert.equal(controller.session, session);
   assert.equal(controller.leases.size, 1);
@@ -552,4 +559,83 @@ test('a zoomed screenshot keeps the full screenshot mapping', async () => {
   assert.equal(controller.shots.get(10).imageWidth, 1280);
   await assert.rejects(controller.dispatch(request(controller, 'screenshot', {clip: {x: 1200, y: 0, width: 200, height: 10}}, {leaseId: 'lease1'})), /clip_outside_screenshot/);
   await assert.rejects(controller.dispatch(request(controller, 'screenshot', {waitSeconds: 60}, {leaseId: 'lease1'})), /invalid_wait_seconds/);
+});
+
+test('re-selecting the same chat’s managed tab reuses its original lease', async () => {
+  const controller = await paired();
+  const first = await select(controller);
+  const resumed = await controller.dispatch(request(controller, 'select', {tabId: 10}, {leaseId: 'lease1'}));
+  assert.equal(resumed.resumed, true);
+  assert.equal(resumed.leaseId, first.leaseId);
+  assert.equal(controller.leases.size, 1);
+  assert.equal(controller.chrome.calls.filter(call => call[0] === 'attach').length, 1);
+  await controller.stop();
+});
+
+test('selected tabs render idle, active, pointer, and navigation states in the leased document', async () => {
+  const chrome = mockChrome();
+  const overlays = [];
+  chrome.i18n = {getMessage: key => ({tabOverlayIdle: 'Switchboard · Tab connected', tabOverlayActive: 'Switchboard · Agent working'})[key]};
+  chrome.page.renderTabOverlay = args => overlays.push(args);
+  const controller = await paired(chrome);
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  await select(controller);
+  await settle();
+  assert.deepEqual(overlays.at(-1), {active: false, label: 'Switchboard · Tab connected'});
+  await controller.dispatch(request(controller, 'input', {action: 'click', ref: 'ref_1', ...observed}, {leaseId: 'lease1'}));
+  await settle();
+  assert.ok(overlays.some(overlay => overlay.active && overlay.label === 'Switchboard · Agent working'));
+  const pointer = overlays.at(-1).point;
+  assert.equal(pointer.documentToken, observed.documentToken);
+  assert.deepEqual({x: pointer.x, y: pointer.y}, {x: 30, y: 40});
+  controller.onDebuggerEvent({tabId: 10}, 'Page.frameNavigated', {frame: {id: 'frame2'}});
+  await settle();
+  assert.deepEqual(overlays.at(-1), {active: false, label: 'Switchboard · Tab connected'});
+  await controller.stop();
+  assert.deepEqual(overlays.at(-1), {remove: true});
+});
+
+test('app release removes only the named indicator and keeps the existing page open', async () => {
+  const controller = await paired();
+  await controller.connect();
+  await select(controller);
+  await controller.dispatch(request(controller, 'open', {url: 'https://example.org/other'}, {leaseId: 'lease2', chatId: 'chat2'}));
+  await new Promise(resolve => setImmediate(resolve));
+  const {calls} = controller.chrome;
+  calls.length = 0;
+  const release = request(controller, 'release', {}, {leaseId: 'lease1', type: 'release-lease'});
+  await controller.releaseFromApp(release);
+  assert.deepEqual(calls.at(-1), ['post', {type: 'response', id: release.id, result: {released: true, closed: false}}]);
+  assert.match(calls[0][2].expression, /\{"remove":true\}\)$/);
+  assert.deepEqual(calls[1], ['detach', {tabId: 10}]);
+  assert.equal(controller.chrome.tabsById.has(10), true);
+  assert.deepEqual([...controller.leases.keys()], ['lease2']);
+  await controller.stop();
+});
+
+
+test('popup releases an exact lease by title and keeps another lease in the same chat', async () => {
+  const controller = await paired();
+  await controller.connect();
+  await select(controller);
+  await controller.dispatch(request(controller, 'open', {url: 'https://example.org/other'}, {leaseId: 'lease2'}));
+  assert.equal(controller.status().leases.find(lease => lease.leaseId === 'lease1').title, 'Existing');
+  controller.titleChanged(10, 'Form in progress');
+  assert.equal(controller.status().leases.find(lease => lease.leaseId === 'lease1').title, 'Form in progress');
+
+  const session = controller.session;
+  const status = await controller.releaseFromPopup('lease1');
+  assert.deepEqual(status.leases.map(lease => lease.leaseId), ['lease2']);
+  assert.equal(controller.session, session);
+  assert.equal(controller.chrome.tabsById.has(10), true);
+  assert.ok(!controller.chrome.calls.some(call => call[0] === 'update' || call[0] === 'remove'));
+  assert.deepEqual(controller.chrome.calls.filter(call => call[0] === 'post').at(-1), ['post', {
+    type: 'event', event: 'detached', profileId: controller.profileId, tabId: 10, leaseId: 'lease1'
+  }]);
+
+  // A stale button cannot address a new lease for the same tab.
+  await select(controller, {leaseId: 'lease3'});
+  const reopened = await controller.releaseFromPopup('lease1');
+  assert.deepEqual(reopened.leases.map(lease => lease.leaseId), ['lease2', 'lease3']);
+  await controller.stop();
 });

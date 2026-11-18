@@ -246,3 +246,90 @@ export function installUpload(args) {
   el.dispatchEvent(new Event('change', {bubbles: true}));
   return {uploaded: transfer.files.length};
 }
+
+// Render only in the leased top document. The closed shadow tree keeps its copy out of page reads.
+export function renderTabOverlay({active, label, point, remove = false}) {
+  const key = '__switchboard_tab_overlay_v1__';
+  let state = globalThis[key];
+  if (remove) {
+    state?.dispose();
+    return;
+  }
+  if (window !== top || !['http:', 'https:'].includes(location.protocol) || !document.documentElement) return;
+
+  if (!state) {
+    const host = document.createElement('div');
+    host.setAttribute('aria-hidden', 'true');
+    host.inert = true;
+    host.style.cssText = 'all:initial!important;position:fixed!important;inset:0!important;display:block!important;' +
+      'z-index:2147483647!important;pointer-events:none!important;contain:strict!important;direction:ltr!important';
+    const root = host.attachShadow({mode: 'closed'});
+    const css = new CSSStyleSheet();
+    css.replaceSync(`
+      * { pointer-events: none; box-sizing: border-box; }
+      .outline { position: absolute; inset: 0; border: 1px solid rgb(227 118 57 / .88);
+        box-shadow: inset 0 0 9px rgb(239 127 51 / .30); }
+      .outline.active { border-color: #ff9757; box-shadow: inset 0 0 13px rgb(255 136 55 / .55); }
+      .badge { position: absolute; top: 0; left: 50%; transform: translateX(-50%); display: flex;
+        align-items: center; justify-content: center; gap: 8px; width: max-content; max-width: 100%;
+        min-height: 30px; padding: 5px 13px; border-radius: 0 0 9px 9px;
+        background: #a34724; color: #fff; box-shadow: 0 5px 8px rgb(156 63 29 / .27);
+        font: 600 12px/1.2 system-ui; text-align: center; }
+      .badge::before { content: ""; flex: 0 0 7px; height: 7px; border: 1px solid currentColor;
+        border-radius: 2px; transform: rotate(45deg); }
+      .active + .badge { background: #ae411a; }
+      .active + .badge::before { background: currentColor; }
+      svg { position: absolute; width: 21px; height: 25px; overflow: visible;
+        filter: drop-shadow(0 1px 2px #29170e); }
+    `);
+    root.adoptedStyleSheets = [css];
+    const outline = document.createElement('div');
+    outline.className = 'outline';
+    const badge = document.createElement('div');
+    badge.className = 'badge';
+    const svgNamespace = 'http://www.w3.org/2000/svg';
+    const cursor = document.createElementNS(svgNamespace, 'svg');
+    cursor.setAttribute('viewBox', '0 0 21 25');
+    const arrow = document.createElementNS(svgNamespace, 'path');
+    arrow.setAttribute('d', 'M0 0L18 12L10 14L7 23Z');
+    arrow.setAttribute('fill', '#ff9f5a');
+    arrow.setAttribute('stroke', '#fff6ef');
+    arrow.setAttribute('stroke-width', '1.5');
+    arrow.setAttribute('stroke-linejoin', 'round');
+    cursor.append(arrow);
+    root.append(outline, badge, cursor);
+    const checkExpiry = () => { if (Date.now() >= state.expires) state.dispose(); };
+    const dispose = () => {
+      clearTimeout(state.expiryTimer);
+      clearTimeout(state.pointerTimer);
+      document.removeEventListener('visibilitychange', checkExpiry);
+      window.removeEventListener('pagehide', dispose);
+      host.remove();
+      delete globalThis[key];
+    };
+    state = globalThis[key] = {host, outline, badge, cursor, dispose};
+    document.addEventListener('visibilitychange', checkExpiry);
+    window.addEventListener('pagehide', dispose, {once: true});
+  }
+  if (!state.host.isConnected) document.documentElement.append(state.host);
+  state.outline.classList.toggle('active', active);
+  if (state.badge.textContent !== label) state.badge.textContent = label;
+  clearTimeout(state.expiryTimer);
+  state.expires = Date.now() + 18000;
+  state.expiryTimer = setTimeout(state.dispose, 18000);
+
+  // CDP sends CSS pixels in the main viewport. Render only a fresh point in that same document.
+  clearTimeout(state.pointerTimer);
+  state.cursor.style.display = 'none';
+  if (point && point.expires > Date.now() && globalThis.__switchboard_page_v1__?.token === point.documentToken &&
+      point.x >= 0 && point.y >= 0 && point.x < innerWidth && point.y < innerHeight &&
+      (!visualViewport || (visualViewport.scale === 1 && visualViewport.offsetLeft === 0 && visualViewport.offsetTop === 0))) {
+    const rect = state.host.getBoundingClientRect();
+    if (rect.left !== 0 || rect.top !== 0 || rect.width !== document.documentElement.clientWidth ||
+        rect.height !== document.documentElement.clientHeight) return;
+    state.cursor.style.left = point.x + 'px';
+    state.cursor.style.top = point.y + 'px';
+    state.cursor.style.display = 'block';
+    state.pointerTimer = setTimeout(() => { state.cursor.style.display = 'none'; }, point.expires - Date.now());
+  }
+}
