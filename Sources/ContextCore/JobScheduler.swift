@@ -148,6 +148,7 @@ public struct JobQuotaWait: Codable, Sendable {
     public var accountID: String?
     public var suspendedTurnID: String?
     public var job: ManagedJob
+    public var preconditionOutput: String?
     public init(resetAt: Date?, nextCheckAt: Date, model: String, accountID: String?, suspendedTurnID: String?, job: ManagedJob) {
         self.resetAt = resetAt; self.nextCheckAt = nextCheckAt; self.model = model; self.accountID = accountID
         self.suspendedTurnID = suspendedTurnID; self.job = job
@@ -365,6 +366,23 @@ public actor JobStore {
         value.runs[i].status = .waitingForQuota; value.runs[i].finished = nil
         try commit(value); return value
     }
+    /// Release the slot before dispatch. Keep any completed precondition output with the frozen job.
+    public func deferClaimedForQuota(_ id: UUID, job: ManagedJob, accountID: String?, resetAt: Date?,
+                                     nextCheckAt: Date, preconditionOutput: String?, output: String) throws -> JobLedger {
+        var value = try load()
+        guard let i = value.runs.firstIndex(where: { $0.id == id && $0.status == .starting && $0.threadID == nil }) else { return value }
+        let binding = value.runs[i].executionAccountID ?? accountID
+        var wait = value.runs[i].quotaWait ?? JobQuotaWait(resetAt: resetAt, nextCheckAt: nextCheckAt, model: job.model,
+                                                          accountID: binding, suspendedTurnID: nil, job: job)
+        wait.resetAt = resetAt
+        wait.nextCheckAt = nextCheckAt
+        wait.preconditionOutput = preconditionOutput
+        value.runs[i].quotaWait = wait
+        value.runs[i].executionAccountID = binding
+        value.runs[i].status = .waitingForQuota
+        value.runs[i].output = output
+        try commit(value); return value
+    }
     /// Write the send intent first. A crash or ambiguous dispatch can never reclaim this wait.
     public func claimQuotaResume(_ id: UUID, now: Date = Date(), accountID: String? = nil) throws -> (ManagedJob, JobRun)? {
         var value = try load()
@@ -413,10 +431,12 @@ public actor JobStore {
         try commit(value); return value
     }
     /// Persist the resolved execution settings before a request can leave the process.
-    public func bindExecution(_ id: UUID, model: String, permissions: AgentPermissionProfile) throws -> JobLedger {
+    public func bindExecution(_ id: UUID, model: String, permissions: AgentPermissionProfile,
+                              accountID: String? = nil) throws -> JobLedger {
         var value = try load()
         if let i = value.runs.firstIndex(where: { $0.id == id && $0.status.occupiesSlot }) {
             value.runs[i].executionModel = model; value.runs[i].executionPermissions = permissions
+            if value.runs[i].executionAccountID == nil { value.runs[i].executionAccountID = accountID }
         }
         try commit(value); return value
     }

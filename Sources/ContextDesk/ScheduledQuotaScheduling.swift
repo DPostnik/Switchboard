@@ -1,7 +1,7 @@
 import Foundation
 import ContextCore
 
-/// One admission read per connection, shared by all due routines. Never starts a model turn.
+/// Admission reads are shared by due routines on the same connection.
 @MainActor final class ScheduledQuotaState {
     struct Snapshot: Sendable {
         let accountID: String?
@@ -21,38 +21,55 @@ import ContextCore
 }
 
 @MainActor extension DeskModel {
-    func scheduledQuotaSnapshot(_ connection: AgentConnectionID?, fresh: Bool = false) async -> ScheduledQuotaState.Snapshot {
+    func scheduledQuotaSnapshot(_ connection: AgentConnectionID?, fresh: Bool = false,
+                                after: Date? = nil) async -> ScheduledQuotaState.Snapshot {
         guard let agent = connection else { return .init(accountID: nil, limits: nil, context: nil, fetchedAt: Date()) }
         let context = agentState(agent).descriptor?.context
         if let pending = scheduledQuota.requests[agent] { return await pending.value }
         if !fresh, let value = scheduledQuota.cached[agent], value.context == context,
+           (after.map { value.fetchedAt > $0 } ?? true),
            Date().timeIntervalSince(value.fetchedAt) < 60 { return value }
         let task = Task { @MainActor [weak self] in
-            guard let self, let client = self.client(agent) else {
+            guard let self else {
                 return ScheduledQuotaState.Snapshot(accountID: nil, limits: nil, context: context, fetchedAt: Date())
             }
-            do {
-                let account = try await client.account()
-                let limits = try await client.limits()
-                guard account.authenticated, self.agentState(agent).descriptor?.context == context else {
-                    return ScheduledQuotaState.Snapshot(accountID: nil, limits: nil, context: context, fetchedAt: Date())
-                }
-                return ScheduledQuotaState.Snapshot(accountID: account.identityFingerprint, limits: limits, context: context, fetchedAt: Date())
-            } catch {
-                return ScheduledQuotaState.Snapshot(accountID: nil, limits: nil, context: context, fetchedAt: Date())
-            }
+            let value = await self.readScheduledQuota(agent, context: context)
+            self.scheduledQuota.requests[agent] = nil
+            self.scheduledQuota.cached[agent] = value
+            return value
         }
         scheduledQuota.requests[agent] = task
-        let value = await task.value
-        scheduledQuota.requests[agent] = nil
-        scheduledQuota.cached[agent] = value
-        return value
+        return await task.value
+    }
+
+    private func readScheduledQuota(_ agent: AgentConnectionID, context: AgentContext?) async -> ScheduledQuotaState.Snapshot {
+        if let client = client(agent), let account = try? await client.account(),
+           account.authenticated, let accountID = account.identityFingerprint {
+            let limits = try? await client.limits()
+            if agentState(agent).descriptor?.context == context {
+                return .init(accountID: accountID, limits: limits, context: context, fetchedAt: Date())
+            }
+        }
+        return .init(accountID: nil, limits: nil, context: context, fetchedAt: Date())
     }
 
     func scheduledQuotaDecision(_ job: ManagedJob, snapshot: ScheduledQuotaState.Snapshot, now: Date) -> ScheduledLimitPolicy.Decision {
-        guard snapshot.accountID != nil else { return .unknown }
+        guard snapshot.accountID != nil, snapshot.context == agentState(connection(for: job.engine)).descriptor?.context else { return .unknown }
         guard let provider = AgentIntegrationFactory.quotaProvider(job.engine) else { return .unknown }
         return ScheduledLimitPolicy.evaluate(snapshot.limits, provider: provider, model: modelCatalog(connection(for: job.engine))?.resolveModel(job.model) ?? job.model, now: now)
+    }
+
+    func scheduledQuotaAdmission(_ job: ManagedJob, fresh: Bool = false,
+                                 expectedAccountID: String? = nil) async -> ScheduledQuotaState.Snapshot {
+        let agent = connection(for: job.engine)
+        let snapshot = await scheduledQuotaSnapshot(agent, fresh: fresh)
+        guard let agent, scheduledAgentReady(agent), !schedulerStopping, !Task.isCancelled,
+              scheduledQuotaDecision(job, snapshot: snapshot, now: Date()) == .unknown else { return snapshot }
+        if let expectedAccountID, let accountID = snapshot.accountID, expectedAccountID != accountID {
+            return snapshot
+        }
+        // Retry the read-only admission once. Concurrent callers can join or use the resulting snapshot.
+        return await scheduledQuotaSnapshot(agent, after: snapshot.fetchedAt)
     }
 
     func quotaNextCheck(reset: Date?, count: Int = 0, now: Date) -> Date {
@@ -131,8 +148,8 @@ import ContextCore
         guard let run = jobLedger.runs.first(where: { $0.id == id && $0.status == .waitingForQuota }), let wait = run.quotaWait else { return }
         guard let agent = connection(for: run.engine) else { return }
         guard scheduledAgentReady(agent) else { return }
-        let snapshot = await scheduledQuotaSnapshot(agent, fresh: manual)
-        guard schedulerReady, !schedulerStopping,
+        let snapshot = await scheduledQuotaAdmission(wait.job, fresh: manual, expectedAccountID: wait.accountID)
+        guard schedulerReady, !schedulerStopping, snapshot.context == agentState(agent).descriptor?.context,
               jobLedger.runs.contains(where: { $0.id == id && $0.status == .waitingForQuota }) else { return }
         if let original = wait.accountID, let current = snapshot.accountID, original != current {
             await finishJob(id, status: .interrupted, output: L10n.text("Аккаунт изменился. Автоматическое продолжение отменено.", "The account changed. Automatic continuation was cancelled.")); return
@@ -149,13 +166,12 @@ import ContextCore
                 await finishJob(id, status: .interrupted, output: L10n.text("Не удалось подтвердить исходный аккаунт. Продолжи чат вручную.", "The original account could not be confirmed. Continue the chat manually.")); return
             }
         }
-        guard snapshot.context == agentState(agent).descriptor?.context else { return }
         let decision = scheduledQuotaDecision(wait.job, snapshot: snapshot, now: Date())
         do {
             switch decision {
             case .unknown, .wait:
                 let reset: Date?
-                if case .wait(let value) = decision { reset = value } else { reset = nil }
+                if case .wait(let value) = decision { reset = value } else { reset = wait.resetAt }
                 jobLedger = try await jobStore.updateQuotaWait(id, resetAt: reset,
                     nextCheckAt: quotaNextCheck(reset: reset, count: wait.checkCount ?? 0, now: Date()))
             case .allowed:

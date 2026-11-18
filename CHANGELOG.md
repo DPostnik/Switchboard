@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Scheduled routines skip an empty pre-run check without reading quota and retry an unavailable quota read before waiting.
+
 - New chats get a short local title if AI naming fails. Codex title generation waits up to 30 seconds for the model response.
 
 - Codex chats opened right after their run starts (for example scheduled routines) no longer show "list_turns is not supported yet": the history read waits briefly until Codex has indexed the chat.

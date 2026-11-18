@@ -4,7 +4,7 @@ import Testing
 @testable import ContextCore
 @testable import ContextDesk
 
-@MainActor private func quotaFixture(_ root: URL) async throws -> (DeskModel, CodexConnection, ManagedJob) {
+@MainActor private func quotaFixture(_ root: URL, unavailableReads: Int = 0) async throws -> (DeskModel, CodexConnection, ManagedJob) {
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     let executable = root.appendingPathComponent("engine.py")
     try Data(#"""
@@ -12,6 +12,7 @@ import Testing
     import sys,json,os,pathlib
     calls=pathlib.Path(os.environ['CODEX_HOME'])/'quota-calls.jsonl'
     turns=0
+    quota_reads=0
     for line in sys.stdin:
         m=json.loads(line)
         if 'id' not in m: continue
@@ -22,7 +23,9 @@ import Testing
             turns+=1
             result={'turn':{'id':'turn-'+str(turns)}}
         if method=='account/read': result={'account':{'type':'chatgpt','email':'fixture@example.com','planType':'plus'}}
-        if method=='account/rateLimits/read': result={'rateLimits':{'limitId':'codex','primary':{'usedPercent':0}}}
+        if method=='account/rateLimits/read':
+            quota_reads+=1
+            result={} if quota_reads<=\#(unavailableReads) else {'rateLimits':{'limitId':'codex','primary':{'usedPercent':0}}}
         if method=='test/requests':
             result=[json.loads(x) for x in calls.read_text().splitlines()] if calls.exists() else []
         else:
@@ -111,18 +114,64 @@ private func quotaTurns(_ transport: CodexConnection) async throws -> [JSONValue
 @Test @MainActor func scheduledQuotaUnknownPreflightNeverDispatches() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
-    let (model, transport, job) = try await quotaFixture(root)
+    let (model, transport, job) = try await quotaFixture(root, unavailableReads: 10)
     quotaCache(model, account: nil, remaining: nil)
     await model.launchJob(job.id)
     let waiting = try #require(model.jobLedger.runs.first)
     #expect(waiting.status == .waitingForQuota && waiting.threadID == nil)
     #expect(model.jobTasks.isEmpty && model.state.chats.isEmpty)
     #expect(try await quotaTurns(transport).isEmpty)
-    quotaCache(model, remaining: nil)
+    quotaCache(model, account: waiting.quotaWait?.accountID, remaining: nil)
     model.jobLedger = try await model.jobStore.updateQuotaWait(waiting.id, resetAt: nil, nextCheckAt: Date().addingTimeInterval(-1))
     await model.checkScheduledQuotaWait(waiting.id)
     #expect(model.jobLedger.runs.first?.status == .waitingForQuota)
     #expect(try await quotaTurns(transport).isEmpty)
+    await model.stopScheduler(); await transport.stop()
+}
+
+@Test @MainActor func skippedPreconditionDoesNotReadQuota() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let (model, transport, original) = try await quotaFixture(root, unavailableReads: 10)
+    var job = original
+    job.precondition = JobPrecondition(command: "exit 1")
+    #expect(await model.saveJob(job))
+    await model.launchJob(job.id)
+    for task in Array(model.jobTasks.values) { await task.value }
+    let run = try #require(model.jobLedger.runs.first)
+    #expect(run.status == .skipped)
+    #expect(!model.attention.open.contains { $0.runID == run.id })
+    let requests = try await transport.request("test/requests").array
+    #expect(!requests.contains { ["account/read", "account/rateLimits/read", "turn/start"].contains($0["method"].string ?? "") })
+    await model.stopScheduler(); await transport.stop()
+}
+
+@Test @MainActor func dueQuotaWaitRefreshesUnavailableSnapshotAndKeepsPreconditionOutput() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let (model, transport, original) = try await quotaFixture(root, unavailableReads: 2)
+    var job = original
+    job.precondition = JobPrecondition(command: "echo checked >> checks; echo 'new mail'")
+    #expect(await model.saveJob(job))
+    await model.launchJob(job.id)
+    for task in Array(model.jobTasks.values) { await task.value }
+    let waiting = try #require(model.jobLedger.runs.first)
+    #expect(waiting.status == .waitingForQuota && waiting.threadID == nil)
+    #expect(waiting.quotaWait?.preconditionOutput == "new mail")
+    let before = try await transport.request("test/requests").array
+    #expect(before.filter { $0["method"].string == "account/rateLimits/read" }.count == 2)
+    #expect(!before.contains { $0["method"].string == "turn/start" })
+    model.jobLedger = try await model.jobStore.updateQuotaWait(waiting.id, resetAt: nil, nextCheckAt: Date().addingTimeInterval(-1))
+    await model.checkScheduledQuotaWaits()
+    for task in Array(model.jobTasks.values) { await task.value }
+    let resumed = try #require(model.jobLedger.runs.first)
+    #expect(resumed.id == waiting.id && resumed.status == .running)
+    let turns = try await quotaTurns(transport)
+    #expect(turns.count == 1)
+    #expect(turns.first?["params"]["input"].array.first?["text"].string?.contains("new mail") == true)
+    #expect(try String(contentsOf: root.appendingPathComponent("checks"), encoding: .utf8) == "checked\n")
+    let after = try await transport.request("test/requests").array
+    #expect(after.filter { $0["method"].string == "account/rateLimits/read" }.count == 3)
     await model.stopScheduler(); await transport.stop()
 }
 

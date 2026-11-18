@@ -100,7 +100,13 @@ import ContextCore
                 jobLedger = try await jobStore.load()
                 return
             }
-            let snapshot = await scheduledQuotaSnapshot(connection(for: job.engine))
+            if let check = job.precondition, !check.isEmpty {
+                guard let (claimedJob, run) = try await jobStore.claim(id, manual: manual, now: now) else { return }
+                jobLedger = try await jobStore.load()
+                await executeClaimedJob(claimedJob, run: run)
+                return
+            }
+            let snapshot = await scheduledQuotaAdmission(job)
             guard schedulerReady, !schedulerStopping, jobLedger.jobs.first(where: { $0.id == id }) == job else { return }
             let decision = scheduledQuotaDecision(job, snapshot: snapshot, now: Date())
             guard decision == .allowed else {
@@ -131,9 +137,10 @@ import ContextCore
             await finishJob(run.id, status: .blocked, output: L10n.text("Исполнитель недоступен", "The agent is unavailable")); return
         }
         guard !schedulerStopping else { await finishJob(run.id, status: .interrupted); return }
+        let permissions = job.role(project: project, catalog: roleCatalog).profile(for: project, sharedRoots: sharedRoots)
         do {
             jobLedger = try await jobStore.bindExecution(run.id, model: job.model,
-                permissions: job.role(project: project, catalog: roleCatalog).profile(for: project, sharedRoots: sharedRoots))
+                permissions: permissions)
         } catch { schedulerReady = false; self.error = error.localizedDescription; return }
         jobTasks[run.id] = Task { [weak self] in
             guard let self else { return }
@@ -145,21 +152,49 @@ import ContextCore
             }
             do {
                 var runJob = job
+                var preconditionOutput = run.quotaWait?.preconditionOutput
                 if let check = job.precondition, !check.isEmpty {
-                    switch await check.evaluate(in: project.path, label: "precondition-" + run.id.uuidString.lowercased()) {
-                    case .skip: await finishJob(run.id, status: .skipped); return
-                    case .broken(let reason): await finishJob(run.id, status: .blocked, output: reason); return
-                    case .run(let output): runJob.prompt = JobPrecondition.prompt(job.prompt, output: output)
+                    if preconditionOutput == nil {
+                        let outcome = await check.evaluate(in: project.path, label: "precondition-" + run.id.uuidString.lowercased())
+                        guard !Task.isCancelled, !schedulerStopping else { await finishJob(run.id, status: .interrupted); return }
+                        switch outcome {
+                        case .skip: await finishJob(run.id, status: .skipped); return
+                        case .broken(let reason): await finishJob(run.id, status: .blocked, output: reason); return
+                        case .run(let output): preconditionOutput = output
+                        }
                     }
-                    guard !Task.isCancelled, !schedulerStopping else { await finishJob(run.id, status: .interrupted); return }
+                    if let preconditionOutput { runJob.prompt = JobPrecondition.prompt(job.prompt, output: preconditionOutput) }
                 }
-                let admission = await scheduledQuotaSnapshot(connection(for: job.engine))
-                guard admission.accountID == run.executionAccountID, admission.accountID != nil,
+                let admission = await scheduledQuotaAdmission(job, expectedAccountID: run.executionAccountID)
+                try Task.checkCancellation()
+                guard schedulerReady, !schedulerStopping,
+                      jobLedger.runs.contains(where: { $0.id == run.id && $0.status == .starting }) else { return }
+                if let original = run.executionAccountID, let current = admission.accountID, original != current {
+                    await finishJob(run.id, status: .interrupted, output: L10n.text("Аккаунт запуска изменился. Запуск отменён.", "The run's account changed. The run was cancelled.")); return
+                }
+                let now = Date()
+                let decision = scheduledQuotaDecision(job, snapshot: admission, now: now)
+                guard decision == .allowed else {
+                    let reset: Date?
+                    if case .wait(let date) = decision { reset = date } else { reset = run.quotaWait?.resetAt }
+                    jobLedger = try await jobStore.deferClaimedForQuota(run.id, job: job, accountID: admission.accountID,
+                        resetAt: reset, nextCheckAt: quotaNextCheck(reset: reset, count: run.quotaWait?.checkCount ?? 0, now: now),
+                        preconditionOutput: preconditionOutput, output: quotaWaitingText(reset: reset))
+                    await reconcileQuotaAttention()
+                    return
+                }
+                if run.executionAccountID == nil {
+                    jobLedger = try await jobStore.bindExecution(run.id, model: job.model, permissions: permissions,
+                        accountID: admission.accountID)
+                }
+                try Task.checkCancellation()
+                guard let boundRun = jobLedger.runs.first(where: { $0.id == run.id && $0.status == .starting }),
+                      admission.accountID == boundRun.executionAccountID, admission.accountID != nil,
                       admission.context == agentState(connection(for: job.engine)).descriptor?.context else {
                     await finishJob(run.id, status: .interrupted, output: L10n.text("Аккаунт запуска больше не подтверждён. Запуск отменён.", "The run's account is no longer confirmed. The run was cancelled.")); return
                 }
                 // Bind validation and chat delivery to the same prompt, including precondition output.
-                let executor = makeExecutor(self, runJob, run, project)
+                let executor = makeExecutor(self, runJob, boundRun, project)
                 jobExecutors[run.id] = executor
                 let descriptor = try await executor.descriptor().value()
                 if let routine = job.routine {
@@ -175,7 +210,7 @@ import ContextCore
                     guard let self else { throw CancellationError() }
                     // A print run (installed CLI) has no engine session; its chat is a local read-only record.
                     if descriptor.identityMode == .externalCLI {
-                        try await self.attachScheduledRecord(run, job: job, prompt: request.prompt, project: project)
+                        try await self.attachScheduledRecord(boundRun, job: job, prompt: request.prompt, project: project)
                     } else { try await self.attachScheduledRun(run.id) }
                 }.value()
                 if case .finished(let outcome, let output) = result {
