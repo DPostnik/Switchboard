@@ -485,7 +485,7 @@ public actor CodexClient {
         } catch is CodexReplyTooLarge {
             return try await readPaged(id)
         } catch let failure as ClientFailure where Self.isPaginatedOnly(failure) {
-            return try await readPaged(id)
+            return try await readPagedOnceIndexed(id)
         }
         guard result["thread"]["id"].string == id else {
             throw ClientFailure(L10n.text("Получена история другого чата", "Received history for a different chat"))
@@ -497,7 +497,26 @@ public actor CodexClient {
     }
     /// Codex 0.169.0 stores new threads as paginated; `thread/read` with `includeTurns` then fails with
     /// "list_turns is not supported yet" (live check 2026-11-17), and the history is read in pages instead.
-    static func isPaginatedOnly(_ failure: ClientFailure) -> Bool { failure.message.contains("list_turns is not supported") }
+    /// Codex 0.167.0 returns the same error for a paginated thread whose row is not yet in its state database
+    /// (`validate_thread_for_paginated_reads`, rust-v0.167.0 thread-store/src/local/thread_history/read.rs), for
+    /// example right after a scheduled run starts (seen 2026-11-18).
+    static func isPaginatedOnly(_ failure: ClientFailure) -> Bool {
+        failure.message.contains("list_turns is not supported") || failure.message.contains("list_items is not supported")
+    }
+    /// Polls of a thread the state database does not list yet, `paginatedIndexDelay` apart.
+    static let paginatedIndexPolls = 6
+    static let paginatedIndexDelay = Duration.milliseconds(500)
+    /// These are read-only requests, so polling again replays no side effect.
+    private func readPagedOnceIndexed(_ id: String) async throws -> JSONValue {
+        var attempt = 1
+        while true {
+            do { return try await readPaged(id) }
+            catch let failure as ClientFailure where Self.isPaginatedOnly(failure) && attempt < Self.paginatedIndexPolls {
+                attempt += 1
+                try await Task.sleep(for: Self.paginatedIndexDelay)
+            }
+        }
+    }
     /// A history over the transport's line limit (large tool results) is read in pages of turns, then items.
     /// An item that alone exceeds the limit ends its turn's items there: the rest of that turn is left out.
     private func readPaged(_ id: String) async throws -> JSONValue {

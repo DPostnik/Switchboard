@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Codex chats opened right after their run starts (for example scheduled routines) no longer show "list_turns is not supported yet": the history read waits briefly until Codex has indexed the chat.
+
 - GPT-6.2 Sol is the new default Codex model: the app default, project defaults and routines that used GPT-6.1 Sol move to it once, and GPT Astra orchestrators delegate to it.
 
 - GPT-6.2: GPT-6.2-Astra chats get the orchestrator role like GPT-6-Astra, and Codex 0.169.0 chat histories open (they are read in pages when the engine refuses a full read).

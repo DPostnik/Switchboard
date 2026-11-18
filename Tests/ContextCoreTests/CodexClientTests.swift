@@ -49,6 +49,12 @@ private func commandFixture() throws -> (URL, URL) {
                 if (root/'paged').exists():
                     result = {'thread': {'id': p['threadId']}}
                     if p.get('includeTurns'): result['pad'] = 'x' * 5000
+            if method == 'thread/turns/list' and (root/'unindexed').exists():
+                left = int((root/'unindexed').read_text())
+                if left > 0:
+                    (root/'unindexed').write_text(str(left - 1))
+                    print(json.dumps({'id': m['id'], 'error': {'code': -32600, 'message': 'list_turns is not supported yet'}}), flush=True)
+                    continue
             if method == 'thread/turns/list':
                 result = ({'data': [{'id': 't1', 'status': 'completed'}], 'nextCursor': 'next'} if 'cursor' not in p
                           else {'data': [{'id': 't2', 'status': 'completed'}], 'nextCursor': None})
@@ -229,6 +235,25 @@ private func commandFixture() throws -> (URL, URL) {
     let turns = try await client.history(session)
     #expect(turns.map(\.id) == ["t1", "t2"])
     #expect(turns.first?.items.map(\.text) == ["a1", "a2"])
+    await client.stop()
+}
+
+/// Codex 0.167.0 refuses paginated reads until the thread is in its state database (right after a scheduled run starts).
+@Test func paginatedHistoryWaitsUntilTheThreadIsIndexed() async throws {
+    let (root, executable) = try commandFixture()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try Data().write(to: root.appendingPathComponent("paginated-only"))
+    try Data("2".utf8).write(to: root.appendingPathComponent("unindexed"))
+    let wire = CodexConnection(), client = CodexClient(transport: wire)
+    try await client.start(executable: executable, home: root)
+    let session = AgentSessionReference(connection: .originalCodex, nativeID: "fresh")
+    let turns = try await client.history(session)
+    #expect(turns.map(\.id) == ["t1", "t2"])
+    // A thread that never becomes readable still fails after the bounded polls.
+    try Data("100".utf8).write(to: root.appendingPathComponent("unindexed"))
+    await #expect(throws: ClientFailure.self) { try await client.history(session) }
+    let polls = try await wire.request("test/calls").array.filter { $0["method"].string == "thread/turns/list" }
+    #expect(polls.count == 2 + 2 + CodexClient.paginatedIndexPolls)
     await client.stop()
 }
 

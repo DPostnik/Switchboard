@@ -61,7 +61,9 @@ extension CodexClient {
     }
 
     /// The thread store found the child's rollout file without its first line yet.
+    /// Also a child the state database does not list yet ("list_turns is not supported yet", seen 2026-11-12/13).
     static func isUnwrittenRollout(_ error: any Error) -> Bool {
+        if let failure = error as? ClientFailure, isPaginatedOnly(failure) { return true }
         let text = error.localizedDescription
         return text.contains("failed to read session metadata") && text.hasSuffix(" is empty")
     }
