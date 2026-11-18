@@ -344,6 +344,9 @@ func summaryRunnerRoutesAndFailsClosed(mode: String, version: String) async thro
     #expect(ChatTitle.shortened("Weekly report, " + String(repeating: "x", count: 50)) == "Weekly report")
     #expect(ChatTitle.placeholder(language: .russian) == "Новый чат")
     #expect(ChatTitle.placeholder(language: .english) == "New chat")
+    #expect(ChatTitle.fallback(from: "  Исправить\n\tзаголовки чатов  ") == "Исправить заголовки чатов")
+    #expect(ChatTitle.fallback(from: "  \n\t  ") == nil)
+    #expect(ChatTitle.fallback(from: "Weekly report, " + String(repeating: "x", count: 50)) == "Weekly report")
 }
 
 @Test(arguments: ["success", "route", "tools", "disconnect", "approval"])
@@ -363,10 +366,11 @@ func chatTitleRunnerPreservesRouteAndIsolation(mode: String) async throws {
     #expect(!calls.contains("thread/resume"))
 }
 
-@Test @MainActor func chatTitlePersistsAndManualRenameWins() async throws {
+@Test(arguments: ["success", "disconnect"])
+@MainActor func chatTitlePersistsAndManualRenameWins(mode: String) async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
-    let executable = try fixture(root)
+    let executable = try fixture(root, mode: mode)
     let connection = CodexConnection()
     let fixtureClient = CodexClient(transport: connection)
     try await fixtureClient.start(executable: executable, home: root)
@@ -378,13 +382,14 @@ func chatTitleRunnerPreservesRouteAndIsolation(mode: String) async throws {
     model.state.chats = [Chat(id: "chat", projectID: project.id, title: ChatTitle.placeholder(), model: "test-model")]
     model.generateChatTitle("chat", firstMessage: "Please summarize weekly sales", model: "test-model", route: .direct)
     await model.titleTasks["chat"]?.value
-    #expect(model.state.chats.first?.title == "Weekly sales report")
+    let expectedTitle = mode == "success" ? "Weekly sales report" : "Please summarize weekly sales"
+    #expect(model.state.chats.first?.title == expectedTitle)
     // Wait for the app's asynchronous persistence task to reach the actor.
     for _ in 0..<100 {
-        if try await store.load().chats.first?.title == "Weekly sales report" { break }
+        if try await store.load().chats.first?.title == expectedTitle { break }
         try await Task.sleep(for: .milliseconds(10))
     }
-    #expect(try await AppStore(file: file).load().chats.first?.title == "Weekly sales report")
+    #expect(try await AppStore(file: file).load().chats.first?.title == expectedTitle)
     model.generateChatTitle("chat", firstMessage: "Different first message", model: "test-model", route: .direct)
     await model.renameChat("chat", title: "My own title")
     #expect(model.state.chats.first?.title == "My own title")

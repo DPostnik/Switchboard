@@ -23,6 +23,15 @@ public enum ChatTitle {
         L10n.text("Новый чат", "New chat", language: language)
     }
 
+    public static func fallback(from firstMessage: String) -> String? {
+        let sanitized = String(String.UnicodeScalarView(firstMessage.unicodeScalars.map {
+            CharacterSet.controlCharacters.contains($0) ? " " : $0
+        }))
+        let title = sanitized.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard !title.isEmpty else { return nil }
+        return shortened(title)
+    }
+
     public static func validate(_ output: String) throws -> String {
         struct Result: Decodable { var title: String }
         guard output.utf8.count <= 4096 else { throw invalid() }

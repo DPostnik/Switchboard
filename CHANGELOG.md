@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- New chats get a short local title if AI naming fails. Codex title generation waits up to 30 seconds for the model response.
+
 - Codex chats opened right after their run starts (for example scheduled routines) no longer show "list_turns is not supported yet": the history read waits briefly until Codex has indexed the chat.
 
 - GPT-6.2 Sol is the new default Codex model: the app default, project defaults and routines that used GPT-6.1 Sol move to it once, and GPT Astra orchestrators delegate to it.

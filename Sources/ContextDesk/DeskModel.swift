@@ -2679,10 +2679,16 @@ private struct ChatRunState: Equatable {
             } catch is CancellationError {
                 log.info("Title cancelled for chat \(id, privacy: .public)")
             } catch {
-                // Keep the neutral placeholder. Never retry an uncertain background request
-                // or interrupt the user's main conversation with a naming failure.
                 let rejection = (error as? AgentOperationFailure)?.rejection.map { String(describing: $0) } ?? "none"
                 log.error("Title failed for chat \(id, privacy: .public) after \(Date().timeIntervalSince(started), format: .fixed(precision: 1), privacy: .public)s, rejection \(rejection, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                // Use the local message so a provider failure never requires another request.
+                guard !Task.isCancelled, !self.manuallyNamedChatIDs.contains(id),
+                      let index = self.state.chats.firstIndex(where: { $0.id == id }),
+                      AppLanguage.allCases.contains(where: { ChatTitle.placeholder(language: $0) == self.state.chats[index].title }),
+                      let title = ChatTitle.fallback(from: firstMessage) else { return }
+                self.state.chats[index].title = title
+                self.persist()
+                log.info("Used local fallback title for chat \(id, privacy: .public)")
             }
         }
     }

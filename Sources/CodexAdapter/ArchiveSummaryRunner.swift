@@ -46,7 +46,7 @@ public actor ArchiveSummaryRunner {
         let input = String(decoding: try JSONEncoder().encode(["firstMessage": firstMessage]), as: UTF8.self)
         let output = try await generate(input: input, instructions: ChatTitle.instructions,
             schema: ChatTitle.schema, model: model, route: route, executable: executable, home: home,
-            workspace: workspace, providerArguments: providerArguments, willStart: willStart)
+            workspace: workspace, providerArguments: providerArguments, responseTimeout: .seconds(30), willStart: willStart)
         return try ChatTitle.validate(output.text)
     }
 
@@ -72,7 +72,8 @@ public actor ArchiveSummaryRunner {
 
     private func generate(input: String, instructions: String, schema: JSONValue, model: String,
                           route: RequestRoute, executable: URL, home: URL, workspace: URL,
-                          providerArguments: [String], willStart: @Sendable () async throws -> Void) async throws -> Output {
+                          providerArguments: [String], responseTimeout: Duration = .seconds(180),
+                          willStart: @Sendable () async throws -> Void) async throws -> Output {
         try Task.checkCancellation()
         let connection = CodexConnection(); active = connection
         var dispatched = false, completed = false
@@ -135,7 +136,7 @@ public actor ArchiveSummaryRunner {
             guard let turnID = response["turn"]["id"].string else {
                 throw ClientFailure(L10n.text("Не получен ID запроса итога", "No summary turn ID received"))
             }
-            let output = try await Self.collect(connection: connection, threadID: threadID, turnID: turnID)
+            let output = try await Self.collect(connection: connection, threadID: threadID, turnID: turnID, timeout: responseTimeout)
             completed = true
             await connection.stop(); active = nil
             return output
@@ -148,7 +149,7 @@ public actor ArchiveSummaryRunner {
 
     private struct Output: Sendable { var text: String; var tokens: TokenCounters? }
 
-    private static func collect(connection: CodexConnection, threadID: String, turnID: String) async throws -> Output {
+    private static func collect(connection: CodexConnection, threadID: String, turnID: String, timeout: Duration) async throws -> Output {
         try await withThrowingTaskGroup(of: Output.self) { group in
             group.addTask {
                 var text = "", tokens: TokenCounters?
@@ -184,7 +185,7 @@ public actor ArchiveSummaryRunner {
                 throw SummaryRunFailure(uncertain: true, message: L10n.text("Ответ итога не получен", "Summary response was not received"))
             }
             group.addTask {
-                try await Task.sleep(for: .seconds(180))
+                try await Task.sleep(for: timeout)
                 throw SummaryRunFailure(uncertain: true, message: L10n.text("Истекло время подготовки итога; запрос не повторён", "Summary timed out; request was not retried"))
             }
             defer { group.cancelAll() }
