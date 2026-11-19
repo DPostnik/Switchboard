@@ -414,6 +414,11 @@ struct DeskView: View {
         let project = entry.project
         let isExpanded = entry.expanded
         let sidebarAnimation = DeskMotion.standard(list.reduceMotion)
+        let runningChats = entry.runningChatTitles
+        let activityDetails = runningChats.isEmpty ? nil :
+            L10n.text("Чаты в работе", "Running chats") + "\n" + runningChats.joined(separator: "\n")
+        let details = [activityDetails, entry.missing ? ProjectMenu.folderMissingHelp : nil, model.projectHeaderDetails(project.path)]
+            .compactMap { $0 }
         VStack(spacing: 0) {
             HStack(spacing: .ui(2)) {
                 ProjectHeader(project: project, expanded: isExpanded, activate: {
@@ -438,8 +443,7 @@ struct DeskView: View {
                 }, actions: { projectActions(project) }, reorder: { projectReorderActions(project) },
                    menuShown: menuShown("project:\(project.id)"),
                    hovered: hover("project:\(project.id)"), pressed: press("project:\(project.id)"),
-                   details: entry.missing ? [ProjectMenu.folderMissingHelp, model.projectHeaderDetails(project.path)].compactMap { $0 }.joined(separator: "\n")
-                                                 : model.projectHeaderDetails(project.path)) {
+                   details: details.isEmpty ? nil : details.joined(separator: "\n")) {
                     HStack(spacing: .ui(9)) {
                         Image(systemName: "chevron.right")
                             .font(.ui(.caption).weight(.semibold))
@@ -470,6 +474,9 @@ struct DeskView: View {
                             Circle().fill(DeskPalette.accent).frame(width: .ui(7), height: .ui(7))
                                 .help(L10n.text("Есть непрочитанные ответы", "Unread responses"))
                                 .accessibilityLabel(L10n.text("Есть непрочитанные ответы", "Unread responses"))
+                        }
+                        if !runningChats.isEmpty {
+                            ProgressView().uiSmallSpinner().accessibilityHidden(true)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)

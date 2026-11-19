@@ -36,6 +36,12 @@ import ContextCore
     let session = try #require(model.state.chats[0].nativeSession)
     await model.receive(.init(session: session, payload: .started(turn: "t")))
     #expect(row("one")?.busy == true && snapshot() != before)
+    #expect(project(a.id)?.runningChatTitles == ["One"])
+    #expect(project(b.id)?.runningChatTitles == [])
+    let filtered = model.sidebarSnapshot(SidebarListing(search: "Two", collapsedInSearch: [a.id], pageSize: 1))
+    #expect(filtered.projects.first?.expanded == false)
+    #expect(filtered.projects.first?.rows.map(\.id) == ["two"])
+    #expect(filtered.projects.first?.runningChatTitles == ["One"])
     model.pending.append(PendingAction(interaction: AgentInteraction(id: UUID(), session: session, turn: "t", kind: .approval(canAllow: true),
                                                                      reason: "Run", details: "ls", canAllowTurn: false), threadID: "one"))
     #expect(row("one")?.pending == true && project(a.id)?.waiting == true)
@@ -56,4 +62,7 @@ import ContextCore
     let collapsed = model.sidebarSnapshot(SidebarListing(expanded: [b.id], pageSize: 1))
     #expect(collapsed.projects.first { $0.id == a.id }?.expanded == false)
     #expect(collapsed.projects.first { $0.id == a.id }.map { ($0.limit, $0.total, $0.rows.count) } ?? (0, 0, 0) == (1, 2, 1))
+    await model.receive(.init(session: session, payload: .completed(.init(id: "t", status: .completed, hasError: false, error: nil,
+        history: AgentHistoryTurn(id: "t", items: [], startedAt: nil, completedAt: nil, duration: nil, isComplete: true)))))
+    #expect(project(a.id)?.runningChatTitles == [])
 }

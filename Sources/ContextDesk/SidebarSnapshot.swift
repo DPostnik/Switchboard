@@ -29,6 +29,7 @@ struct SidebarProjectRow: Equatable, Identifiable {
     let total: Int
     let rows: [SidebarChatRow]
     let hasChats: Bool
+    let runningChatTitles: [String]
     /// A chat waits for an action or for the app restart (amber dot).
     let waiting: Bool
     let unread: Bool
@@ -98,6 +99,7 @@ extension DeskModel {
             let chats = byProject[section.project.id] ?? []
             return SidebarProjectRow(project: section.project, expanded: section.expanded, limit: section.limit, total: section.chats.count,
                                      rows: section.chats.prefix(section.limit).map { row($0, favorite: false) }, hasChats: !chats.isEmpty,
+                                     runningChatTitles: chats.filter { isBusy(threadID: $0.id) }.map(\.title),
                                      waiting: chats.contains { pendingChats.contains($0.id) || restartWaiting.contains($0.id) },
                                      unread: chats.contains(where: \.hasUnreadResponse), missing: projectFolderMissing(section.project))
         }
