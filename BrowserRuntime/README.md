@@ -400,6 +400,18 @@ never launches Chrome; when Chrome has already exited it returns `browserQuit: n
 Live sessions of the chat, unknown outcomes and malformed tokens still get
 `session_not_owned`.
 
+Idle quit and tab reuse (2026-11-18). A Chrome that only has blank tabs left after a
+normal `browser_close` no longer quits at once: the close returns `browserQuit: scheduled`,
+and the executor quits it after `IDLE_QUIT_SECONDS` (90 s; `SWITCHBOARD_BROWSER_IDLE_QUIT_SECONDS`
+in tests) unless new work arrives, rechecking under `operation.lock`; it also quits it
+when the executor stops. When the task tab is the last one and no blank tab exists, the
+close navigates it to `about:blank` instead of closing it, and `browser_open` reuses a
+plain `about:blank` tab (Chrome's start tab or a released one) by navigating it to the
+session marker; only when there is none does it create a tab. On macOS a new tab could
+open a new window and bring Chrome for Testing to the front, which left full-screen
+apps and handed focus to Switchboard once Chrome was hidden again. Chrome also starts
+through LaunchServices with `open -g -j -n` (background, hidden, own instance).
+
 Aborted `browser_open` (2026-10-29). When the agent's client aborts a silent
 `browser_open` (Claude Code's MCP idle timeout), the tab may already exist but its
 token never reaches the agent, and the next connection starts without a session. While

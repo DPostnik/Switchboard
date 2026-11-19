@@ -21,8 +21,9 @@ class BackgroundTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             browser = Browser(Path(directory), rpc=rpc)
             opened = browser.open('https://example.test/')
-            self.assertIs(calls[0][1].get('background'), True)
-            self.assertTrue(all(args.get('pageId') == 9 for _, args in calls[1:]))
+            self.assertEqual(calls[0][0], 'list_pages')  # No spare blank tab here.
+            self.assertIs(calls[1][1].get('background'), True)
+            self.assertTrue(all(args.get('pageId') == 9 for _, args in calls[2:]))
             browser.read = lambda *args, **kwargs: {
                 'url': 'https://example.test/', 'cards': [], 'placeholders': 0,
                 'loading': True, 'empty': False, 'truncated': False, 'bottom': True,

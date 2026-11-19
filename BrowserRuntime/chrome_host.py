@@ -43,6 +43,42 @@ def chrome_command(executable, profile, port):
             '--no-first-run', '--no-default-browser-check', 'about:blank']
 
 
+def launch_command(executable, profile, port):
+    """LaunchServices start that never takes focus: -g keeps the current app frontmost,
+    -j starts hidden, -n gives this profile its own instance. A direct exec of the
+    executable activates Chrome, which leaves a full-screen video and, once hidden,
+    hands focus to Switchboard. The started process keeps exactly chrome_command."""
+    command = chrome_command(executable, profile, port)
+    parts = Path(executable).parents
+    bundle = parts[2] if len(parts) > 3 else None
+    if bundle is None or bundle.suffix != '.app' or Path(executable).parent != bundle / 'Contents/MacOS':
+        raise ValueError('invalid_chrome_launch_parameters')
+    return ['/usr/bin/open', '-g', '-j', '-n', '-a', str(bundle), '--args', *command[1:]]
+
+
+class LaunchedChrome:
+    """Chrome started through LaunchServices: launchd is its parent, so exit is read from ps."""
+
+    def __init__(self, pid, host):
+        self.pid = pid
+        self.host = host
+
+    def poll(self):
+        state = self.host.process_field(self.pid, 'stat')
+        return None if state and not state.startswith('Z') else 0
+
+    def terminate(self):
+        os.kill(self.pid, signal.SIGTERM)
+
+    def wait(self, timeout=None):
+        end = time.monotonic() + (timeout or 0)
+        while self.poll() is None:
+            if timeout is not None and time.monotonic() >= end:
+                raise subprocess.TimeoutExpired('chrome', timeout)
+            time.sleep(0.1)
+        return 0
+
+
 class ChromeHost:
     def __init__(self, root, language='en', max_browsers=2):
         self.root = Path(root).resolve()
@@ -226,10 +262,8 @@ class ChromeHost:
                 port = reservation.getsockname()[1]
             # A positive port uses Chrome's documented manual debugging mode.
             # Listener ownership below handles a port allocation race fail-closed.
-            env = {k: v for k, v in os.environ.items() if k in ('HOME', 'PATH', 'TMPDIR', 'LANG', 'LC_ALL')}
-            self.child = subprocess.Popen(chrome_command(executable, self.profile, port),
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                env=env, start_new_session=True)
+            pid = self.launch(executable, port, cancelled, seconds)
+            self.child = LaunchedChrome(pid, self)
             owner = {'pid': self.child.pid, 'port': port, 'executable': executable,
                      'profile': str(self.profile), 'birth': self.process_field(self.child.pid, 'lstart')}
             self.persist(owner)
@@ -246,6 +280,32 @@ class ChromeHost:
                 if launched:
                     self.hide_created_browser(owner)
                 return endpoint
+            cancelled.wait(0.2)
+        raise self.error('Подключение к Chrome не подтверждено. Автоматического перезапуска не было.',
+                         'Chrome connection was not confirmed. No automatic restart was attempted.')
+
+    def launch(self, executable, port, cancelled, seconds):
+        """Start Chrome in the background once and return the PID that listens on the reserved port.
+
+        Identity is still verified by matches() and endpoint(); an unrelated listener fails closed.
+        """
+        env = {k: v for k, v in os.environ.items() if k in ('HOME', 'PATH', 'TMPDIR', 'LANG', 'LC_ALL')}
+        try:
+            opened = subprocess.run(launch_command(executable, self.profile, port),
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    env=env, timeout=seconds)
+        except subprocess.TimeoutExpired:
+            opened = None
+        if opened is None or opened.returncode != 0:
+            raise self.error('Chrome не запустился. Автоматического перезапуска не было.',
+                             'Chrome did not start. No automatic restart was attempted.')
+        end = time.monotonic() + seconds
+        while time.monotonic() < end and not cancelled.is_set():
+            result = subprocess.run(['/usr/sbin/lsof', '-nP', '-iTCP:' + str(port), '-sTCP:LISTEN', '-Fp'],
+                                    capture_output=True, text=True, timeout=3)
+            pids = {int(line[1:]) for line in result.stdout.splitlines() if line[1:].isdigit() and line.startswith('p')}
+            if len(pids) == 1:
+                return pids.pop()
             cancelled.wait(0.2)
         raise self.error('Подключение к Chrome не подтверждено. Автоматического перезапуска не было.',
                          'Chrome connection was not confirmed. No automatic restart was attempted.')

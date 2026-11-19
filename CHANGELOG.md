@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- The agent browser no longer takes focus, leaves a full-screen video or brings Switchboard to the front: it starts in the background, reuses a blank tab instead of opening new tabs and windows, and quits about 90 seconds after the last tab closes instead of relaunching for every page.
+
 - Scheduled routines skip an empty pre-run check without reading quota and retry an unavailable quota read before waiting.
 
 - New chats get a short local title if AI naming fails. Codex title generation waits up to 30 seconds for the model response.

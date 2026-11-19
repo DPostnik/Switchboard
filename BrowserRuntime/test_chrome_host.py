@@ -8,7 +8,7 @@ import threading
 import unittest
 from unittest.mock import patch, Mock
 
-from chrome_host import ChromeHost, ChromeLaunchError, chrome_command
+from chrome_host import ChromeHost, ChromeLaunchError, chrome_command, launch_command
 
 
 class ChromeHostTests(unittest.TestCase):
@@ -48,6 +48,31 @@ class ChromeHostTests(unittest.TestCase):
         self.assertIn('--remote-debugging-port=9233', command)
         with self.assertRaises(ValueError):
             chrome_command(self.owner['executable'], self.host.profile, 0)
+
+    def test_launch_is_background_and_hidden_and_keeps_the_verified_command(self):
+        executable = self.owner['executable']
+        command = launch_command(executable, self.host.profile, 9233)
+        self.assertEqual(command[:6], ['/usr/bin/open', '-g', '-j', '-n', '-a', str(Path(executable).parents[2])])
+        self.assertEqual(command[6], '--args')
+        self.assertEqual([executable] + command[7:], chrome_command(executable, self.host.profile, 9233))
+        with self.assertRaises(ValueError):
+            launch_command('/tmp/chrome', self.host.profile, 9233)
+
+    def test_launch_reports_listener_pid_and_never_relaunches(self):
+        import subprocess
+        calls = []
+        def fake_run(args, **_):
+            calls.append(args[0])
+            if args[0] == '/usr/bin/open':
+                return subprocess.CompletedProcess(args, 0)
+            return subprocess.CompletedProcess(args, 0, stdout='p' + ('' if calls.count('/usr/sbin/lsof') < 2 else '4321') + '\n')
+        with patch('chrome_host.subprocess.run', side_effect=fake_run):
+            self.assertEqual(self.host.launch(self.owner['executable'], 9233, threading.Event(), 5), 4321)
+        self.assertEqual(calls.count('/usr/bin/open'), 1)
+        with patch('chrome_host.subprocess.run', return_value=subprocess.CompletedProcess([], 1)) as run, \
+             self.assertRaises(ChromeLaunchError):
+            self.host.launch(self.owner['executable'], 9233, threading.Event(), 5)
+        run.assert_called_once()
 
     def test_graceful_close_sends_one_masked_fixed_command_after_endpoint_recheck(self):
         owner = dict(self.owner, browserPath='/devtools/browser/fixture')
@@ -89,7 +114,7 @@ class ChromeHostTests(unittest.TestCase):
         self.assertTrue(all('Google Chrome for Testing.app' in p for p in self.host.executables()))
 
     def test_missing_testing_browser_does_not_fall_back_to_regular_chrome(self):
-        with patch('chrome_host.os.access', return_value=False), patch('chrome_host.subprocess.Popen') as launch:
+        with patch('chrome_host.os.access', return_value=False), patch.object(self.host, 'launch') as launch:
             with self.assertRaisesRegex(ChromeLaunchError, 'Chrome for Testing'):
                 self.host.ensure()
         launch.assert_not_called()
@@ -122,7 +147,7 @@ class ChromeHostTests(unittest.TestCase):
     def test_cancel_does_not_launch(self):
         event = threading.Event()
         event.set()
-        with patch('chrome_host.subprocess.Popen') as launch, self.assertRaises(ChromeLaunchError):
+        with patch.object(self.host, 'launch') as launch, self.assertRaises(ChromeLaunchError):
             self.host.ensure(cancelled=event)
         launch.assert_not_called()
 
@@ -133,7 +158,7 @@ class ChromeHostTests(unittest.TestCase):
         (other / 'testing-chrome-owner.json').write_text(json.dumps(self.owner))
         host = ChromeHost(environments / 'run', max_browsers=1)
         host.root.mkdir()
-        with patch.object(host, 'process_gone', return_value=False), patch('chrome_host.subprocess.Popen') as launch:
+        with patch.object(host, 'process_gone', return_value=False), patch.object(host, 'launch') as launch:
             with self.assertRaises(ChromeLaunchError) as raised:
                 host.prepare_cookie_import()
         self.assertEqual(raised.exception.code, 'browser_limit')
@@ -166,13 +191,13 @@ class ChromeHostTests(unittest.TestCase):
         self.host.persist(self.owner)
         # Same start time (a reused PID within one second) but another command.
         with patch.object(self.host, 'process_field', side_effect=lambda pid, field: 'birth' if field == 'lstart' else 'foreign'), \
-             patch('chrome_host.subprocess.Popen') as launch:
+             patch.object(self.host, 'launch') as launch:
             with self.assertRaises(ChromeLaunchError):
                 self.host.ensure()
             launch.assert_not_called()
 
     def test_reused_host_cannot_terminate_chrome(self):
-        with patch('chrome_host.subprocess.Popen') as launch:
+        with patch('chrome_host.os.kill') as launch:
             self.host.close_created_for_test()
             launch.assert_not_called()
 
@@ -192,12 +217,12 @@ class ChromeHostTests(unittest.TestCase):
 
     def test_zombie_record_allows_one_fresh_launch(self):
         self.host.persist(self.owner)
-        child = Mock(pid=456)
-        child.poll.return_value = None
-        with patch.object(self.host, 'process_field', side_effect=lambda pid, field: 'Z' if field == 'stat' else 'birth'), \
+        # The recorded PID is a zombie; the fresh Chrome (456) is alive.
+        state = lambda pid, field: ('Z' if pid == 123 else 'S') if field == 'stat' else 'birth'
+        with patch.object(self.host, 'process_field', side_effect=state), \
              patch('chrome_host.os.access', return_value=True), \
              patch('chrome_host.verify_chrome'), \
-             patch('chrome_host.subprocess.Popen', return_value=child) as launch, \
+             patch.object(self.host, 'launch', return_value=456) as launch, \
              patch.object(self.host, 'endpoint', return_value='http://127.0.0.1:9999'), \
              patch.object(self.host, 'hide_created_browser', return_value=True) as hide:
             self.assertEqual(self.host.ensure(), 'http://127.0.0.1:9999')

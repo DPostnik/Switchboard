@@ -64,7 +64,9 @@ def serve_fake():
                 return {'content': [{'type': 'text', 'text': text}]}
             super().__init__(root, rpc=rpc, **kwargs)
 
-        def quit_idle_chrome(self, seconds=8):
+        def quit_idle_chrome(self, seconds=8, check_only=False):
+            if check_only:
+                return 'idle'
             with (Path(self.root) / 'dispatch.jsonl').open('a') as stream:
                 stream.write(json.dumps({'name': 'quit_idle_chrome', 'phase': 'start'}) + '\n')
             return 'quit'
@@ -92,7 +94,8 @@ class MultiClientTests(unittest.TestCase):
 
     def start_executor(self):
         self.executor = subprocess.Popen([sys.executable, '-B', str(Path(__file__).resolve()), '--serve-fake', str(self.root)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env={**os.environ, 'SWITCHBOARD_BROWSER_IDLE_QUIT_SECONDS': '0.5'})
         deadline = time.monotonic() + 3
         while not broker.endpoint(self.root).exists():
             self.assertIsNone(self.executor.poll())
@@ -176,11 +179,30 @@ class MultiClientTests(unittest.TestCase):
         self.assertFalse(any(r['name'] == 'quit_idle_chrome' for r in self.trace()))
         self.assertFalse(self.call(b, 'browser_snapshot', session=second['session']).get('isError'))
         closed = self.call(b, 'browser_close', session=second['session'])
-        self.assertEqual(json.loads(closed['content'][0]['text'])['browserQuit'], 'quit')
+        # The idle Chrome quits after the grace period, not inside the close call.
+        self.assertEqual(json.loads(closed['content'][0]['text'])['browserQuit'], 'scheduled')
+        self.assertFalse(any(r['name'] == 'quit_idle_chrome' for r in self.trace()))
+        deadline = time.monotonic() + 5
+        while not any(r['name'] == 'quit_idle_chrome' for r in self.trace()):
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.05)
         self.assertEqual(sum(r['name'] == 'quit_idle_chrome' for r in self.trace()), 1)
-        navigation = [row for row in self.trace() if row['name'] == 'navigate_page' and row['phase'] == 'start']
+        navigation = [row for row in self.trace() if row['name'] == 'navigate_page' and row['phase'] == 'start'
+                      and row['args']['url'] != 'about:blank']  # b's close released its tab as blank
         self.assertEqual([r['workspace'] for r in navigation], [str(p.resolve()) for p in projects])
         self.assertEqual([r['args']['pageId'] for r in navigation], [first['pageId'], second['pageId']])
+
+    def test_open_within_grace_period_keeps_chrome_and_reuses_the_released_tab(self):
+        self.start_executor()
+        a = self.client()
+        first = self.opened(a)
+        closed = json.loads(self.call(a, 'browser_close', session=first['session'])['content'][0]['text'])
+        self.assertEqual(closed['browserQuit'], 'scheduled')
+        second = self.opened(a)
+        self.assertEqual(second['pageId'], first['pageId'])
+        time.sleep(1)
+        self.assertFalse(any(r['name'] == 'quit_idle_chrome' for r in self.trace()))
+        self.assertEqual(sum(r['name'] == 'new_page' and r['phase'] == 'start' for r in self.trace()), 1)
 
     def test_concurrent_calls_are_serialized(self):
         self.start_executor()
@@ -354,7 +376,8 @@ class MultiClientTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / 'records/action-lost-action.json').read_text())['state'], 'outcome_unknown')
         self.opened(a)
         self.opened(b)
-        self.assertEqual(sum(r['name'] == 'new_page' and r['phase'] == 'start' for r in self.trace()), 4)
+        # One of the two new tasks reuses the blank tab released by b's close.
+        self.assertEqual(sum(r['name'] == 'new_page' and r['phase'] == 'start' for r in self.trace()), 3)
 
     def test_close_without_token_recovers_after_hung_open_was_aborted(self):
         self.start_executor()

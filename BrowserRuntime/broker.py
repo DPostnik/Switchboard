@@ -20,6 +20,8 @@ import time
 
 sys.dont_write_bytecode = True
 PROTOCOL = 1
+# Seconds an idle Chrome (blank tabs only) keeps running after the last browser_close.
+IDLE_QUIT_SECONDS = float(os.environ.get('SWITCHBOARD_BROWSER_IDLE_QUIT_SECONDS', '90'))
 LIMIT = 8_000_000
 
 
@@ -215,6 +217,10 @@ class Executor:
         self.listener = None
         self.path = endpoint(self.root)
         self.identity = BUILD_REVISION
+        # Chrome that only has blank tabs left quits after this grace period, not at once:
+        # a chat that opens one page after another reuses the running browser. Each fresh
+        # launch and each new browser window takes focus on macOS.
+        self.idle_quit = None  # (monotonic deadline, Browser that saw the idle Chrome)
 
     def apply_approved_read_recovery(self):
         """Called only at startup, after acquiring the legacy executor lock.
@@ -332,6 +338,7 @@ class Executor:
     def work(self):
         try:
             self.run_jobs()
+            self.quit_idle()  # The executor stops: do not leave an idle Chrome behind.
         except BaseException:
             self.stopped.set()  # Persistence/cleanup failure stops every dispatch.
 
@@ -342,6 +349,8 @@ class Executor:
                 client, message = self.jobs.get(timeout=0.1)
             except queue.Empty:
                 self.cleanup()
+                if self.idle_quit and time.monotonic() >= self.idle_quit[0]:
+                    self.quit_idle()
                 continue
             browser = client.browser
             response = {'id': message['id']}
@@ -356,6 +365,8 @@ class Executor:
                     from profiles import validate
                     validate(self.root, client.profile_lease, browser.workspace, language=client.language)
                     name = message.get('name')
+                    # Any new work keeps Chrome; a later idle close schedules the quit again.
+                    self.idle_quit = None
                     browser.uncertain = False
                     was_failed = browser.failed
                     shared = False
@@ -380,7 +391,12 @@ class Executor:
                         browser.persist()
                         if name == 'browser_close' and 'browserQuit' not in result:
                             # Another task of this chat still works in the same Chrome: keep it.
-                            result['browserQuit'] = 'kept' if shared else browser.quit_idle_chrome()
+                            verdict = 'kept' if shared else browser.quit_idle_chrome(check_only=True)
+                            if verdict == 'idle':
+                                self.idle_quit = (time.monotonic() + IDLE_QUIT_SECONDS, browser)
+                                result['browserQuit'] = 'scheduled'
+                            else:
+                                result['browserQuit'] = verdict
                             if result['browserQuit'] == 'kept':
                                 result.update(browser.kept_reason(other_task=shared))
                         response['result'] = result
@@ -401,6 +417,24 @@ class Executor:
                         client.browser.stop()
                         client.wire.close()
                 self.cleanup()
+
+    def quit_idle(self):
+        """Quit the idle Chrome once its grace period ended (or the executor stops).
+
+        Rechecked under operation.lock: any live task tab or non-blank page keeps it.
+        One graceful close, never resent; an unconfirmed quit is not retried.
+        """
+        pending, self.idle_quit = self.idle_quit, None
+        if pending is None:
+            return
+        browser = pending[1]
+        with self.clients_lock:
+            if any(c.browser.session for c in self.clients):
+                return
+        with (self.root / 'operation.lock').open('a') as operation_lock:
+            fcntl.flock(operation_lock, fcntl.LOCK_EX)
+            if browser.quit_idle_chrome(check_only=True) == 'idle':
+                browser.quit_idle_chrome()
 
     def run(self):
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -423,7 +457,7 @@ class Executor:
                         connection, _ = self.listener.accept()
                     except socket.timeout:
                         with self.clients_lock:
-                            if self.clients:
+                            if self.clients or self.idle_quit:
                                 empty_since = time.monotonic()
                             elif time.monotonic() - empty_since > 3:
                                 break

@@ -62,7 +62,7 @@ def main():
                 time.sleep(0.1)
             after = client()
             failed, closed = call(after, 'browser_close', session=opened['session'])
-            assert not failed and closed.get('earlierSession') and closed.get('browserQuit') == 'quit', closed
+            assert not failed and closed.get('earlierSession') and closed.get('browserQuit') in ('quit', 'scheduled'), closed
             assert host.process_gone(owner), 'chat Chrome still runs'
             assert json.loads(record.read_text())['state'] == 'orphan_closed'
             failed, again = call(after, 'browser_close', session=opened['session'])

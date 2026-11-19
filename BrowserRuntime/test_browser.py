@@ -41,31 +41,61 @@ class BrowserTests(unittest.TestCase):
     def test_open_preserves_visibility_without_replaying_uncertain_tab_creation(self):
         for hidden in (False, True):
             with self.subTest(hidden=hidden):
-                browser = Browser(Path(self.directory.name), rpc=Mock(side_effect=TimeoutError('lost reply')))
+                created = []
+                def rpc(name, args):
+                    if name == 'list_pages':  # No spare blank tab: a new tab is needed.
+                        return {'content': [{'type': 'text', 'text': '## Pages\n1: https://person.test/'}]}
+                    created.append(name)
+                    raise TimeoutError('lost reply')
+                browser = Browser(Path(self.directory.name), rpc=rpc)
                 browser.chrome = Mock(owner={'pid': 123})
                 browser.chrome.process_gone.return_value = False
                 browser.chrome.visibility.return_value = hidden
                 with self.assertRaises(TimeoutError):
                     browser.open('https://example.test/')
-                browser.injected.assert_called_once()
+                self.assertEqual(created, ['new_page'])
                 self.assertTrue(browser.failed)
                 self.assertEqual(browser.chrome.visibility.call_count, 2 if hidden else 1)
                 if hidden:
                     browser.chrome.visibility.assert_called_with({'pid': 123}, hide=True)
                 with self.assertRaises(Rejected):
                     browser.open('https://example.test/')
-                browser.injected.assert_called_once()
+                self.assertEqual(created, ['new_page'])
 
     def test_close_waits_for_inventory_without_replaying_action(self):
-        inventories = iter(['## Pages\n7: https://example.test/', '## Pages\n1: about:blank'])
+        # A spare blank tab already exists, so the task tab is closed.
+        inventories = iter(['## Pages\n1: about:blank\n7: https://example.test/',
+                            '## Pages\n1: about:blank\n7: https://example.test/', '## Pages\n1: about:blank'])
         def rpc(name, args):
             self.calls.append((name, args))
             return {'content': [{'type': 'text', 'text': next(inventories) if name == 'list_pages' else 'closed'}]}
         self.browser.injected = rpc
         self.assertEqual(self.browser.close_session('owner'), {'closed': True})
         self.assertEqual([n for n, _ in self.calls].count('close_page'), 1)
-        self.assertEqual([n for n, _ in self.calls].count('list_pages'), 2)
+        self.assertEqual([n for n, _ in self.calls].count('list_pages'), 3)
         self.assertIsNone(self.browser.session)
+
+    def test_last_task_tab_is_released_as_blank_and_reused_by_the_next_open(self):
+        pages = {7: 'https://example.test/'}
+        def rpc(name, args):
+            self.calls.append((name, args))
+            if name == 'list_pages':
+                return {'content': [{'type': 'text', 'text': '## Pages\n' + '\n'.join(f'{k}: {v}' for k, v in sorted(pages.items()))}]}
+            if name == 'navigate_page':
+                pages[args['pageId']] = args['url']
+                return {'content': [{'type': 'text', 'text': 'ok'}]}
+            if name == 'new_page':
+                raise AssertionError('a spare tab must be reused')
+            return envelope({'url': 'https://example.test/', 'readyState': 'complete'})
+        self.browser.injected = rpc
+        self.assertEqual(self.browser.close_session('owner'), {'closed': True})
+        self.assertEqual(pages, {7: 'about:blank'})
+        self.assertNotIn('close_page', [n for n, _ in self.calls])
+        self.browser.chrome = Mock(owner=None)
+        self.browser.chrome.process_gone.return_value = False
+        opened = self.browser.open('https://example.test/')
+        self.assertEqual(opened['pageId'], 7)
+        self.assertEqual(pages, {7: 'https://example.test/'})
 
     def test_close_also_closes_tabs_sites_opened_from_the_task_tab(self):
         owned, popup, nested, person = 'A' * 32, 'B' * 32, 'C' * 32, 'D' * 32
@@ -162,7 +192,8 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(self.browser.checkpoint['state'], 'close_uncertain')
         with self.assertRaises(Rejected):
             self.browser.close_session('owner')
-        self.assertEqual([n for n, _ in self.calls].count('close_page'), 1)
+        # The last tab is released to about:blank, once; the uncertain release is never replayed.
+        self.assertEqual([a.get('url') for n, a in self.calls if n == 'navigate_page'], ['about:blank'])
 
     def test_close_rejects_unconfirmed_inventory(self):
         with self.assertRaisesRegex(Rejected, 'page_inventory_not_confirmed'):
@@ -239,7 +270,7 @@ class BrowserTests(unittest.TestCase):
         opened = self.browser.open('https://example.test/')
         self.assertNotEqual(opened['session'], 'owner')
         self.assertEqual(opened['pageId'], 9)
-        self.assertEqual([name for name, _ in self.calls], ['new_page', 'navigate_page', 'evaluate_script'])
+        self.assertEqual([name for name, _ in self.calls], ['list_pages', 'new_page', 'navigate_page', 'evaluate_script'])
 
     def test_open_closes_only_verified_orphaned_tabs_once_and_records_new_target(self):
         browser = Browser(Path(self.directory.name))
