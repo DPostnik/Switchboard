@@ -111,7 +111,7 @@ import ContextCore
     await model.send()
 
     let requests = try await connection.request("test/requests").array
-    let sent = requests.filter { $0["method"].string == "turn/start" }.map { $0["params"]["input"].array.compactMap { $0["text"].string }.joined() }
+    let sent = try requests.filter { $0["method"].string == "turn/start" }.map(codexTurnUserText)
     try #require(sent.count == 3)
     #expect(sent[0].hasPrefix("First\n\n[Switchboard: ") && sent[0].contains("tests pass") && ChatJobNote.stripped(sent[0]) == "First")
     #expect(sent[1] == "Second")

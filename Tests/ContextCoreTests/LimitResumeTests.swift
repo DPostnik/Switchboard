@@ -179,7 +179,7 @@ private let codexLimitError = #"{"message":"You've hit your usage limit. Upgrade
 
 private func startedTexts(_ connection: CodexConnection) async throws -> [String] {
     try await connection.request("test/requests").array.filter { $0["method"].string == "turn/start" }
-        .map { $0["params"]["input"].array.compactMap { $0["text"].string }.joined() }
+        .map(codexTurnUserText)
 }
 
 @Test @MainActor func limitStopOffersArmsAndQueuesOneContinuation() async throws {

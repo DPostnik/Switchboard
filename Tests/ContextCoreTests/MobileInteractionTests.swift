@@ -218,7 +218,7 @@ private func interaction(_ kind: AgentInteraction.Kind) -> AgentInteraction {
 }
 @MainActor private func turnStarts(_ connection: CodexConnection) async throws -> [String] {
     try await connection.request("test/requests").array.filter { $0["method"].string == "turn/start" }
-        .map { $0["params"]["input"].array.compactMap { $0["text"].string }.joined() }
+        .map(codexTurnUserText)
 }
 @MainActor private func settle(_ model: DeskModel, until done: () async throws -> Bool) async throws {
     for _ in 0..<200 { if try await done() { return }; try await Task.sleep(for: .milliseconds(10)) }

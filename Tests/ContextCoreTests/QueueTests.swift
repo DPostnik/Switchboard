@@ -77,7 +77,7 @@ import ContextCore
     #expect(model.visibleQueue.isEmpty)
     // Only the message that interrupted the turn tells the agent to finish the interrupted task; the transcript hides the note.
     requests = try await connection.request("test/requests").array
-    let sent = requests.filter { $0["method"].string == "turn/start" }.map { $0["params"]["input"].array.compactMap { $0["text"].string }.joined() }
+    let sent = try requests.filter { $0["method"].string == "turn/start" }.map(codexTurnUserText)
     try #require(sent.count == 3)
     #expect(sent[0] == "First" && sent[2] == "Second")
     #expect(sent[1].hasPrefix("Third\n\n[Switchboard: ") && InterruptedTurnNote.stripped(sent[1]) == "Third")
@@ -100,7 +100,8 @@ import ContextCore
     }
     // After a plain Stop the next message carries no note.
     requests = try await connection.request("test/requests").array
-    #expect(requests.filter { $0["method"].string == "turn/start" }.last?["params"]["input"].array.compactMap { $0["text"].string }.joined() == "Keep for later")
+    let resumed = try #require(requests.last { $0["method"].string == "turn/start" })
+    #expect(try codexTurnUserText(resumed) == "Keep for later")
     model.draft = "Wait after failure"
     await model.send()
     model.finishActiveTurn(threadID: "t", turnID: "v4", status: .failed, hasError: true)
@@ -217,8 +218,8 @@ private func parallelChatFixture() throws -> (URL, URL) {
     let starts = requests.filter { $0["method"].string == "turn/start" }
     // Independent workers may reach turn/start in either order; each chat keeps its own order.
     #expect(starts.compactMap { $0["params"]["threadId"].string }.sorted() == ["a", "b", "b"])
-    #expect(starts.filter { $0["params"]["threadId"].string == "b" }
-        .map { $0["params"]["input"].array.first?["text"].string } == ["B first", "B queued"])
+    #expect(try starts.filter { $0["params"]["threadId"].string == "b" }
+        .map(codexTurnUserText) == ["B first", "B queued"])
 
     // Clicking the same project leaves its existing chat and preserves a new draft.
     model.selectProject(b.id)
@@ -594,7 +595,7 @@ private func parallelChatFixture() throws -> (URL, URL) {
     var sent: [String] = []
     for _ in 0..<300 {
         sent = try await connection.request("test/requests").array.filter { $0["method"].string == "turn/start" && $0["params"]["threadId"].string == thread }
-            .map { InterruptedTurnNote.stripped($0["params"]["input"].array.compactMap { $0["text"].string }.joined()) }
+            .map(codexTurnUserText)
         if sent.count >= count && !model.sending { break }
         try await Task.sleep(for: .milliseconds(10))
     }
@@ -685,13 +686,16 @@ private func parallelChatFixture() throws -> (URL, URL) {
     model.finishActiveTurn(threadID: "t", turnID: "t-1", status: .cancelled, hasError: false)
     #expect(model.queuedMessageIsClaimed(c))
     #expect(model.moveQueuedMessage(b, by: -1) == .claimed)
-    #expect(try await sentTexts(connection, model, count: 2) == ["First", "C"])
+    let sent = try await sentTexts(connection, model, count: 2)
+    try #require(sent.count == 2)
+    #expect(sent[0] == "First")
+    #expect(sent[1].hasPrefix("C\n\n[Switchboard: ") && InterruptedTurnNote.stripped(sent[1]) == "C")
     // Once sent, it is gone: an edit is refused, and nothing is sent again.
     #expect(model.editQueuedMessage(c, text: "Late", threadID: "t") == .gone)
     #expect(model.error != nil && model.draft == "Late")
     #expect(model.moveQueuedMessage(c, by: 1) == .gone)
     try await Task.sleep(for: .milliseconds(100))
-    #expect(try await sentTexts(connection, model, count: 2) == ["First", "C"])
+    #expect(try await sentTexts(connection, model, count: 2) == sent)
     #expect(model.visibleQueue.map(\.text) == ["B", "A, edited"])
     await connection.stop()
 }
