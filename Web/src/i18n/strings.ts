@@ -40,6 +40,16 @@ export const strings = {
   connStopped: ['Соединение приостановлено', 'Connection paused'],
   macOnline: ['Mac на связи', 'Mac online'],
   macOffline: ['Mac не в сети', 'Mac offline'],
+  macUnreachableTitle: ['Нет связи с Mac', 'Cannot reach the Mac'],
+  macUnreachableText: [
+    'Switchboard на Mac не отвечает: Mac спит или выключен, приложение закрыто, мобильный доступ выключен или у Mac нет сети. Новые команды подождут в облаке, и Mac обработает их, когда вернётся.',
+    'Switchboard on the Mac is not responding: the Mac is asleep or off, the app is closed, mobile access is off, or the Mac has no network. New commands wait in the cloud, and the Mac handles them when it is back.',
+  ],
+  serverUnreachableTitle: ['Нет связи с сервером Switchboard', 'Cannot reach the Switchboard server'],
+  serverUnreachableText: [
+    'Сайт не может связаться с облаком, через которое работает Mac. Показаны последние полученные данные; отправка может не пройти.',
+    'The site cannot reach the cloud that connects it to the Mac. The last received data is shown; sending may fail.',
+  ],
   mac: ['Mac', 'Mac'],
   noMacs: ['Нет Mac с включённым мобильным доступом. Включи его в настройках Switchboard на Mac.', 'No Mac with mobile access. Turn it on in Switchboard settings on the Mac.'],
   waitingForData: ['Получаем данные с Mac…', 'Loading data from the Mac…'],

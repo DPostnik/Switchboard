@@ -29,7 +29,12 @@ struct MobileChatList: View {
                 Section {
                 } header: {
                     VStack(alignment: .leading, spacing: 6) {
-                        ForEach(model.devices) { ConnectionStatus(model: model, device: $0, showsName: multipleMacs) }
+                        ForEach(model.devices) { device in
+                            VStack(alignment: .leading, spacing: 0) {
+                                ConnectionStatus(model: model, device: device, showsName: multipleMacs)
+                                MacUnreachableNotice(model: model, device: device)
+                            }
+                        }
                     }.textCase(nil)
                 }
             }

@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react'
-import { tx, type Language } from '../i18n'
+import { t, tx, type Language } from '../i18n'
 import { s } from '../i18n/strings'
 import { Engine } from '../sync/engine'
 import { ChatView } from './ChatView'
@@ -12,7 +12,10 @@ import { SearchForm } from './SearchForm'
 import { Sidebar } from './Sidebar'
 import { store, stored } from './storage'
 import { ShellContext, Toolbar } from './Toolbar'
+import { formatRelative } from './format'
 import { useMediaQuery } from './useMediaQuery'
+import { useNow } from './useNow'
+import { useReachability } from './useReachability'
 
 export type View = { kind: 'none' } | { kind: 'chat'; id: string } | { kind: 'new'; project?: string } | { kind: 'search' }
 
@@ -133,6 +136,9 @@ export function WorkspaceShell({ engine, lang, onToggleLanguage, onSignOut }: Sh
   // The selected project preselects the project of a new chat or search.
   const selectedProject = device?.snapshot.projects.some((project) => project.id === projectChoice) ? projectChoice : ''
   const initialProject = (view.kind === 'new' && view.project) || selectedProject
+  const reach = useReachability(state, device)
+  const now = useNow(30_000, reach === 'mac')
+  const seen = reach === 'mac' ? formatRelative(device?.seen, now) : null
 
   let main
   if (!state.synced) main = <Page title={s('appName')}><EmptyState icon="desktop" title={state.error ? tx(state.error) : s('waitingForData')} busy={!state.error} /></Page>
@@ -162,10 +168,28 @@ export function WorkspaceShell({ engine, lang, onToggleLanguage, onSignOut }: Sh
           onChooseDevice={chooseDevice} onSignOut={onSignOut} onToggleLanguage={onToggleLanguage} hidden={!sidebarVisible} />
         {narrow && drawerOpen && <div className="scrim" onClick={() => setDrawerOpen(false)} aria-hidden="true" />}
         <main className="main">
-          {state.error && state.connection !== 'connected' && state.synced && (
+          {reach === 'server' ? (
+            <div className="banner problem" role="alert">
+              <Icon name="warning" />
+              <div className="banner-body">
+                <strong>{s('serverUnreachableTitle')}</strong>
+                <span>{state.error ? tx(state.error) : s('serverUnreachableText')}</span>
+              </div>
+            </div>
+          ) : state.error && state.connection !== 'connected' && state.synced && (
             <div className="banner problem" role="alert">
               <Icon name="warning" />
               <span>{tx(state.error)}</span>
+            </div>
+          )}
+          {reach === 'mac' && device && (
+            <div className="banner attention" role="alert">
+              <Icon name="warning" />
+              <div className="banner-body">
+                <strong>{s('macUnreachableTitle')}</strong>
+                <span>{s('macUnreachableText')}</span>
+                {seen && <span>{t(`Последние данные от Mac: ${seen}`, `Last data from the Mac: ${seen}`)}</span>}
+              </div>
             </div>
           )}
           {main}

@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- The web client and the iPhone app explain when they cannot reach the Mac (Switchboard on the Mac asleep, closed or offline) or the Switchboard server, and that new commands wait until the Mac is back.
+
 - Project rows show a spinner while agents are working, and the tooltip lists the running chats even when the project is collapsed.
 
 - The agent browser no longer takes focus, leaves a full-screen video or brings Switchboard to the front: it starts in the background, reuses a blank tab instead of opening new tabs and windows, and quits about 90 seconds after the last tab closes instead of relaunching for every page.

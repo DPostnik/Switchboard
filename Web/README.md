@@ -49,5 +49,5 @@ Mac's and the iPhone's sessions, because all clients share the owner account.
 - `src/components/` – the React UI, drawn after the Mac app (`DeskPalette`, sidebar, transcript, composer).
   `src/styles.css` holds the palette (light from `DeskPalette.swift`, dark from `prefers-color-scheme`). `src/i18n/` – Russian and English strings.
 - `src/preview/` – dev-only sample data: `npm run dev`, then open `/?preview=1` (add `&lang=ru|en`, `&theme=dark`,
-  `&screen=signin`). It uses an in-memory engine, never creates a Supabase client and sends nothing; the dev server
+  `&screen=signin`, `&mac=offline`, `&server=offline`). It uses an in-memory engine, never creates a Supabase client and sends nothing; the dev server
   swaps the entry (`vite.config.ts`, `apply: 'serve'`), so production builds do not contain it.

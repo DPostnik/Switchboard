@@ -23,7 +23,10 @@ struct MobileChatView: View {
             let project = device.snapshot.projects.first { $0.id == chat.project }
             VStack(spacing: 0) {
                 if !(model.connectionState == .connected && model.onlineMacs.contains(device.id.lowercased())) {
-                    ConnectionStatus(model: model, device: device)
+                    VStack(alignment: .leading, spacing: 0) {
+                        ConnectionStatus(model: model, device: device)
+                        MacUnreachableNotice(model: model, device: device)
+                    }
                         .padding(.horizontal, 16).padding(.vertical, 8)
                         .frame(maxWidth: .infinity).background(.bar)
                 }

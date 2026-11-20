@@ -3,7 +3,7 @@ import Foundation
 
 // Simulator-only fixtures for visual checks and UI tests; no cloud or agent access.
 // Launch arguments: -mobile-preview (required), -preview-chat, -preview-long, -preview-rich,
-// -preview-actions, -preview-settings, -preview-read-only, -preview-project-list, -preview-offline,
+// -preview-actions, -preview-settings, -preview-read-only, -preview-project-list, -preview-offline, -preview-mac-offline,
 // -preview-file <path>, -preview-groups (running, approval and read-only chats in a second project),
 // -preview-unconfirmed (an unconfirmed send in the first chat and an undelivered new chat),
 // -preview-question (a working first chat asks a question with options and "Other", then a form waits),
@@ -150,7 +150,7 @@ extension MobileModel {
         }
 
         connectionState = ProcessInfo.processInfo.arguments.contains("-preview-offline") ? .offline : .connected
-        onlineMacs = Set(devices.map(\.id))
+        onlineMacs = ProcessInfo.processInfo.arguments.contains("-preview-mac-offline") ? [] : Set(devices.map(\.id))
         signedIn = true
         if ProcessInfo.processInfo.arguments.contains("-preview-unconfirmed"), let device = devices.first {
             receiptStorage = RemoteSessionStorage(read: { _ in nil }, write: { _, _ in })

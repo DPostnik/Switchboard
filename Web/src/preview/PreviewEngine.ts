@@ -8,7 +8,7 @@ import { previewOwner, previewState } from './fixtures'
 
 export class PreviewEngine implements EngineLike {
   readonly owner = previewOwner
-  private state: EngineState = previewState()
+  private state: EngineState = PreviewEngine.initialState()
   private listeners = new Set<() => void>()
 
   subscribe = (listener: () => void): (() => void) => {
@@ -16,6 +16,15 @@ export class PreviewEngine implements EngineLike {
     return () => this.listeners.delete(listener)
   }
   getState = (): EngineState => this.state
+
+  /** `mac=offline` hides the Mac's Presence; `server=offline` drops the server connection after the first sync. */
+  private static initialState(): EngineState {
+    const state = previewState()
+    const params = new URLSearchParams(location.search)
+    if (params.get('mac') === 'offline') state.macs = new Set()
+    if (params.get('server') === 'offline') return { ...state, connection: 'offline', macs: new Set() }
+    return state
+  }
 
   private set(patch: Partial<EngineState>): void {
     this.state = { ...this.state, ...patch }

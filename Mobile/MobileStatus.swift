@@ -66,6 +66,39 @@ struct ConnectionStatus: View {
     }
 }
 
+/// Explains a Mac that is absent while the server is connected, after the absence has lasted a few seconds:
+/// Presence drops briefly on every reconnect of either side. Commands stay queued in the cloud meanwhile.
+struct MacUnreachableNotice: View {
+    @ObservedObject var model: MobileModel
+    let device: RemoteDevice
+    @State private var shown = false
+    static let grace: Duration = .seconds(5)
+    var body: some View {
+        let absent = model.connectionState == .connected && !model.onlineMacs.contains(device.id.lowercased())
+        VStack(alignment: .leading, spacing: 4) {
+            if absent && shown {
+                Label(L10n.text("Нет связи с Mac", "Cannot reach the Mac"), systemImage: "exclamationmark.triangle")
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(.orange)
+                Text(L10n.text("Switchboard на Mac не отвечает: Mac спит или выключен, приложение закрыто, мобильный доступ выключен или у Mac нет сети. Новые команды подождут в облаке, и Mac обработает их, когда вернётся.",
+                               "Switchboard on the Mac is not responding: the Mac is asleep or off, the app is closed, mobile access is off, or the Mac has no network. New commands wait in the cloud, and the Mac handles them when it is back."))
+                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        // Spacing lives here, so a hidden notice takes no room in its parent.
+        .padding(.top, absent && shown ? 6 : 0)
+        .font(.footnote)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("mac-unreachable")
+        .task(id: absent) {
+            shown = false
+            guard absent else { return }
+            try? await Task.sleep(for: Self.grace)
+            if !Task.isCancelled { shown = true }
+        }
+    }
+}
+
 /// Errors and the delivery receipt of one chat (or of new chats in one project), with the next step.
 /// An unconfirmed command blocks only this chat; nothing is resent automatically.
 struct MobileDeliveryNotice: View {
