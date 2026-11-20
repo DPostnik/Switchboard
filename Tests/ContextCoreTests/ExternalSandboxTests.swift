@@ -1002,3 +1002,41 @@ private extension ExternalSandboxCommand.ArgumentRule {
     let unchanged = try ExternalSandboxPlanner.plan(inputs[1], helper: .success(helper)).get()
     #expect(scope(after[1]) == scope(unchanged))
 }
+
+/// The Docker access set opens the daemon socket file only, with nono's `deny_credentials` rule lifted for that file;
+/// `~/.docker` itself stays closed, and a saved `~/.docker` folder grant is reported as protected (user decision 2026-11-20).
+@Test func dockerSetGrantsOnlyTheSocketAndReportsProtectedFolderGrants() throws {
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    let home = root.appendingPathComponent("home")
+    let socket = home.appendingPathComponent(".docker/run/docker.sock")
+    try FileManager.default.createDirectory(at: socket.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data().write(to: socket)
+    var project = Project(path: root.appendingPathComponent("project").path)
+    project.accessPresets = ["docker"]
+    #expect(project.commandSandbox(extraRoots: [])?.unixSockets == ["/var/run/docker.sock", "~/.docker/run/docker.sock"])
+    let plan = try ExternalSandboxPlanner.plan(claudeInput(root, project: project, workerID: "docker"), helper: .success(helper)).get()
+    let path = socket.resolvingSymlinksInPath().path
+    let folder = home.appendingPathComponent(".docker").resolvingSymlinksInPath().path
+    #expect(plan.grants.contains(.init(.unixSocket, path)) && plan.grants.contains(.init(.bypassProtection, path)))
+    #expect(!plan.grants.contains { $0.path == folder || ($0.mode == .bypassProtection && $0.path != path && $0.path.hasPrefix(folder)) })
+    #expect(plan.protectedFolders.isEmpty && plan.foldersNotice() == nil)
+    let arguments = plan.arguments(helper: helper)
+    #expect(zip(arguments, arguments.dropFirst()).contains { $0 == "--bypass-protection" && $1 == path })
+    // `~/.docker/config.json` stays denied: Docker clients read an empty config folder inside the worker's temp grant.
+    #expect(plan.environment["DOCKER_CONFIG"] == plan.temporary.appendingPathComponent("docker-config").path)
+    #expect(plan.environment["DOCKER_CONFIG"]?.hasPrefix(plan.temporary.path + "/") == true)
+
+    // Without the set nothing opens; a saved folder grant of `~/.docker` is named in the chat notice instead.
+    project.accessPresets = []
+    project.extraRoots = [.init(path: folder, writable: true)]
+    let folderOnly = try ExternalSandboxPlanner.plan(claudeInput(root, project: project, workerID: "docker"), helper: .success(helper)).get()
+    #expect(!folderOnly.grants.contains { $0.mode == .unixSocket && $0.path == path || $0.mode == .bypassProtection })
+    #expect(folderOnly.protectedFolders == [folder])
+    #expect(folderOnly.environment["DOCKER_CONFIG"] == nil)
+    for language in [AppLanguage.russian, .english] {
+        let text = try #require(folderOnly.foldersNotice(language: language))
+        #expect(text.contains(folder) && text.contains("docker"))
+    }
+}

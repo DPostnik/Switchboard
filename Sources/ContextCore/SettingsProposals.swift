@@ -416,8 +416,8 @@ public enum SettingsProposalInbox {
     }
 
     public static func boundaryCommandRule(language: AppLanguage = L10n.language) -> String {
-        L10n.text("- Под внешней границей (`SWITCHBOARD_EXTERNAL_SANDBOX=1`) `addCommands` не выводит команду наружу: она всё равно выполняется внутри. Для записи Связки ключей запрашивай `addKeychainItems`, для учётных данных или сетевой идентичности - набор доступа с командой-посредником (`addPresets`), но не доверенную команду.",
-                  "- Under the external boundary (`SWITCHBOARD_EXTERNAL_SANDBOX=1`) `addCommands` does not take a command outside: it still runs inside. For a Keychain item request `addKeychainItems`; for a credential or a network identity, an access set with a mediated command (`addPresets`); never a trusted command.",
+        L10n.text("- Под внешней границей (`SWITCHBOARD_EXTERNAL_SANDBOX=1`) `addCommands` не выводит команду наружу: она всё равно выполняется внутри. Для записи Связки ключей запрашивай `addKeychainItems`, для учётных данных или сетевой идентичности - набор доступа с командой-посредником (`addPresets`), но не доверенную команду. Папки с учётными данными (`~/.docker`, `~/.ssh`, `~/.aws`, `~/.kube` и подобные) граница не открывает даже после выдачи папки; для демона Docker запрашивай набор `docker`.",
+                  "- Under the external boundary (`SWITCHBOARD_EXTERNAL_SANDBOX=1`) `addCommands` does not take a command outside: it still runs inside. For a Keychain item request `addKeychainItems`; for a credential or a network identity, an access set with a mediated command (`addPresets`); never a trusted command. Folders with credentials (`~/.docker`, `~/.ssh`, `~/.aws`, `~/.kube` and similar) stay closed under the boundary even after a folder grant; for the Docker daemon request the `docker` set.",
                   language: language)
     }
     /// How a project script reads a granted Keychain item under the external boundary, and the one request when it is missing.

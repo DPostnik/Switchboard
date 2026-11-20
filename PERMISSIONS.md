@@ -164,7 +164,9 @@ Secrets
     files) stay denied inside every restricted role. One deliberate exception (user decision
     2026-11-13): mediated gh's own sandbox reads `~/.config/gh` (read-only), only while its
     `hosts.yml` holds no plain-text `oauth_token` (the token stays in the Keychain). The session and
-    every other command never get it.
+    every other command never get it. Second exception (user decision 2026-11-20): the `docker` access
+    set opens the Docker daemon socket file inside `~/.docker` (`--allow-unix-socket` plus
+    `--bypass-protection` on that one file); the folder and `config.json` stay denied.
 
 Process
 13. Never retry a turn, an answer or an action after an uncertain transport result.
@@ -217,6 +219,8 @@ Do not reopen these without the user.
 - Under the boundary an action outside the roots fails; the command itself is never asked about.
   The agent then follows "After a refusal" in section 1: one access request for a durable project
   setting, no workaround (user decision 2026-11-12; it refines the earlier "fails, not asked").
+- Docker (2026-11-20): only through the `docker` access set, which opens the daemon socket file and
+  nothing else in `~/.docker`. Never a folder grant of `~/.docker` or a bypass of a whole folder.
 - Grants are reviewed about twice a week (section 7). Accumulated grants are not trusted forever.
 - Sub-agents inherit the parent's rights. The role cap limits their tool names only; there is no
   read-only promise for them.
@@ -658,6 +662,31 @@ installer (channel 3) keeps its existing signature/team/bundle checks and no-ret
 No permission invariant or taken decision changes. PostgreSQL database tests remain
 blocked inside the external boundary by its shared-memory refusal (the user ran the suite successfully in Terminal); a trusted Python command
 would not remove that boundary and is not a valid workaround.
+
+### Docker daemon socket (2026-11-20, live check pending)
+
+Found: a chat of `sportradar-engineering-exercise` got `~/.docker` as a writable folder, yet
+`docker version` still failed with "permission denied" on `/var/run/docker.sock` (a link to
+`~/.docker/run/docker.sock`). nono 0.81.0 has the required group `deny_credentials` (`~/.docker`,
+`~/.ssh`, `~/.aws`, `~/.kube`, `~/.npmrc`, ...); `--allow` does not lift it, only
+`--bypass-protection <path>` does (`nono run -v --dry-run`).
+
+User decision: a `docker` access set, ticked on purpose (no markers). Channel 1 (inside the
+boundary), compiled from the project settings (invariant 1). `AccessPreset.unixSockets` reaches
+`CommandSandbox.unixSockets`; the planner resolves each existing socket (the link target) and passes
+`--allow-unix-socket <socket>`, plus `--bypass-protection <socket>` when the socket lies under a
+`protectedPaths` entry. Claude's native sandbox gets `network.allowUnixSockets` and a read grant of the
+socket file (both the given path and its target). Under the boundary `DOCKER_CONFIG` points to an empty
+folder in the worker's temp grant: Testcontainers (`auth/get-auth-config.ts`) sees `~/.docker/config.json`
+and fails with EPERM reading it; registry sign-ins therefore stay unavailable to agents. Known gap: Claude's
+native sandbox does not set `DOCKER_CONFIG`. Codex native `workspaceWrite` with network already
+allowed the socket; no change there. Risk accepted by the user: the daemon can start a container that
+mounts any shared host folder, so this set reaches beyond the project roots.
+
+Diagnostics: a saved folder grant under `protectedPaths` is reported in the chat on launch by both
+providers (`ExternalSandboxPlan.protectedFolders`, `foldersNotice()`), and the agents' proposal rule
+says such folders stay closed and names the `docker` set. `protectedHomePaths` copies nono 0.81.0's
+`deny_credentials` and `deny_keychains_macos`; update it when nono is upgraded.
 
 ### Missing explicit folders (2026-11-15, implementation pending verification)
 

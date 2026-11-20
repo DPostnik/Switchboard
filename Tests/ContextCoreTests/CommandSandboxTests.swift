@@ -19,7 +19,7 @@ private func sandboxSettings(_ profile: AgentPermissionProfile, cwd: String) thr
     try Data(#"{"devDependencies":{"@playwright/test":"1.0.0"}}"#.utf8).write(to: root.appendingPathComponent("package.json"))
     #expect(AccessPresetCatalog.detect(projectPath: root.path) == ["github", "node", "browsers", "swift"])
     // Presets without markers (Homebrew, Downloads, signing) are never suggested.
-    #expect(AccessPresetCatalog.all.filter(\.markers.isEmpty).map(\.id) == ["homebrew", "agent-clis", "downloads", "apple-signing"])
+    #expect(AccessPresetCatalog.all.filter(\.markers.isEmpty).map(\.id) == ["homebrew", "agent-clis", "downloads", "apple-signing", "docker"])
 
     var state = SavedState()
     state.projects = [Project(path: root.path)]
@@ -65,6 +65,18 @@ private func sandboxSettings(_ profile: AgentPermissionProfile, cwd: String) thr
     #expect(sandbox["excludedCommands"] == .null && sandbox["allowUnsandboxedCommands"] == .bool(true))
     #expect(sandbox["network"]["allowedDomains"].array == [.string("*")])
     #expect(!settings["permissions"]["allow"].array.contains(.string("Bash")))
+    #expect(sandbox["network"]["allowUnixSockets"] == .null)
+}
+
+@Test func claudeDockerSetAllowsOnlyTheDaemonSocket() throws {
+    var project = Project(path: "/Users/me/app")
+    project.accessPresets = ["docker"]
+    let sandbox = try sandboxSettings(developer(project), cwd: "/Users/me/app")["sandbox"]
+    let sockets = sandbox["network"]["allowUnixSockets"].array.compactMap(\.string)
+    let home = NSHomeDirectory() + "/.docker/run/docker.sock"
+    #expect(sockets.contains("/var/run/docker.sock") && sockets.contains(home))
+    let read = sandbox["filesystem"]["allowRead"].array.compactMap(\.string)
+    #expect(read.contains(home) && !read.contains(NSHomeDirectory() + "/.docker") && !read.contains("~/.docker"))
 }
 
 @Test func claudeSandboxedLaunchTellsTheAgentHowTrustedCommandsLeaveTheSandbox() throws {

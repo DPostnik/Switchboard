@@ -51,19 +51,19 @@ def swift_cases(source, enum):
 
 
 def presets():
-    """Access sets from the app's catalog: id -> read, write, unsandboxed."""
+    """Access sets from the app's catalog: id -> read, write, unsandboxed, unixSockets."""
     if not PRESETS_SOURCE.exists():
         return None
     text = PRESETS_SOURCE.read_text()
     result = {}
     for block in re.findall(r'AccessPreset\(id: "([^"]+)"(.*?)(?=AccessPreset\(id:|\n    \])', text, re.S):
-        fields = {name: re.findall(r'"([^"]+)"', value) for name, value in re.findall(r'\b(read|write|unsandboxed): \[(.*?)\]', block[1], re.S)}
+        fields = {name: re.findall(r'"([^"]+)"', value) for name, value in re.findall(r'\b(read|write|unsandboxed|unixSockets): \[(.*?)\]', block[1], re.S)}
         result[block[0]] = {key: [expand(path) for path in fields.get(key, [])] if key != 'unsandboxed' else fields.get(key, [])
-                            for key in ('read', 'write', 'unsandboxed')}
+                            for key in ('read', 'write', 'unsandboxed', 'unixSockets')}
     base = re.search(r'baseUnsandboxed = \[(.*?)\]', text)
     if not result or not base:
         fail(f'access sets not found in {PRESETS_SOURCE}; update this script with the app change')
-    result['_base'] = {'read': [], 'write': [], 'unsandboxed': re.findall(r'"([^"]+)"', base.group(1))}
+    result['_base'] = {'read': [], 'write': [], 'unixSockets': [], 'unsandboxed': re.findall(r'"([^"]+)"', base.group(1))}
     return result
 
 

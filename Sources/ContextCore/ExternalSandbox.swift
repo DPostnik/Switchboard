@@ -221,6 +221,9 @@ public struct ExternalSandboxCommand: Hashable, Sendable, Encodable {
 public struct ExternalSandboxPlan: Hashable, Sendable {
     public enum Mode: String, Sendable {
         case allow = "--allow", read = "--read", allowFile = "--allow-file", readFile = "--read-file", unixSocket = "--allow-unix-socket"
+        /// Lifts nono's built-in deny rule (`deny_credentials`) for exactly this path; paired with a `unixSocket` grant of the
+        /// same path, never with a folder.
+        case bypassProtection = "--bypass-protection"
     }
     public struct Grant: Hashable, Sendable {
         public let mode: Mode
@@ -232,6 +235,13 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
     public let grants: [Grant]
     /// Explicit saved folder grants omitted because the resource does not exist. Optional preset paths are excluded.
     public let missingFolders: [String]
+    /// Explicit saved folder grants inside a path nono denies by its required groups (`ExternalSandboxPlanner.protectedPaths`):
+    /// passed to nono, but the deny rule wins, so the folder stays closed.
+    public var protectedFolders: [String] = []
+    /// An access set opened a daemon socket (Docker): `DOCKER_CONFIG` points to an empty folder in the worker's temp folder,
+    /// because `~/.docker/config.json` stays denied and Testcontainers fails on a config file it sees but cannot read.
+    public var dockerConfig = false
+    public var dockerConfigFolder: URL { temporary.appendingPathComponent("docker-config", isDirectory: true) }
     public let commands: [ExternalSandboxCommand]
     public let executableDirectories: [String]
     public let worker: URL
@@ -244,6 +254,22 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
         return L10n.text(
             "Доступ к папкам сохранён, но эти пути отсутствуют и не вошли во внешнюю границу: \(paths). Приложение не создаёт их и не даёт доступ к родительским папкам. После создания папки приложение заново скомпилирует сохранённые права со следующего сообщения. Повторный запрос доступа не нужен.",
             "Folder access is saved, but these paths do not exist and were omitted from the external boundary: \(paths). The app does not create them or grant their parent folders. After a folder is created, the app recompiles saved grants on the next message. No repeated access request is needed.", language: language)
+    }
+    /// The chat diagnostic for saved folder grants the boundary does not open (missing or protected), shared by both providers.
+    public func foldersNotice(language: AppLanguage = L10n.language) -> String? {
+        let parts = [missingFoldersNotice(language: language), protectedFoldersNotice(language: language)].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: "\n\n")
+    }
+    public func protectedFoldersNotice(language: AppLanguage = L10n.language) -> String? {
+        guard !protectedFolders.isEmpty else { return nil }
+        let paths = protectedFolders.joined(separator: ", ")
+        let docker = protectedFolders.contains { $0.hasSuffix("/.docker") || $0.contains("/.docker/") }
+        return L10n.text(
+            "Доступ к папкам сохранён, но внешняя граница всё равно закрывает их: в них хранятся учётные данные (\(paths)). Повторный запрос папки не поможет."
+                + (docker ? " Для демона Docker нужен набор доступа «Docker» (`addPresets: [\"docker\"]`): он открывает только сокет." : ""),
+            "Folder access is saved, but the external boundary still closes these folders because they hold credentials: \(paths). Requesting the folder again will not help."
+                + (docker ? " For the Docker daemon use the “Docker” access set (`addPresets: [\"docker\"]`): it opens only the socket." : ""),
+            language: language)
     }
     public var policyFile: URL { worker.appendingPathComponent("policy.json") }
     /// Provider settings the app writes before launch (Claude `--settings`); granted read-only when the plan asks for it.
@@ -275,6 +301,7 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
         // validates TLS through it gets macOS's own CA bundle file instead of a Keychain grant.
         ["TMPDIR": temporary.path, "XDG_STATE_HOME": ExternalSandboxLocations.state.path, "XDG_CONFIG_HOME": ExternalSandboxLocations.config.path,
          "SWITCHBOARD_EXTERNAL_SANDBOX": "1", "SSL_CERT_FILE": "/etc/ssl/cert.pem"]
+            .merging(dockerConfig ? ["DOCKER_CONFIG": dockerConfigFolder.path] : [:]) { _, new in new }
     }
 
     /// `nono run` arguments; the caller appends `--` and the provider command.
@@ -354,7 +381,8 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
     /// Writes the worker folder, policy and an empty server spec. The folder is private to the app (0700).
     public func materialize() throws {
         let manager = FileManager.default
-        for directory in [ExternalSandboxLocations.state, ExternalSandboxLocations.config, worker, temporary, socket.deletingLastPathComponent()] {
+        for directory in [ExternalSandboxLocations.state, ExternalSandboxLocations.config, worker, temporary, socket.deletingLastPathComponent()]
+                + (dockerConfig ? [dockerConfigFolder] : []) {
             try manager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         }
         let data = try JSONSerialization.data(withJSONObject: policyDocument(), options: [.sortedKeys, .prettyPrinted])
@@ -518,6 +546,17 @@ public enum ExternalSandboxPlanner {
         if let sandbox = effective.commandSandbox, effective.shell == .on {
             for path in sandbox.write { add(.allow, path) }
             for path in sandbox.read { add(.read, path) }
+            // Access-set sockets: the socket file only (a link resolves to its target), with nono's deny rule lifted for that
+            // file alone. Missing sockets (daemon not installed) are skipped; the next planned process picks them up.
+            for path in sandbox.unixSockets ?? [] {
+                let resolved = canonical(expand(path, home: input.home))
+                guard resolved.hasPrefix("/"), resolved != protected, !resolved.hasPrefix(protected + "/"),
+                      manager.fileExists(atPath: resolved), !grants.contains(.init(.unixSocket, resolved)) else { continue }
+                grants.append(.init(.unixSocket, resolved))
+                if protectedPaths(home: input.home).contains(where: { resolved == $0 || resolved.hasPrefix($0 + "/") }) {
+                    grants.append(.init(.bypassProtection, resolved))
+                }
+            }
             // The app's own cache folder holds the shared build lock every project script takes.
             let caches = input.home.appendingPathComponent("Library/Caches/Switchboard").path
             try? manager.createDirectory(atPath: caches, withIntermediateDirectories: true)
@@ -591,9 +630,25 @@ public enum ExternalSandboxPlanner {
                 return .failure(.trustedCommandOutside(command))
             }
         }
-        return .success(.init(workerID: input.workerID, project: project, grants: grants, missingFolders: missingFolders, commands: commands,
-                              executableDirectories: executableDirectories, worker: worker, socket: socket,
-                              relay: resources.appendingPathComponent("SandboxRuntime/mcp_relay.py"), temporary: temporary))
+        var result = ExternalSandboxPlan(workerID: input.workerID, project: project, grants: grants, missingFolders: missingFolders, commands: commands,
+                                         executableDirectories: executableDirectories, worker: worker, socket: socket,
+                                         relay: resources.appendingPathComponent("SandboxRuntime/mcp_relay.py"), temporary: temporary)
+        let denied = protectedPaths(home: input.home)
+        result.dockerConfig = grants.contains { $0.mode == .bypassProtection }
+        result.protectedFolders = effective.extraRoots.map { canonical(expand($0.path, home: input.home)) }
+            .filter { root in denied.contains { root == $0 || root.hasPrefix($0 + "/") } }
+        return .success(result)
+    }
+
+    /// Paths nono 0.81.0 denies through its required groups `deny_credentials` and `deny_keychains_macos` (built-in policy,
+    /// checked with `nono run -v --dry-run`). A plain `--allow` does not open them; only `--bypass-protection` does.
+    static let protectedHomePaths = [".ssh", ".gnupg", ".aws", ".azure", ".config/gcloud", ".gcloud", ".kube", ".docker", ".git-credentials",
+                                     ".netrc", ".npmrc", ".bunfig.toml", ".config/bun/bunfig.toml", ".vault-token", ".credentials", ".secrets",
+                                     ".keys", ".pki", ".terraform.d", ".config/op", "Library/Keychains", ".password-store", ".1password",
+                                     "Library/Group Containers/2BUA8C4S2C.com.1password", "Library/Application Support/1Password",
+                                     "Library/Containers/com.1password.1password"]
+    static func protectedPaths(home: URL) -> [String] {
+        protectedHomePaths.map { canonical(home.appendingPathComponent($0).path) } + ["/Library/Keychains"]
     }
 
     /// Rollback switch: `defaults write local.daniil.switchboard ExternalBoundaryGitNarrowingOff -bool YES` gives mediated git
@@ -726,7 +781,7 @@ public enum ExternalSandboxPlanner {
         func inside(_ raw: String) -> Bool {
             let path = canonical(expand(raw, home: home))
             if systemPrefixes.contains(where: { (path + "/").hasPrefix($0) }) { return true }
-            return grants.contains { $0.mode != .unixSocket && (path == $0.path || path.hasPrefix($0.path + "/")) }
+            return grants.contains { $0.mode != .unixSocket && $0.mode != .bypassProtection && (path == $0.path || path.hasPrefix($0.path + "/")) }
         }
         for command in trusted where !base.contains(command) {
             let tokens = commandTokens(command)

@@ -19,11 +19,14 @@ public struct AccessPreset: Codable, Hashable, Identifiable, Sendable {
     /// Project entries that suggest the preset: a file name, a `*.ext` glob over the top level, or `file:text`
     /// for a file that contains the text. Empty: never suggested, the user ticks it on purpose.
     public var markers: [String]
+    /// Unix sockets commands may connect to. Under the external boundary each one also lifts nono's deny rule for that one
+    /// file (`--bypass-protection`), never for its folder.
+    public var unixSockets: [String]
 
     public init(id: String, titleRU: String, titleEN: String, summaryRU: String, summaryEN: String,
-                read: [String] = [], write: [String] = [], unsandboxed: [String] = [], markers: [String] = []) {
+                read: [String] = [], write: [String] = [], unsandboxed: [String] = [], markers: [String] = [], unixSockets: [String] = []) {
         self.id = id; self.titleRU = titleRU; self.titleEN = titleEN; self.summaryRU = summaryRU; self.summaryEN = summaryEN
-        self.read = read; self.write = write; self.unsandboxed = unsandboxed; self.markers = markers
+        self.read = read; self.write = write; self.unsandboxed = unsandboxed; self.markers = markers; self.unixSockets = unixSockets
     }
     public func title(language: AppLanguage = L10n.language) -> String { L10n.text(titleRU, titleEN, language: language) }
     public var title: String { title() }
@@ -100,7 +103,13 @@ public enum AccessPresetCatalog {
                      summaryRU: "codesign идёт вне песочницы и использует сертификаты из Связки ключей.",
                      summaryEN: "codesign runs outside the sandbox and uses certificates from the Keychain.",
                      write: ["~/Library/Developer/Xcode/UserData/Provisioning Profiles"],
-                     unsandboxed: ["codesign"])
+                     unsandboxed: ["codesign"]),
+        // No markers: the daemon socket controls every container and the folders they mount, so the user ticks it on purpose
+        // (user decision 2026-11-20). `~/.docker` itself (registry credentials in config.json) stays closed.
+        AccessPreset(id: "docker", titleRU: "Docker (сокет демона)", titleEN: "Docker (daemon socket)",
+                     summaryRU: "Команды подключаются к сокету Docker: docker, Testcontainers. Через демон контейнер может подключить любую папку Mac. Папка ~/.docker с данными входа в реестры остаётся закрытой.",
+                     summaryEN: "Commands connect to the Docker socket: docker, Testcontainers. Through the daemon a container can mount any folder of the Mac. The ~/.docker folder with registry sign-ins stays closed.",
+                     unixSockets: ["/var/run/docker.sock", "~/.docker/run/docker.sock"])
     ]
     /// Read-only system queries every sandboxed project keeps: the sandbox denies process and kernel information, and
     /// agents check the Mac's load and running jobs with these before heavy work. `pgrep` and `lsof` are not here: the
@@ -130,9 +139,10 @@ extension Project {
         let commands = (sandboxCommands ?? []).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         // The only entry point for Keychain items: roles without a shell or without this sandbox (Reader, Editor) never get them.
         let items = KeychainItemRule.usable(keychainItems ?? [])
+        let sockets = unique(presets.flatMap(\.unixSockets))
         return .init(read: read, write: write,
                      unsandboxed: unique(AccessPresetCatalog.baseUnsandboxed + presets.flatMap(\.unsandboxed) + commands),
-                     keychainItems: items.isEmpty ? nil : items)
+                     keychainItems: items.isEmpty ? nil : items, unixSockets: sockets.isEmpty ? nil : sockets)
     }
 }
 

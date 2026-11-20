@@ -47,8 +47,12 @@ public struct AgentPermissionProfile: Codable, Hashable, Sendable {
         /// Named Keychain items the project's scripts may read with `security find-generic-password` under the external
         /// boundary (mediated, argument allow-list); nil or empty: none. Only the project settings fill this.
         public var keychainItems: [KeychainItem]?
-        public init(read: [String], write: [String], unsandboxed: [String] = [], keychainItems: [KeychainItem]? = nil) {
+        /// Unix sockets commands may connect to (absolute or `~/`), from access sets only (the Docker daemon). Only the
+        /// socket file opens, never its folder; nil or empty: none.
+        public var unixSockets: [String]?
+        public init(read: [String], write: [String], unsandboxed: [String] = [], keychainItems: [KeychainItem]? = nil, unixSockets: [String]? = nil) {
             self.read = read; self.write = write; self.unsandboxed = unsandboxed; self.keychainItems = keychainItems
+            self.unixSockets = unixSockets
         }
     }
     /// One generic-password Keychain item by service and, optionally, account. Never the whole Keychain.

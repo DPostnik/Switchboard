@@ -142,14 +142,22 @@ struct ClaudeLaunchPolicy: Equatable {
         if boundary { return .object(["enabled": .bool(false)]) }
         guard let sandbox else { return nil }
         func unique(_ values: [String]) -> [String] { var seen = Set<String>(); return values.filter { !$0.isEmpty && seen.insert($0).inserted } }
+        // Access-set sockets (Docker): the CLI's `network.allowUnixSockets` (macOS only, paths) and a read grant of the socket
+        // file itself; both the given path and its link target, since Seatbelt checks the resolved one.
+        let sockets = unique((sandbox.unixSockets ?? []).flatMap { path -> [String] in
+            let expanded = path.hasPrefix("~/") ? NSHomeDirectory() + path.dropFirst(1) : path
+            let resolved = URL(fileURLWithPath: expanded).resolvingSymlinksInPath().path
+            return [expanded, resolved]
+        })
         let write = unique([cwd].compactMap { $0 } + sandbox.write + ["/private/tmp"] + extraWrites)
-        let read = unique(write + sandbox.read + extraReads)
+        let read = unique(write + sandbox.read + extraReads + sockets)
         let filesystem: [String: JSONValue] = ["denyRead": .array([.string("~/")]),
                                                "allowRead": .array(read.map(JSONValue.string)),
                                                "allowWrite": .array(write.map(JSONValue.string))]
         // `*` keeps the network open for roles that have it; the CLI's proxy then passes every host.
-        let network: [String: JSONValue] = ["allowedDomains": .array(profile.network ? [.string("*")] : []),
+        var network: [String: JSONValue] = ["allowedDomains": .array(profile.network ? [.string("*")] : []),
                                             "allowLocalBinding": .bool(profile.network)]
+        if !sockets.isEmpty { network["allowUnixSockets"] = .array(sockets.map(JSONValue.string)) }
         return .object(["enabled": .bool(true), "failIfUnavailable": .bool(true), "autoAllowBashIfSandboxed": .bool(true),
                         "allowUnsandboxedCommands": .bool(true),
                         "filesystem": .object(filesystem), "network": .object(network)])
