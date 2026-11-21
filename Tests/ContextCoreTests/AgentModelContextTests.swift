@@ -8,7 +8,7 @@ import ClaudeAdapter
         let astra = AgentModelContext.instructions(model: "gpt-6-astra", provider: .codex, language: language)
         let fable = AgentModelContext.instructions(model: "claude-fable-5-2", provider: .claude, language: language)
         #expect(astra.contains("gpt-6-astra") && astra.contains("gpt-6.2-sol") && astra.contains("fork_turns"))
-        #expect(fable.contains("claude-fable-5-2") && fable.contains("sonnet"))
+        #expect(fable.contains("claude-fable-5-2") && fable.contains("Opus 5.5 (model: \"opus\")") && !fable.contains("sonnet"))
         let sol = AgentModelContext.instructions(model: "gpt-6.2-sol", provider: .codex, language: language)
         #expect(!sol.contains("fork_turns") && !sol.contains("gpt-6-astra"))
         let unset = AgentModelContext.instructions(model: "", provider: .codex, language: language)
@@ -27,7 +27,7 @@ import ClaudeAdapter
     let custom = "custom\"\nmodel"
     let encoded = String(decoding: try! JSONEncoder().encode(custom), as: UTF8.self)
     #expect(AgentModelContext.instructions(model: custom, provider: .codex, language: .english).contains(encoded))
-    #expect(!AgentModelContext.instructions(model: "claude-fable-5-2", provider: .codex, language: .english).contains("on sonnet"))
+    #expect(!AgentModelContext.instructions(model: "claude-fable-5-2", provider: .codex, language: .english).contains("model: \"opus\""))
 }
 
 @Test func scheduledClaudePromptUsesEachRunsSelectedModel() throws {
