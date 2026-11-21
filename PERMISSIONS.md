@@ -422,7 +422,12 @@ Known gaps. Check this list before you treat a failure as a new defect.
     checked live in a chat.
   - Cost: nono walks each root once per deny glob at every process start (no pruning, `walk_and_match`). Measured on this
     repository (about 180,000 entries with `.build`): 1.4-2.2 s for both globs in `nono run --dry-run`. A large shared root adds
-    its own walk.
+    its own walk. On a new external Claude worker, the app-owned zsh launcher reports readiness on stdout after nono has
+    installed the policy and the launcher has prepared fd 3. The wire consumes this fixed prelude before sending initialize.
+    Sandbox preparation has a separate 60 s watchdog. Claude then has the ordinary 15 s to answer initialize. EOF, malformed
+    startup output and preparation timeout close the wire. The signal is timing information only and cannot grant access.
+    A warm worker skips this startup sequence. Codex has its own 30 s initialization deadline.
+  - Consequences: a repository that tracks a `.env` file cannot check it out, stash or `git add -A` it under the boundary (EPERM);
     an untracked, unignored `.env` makes `git add -A` fail. Tools that write `.env` (`vercel env pull` and the like) fail. Hard
     links to an env file made inside the boundary are not checked. Claude's Read tool under the boundary uses exact template
     exceptions via ordered relative gitignore negations in the same deny list

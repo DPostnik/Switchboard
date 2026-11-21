@@ -2241,7 +2241,7 @@ private struct BoundaryFixture {
 /// The real launch chain with two fakes: a nono stand-in that records its arguments and execs what follows `--`, and a
 /// CLI that reports what it received on fd 3, in argv and in its environment. The zsh token launcher and the setsid
 /// launcher are the app's own.
-private func boundaryFixture(token: Result<ClaudeAccessToken, ClaudeTokenFailure>? = nil) throws -> BoundaryFixture {
+private func boundaryFixture(token: Result<ClaudeAccessToken, ClaudeTokenFailure>? = nil, startupDelay: Int = 0) throws -> BoundaryFixture {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     let home = root.appendingPathComponent("home"), resources = root.appendingPathComponent("resources")
     try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
@@ -2257,6 +2257,7 @@ private func boundaryFixture(token: Result<ClaudeAccessToken, ClaudeTokenFailure
     a=sys.argv; i=a.index('--')
     profile=a[a.index('--profile')+1]
     append('nono-args',json.dumps(a[1:i]+['policy-exists='+str(os.path.exists(profile))])+'\n')
+    time.sleep(\#(startupDelay))
     os.execv(a[i+1], a[i+1:])
     """#.utf8).write(to: nono)
     try installFixtureExecutable(at: nono)
@@ -2321,6 +2322,43 @@ private func boundaryFixture(token: Result<ClaudeAccessToken, ClaudeTokenFailure
 
 private func boundaryDeveloper(_ root: URL, sharedRoots: [AgentPermissionProfile.Root] = []) -> AgentPermissionProfile {
     AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: Project(path: root.path), sharedRoots: sharedRoots)
+}
+
+@Test(arguments: ["closed", "malformed", "stalled"])
+func claudeBoundaryStartupFailsBeforeInitialize(_ mode: String) async throws {
+    let wire = ClaudeWire()
+    let script = switch mode {
+    case "closed": "read -r first; exit 1"
+    case "malformed": #"read -r first; print -r -- '{"type":"system"}'"#
+    default: "read -r first; read -r another"
+    }
+    try await wire.start(executable: URL(fileURLWithPath: "/bin/zsh"), arguments: ["-f", "-c", script],
+                         environment: [:], cwd: FileManager.default.temporaryDirectory, firstLine: Data("fixture".utf8))
+    do {
+        try await wire.waitForBoundaryStartup(timeout: mode == "stalled" ? .milliseconds(50) : .seconds(5))
+        Issue.record("The launcher did not announce readiness")
+    } catch {
+        let expected = mode == "stalled"
+            ? L10n.text("Истекло время подготовки песочницы для Claude.", "Timed out preparing the sandbox for Claude.")
+            : L10n.text("Песочница завершила работу до запуска Claude.", "The sandbox exited before starting Claude.")
+        #expect(error.localizedDescription == expected)
+    }
+    await wire.close()
+}
+
+@Test func claudeSubmitsOnceWhenBoundarySetupExceedsTheControlTimeout() async throws {
+    let fixture = try boundaryFixture(startupDelay: 16)
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let adapter = ClaudeIntegration(boundary: fixture.runtime), events = ClaudeEvents()
+    let reader = Task { for await event in adapter.events { await events.append(event) } }
+    defer { reader.cancel() }
+    let descriptor = try await adapter.connect(.init(executable: fixture.binary, home: fixture.home, resources: fixture.resources)).value()
+    let role = boundaryDeveloper(fixture.root)
+    let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: fixture.root, role: role)).value()
+    _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: fixture.root, session: session, prompt: "hello", role: role)).value()
+    try await waitFor { await events.completionCount() == 1 }
+    #expect(fixture.helperArguments().count == 1 && fixture.launches().count == 1)
+    await adapter.disconnect()
 }
 
 @Test func claudeBoundaryHandsTheTokenOnlyOnFd3AndAnswersByTheBoundary() async throws {

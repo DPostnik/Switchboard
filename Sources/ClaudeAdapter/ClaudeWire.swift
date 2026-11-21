@@ -11,6 +11,10 @@ actor ClaudeWire {
     private var stdout: Pipe?
     private var stderr: Pipe?
     private var reader: Task<Void, Never>?
+    // Only the in-sandbox token launcher emits the prelude. Keep the stream so a marker or EOF
+    // received before the caller starts waiting is observed as well.
+    private var boundaryStartup: AsyncThrowingStream<Void, any Error>?
+    private var startupSignal: AsyncThrowingStream<Void, any Error>.Continuation?
     private var buffer = Data()
     private var pending: [String: CheckedContinuation<JSONValue, any Error>] = [:]
     /// Read-only requests that timed out; their late answers are dropped.
@@ -45,6 +49,9 @@ actor ClaudeWire {
         process = child; stdin = input; stdout = output; stderr = errors
         self.processGroup = processGroup; self.cleanup = cleanup
         if let firstLine {
+            let ready = AsyncThrowingStream<Void, any Error>.makeStream()
+            boundaryStartup = ready.stream
+            startupSignal = ready.continuation
             do { try input.fileHandleForWriting.write(contentsOf: firstLine + Data([10])) }
             catch { close(); throw error }
         }
@@ -52,6 +59,22 @@ actor ClaudeWire {
             for await data in chunks.stream { await self?.ingest(data) }
             await self?.closed()
         }
+    }
+    /// A stalled helper has a separate deadline. Once its launcher is running, Claude gets
+    /// the ordinary control-request deadline for its own initialize response.
+    func waitForBoundaryStartup(timeout: Duration = .seconds(60)) async throws {
+        guard let boundaryStartup else { return }
+        let watchdog = Task {
+            try await Task.sleep(for: timeout)
+            guard let signal = startupSignal else { return }
+            signal.finish(throwing: ClientFailure(L10n.text(
+                "Истекло время подготовки песочницы для Claude.", "Timed out preparing the sandbox for Claude.")))
+            startupSignal = nil
+            close()
+        }
+        defer { watchdog.cancel() }
+        for try await _ in boundaryStartup {}
+        try Task.checkCancellation()
     }
     func send(_ value: JSONValue) throws {
         guard !ended, process?.isRunning == true, let input = stdin else { throw Self.closedError }
@@ -73,14 +96,24 @@ actor ClaudeWire {
         }
     }
     private func timeout(_ id: String, closes: Bool) {
-        guard let continuation = pending[id] else { return }
-        guard !closes else { close(); return }
-        pending[id] = nil; abandoned.insert(id)
-        continuation.resume(throwing: ClientFailure(L10n.text("Claude не ответил на запрос.", "Claude did not answer the request.")))
+        guard let continuation = pending.removeValue(forKey: id) else { return }
+        continuation.resume(throwing: ClientFailure(L10n.text("Время ожидания ответа Claude истекло.", "Timed out waiting for Claude to respond.")))
+        if closes { close() } else { abandoned.insert(id) }
     }
     private func ingest(_ data: Data) {
         guard !ended else { return }
         buffer.append(data)
+        if let signal = startupSignal {
+            let marker = ClaudeBoundaryLaunch.readyLine.utf8
+            guard let newline = buffer.firstIndex(of: 10) else {
+                if buffer.count > marker.count { close() }
+                return
+            }
+            guard buffer[..<newline].elementsEqual(marker) else { close(); return }
+            buffer.removeSubrange(...newline)
+            startupSignal = nil
+            signal.finish()
+        }
         while let newline = buffer.firstIndex(of: 10) {
             let line = buffer[..<newline]; buffer.removeSubrange(...newline)
             guard line.count <= 4 * 1024 * 1024 else { close(); return }
@@ -116,6 +149,9 @@ actor ClaudeWire {
     }
     private func closed() {
         guard !ended else { return }; ended = true
+        startupSignal?.finish(throwing: ClientFailure(L10n.text(
+            "Песочница завершила работу до запуска Claude.", "The sandbox exited before starting Claude.")))
+        startupSignal = nil
         for continuation in pending.values { continuation.resume(throwing: Self.closedError) }; pending.removeAll()
         stdout?.fileHandleForReading.readabilityHandler = nil; stderr?.fileHandleForReading.readabilityHandler = nil
         try? stdin?.fileHandleForWriting.close()

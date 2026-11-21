@@ -120,9 +120,10 @@ enum ClaudeBoundaryFallback: Error, Equatable, Sendable {
 struct ClaudeBoundaryLaunch: Sendable {
     let launch: ExternalSandboxLaunch
     var plan: ExternalSandboxPlan { launch.plan }
+    static let readyLine = "switchboard-claude-launch-ready"
     /// Inside the boundary: read the token line from stdin, open it as fd 3 through a pipe, drop the variable, exec the CLI.
     /// nono closes every inherited descriptor above 2, so the descriptor has to be made inside (B1 probe, option d).
-    static let tokenLauncher = ["-f", "-c", "IFS= read -r t; exec 3< <(print -r -- \"$t\"); unset t; exec \"$@\"", "zsh"]
+    static let tokenLauncher = ["-f", "-c", "IFS= read -r t || exit 1; exec 3< <(print -r -- \"$t\") || exit 1; unset t; print -r -- \(readyLine) || exit 1; exec \"$@\"", "zsh"]
     static let tokenEnvironment = ["CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR": "3", "CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH": "1"]
     /// Credentials the CLI must not see from the app's own environment under the boundary.
     static let strippedEnvironment = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]

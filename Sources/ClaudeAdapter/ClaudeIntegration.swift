@@ -447,6 +447,10 @@ public actor ClaudeIntegration: AgentIntegration {
                 if let grant { wireGrants[id] = grant; try profiles.acknowledge(grant, session: reference(id)) }
                 seenRequests[id] = []
                 readers[id] = Task { [weak self] in for await value in wire.frames { await self?.receive(value, session: id, wire: wire) } }
+                try await wire.waitForBoundaryStartup()
+                if let plan = boundary?.plan, boundaries[id] != nil {
+                    ExternalSandboxLog.logger.notice("External boundary active (Claude): worker \(plan.workerID, privacy: .public) project \(plan.project, privacy: .public) readOnly \(plan.readOnlyProject, privacy: .public) mediated \(plan.commands.map(\.name).joined(separator: ","), privacy: .public)")
+                }
                 _ = try await wire.control(.object(["subtype": .string("initialize"), "hooks": self.auditPolicy(id, scheduled: scheduled)?.hooks ?? policy.hooks]))
             }
             guard request.model.context == context, signedIn, wires[id] === wire else { await wire.close(); return .rejected(.staleContext) }
@@ -1016,7 +1020,6 @@ public actor ClaudeIntegration: AgentIntegration {
                                  cwd: URL(fileURLWithPath: cwd), firstLine: Data(token.value.utf8), processGroup: true,
                                  cleanup: { await host.stop(); plan.removeWorkerFolder() })
         } catch { await host.stop(); plan.removeWorkerFolder(); throw error }
-        ExternalSandboxLog.logger.notice("External boundary active (Claude): worker \(plan.workerID, privacy: .public) project \(plan.project, privacy: .public) readOnly \(plan.readOnlyProject, privacy: .public) mediated \(plan.commands.map(\.name).joined(separator: ","), privacy: .public)")
     }
     /// Logs a native launch once per reason (`externalSandbox`) and shows the chat notice when the reason changes.
     /// Role-defined native paths (unrestricted, no network) are logged only.
