@@ -179,7 +179,15 @@ struct ClaudeLaunchPolicy: Equatable {
     /// (an ask-list hit refused in an unattended run keeps `askList`).
     func inspection(command: String, cwd: String? = nil) -> (decision: CommandDecision, reason: String?) {
         let text = command.trimmingCharacters(in: .whitespacesAndNewlines) + " "
-        if let hit = profile.commandInspection.deny.first(where: { Self.matches(text, $0) }) {
+        // Under the external boundary nono mediates `security` with the exact reads of the project's named Keychain items
+        // (channel 2, `ExternalSandboxPlanner`), as Codex runs them; only those heads pass the `security ` deny entry.
+        let keychainItems = boundary && profile.shell == .on ? KeychainItemRule.usable(profile.commandSandbox?.keychainItems ?? []) : []
+        let heads = Self.heads(text)
+        if let hit = profile.commandInspection.deny.first(where: { pattern in
+            heads.contains { head in
+                (head + " ").hasPrefix(pattern) && !(pattern == "security " && KeychainItemRule.isItemRead(head, items: keychainItems))
+            }
+        }) {
             return (.deny(ClaudeIntegration.roleDenyRefusal(hit.trimmingCharacters(in: .whitespaces))), "denyList")
         }
         if !profile.network, let hit = Self.networkCommands.first(where: { Self.matches(text, $0) }) {

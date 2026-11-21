@@ -70,6 +70,17 @@ public enum KeychainItemRule {
         if let account = item.account { groups.insert(["-a", account], at: 0) }
         return permutations(groups).map { [command] + $0.flatMap { $0 } }
     }
+    /// Whether one command head (`AgentCommandPolicy.heads`) is exactly a mediated read of one of `items`: `security` by name
+    /// (not a path, not quoted) followed by one of `argumentForms`, with only harmless redirections (`2>/dev/null`, a
+    /// temporary file) after it. The role's command hook uses it so the `security ` deny entry does not refuse the form nono's
+    /// argument allow-list already admits under the external boundary; nono stays the enforcement.
+    public static func isItemRead(_ head: String, items: [Item]) -> Bool {
+        guard !items.isEmpty, let parsed = AgentCommandPolicy.words(head),
+              let words = AgentCommandPolicy.withoutSafeRedirections(parsed),
+              let first = words.first, first.text == "security", !first.quoted else { return false }
+        let arguments = words.dropFirst().map(\.text)
+        return usable(items).contains { argumentForms($0).contains(arguments) }
+    }
     static func permutations(_ groups: [[String]]) -> [[[String]]] {
         guard groups.count > 1 else { return [groups] }
         return groups.indices.flatMap { index -> [[[String]]] in

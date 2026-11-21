@@ -257,6 +257,62 @@ private func settings(_ args: [String]) throws -> JSONValue {
     #expect(ClaudeToolRule.matches("mcp__claude_ai_Gmail__label_message", "mcp__claude_ai_*__label*"))
 }
 
+private func fallbackPolicy(_ profile: AgentPermissionProfile) -> ClaudeLaunchPolicy {
+    ClaudeLaunchPolicy(profile, scheduled: false, userChromeEnabled: false)
+}
+
+@Test func claudeHookLetsTheMediatedKeychainItemReadPassUnderTheBoundary() {
+    var profile = preset(AgentRoleID.developer).profile
+    profile.commandSandbox = .init(read: [], write: [], keychainItems: [.init(service: "isostudio-sentry", account: "auth-token"), .init(service: "deepgram")])
+    let boundary = ClaudeLaunchPolicy(profile, scheduled: false, userChromeEnabled: false, boundary: true)
+    let denied = ClaudeLaunchPolicy.CommandDecision.deny(ClaudeIntegration.roleDenyRefusal("security"))
+    // The exact forms nono's argument allow-list admits, alone and in ordinary shell composition (the live 2026-11-21 commands).
+    for command in ["security find-generic-password -s isostudio-sentry -a auth-token -w",
+                    "security find-generic-password -w -a auth-token -s isostudio-sentry",
+                    "security find-generic-password -s isostudio-sentry -a auth-token -w | wc -c",
+                    "TOKEN=$(security find-generic-password -s isostudio-sentry -a auth-token -w 2>/dev/null); test -n \"$TOKEN\" && echo ok",
+                    "KEY=\"$(security find-generic-password -s 'deepgram' -w)\" python3 scripts/transcribe.py",
+                    "security find-generic-password -s deepgram -w"] {
+        #expect(boundary.inspection(command: command, cwd: "/p/proj") == (.allow, nil), "\(command)")
+    }
+    // Everything else keeps the `security ` deny entry: another item or account, an item without an account read with one,
+    // other subcommands or flags, a path, a redirection that is not harmless, and other deny entries.
+    for command in ["security find-generic-password -s other -w",
+                    "security find-generic-password -s isostudio-sentry -w",
+                    "security find-generic-password -s isostudio-sentry -a other -w",
+                    "security find-generic-password -s deepgram -a someone -w",
+                    "security find-generic-password -s isostudio-sentry -a auth-token -g",
+                    "security find-generic-password -s isostudio-sentry -a auth-token",
+                    "security find-internet-password -s isostudio-sentry -a auth-token -w",
+                    "security dump-keychain", "security find-identity -v -p codesigning", "security unlock-keychain",
+                    "security find-generic-password -s deepgram -w > ~/secret.txt",
+                    "security find-generic-password -s deepgram -w; security dump-keychain",
+                    "echo $(security find-generic-password -s deepgram -w -k login.keychain)"] {
+        #expect(boundary.inspection(command: command, cwd: "/p/proj").decision != .allow, "\(command)")
+    }
+    #expect(boundary.inspection(command: "security dump-keychain").decision == denied)
+    // Only `security` by name is a read nono mediates; a path or a quoted name is never an item read (the hook's answer for
+    // them is unchanged: the deny entry matches the head text, and `/usr/bin/security` exits 127 under nono).
+    let items = profile.commandSandbox?.keychainItems ?? []
+    #expect(KeychainItemRule.isItemRead("security find-generic-password -s deepgram -w 2>/dev/null", items: items))
+    #expect(!KeychainItemRule.isItemRead("/usr/bin/security find-generic-password -s deepgram -w", items: items))
+    #expect(!KeychainItemRule.isItemRead("'security' find-generic-password -s deepgram -w", items: items))
+    #expect(!KeychainItemRule.isItemRead("security find-generic-password -s deepgram -w", items: []))
+    #expect(boundary.inspect(command: "/usr/bin/security find-generic-password -s deepgram -w")
+            == fallbackPolicy(profile).inspect(command: "/usr/bin/security find-generic-password -s deepgram -w"))
+    #expect(boundary.inspect(command: "security find-generic-password -s deepgram -w && sudo ls") == .deny(ClaudeIntegration.roleDenyRefusal("sudo")))
+    // Without the boundary (CLI sandbox fallback, nothing mediates `security`) or without listed items it stays denied.
+    let fallback = ClaudeLaunchPolicy(profile, scheduled: false, userChromeEnabled: false)
+    #expect(fallback.inspection(command: "security find-generic-password -s deepgram -w") == (denied, "denyList"))
+    var empty = profile; empty.commandSandbox?.keychainItems = []
+    let noItems = ClaudeLaunchPolicy(empty, scheduled: false, userChromeEnabled: false, boundary: true)
+    #expect(noItems.inspection(command: "security find-generic-password -s deepgram -w") == (denied, "denyList"))
+    // A reserved item never passes, even if it reached the list.
+    var reserved = profile; reserved.commandSandbox?.keychainItems = [.init(service: "Claude Code-credentials")]
+    let reservedPolicy = ClaudeLaunchPolicy(reserved, scheduled: false, userChromeEnabled: false, boundary: true)
+    #expect(reservedPolicy.inspect(command: "security find-generic-password -s Claude\\ Code-credentials -w") == denied)
+}
+
 // MARK: - Ledger
 
 @Test func commandHookReadsQuotesHeredocsAndSubstitutionsLikeTheShell() {

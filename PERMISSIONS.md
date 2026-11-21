@@ -306,7 +306,8 @@ Delivered in steps 2-4 (live status in the paragraph above):
   `unattended` refusal including the hook's unattended ask-list hit and the unattended unsandboxed
   command (one settings proposal when the inbox exists, the blocker in the final message), and
   `shellOff` (no other way; only the user changes the role). Decisions and ledger reasons did not
-  change.
+  change. Since 2026-11-21 the `security` deny entry does not refuse the exact read of a project's listed Keychain item
+  under the boundary (see "Named Keychain items" in the known gaps); its refusal text for every other form is unchanged.
 
 Codex chat inspection (2026-11-12, implementation pending verification): channel 3 uses the same
 `ChatDirectoryRuntime` reference allowlist as Claude. Directory arguments are part of the dedicated
@@ -396,7 +397,16 @@ Known gaps. Check this list before you treat a failure as a new defect.
   enforced on the Claude CLI-sandbox fallback or the Codex native sandbox (items work only under the boundary); Reader
   and Editor never; Routine operator (audit mode) and Operator unrestricted as before. An item without an account
   matches calls without `-a` only. The script must call `security` by name (`/usr/bin/security` exits 127 under
-  nono). Checked live 2026-11-13 (psy-wiki, Claude chat 1D20A230, build 502): the script's read failed, the agent
+  nono). Claude's role hook (2026-11-21, `KeychainItemRule.isItemRead`, used by `ClaudeLaunchPolicy.inspection`): the
+  Developer deny entry `security ` refused even these exact reads before nono saw them, while Codex (no hook) ran them
+  (seen live in isostudio, item `isostudio-sentry`/`auth-token`). Now, only when the process runs under the boundary and
+  the profile lists usable items, a command head that is exactly `security` (by name, unquoted) plus one of the item's
+  `argumentForms`, followed only by harmless redirections (`2>/dev/null`, a temporary file), passes that one deny entry,
+  also inside `$(...)`, after `VAR=` and in a pipe. Channel 2 (mediated command); nono's argument allow-list remains the
+  enforcement, the hook only stops refusing what nono admits. Every other `security` form, other deny entries in the same
+  line, the CLI-sandbox fallback and a profile without items keep the `denyList` refusal. Pre-existing, unchanged: the
+  deny entry matches the head text, so `/usr/bin/security …` and a quoted `'security'` are not refused by the hook (nono
+  still refuses or cannot run them). Unit-tested, not checked live. Checked live 2026-11-13 (psy-wiki, Claude chat 1D20A230, build 502): the script's read failed, the agent
   wrote one proposal with `addKeychainItems` (service and account), the user applied it on the card, the chat
   continued by itself and the script read the key through the shim and completed the Deepgram transcription, with no
   macOS dialog reported; signing still finds the Apple Development identity with `security` narrowed to
