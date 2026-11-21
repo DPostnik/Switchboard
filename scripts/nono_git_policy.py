@@ -10,6 +10,7 @@ GIT_LOCAL_ENV = PLAIN_ENV + ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_AUTHOR_
                              'GIT_COMMITTER_DATE', 'GIT_INDEX_FILE', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_EDITOR', 'GIT_SEQUENCE_EDITOR',
                              'GIT_MERGE_AUTOEDIT', 'GIT_OPTIONAL_LOCKS']
 KEYCHAIN_SUBCOMMANDS = ['push', 'fetch', 'ls-remote']
+GIT_HASH_STDIN_REFUSAL = 'Piped input to git hash-object can hang in the nono broker. The command did not start. Pass a file path to hash.'
 KEYCHAIN_PREPEND = ['--no-pager', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.askPass=',
                     '-c', 'core.alternateRefsCommand=exit 0', '-c', 'credential.helper=', '-c', 'credential.https://github.com.helper=osxkeychain',
                     '-c', 'gpg.format=openpgp', '-c', 'gpg.program=gpg']
@@ -59,6 +60,8 @@ def git_policy(fs, home, roots):
                                                     'GIT_EDITOR': ':', 'GIT_SEQUENCE_EDITOR': ':'}, trees, prepend=KEYCHAIN_PREPEND)
     deny = [{'argv': {'prefix': lead + ['pull']}, 'reason': 'git pull: run git fetch, then git merge --ff-only or git rebase'} for lead in leads]
     deny += [{'argv': {'prefix': lead + ['credential']}, 'reason': 'git credential is not available under the boundary'} for lead in leads]
+    deny += [{'argv': {'prefix': lead + argv}, 'reason': GIT_HASH_STDIN_REFUSAL}
+             for lead in leads for argv in (['hash-object', '--stdin'], ['hash-object', '-w', '--stdin'])]
     intercept = [{'match': {'argv': {'prefix': lead + [sub]}}, 'action': {'type': 'passthrough'}, 'sandbox': keychain}
                  for lead in leads for sub in KEYCHAIN_SUBCOMMANDS]
     intercept += [{'match': {'argv': {'prefix': lead + ['clone']}}, 'action': {'type': 'passthrough'}, 'sandbox': clone} for lead in leads]

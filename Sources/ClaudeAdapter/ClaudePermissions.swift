@@ -19,10 +19,7 @@ struct ClaudeLaunchPolicy: Equatable {
     static let hookCallback = "switchboard-bash"
     /// `SendMessage` also reaches the user's other Claude sessions; the hook lets it through only to the chat's own sub-agents.
     static let sendCallback = "switchboard-send"
-    /// Secrets no restricted role may read even inside its roots. `.env.*` also matches the templates the external boundary
-    /// keeps open (`ProjectSecretFiles.templates`): Claude's deny rules win over every allow rule and take no exception, so its
-    /// Read tool still refuses them (PERMISSIONS.md section 5). Under the boundary nono closes the other secret files for the
-    /// whole process tree; these rules stay for the Read tool and the CLI-sandbox fallback.
+    /// Secrets no restricted role may read even inside its roots.
     static let secretDenyRules = ["Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(~/.gnupg/**)", "Read(~/.config/gh/**)",
                                   "Read(**/.env)", "Read(**/.env.*)", "Read(~/.codex/auth.json)", "Read(~/.claude/.credentials.json)"]
     /// Commands that reach the network; denied by the hook when the role has shell but no network.
@@ -76,7 +73,11 @@ struct ClaudeLaunchPolicy: Equatable {
         // the sandbox reaches the app's answer instead of running unasked (a rule would auto-approve it).
         if profile.shell == .on, !unrestricted, sandbox == nil { allow.append("Bash") }
         if profile.network, !unrestricted { allow += Self.fetchTools }
-        if !unrestricted, profile.network || profile.shell == .on { deny += Self.secretDenyRules }
+        if !unrestricted, profile.network || profile.shell == .on {
+            deny += Self.secretDenyRules
+            // Claude supports ordered gitignore negation within one deny list. Under nono the OS still checks reads and writes.
+            if self.boundary { deny += ProjectSecretFiles.templates.map { "Read(!**/\($0))" } }
+        }
         switch profile.connectors {
         case .off, .all where scheduled: break
         // Attended operator chats still hold connector writes for approval, as full access always did.
@@ -185,20 +186,23 @@ struct ClaudeLaunchPolicy: Equatable {
         // Under the external boundary nono mediates `security` with the exact reads of the project's named Keychain items
         // (channel 2, `ExternalSandboxPlanner`), as Codex runs them; only those heads pass the `security ` deny entry.
         let keychainItems = boundary && profile.shell == .on ? KeychainItemRule.usable(profile.commandSandbox?.keychainItems ?? []) : []
-        let heads = Self.heads(text)
+        // The lists name commands, so each head is matched as the shell resolves it (`AgentCommandPolicy.resolvedHead`):
+        // `/usr/bin/security`, `'security'`, `\sudo`, `/usr/bin/env -i osascript` hit the same entries as the bare names.
+        // The Keychain exemption reads the head as written: only `security` by name is what nono mediates.
+        let heads = AgentCommandPolicy.inspectedHeads(text)
         if let hit = profile.commandInspection.deny.first(where: { pattern in
             heads.contains { head in
-                (head + " ").hasPrefix(pattern) && !(pattern == "security " && KeychainItemRule.isItemRead(head, items: keychainItems))
+                (head.resolved + " ").hasPrefix(pattern) && !(pattern == "security " && KeychainItemRule.isItemRead(head.written, items: keychainItems))
             }
         }) {
             return (.deny(ClaudeIntegration.roleDenyRefusal(hit.trimmingCharacters(in: .whitespaces))), "denyList")
         }
-        if !profile.network, let hit = Self.networkCommands.first(where: { Self.matches(text, $0) }) {
+        if !profile.network, let hit = Self.networkCommands.first(where: { pattern in heads.contains { ($0.resolved + " ").hasPrefix(pattern) } }) {
             return (.deny(L10n.text("Роль без сети: \(hit.trimmingCharacters(in: .whitespaces))", "The role has no network: \(hit.trimmingCharacters(in: .whitespaces))")), "network")
         }
-        for head in Self.heads(text) {
-            guard let pattern = profile.commandInspection.ask.first(where: { (head + " ").hasPrefix($0) }) else { continue }
-            if pattern.hasPrefix("rm "), let cwd, safeRemoval(head, cwd: cwd) { continue }
+        for head in heads {
+            guard let pattern = profile.commandInspection.ask.first(where: { (head.resolved + " ").hasPrefix($0) }) else { continue }
+            if pattern.hasPrefix("rm "), head.written.hasPrefix("rm "), let cwd, safeRemoval(head.written, cwd: cwd) { continue }
             return (profile.approvals == .ask && !scheduled ? .ask : .deny(ClaudeIntegration.unattendedRefusal()), "askList")
         }
         return (.allow, nil)
@@ -222,7 +226,6 @@ struct ClaudeLaunchPolicy: Equatable {
         }
     }
     static func heads(_ text: String) -> [String] { AgentCommandPolicy.heads(text) }
-    static func matches(_ text: String, _ pattern: String) -> Bool { AgentCommandPolicy.matches(text, pattern) }
 
     /// Tools the app answers `can_use_tool` for; anything else is unsupported and denied.
     func permits(tool name: String) -> Bool {

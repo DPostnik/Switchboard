@@ -425,14 +425,19 @@ Known gaps. Check this list before you treat a failure as a new defect.
     its own walk.
   - Consequences: a repository that tracks a `.env` file cannot check it out, stash or `git add -A` it under the boundary (EPERM);
     an untracked, unignored `.env` makes `git add -A` fail. Tools that write `.env` (`vercel env pull` and the like) fail. Hard
-    links to an env file made inside the boundary are not checked. Claude's Read tool still refuses templates: its deny rules win
-    over every allow rule and take no exception (`ClaudeLaunchPolicy.secretDenyRules` unchanged); Bash under the boundary reads
-    them. Fallbacks: the Claude CLI sandbox merges `Read` deny rules into its `denyRead` (code.claude.com/docs/en/sandboxing:
+    links to an env file made inside the boundary are not checked. Claude's Read tool under the boundary uses exact template
+    exceptions via ordered relative gitignore negations in the same deny list
+    ([Claude permissions reference](https://code.claude.com/docs/en/permissions#special-characters-and--negation)).
+    The external boundary still checks file access. Fallbacks: the Claude CLI sandbox merges `Read` deny rules into its
+    `denyRead` (code.claude.com/docs/en/sandboxing:
     a wildcard deny holds inside a wider allow), so Bash there is closed for `.env` and `.env.*`, templates included; not
     checked live. The Codex native path (`sandboxPolicy` `workspaceWrite`/`readOnly`) reads the whole disk and cannot deny a
     file inside a root, so Codex chats on the native sandbox can still read env files. Codex 0.171's permission profiles
-    (`default_permissions`, `[permissions.<name>.filesystem]` with `":workspace_roots"` globs set to `"deny"`) could express it;
-    moving the native path to them is a separate change, not made.
+    (`default_permissions`, `[permissions.<name>.filesystem]` with `":workspace_roots"` globs set to `"deny"`) could express it.
+    The 0.171 app-server's experimental `permissions` fields are mutually exclusive with `sandbox` on thread start/resume and
+    with `sandboxPolicy` on turn start. The native path sets those legacy fields explicitly. Protecting env files there requires
+    migrating the native path's role-derived profiles across thread creation, resumption and turns, and verifying protocol
+    compatibility across supported versions. That migration remains pending.
 
 - Mediated `security` (2026-11-12): before, apple-signing mediated `/usr/bin/security` with Keychain read and no
   argument filter, so agents of such a project could read the whole login Keychain. It now carries an argument
@@ -458,9 +463,10 @@ Known gaps. Check this list before you treat a failure as a new defect.
   `argumentForms`, followed only by harmless redirections (`2>/dev/null`, a temporary file), passes that one deny entry,
   also inside `$(...)`, after `VAR=` and in a pipe. Channel 2 (mediated command); nono's argument allow-list remains the
   enforcement, the hook only stops refusing what nono admits. Every other `security` form, other deny entries in the same
-  line, the CLI-sandbox fallback and a profile without items keep the `denyList` refusal. Pre-existing, unchanged: the
-  deny entry matches the head text, so `/usr/bin/security …` and a quoted `'security'` are not refused by the hook (nono
-  still refuses or cannot run them). Unit-tested, not checked live. Checked live 2026-11-13 (psy-wiki, Claude chat 1D20A230, build 502): the script's read failed, the agent
+  line, the CLI-sandbox fallback and a profile without items keep the `denyList` refusal. The channel 1 hook now matches
+  command basenames after removing quoting and recognized wrappers, including for multiword entries. This affects restriction
+  matching only. Keychain and safe-removal exemptions still use the original command spelling. The OS boundary and broker
+  enforce their own policies. Checked live 2026-11-13 (psy-wiki, Claude chat 1D20A230, build 502): the script's read failed, the agent
   wrote one proposal with `addKeychainItems` (service and account), the user applied it on the card, the chat
   continued by itself and the script read the key through the shim and completed the Deepgram transcription, with no
   macOS dialog reported; signing still finds the Apple Development identity with `security` narrowed to
@@ -534,6 +540,16 @@ Known gaps. Check this list before you treat a failure as a new defect.
     pre-push hook is off; `git-lfs` could not run in the mediated sandbox before either). `git -C <path>/ push`, a
     relative `-C`, `git remote update`, `git submodule update` and local `git fetch ../repo` (file transport) have no
     network or fail.
+
+- Mediated `git hash-object` stdin (2026-11-21): a Claude chat's `git show | awk | git hash-object -w --stdin`
+  stalled under nono 0.81.0. The file-operand form completed. The pinned broker passes stdio itself
+  (`tool-sandbox/protocol.rs`, `tool-sandbox/platform/macos.rs`); Switchboard's provider launcher does
+  not own that pipe. Channel 2 uses the existing Git invocation policy to refuse the prefixes
+  `hash-object --stdin` and `hash-object -w --stdin`, bare or with an existing `-C <root>` lead, before
+  Git starts. The shared planner covers both providers when Git narrowing is enabled. Other stdin
+  forms, other Git subcommands and the rollback policy are outside this mitigation. No grant, route,
+  approval, ledger reason or permission decision changes. The helper and the bounded fixture probe
+  (`scripts/probe-nono-runtime.py --nono .build/nono/nono --git-stdin-only`) still need runtime verification.
 
 - `scripts/build-app.sh` and the queue's `confirm-live` read the process list and a process's path and
   start time through libproc instead of `ps` (2026-11-12): `ps` stopped the app build after a

@@ -27,12 +27,14 @@ parser.add_argument('--nono', required=True, help='Verified helper from prepare-
 parser.add_argument('--skip-chrome', action='store_true')
 parser.add_argument('--skip-swiftpm', action='store_true')
 parser.add_argument('--skip-network', action='store_true')
+parser.add_argument('--git-stdin-only', action='store_true', help='Only check mediated git hash-object on a disposable repository')
 args = parser.parse_args()
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 NONO = str(pathlib.Path(args.nono).resolve())
 OUT = ROOT / 'docs/handoffs/permission-runtime-2026-11-11'
-OUT.mkdir(parents=True, exist_ok=True)
+if not args.git_stdin_only:
+    OUT.mkdir(parents=True, exist_ok=True)
 HOME = pathlib.Path.home()
 DEVELOPER = pathlib.Path(subprocess.check_output(['xcode-select', '-p'], text=True).strip())
 TOOLCHAIN = DEVELOPER / 'Toolchains/XcodeDefault.xctoolchain/usr/bin'
@@ -43,9 +45,11 @@ REPO = ROOT
 GIT_EXEC = subprocess.check_output(['/opt/homebrew/bin/git', '--exec-path'], text=True).strip()
 GH = shutil.which('gh', path=PATH)
 # The user's commit identity, compared by hash inside the sandbox: never printed. Empty when no global name is set.
-_name = subprocess.run(['/opt/homebrew/bin/git', 'config', '--global', 'user.name'], capture_output=True, text=True).stdout.strip()
-NAME_HASH = hashlib.sha256((_name + '\n').encode()).hexdigest() if _name else ''
-ORIGIN = subprocess.run(['/opt/homebrew/bin/git', '-C', str(REPO), 'remote', 'get-url', 'origin'], capture_output=True, text=True).stdout.strip()
+if not args.git_stdin_only:
+    _name = subprocess.run(['/opt/homebrew/bin/git', 'config', '--global', 'user.name'], capture_output=True, text=True).stdout.strip()
+    NAME_HASH = hashlib.sha256((_name + '\n').encode()).hexdigest() if _name else ''
+    ORIGIN = subprocess.run(['/opt/homebrew/bin/git', '-C', str(REPO), 'remote', 'get-url', 'origin'],
+                            capture_output=True, text=True).stdout.strip()
 # /usr/bin/python3 is a stub that execs the selected developer-tools interpreter by absolute path; a command
 # policy must pin that real file (macOS has no exec_paths) and allow its direct execution from the session.
 PYTHON = subprocess.check_output(['/usr/bin/python3', '-c', 'import os,sys;print(os.path.realpath(sys.executable))'], text=True).strip()
@@ -91,12 +95,12 @@ def environment(case):
     return env
 
 
-def make_case(name):
+def make_case(name, git_env=None):
     case = fixture / name
     for sub in ['project', 'other', 'cache', 'profiles', 'resources']:
         (case / sub).mkdir(parents=True)
-    subprocess.run(['git', 'init', '-q', str(case / 'project')], check=True)
-    subprocess.run(['git', 'init', '-q', str(case / 'other')], check=True)
+    subprocess.run(['git', 'init', '-q', str(case / 'project')], check=True, env=git_env)
+    subprocess.run(['git', 'init', '-q', str(case / 'other')], check=True, env=git_env)
     return case
 
 
@@ -205,8 +209,21 @@ def run_nono(case, grants, script, env, timeout=120, profile=None, extra=()):
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
-        out, err = proc.communicate()
+        # Give the supervisor time to clean up mediated children in their own sessions.
+        if proc.poll() is None:
+            proc.terminate()
+        try:
+            out, err = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired as stalled:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.stdout.close()
+            proc.stderr.close()
+            proc.wait(timeout=5)
+            out = (stalled.stdout or b'').decode(errors='replace')
+            err = (stalled.stderr or b'').decode(errors='replace')
         out += '\nTIMEOUT'
     return proc.returncode, out, err
 
@@ -215,7 +232,63 @@ def lines(out):
     return {line.split(' ', 2)[1]: line.split(' ', 2)[2] if len(line.split(' ', 2)) > 2 else '' for line in out.splitlines() if line.startswith('CHECK ')}
 
 
+def probe_git_hash_stdin():
+    home = fixture / 'git-stdin/home'
+    home.mkdir(parents=True)
+    config = home / '.gitconfig'
+    config.touch()
+    git_env = {'HOME': str(home), 'PATH': PATH}
+    case = make_case('git-stdin', git_env)
+    env = environment(case)
+    env['HOME'] = str(home)
+    project = case / 'project'
+    (project / 'payload.txt').write_text('switchboard fixture\n')
+    subprocess.run([nono_git_policy.GIT, '-C', str(project), 'add', 'payload.txt'], check=True, env=git_env)
+    # The file check must exercise writing a fresh object. The index holds only the pipeline fixture.
+    (project / 'from-file.txt').write_text('switchboard file fixture\n')
+    expected = subprocess.check_output(
+        [nono_git_policy.GIT, '-C', str(project), 'hash-object', 'from-file.txt'], text=True, env=git_env
+    ).strip()
+    profile = case / 'git-policy.json'
+    grants = [('--allow', project), ('--allow', case / 'tmp'), ('--read-file', config), ('--read', '/opt/homebrew')]
+    fs = {'fs_read': [str(project), str(case / 'tmp'), '/opt/homebrew'], 'fs_read_file': [str(config)],
+          'fs_write': [str(project), str(case / 'tmp')]}
+    profile.write_text(json.dumps({
+        'meta': {'name': 'switchboard-git-stdin-probe', 'version': '1'},
+        'workdir': {'access': 'none'},
+        'command_policies': {'commands': {'git': nono_git_policy.git_policy(fs, home, [project])}},
+    }))
+    code, out, err = run_nono(case, grants, """
+git show :payload.txt | awk '{ print }' | git hash-object -w --stdin > pipeline.out 2> pipeline.err
+echo "CHECK stdin-exit $?"
+cat pipeline.err
+test ! -s pipeline.out
+echo "CHECK stdin-no-output $?"
+blob=$(git hash-object -w from-file.txt) && git cat-file -e "$blob" && echo "CHECK file-object $blob"
+exit 0
+""", env, timeout=15, profile=profile)
+    found = lines(out)
+    results['git-stdin'] = {'checks': found, 'exit': code}
+    completed = code == 0 and 'TIMEOUT' not in out
+    check('git/hash-object-stdin-refused',
+          completed and found.get('stdin-exit') == '126' and found.get('stdin-no-output') == '0'
+          and nono_git_policy.GIT_HASH_STDIN_REFUSAL in out, (out + err).strip())
+    check('git/hash-object-file-written', completed and found.get('file-object') == expected,
+          found.get('file-object', 'missing'))
+
+
+if args.git_stdin_only:
+    try:
+        probe_git_hash_stdin()
+    finally:
+        shutil.rmtree(fixture, ignore_errors=True)
+        for state in STATE_DIRS:
+            shutil.rmtree(state, ignore_errors=True)
+    sys.exit(0 if all(c['ok'] for c in checks) else 1)
+
+
 try:
+    probe_git_hash_stdin()
     # The value travels in argv for a moment here; it is random and deleted at the end.
     subprocess.run(['/usr/bin/security', 'add-generic-password', '-U', '-s', PROBE_SERVICE, '-a', PROBE_ACCOUNT, '-w', PROBE_SECRET],
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

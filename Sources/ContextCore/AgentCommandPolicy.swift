@@ -446,26 +446,68 @@ public struct AgentCommandPolicy: Sendable {
 
     /// The commands a shell line runs (see `ShellSegments`), with leading environment assignments and
     /// command wrappers (`nohup`, `env`, `exec`…) removed so the real command is what gets matched.
-    public static func heads(_ text: String) -> [String] {
-        ShellSegments.commands(text).map { segment in
-            var head = segment.trimmingCharacters(in: .whitespaces)
-            var changed = true
-            while changed {
-                changed = false
-                if let space = head.firstIndex(of: " "), head[..<space].contains("="), !head[..<space].contains("/") {
-                    head = String(head[head.index(after: space)...]).trimmingCharacters(in: .whitespaces); changed = true
-                }
-                for wrapper in ShellSegments.wrappers where head.hasPrefix(wrapper + " ") {
-                    head = String(head.dropFirst(wrapper.count + 1)).trimmingCharacters(in: .whitespaces); changed = true
-                }
+    public static func heads(_ text: String) -> [String] { ShellSegments.commands(text).map(head) }
+    /// One segment without its leading environment assignments and literal wrapper words.
+    static func head(_ segment: String) -> String {
+        var head = segment.trimmingCharacters(in: .whitespaces)
+        var changed = true
+        while changed {
+            changed = false
+            if let space = head.firstIndex(of: " "), head[..<space].contains("="), !head[..<space].contains("/") {
+                head = String(head[head.index(after: space)...]).trimmingCharacters(in: .whitespaces); changed = true
             }
-            return head
+            for wrapper in ShellSegments.wrappers where head.hasPrefix(wrapper + " ") {
+                head = String(head.dropFirst(wrapper.count + 1)).trimmingCharacters(in: .whitespaces); changed = true
+            }
         }
+        return head
     }
     /// A pattern matches the head of a command segment (after `|`, `;`, `&&`, `(`, backticks, `$(` or a newline),
     /// so `sudo ` is found in `cd x && sudo rm` but not inside `pseudo ` or as an argument such as `echo curl`.
     public static func matches(_ text: String, _ pattern: String) -> Bool {
         heads(text).contains { ($0 + " ").hasPrefix(pattern) }
+    }
+
+    /// Options of a command wrapper that take the next word as their value (`env -u NAME`, `nice -n 5`, `exec -a NAME`).
+    static let wrapperOptionsWithValue: [String: Set<String>] = [
+        "env": ["-u", "-P", "-S"], "nice": ["-n"], "exec": ["-a"],
+        "xargs": ["-E", "-I", "-J", "-L", "-n", "-P", "-R", "-S", "-s"]
+    ]
+    /// A head as the shell resolves its command, for restriction lists only (deny, network, ask): quotes and backslash
+    /// escapes removed from every word, the command word reduced to its file name (`/usr/bin/security`, `'security'`,
+    /// `\sudo`, `./osascript` all become the bare name), and wrappers with their options (`env -i`, `command -p`,
+    /// `nice -n 5`, `/usr/bin/env`, `env -S '…'`) and `NAME=value` prefixes stripped again after that. Never used to trust a
+    /// command: a path ending in `git` is not the `git` a trusted prefix names. A head that does not parse (an unclosed quote)
+    /// is returned unchanged; `command -v`/`-V` only looks a name up and stays as it is.
+    public static func resolvedHead(_ head: String) -> String {
+        guard var words = words(head)?.map(\.text), !words.isEmpty else { return head }
+        for _ in 0..<ShellSegments.maximumDepth {
+            guard let first = words.first else { break }
+            if first.range(of: #"^[A-Za-z_][A-Za-z0-9_]*="#, options: .regularExpression) != nil { words.removeFirst(); continue }
+            let name = first.split(separator: "/").last.map(String.init) ?? first
+            guard ShellSegments.wrappers.contains(name) else { words[0] = name; break }
+            var index = 1
+            while index < words.count, words[index].hasPrefix("-"), words[index] != "-" || name == "env" {
+                let option = words[index]
+                if option == "--" { index += 1; break }
+                if name == "command", option.contains("v") || option.contains("V") { return words.joined(separator: " ") }
+                if name == "env", option == "-S" || option.hasPrefix("-S") && option.count > 2 {
+                    let value = option == "-S" ? (index + 1 < words.count ? words[index + 1] : "") : String(option.dropFirst(2))
+                    let rest = Array(words[min(words.count, index + (option == "-S" ? 2 : 1))...])
+                    words = [name] + (Self.words(value)?.map(\.text) ?? [value]) + rest
+                    index = 1; continue
+                }
+                index += wrapperOptionsWithValue[name, default: []].contains(option) ? 2 : 1
+            }
+            words.removeFirst(min(index, words.count))
+        }
+        return words.joined(separator: " ")
+    }
+    /// Each command of a shell line as written (`heads`) and as resolved (`resolvedHead` of the whole segment, so a wrapper's
+    /// options are still in front of the command), in the same order.
+    public static func inspectedHeads(_ text: String) -> [(written: String, resolved: String)] {
+        let segments = ShellSegments.commands(text)
+        return segments.map { (written: head($0), resolved: resolvedHead($0)) }
     }
 
 }

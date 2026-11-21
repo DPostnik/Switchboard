@@ -291,8 +291,8 @@ private func fallbackPolicy(_ profile: AgentPermissionProfile) -> ClaudeLaunchPo
         #expect(boundary.inspection(command: command, cwd: "/p/proj").decision != .allow, "\(command)")
     }
     #expect(boundary.inspection(command: "security dump-keychain").decision == denied)
-    // Only `security` by name is a read nono mediates; a path or a quoted name is never an item read (the hook's answer for
-    // them is unchanged: the deny entry matches the head text, and `/usr/bin/security` exits 127 under nono).
+    // Only `security` by name is a read nono mediates; a path or a quoted name is never an item read, so the hook refuses them
+    // (the deny entry matches the resolved command name; `/usr/bin/security` exits 127 under nono anyway).
     let items = profile.commandSandbox?.keychainItems ?? []
     #expect(KeychainItemRule.isItemRead("security find-generic-password -s deepgram -w 2>/dev/null", items: items))
     #expect(!KeychainItemRule.isItemRead("/usr/bin/security find-generic-password -s deepgram -w", items: items))
@@ -301,6 +301,15 @@ private func fallbackPolicy(_ profile: AgentPermissionProfile) -> ClaudeLaunchPo
     #expect(boundary.inspect(command: "/usr/bin/security find-generic-password -s deepgram -w")
             == fallbackPolicy(profile).inspect(command: "/usr/bin/security find-generic-password -s deepgram -w"))
     #expect(boundary.inspect(command: "security find-generic-password -s deepgram -w && sudo ls") == .deny(ClaudeIntegration.roleDenyRefusal("sudo")))
+    for written in ["/usr/bin/security find-generic-password -s deepgram -w", "'security' find-generic-password -s deepgram -w",
+                    "\"security\" find-generic-password -s deepgram -w", "\\security find-generic-password -s deepgram -w",
+                    "se'cu'rity find-generic-password -s deepgram -w", "/usr/bin/env security find-generic-password -s deepgram -w"] {
+        #expect(boundary.inspection(command: written, cwd: "/p/proj") == (denied, "denyList"), "\(written)")
+    }
+    // Wrappers the hook already strips keep the exemption for the bare name.
+    for wrapped in ["command security find-generic-password -s deepgram -w", "env security find-generic-password -s deepgram -w"] {
+        #expect(boundary.inspection(command: wrapped, cwd: "/p/proj") == (.allow, nil), "\(wrapped)")
+    }
     // Without the boundary (CLI sandbox fallback, nothing mediates `security`) or without listed items it stays denied.
     let fallback = ClaudeLaunchPolicy(profile, scheduled: false, userChromeEnabled: false)
     #expect(fallback.inspection(command: "security find-generic-password -s deepgram -w") == (denied, "denyList"))
@@ -311,6 +320,64 @@ private func fallbackPolicy(_ profile: AgentPermissionProfile) -> ClaudeLaunchPo
     var reserved = profile; reserved.commandSandbox?.keychainItems = [.init(service: "Claude Code-credentials")]
     let reservedPolicy = ClaudeLaunchPolicy(reserved, scheduled: false, userChromeEnabled: false, boundary: true)
     #expect(reservedPolicy.inspect(command: "security find-generic-password -s Claude\\ Code-credentials -w") == denied)
+}
+
+@Test func commandHookMatchesTheResolvedCommandNameForEveryRestrictionList() {
+    let developer = ClaudeLaunchPolicy(preset(AgentRoleID.developer).profile, scheduled: false, userChromeEnabled: false)
+    func denied(_ entry: String) -> ClaudeLaunchPolicy.CommandDecision { .deny(ClaudeIntegration.roleDenyRefusal(entry)) }
+    // A path, quotes, a backslash or wrappers with options in front of a denied command name the same command.
+    let cases: [(String, String)] = [
+        ("/usr/bin/security dump-keychain", "security"), ("'security' dump-keychain", "security"),
+        ("\"security\" find-generic-password -s x -w", "security"), ("\\security dump-keychain", "security"),
+        ("command security dump-keychain", "security"), ("command -p security dump-keychain", "security"),
+        ("env security dump-keychain", "security"), ("env -i security dump-keychain", "security"),
+        ("/usr/bin/env -u HOME A=1 security dump-keychain", "security"), ("env -S 'security dump-keychain'", "security"),
+        ("exec -a name /usr/bin/security dump-keychain", "security"), ("nice -n 5 /usr/bin/sudo ls", "sudo"),
+        ("nohup /usr/bin/osascript -e beep &", "osascript"), ("x=$('/usr/bin/osascript' -e beep)", "osascript"),
+        ("./sudo ls", "sudo"), ("/bin/launchctl list", "launchctl"), ("/usr/sbin/diskutil list", "diskutil"),
+        ("/usr/bin/defaults write com.apple.dock x -bool true", "defaults write"), ("'defaults' write x y", "defaults write"),
+        ("/opt/homebrew/bin/git push --force origin main", "git push --force"), ("git push \"--force\" origin main", "git push --force"),
+        ("'git' push -f origin main", "git push -f")
+    ]
+    for (command, entry) in cases {
+        #expect(developer.inspection(command: command, cwd: "/p/proj") == (denied(entry), "denyList"), "\(command)")
+    }
+    // The resolved name is only matched as the command word: arguments, other names and lookups stay allowed.
+    for command in ["echo /usr/bin/security", "ls /usr/sbin/diskutil", "/usr/local/bin/sudo-helper x", "which security",
+                    "command -v security", "command -V osascript", "grep 'security ' notes.md", "defaults read com.apple.dock",
+                    "/usr/bin/git push origin main"] {
+        #expect(developer.inspection(command: command, cwd: "/p/proj") == (.allow, nil), "\(command)")
+    }
+    #expect(developer.inspect(command: "git push --force-with-lease origin main") == denied("git push --force"))
+    // Multi-word entries keep matching as before, including a custom deny prefix for an argument path.
+    #expect(developer.inspection(command: "defaults write x y z", cwd: "/p/proj") == (denied("defaults write"), "denyList"))
+    var customProfile = preset(AgentRoleID.developer).profile
+    customProfile.commandInspection.deny.append("rm -rf /")
+    let custom = ClaudeLaunchPolicy(customProfile, scheduled: false, userChromeEnabled: false)
+    #expect(custom.inspection(command: "/bin/rm -rf /", cwd: "/p/proj") == (denied("rm -rf /"), "denyList"))
+    // The ask and network lists use the same resolution.
+    #expect(developer.inspect(command: "/bin/rm -rf ~/Library", cwd: "/p/proj") == .ask)
+    #expect(developer.inspect(command: "/bin/rm -rf build", cwd: "/p/proj") == .ask)
+    #expect(developer.inspect(command: "rm -rf build", cwd: "/p/proj") == .allow)
+    var offline = preset(AgentRoleID.developer).profile; offline.network = false
+    let noNetwork = ClaudeLaunchPolicy(offline, scheduled: false, userChromeEnabled: false)
+    #expect(noNetwork.inspection(command: "/usr/bin/curl https://example.com", cwd: "/p/proj").reason == "network")
+    #expect(noNetwork.inspection(command: "'curl' https://example.com", cwd: "/p/proj").reason == "network")
+    // Resolution itself: an unclosed quote is left as written; a trusted-command match never uses it.
+    #expect(AgentCommandPolicy.resolvedHead("'security dump") == "'security dump")
+    #expect(AgentCommandPolicy.resolvedHead("/usr/bin/env -i PATH=/x /usr/bin/security -v") == "security -v")
+    #expect(AgentCommandPolicy.resolvedHead("xargs -I {} /bin/rm -rf {}") == "rm -rf {}")
+}
+
+@Test func claudeBoundarySettingsCarveOutOnlyTheProjectEnvTemplates() {
+    let profile = preset(AgentRoleID.developer).profile
+    let boundary = ClaudeLaunchPolicy(profile, scheduled: false, userChromeEnabled: false, boundary: true)
+    let fallback = fallbackPolicy(profile)
+    let rules = ["Read(**/.env)", "Read(**/.env.*)"]
+    let exceptions = ["Read(!**/.env.example)", "Read(!**/.env.sample)", "Read(!**/.env.template)"]
+    #expect(boundary.denyRules.filter { $0.contains("/.env") } == rules + exceptions)
+    #expect(fallback.denyRules.filter { $0.contains("/.env") } == rules)
+    #expect(exceptions.allSatisfy { !boundary.allowRules.contains($0) })
 }
 
 // MARK: - Ledger

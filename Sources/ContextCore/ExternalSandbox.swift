@@ -775,6 +775,12 @@ public enum ExternalSandboxPlanner {
                                             "-c", "gpg.format=openpgp", "-c", "gpg.program=gpg"]
     public static let gitPullRefusal = "git pull does not run with the Keychain under the external boundary: it would run the repository's merge drivers and filters with it. Run `git fetch`, then `git merge --ff-only` or `git rebase`. / git pull под внешней границей не получает Связку ключей: он запустил бы с ней драйверы слияния и фильтры репозитория. Выполни `git fetch`, затем `git merge --ff-only` или `git rebase`."
     public static let gitCredentialRefusal = "git credential is not available under the external boundary: credentials stay in the Keychain. `git push`, `git fetch` and `git ls-remote` use them themselves. / git credential под внешней границей недоступен: учётные данные остаются в Связке ключей, их сами берут `git push`, `git fetch` и `git ls-remote`."
+    public static var gitHashStdinRefusal: String {
+        L10n.text(
+            "Передача данных в git hash-object через stdin может зависнуть в посреднике nono. Команда не запущена. Для хеширования передайте путь к файлу.",
+            "Piped input to git hash-object can hang in the nono broker. The command did not start. Pass a file path to hash."
+        )
+    }
 
     /// Mediated git (user decision 2026-11-13). Its own sandbox has neither Keychain nor network: local work keeps the agent's
     /// rights. `push`, `fetch`, `ls-remote` as the first argument (or after `-C <root>`, the project or one of its folders) run
@@ -796,6 +802,11 @@ public enum ExternalSandboxPlanner {
                                                       prependArguments: gitKeychainPrepend)
         let refusals = leads.map { ExternalSandboxCommand.Refusal(.prefix($0 + ["pull"]), reason: gitPullRefusal) }
             + leads.map { ExternalSandboxCommand.Refusal(.prefix($0 + ["credential"]), reason: gitCredentialRefusal) }
+            + leads.flatMap { lead in
+                [["hash-object", "--stdin"], ["hash-object", "-w", "--stdin"]].map {
+                    ExternalSandboxCommand.Refusal(.prefix(lead + $0), reason: gitHashStdinRefusal)
+                }
+            }
         return .init(name: "git", executable: executable, sandbox: local, refusals: refusals,
                      routes: [.init(rules: leads.flatMap { lead in gitKeychainSubcommands.map { .prefix(lead + [$0]) } }, sandbox: keychain),
                               .init(rules: leads.map { .prefix($0 + ["clone"]) }, sandbox: clone)])

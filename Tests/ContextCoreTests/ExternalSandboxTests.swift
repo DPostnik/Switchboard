@@ -649,6 +649,25 @@ private let gitFixture = ExternalSandboxPlanner.gitCommand("/opt/homebrew/bin/gi
     }
 }
 
+@Test func mediatedGitRefusesHashObjectStdinAndKeepsFileOperands() {
+    let git = gitFixture
+    let refused = [
+        ["hash-object", "-w", "--stdin"], ["hash-object", "--stdin", "-w"],
+        ["-C", "/x", "hash-object", "-w", "--stdin"], ["-C", "/shared", "hash-object", "--stdin"],
+    ]
+    for argv in refused {
+        #expect(select(git, argv) == .refused(ExternalSandboxPlanner.gitHashStdinRefusal), "\(argv)")
+    }
+    let allowed = [
+        ["hash-object", "-w", "payload.txt"], ["hash-object", "-w", "--path", "payload.txt", "copy.txt"],
+        ["hash-object", "-w", "--", "--stdin"], ["update-ref", "--stdin"],
+        ["add", "--", "hash-object", "--stdin"],
+    ]
+    for argv in allowed {
+        #expect(select(git, argv) == .own, "\(argv)")
+    }
+}
+
 @Test func narrowedGitCompilesToABaseEdgeAndKeychainIntercepts() throws {
     let root = try fixtureProject()
     defer { try? FileManager.default.removeItem(at: root) }
@@ -841,6 +860,32 @@ private let gitFixture = ExternalSandboxPlanner.gitCommand("/opt/homebrew/bin/gi
     #expect(codexPlan.commands.first { $0.name == "git" }.map { !$0.routes.isEmpty } ?? true)
 }
 
+private func runPinnedNono(_ executable: String, _ arguments: [String], document: [String: Any], fixture: URL) throws
+    -> (code: Int32, stdout: String, stderr: String) {
+    let process = Process(), input = Pipe(), output = Pipe()
+    let diagnostics = fixture.appendingPathComponent("nono.stderr")
+    try Data().write(to: diagnostics)
+    let stderr = try FileHandle(forWritingTo: diagnostics)
+    defer { try? stderr.close() }
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+    process.standardInput = input
+    process.standardOutput = output
+    process.standardError = stderr
+    try process.run()
+    input.fileHandleForWriting.write(try JSONSerialization.data(withJSONObject: document))
+    try input.fileHandleForWriting.close()
+    let stdout = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    process.waitUntilExit()
+    return (process.terminationStatus, stdout, String(decoding: try Data(contentsOf: diagnostics), as: UTF8.self))
+}
+
+private func pinnedNonoWhyStatus(_ result: (code: Int32, stdout: String, stderr: String)) throws -> String {
+    try #require(result.code == 0, "nono why exited with \(result.code): \(result.stderr)\n\(result.stdout)")
+    let json = try? JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any]
+    return try #require(json?["status"] as? String, "nono why returned no JSON status: \(result.stdout)\n\(result.stderr)")
+}
+
 /// The emitted document is accepted by the pinned helper and its argument rules behave as the tests above assume. Runs when
 /// `.build/nono/nono` exists in this checkout or the main checkout (worktrees); the profile goes on stdin, no file is written.
 @Test func narrowedGitPolicyIsAcceptedByThePinnedHelper() throws {
@@ -848,16 +893,6 @@ private let gitFixture = ExternalSandboxPlanner.gitCommand("/opt/homebrew/bin/gi
     let candidates = [package, package.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()]
         .map { $0.appendingPathComponent(".build/nono/nono").path }
     guard let nono = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return }
-    func run(_ arguments: [String], _ document: [String: Any]) throws -> (Int32, String) {
-        let process = Process(), input = Pipe(), output = Pipe()
-        process.executableURL = URL(fileURLWithPath: nono); process.arguments = arguments
-        process.standardInput = input; process.standardOutput = output; process.standardError = output
-        try process.run()
-        input.fileHandleForWriting.write(try JSONSerialization.data(withJSONObject: document)); try input.fileHandleForWriting.close()
-        let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        process.waitUntilExit()
-        return (process.terminationStatus, text)
-    }
     let root = try fixtureProject()
     defer { try? FileManager.default.removeItem(at: root) }
     let helper = try helperFromFixture()
@@ -865,18 +900,21 @@ private let gitFixture = ExternalSandboxPlanner.gitCommand("/opt/homebrew/bin/gi
     project.accessPresets = ["github"]
     let plan = try ExternalSandboxPlanner.plan(claudeInput(root, project: project, workerID: "n1"), helper: .success(helper)).get()
     let document = plan.policyDocument()
-    let (code, text) = try run(["profile", "validate", "/dev/stdin"], document)
+    let (code, stdout, stderr) = try runPinnedNono(nono, ["profile", "validate", "/dev/stdin"], document: document, fixture: root)
+    let text = stdout + stderr
     #expect(code == 0 && text.contains("Result: valid"), "\(text)")
     // The keychain grant is seen in the intercepts only, never on git's own edge.
     #expect(text.contains("from.intercept[0].sandbox is granted the login keychain") && !text.contains("'git' from.session is granted the login keychain"))
     func why(_ document: [String: Any], _ name: String, _ argv: [String]) throws -> String {
-        let (_, out) = try run(["why", "--json", "--profile", "/dev/stdin", "--command", name, "--"] + argv, document)
-        return ((try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any])?["status"] as? String ?? out
+        try pinnedNonoWhyStatus(runPinnedNono(nono, ["why", "--json", "--profile", "/dev/stdin", "--command", name, "--"] + argv,
+                                             document: document, fixture: root))
     }
     guard let git = plan.commands.first(where: { $0.name == "git" }) else { return }
     // Refusals through nono's own invocation policy.
     #expect(try why(document, "git", ["pull"]) == "denied" && why(document, "git", ["credential", "fill"]) == "denied")
     #expect(try why(document, "git", ["push"]) == "allowed" && why(document, "git", ["status"]) == "allowed")
+    #expect(try why(document, "git", ["hash-object", "-w", "--stdin"]) == "denied")
+    #expect(try why(document, "git", ["hash-object", "-w", "payload.txt"]) == "allowed")
     // Routing: nono's `why` does not report intercepts, so each route's matchers are replayed as an allow-list (the same
     // matcher shapes) and compared with the selection the other tests assume.
     let commands = (document["command_policies"] as! [String: Any])["commands"] as! [String: Any]
@@ -905,8 +943,8 @@ private let gitFixture = ExternalSandboxPlanner.gitCommand("/opt/homebrew/bin/gi
         // git started by gh: the same refusals as the agent's own call.
         if gh.canUse.contains("git") {
             func chained(_ argv: [String]) throws -> String {
-                let (_, out) = try run(["why", "--json", "--profile", "/dev/stdin", "--caller", "gh", "--command", "git", "--"] + argv, document)
-                return ((try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any])?["status"] as? String ?? out
+                try pinnedNonoWhyStatus(runPinnedNono(nono, ["why", "--json", "--profile", "/dev/stdin", "--caller", "gh", "--command", "git", "--"] + argv,
+                                                     document: document, fixture: root))
             }
             #expect(try chained(["rev-parse", "--abbrev-ref", "HEAD"]) == "allowed" && chained(["push"]) == "allowed")
             #expect(try chained(["pull"]) == "denied" && chained(["credential", "fill"]) == "denied")
@@ -1147,16 +1185,6 @@ private extension ExternalSandboxCommand.ArgumentRule {
     let candidates = [package, package.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()]
         .map { $0.appendingPathComponent(".build/nono/nono").path }
     guard let nono = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return }
-    func run(_ arguments: [String], _ document: [String: Any]) throws -> (Int32, String) {
-        let process = Process(), input = Pipe(), output = Pipe()
-        process.executableURL = URL(fileURLWithPath: nono); process.arguments = arguments
-        process.standardInput = input; process.standardOutput = output; process.standardError = output
-        try process.run()
-        input.fileHandleForWriting.write(try JSONSerialization.data(withJSONObject: document)); try input.fileHandleForWriting.close()
-        let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        process.waitUntilExit()
-        return (process.terminationStatus, text)
-    }
     let root = try fixtureProject()
     defer { try? FileManager.default.removeItem(at: root) }
     let helper = try helperFromFixture()
@@ -1166,11 +1194,12 @@ private extension ExternalSandboxCommand.ArgumentRule {
     let project = Project(path: folder.path)
     let plan = try ExternalSandboxPlanner.plan(claudeInput(root, project: project, workerID: "se3"), helper: .success(helper)).get()
     let document = plan.policyDocument()
-    let (code, text) = try run(["profile", "validate", "/dev/stdin"], document)
+    let (code, stdout, stderr) = try runPinnedNono(nono, ["profile", "validate", "/dev/stdin"], document: document, fixture: root)
+    let text = stdout + stderr
     #expect(code == 0 && text.contains("Result: valid"), "\(text)")
     func why(_ path: String, _ operation: String) throws -> String {
-        let (_, out) = try run(["why", "--json", "--profile", "/dev/stdin", "--allow", plan.project, "--path", plan.project + "/" + path, "--op", operation], document)
-        return ((try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any])?["status"] as? String ?? out
+        try pinnedNonoWhyStatus(runPinnedNono(nono, ["why", "--json", "--profile", "/dev/stdin", "--allow", plan.project,
+                                             "--path", plan.project + "/" + path, "--op", operation], document: document, fixture: root))
     }
     for path in [".env", ".env.local", "app/.env"] {
         #expect(try why(path, "read") == "denied" && why(path, "write") == "denied", "\(path)")
