@@ -5,7 +5,7 @@ import ContextCore
 @_spi(NativeProtocol) import CodexAdapter
 @testable import ContextDesk
 
-private let handoffOutput = #"{"goal":"Finish the review","decisions":"Keep permissions","changedFiles":"Sources/Example.swift","validation":"Build passed; tests not run","remainingWork":"Run tests"}"#
+private let handoffOutput = #"{"goal":"Finish the review","decisions":"Keep permissions","changedFiles":"Sources/Example.swift","validation":"Build passed; tests not run","remainingWork":"Run tests","continuation":"ready"}"#
 private func handoffSnapshot(_ text: String) -> AgentTranscriptSnapshot {
     .init(conversation: ConversationID("source"), source: .init(connection: .originalCodex, nativeID: "source"),
           revision: "revision", capturedAt: Date(), completeness: .partial,
@@ -35,6 +35,29 @@ private func handoffSnapshot(_ text: String) -> AgentTranscriptSnapshot {
     #expect(throws: ClientFailure.self) { try HandoffSummary.chunks(handoffSnapshot("")) }
     #expect(throws: ClientFailure.self) { try HandoffSummary.validate("{}") }
     #expect(throws: ClientFailure.self) { try HandoffSummary.validate(handoffOutput.replacingOccurrences(of: "Run tests", with: " ")) }
+}
+
+@Test func handoffSummaryContinuesOnlyAnAuthorizedNextAction() throws {
+    let snapshot = handoffSnapshot("Historical task")
+    let ready = try HandoffSummary.validate(handoffOutput)
+    let paused = try HandoffSummary.validate(handoffOutput.replacingOccurrences(of: #""ready""#, with: #""wait""#))
+    for language in AppLanguage.allCases {
+        let continued = try ready.applying(to: snapshot, language: language, automatic: true)
+        let waiting = try paused.applying(to: snapshot, language: language, automatic: true)
+        let blocked = try ready.applying(to: snapshot, language: language, automatic: true, forceWait: true)
+        let continuationText = language == .russian ? "Продолжи ближайший шаг" : "Continue with the next step"
+        let pauseText = language == .russian ? "Сохрани паузу" : "Preserve the pause"
+        #expect(continued.instructions.contains(continuationText))
+        let automaticPrompt = try continued.prompt(language: language)
+        let evidenceStart = try #require(automaticPrompt.range(of: "\n{")?.upperBound)
+        #expect(!automaticPrompt[..<evidenceStart].contains("Finish the review"))
+        #expect(automaticPrompt[evidenceStart...].contains("Finish the review"))
+        #expect(waiting.instructions.contains(pauseText))
+        #expect(blocked.instructions == waiting.instructions)
+    }
+    #expect(throws: ClientFailure.self) {
+        try HandoffSummary.validate(handoffOutput.replacingOccurrences(of: #""ready""#, with: #""unknown""#))
+    }
 }
 
 private func handoffEngine(_ root: URL, mode: String) throws -> URL {
@@ -115,7 +138,8 @@ private func handoffEngine(_ root: URL, mode: String) throws -> URL {
             try await Task.sleep(for: .milliseconds(25))
         }
         #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("dispatched").path))
-        await model.cancelHandoffPreparation()
+        model.cancelHandoffPreparation()
+        #expect(!model.preparingHandoff && model.handoffProgress.isEmpty)
     }
     let handoff = await preparation.value
     if mode == "success" {
@@ -128,7 +152,7 @@ private func handoffEngine(_ root: URL, mode: String) throws -> URL {
         #expect(handoff == nil)
         #expect((model.error != nil) == (mode != "cancel"))
     }
-    #expect(!model.preparingHandoff && model.handoffRunner == nil)
+    #expect(!model.preparingHandoff && model.handoffProgress.isEmpty)
     #expect(model.draft == "Preserve my draft" && model.state.chats.count == 1)
     let calls = try String(contentsOf: root.appendingPathComponent("calls.jsonl"), encoding: .utf8)
     #expect(calls.components(separatedBy: #""method": "turn/start""#).count - 1 == 1)

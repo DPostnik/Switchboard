@@ -96,7 +96,7 @@ private func interactiveFixture(_ root: URL) throws -> URL {
             refs=[f['reference'] for f in json.loads(text.split('\n',1)[1])]
             value={'overview':'Fixture overview','activities':[{'goal':'Say hello','actions':['Greeted'],'outcome':'Done','unfinished':[],
                 'reusableSteps':[],'variableInputs':[],'evidence':['missing/ref' if mode=='invalid' else refs[0]]}]}
-        else: value={k:'Fixture '+k for k in props}
+        else: value={k:(v['enum'][0] if 'enum' in v else 'Fixture '+k) for k,v in props.items()}
         usage={'input_tokens':10,'cache_creation_input_tokens':20,'cache_read_input_tokens':70,'output_tokens':5}
         if mode=='error':
             print(json.dumps({'type':'result','subtype':'error_during_execution','is_error':True,'result':'boom','usage':usage,'permission_denials':[]})); sys.exit(1)

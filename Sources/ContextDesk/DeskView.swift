@@ -1214,6 +1214,17 @@ struct ChatView: View {
             QueuePanel(model: model, columnWidth: columnWidth,
                        fileDrop: ChatFileDrop(enabled: !model.selectedChatIsArchived, targeted: $fileDropTargeted) { model.addDroppedFiles($0) })
             BranchChangeBanner(model: model, width: columnWidth)
+            if model.preparingHandoff {
+                HStack(spacing: .ui(12)) {
+                    ProgressView().uiSmallSpinner()
+                    Text(model.handoffProgress).foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    Button(L10n.text("Отмена", "Cancel")) { model.cancelHandoffPreparation() }
+                        .controlSize(.small).fixedSize()
+                }
+                .font(.ui(.callout))
+                .frame(maxWidth: columnWidth, alignment: .leading).padding(.horizontal, .ui(24)).padding(.vertical, .ui(8))
+            }
             if !model.selectedChatIsArchived {
             VStack(spacing: 4) {
                 ComposerEditor(composer: model.composer,
@@ -1329,16 +1340,30 @@ struct ChatView: View {
                         }
                             .id(session.nativeID)
                     }
-                    if model.preparingHandoff {
-                        ProgressView().uiSmallSpinner()
-                        Text(model.handoffProgress).font(.ui(.caption)).lineLimit(1)
-                        Button(L10n.text("Отмена", "Cancel")) { Task { await model.cancelHandoffPreparation() } }
+                    if !chat.isScheduledRecord {
+                        ChatJobButton(model: model, chatID: chat.id)
                     }
-                    if !chat.isScheduledRecord { ChatJobButton(model: model, chatID: chat.id) }
-                    Button { Task { handoff = await model.prepareHandoff(chat) } } label: {
-                        Label(L10n.text("Передать контекст…", "Hand off context…"), systemImage: "arrowshape.turn.up.right")
-                    }.pointingHandCursor().help(L10n.text("Передать контекст в новый чат", "Hand off context to a new chat"))
-                        .disabled(model.loadingChat || model.creatingHandoff || model.preparingHandoff || model.isBusy(threadID: chat.id))
+                    if !model.preparingHandoff, !chat.isScheduledRecord {
+                        Button { Task { await model.continueInNewChat(chat) } } label: {
+                            Label(L10n.text("Продолжить в новом чате", "Continue in a new chat"), systemImage: "arrowshape.turn.up.right")
+                        }.pointingHandCursor().help(L10n.text("Перенести контекст и отправить первое сообщение в новом чате", "Hand off context and send the first message in a new chat"))
+                            .disabled(model.loadingChat || model.creatingHandoff || model.isBusy(threadID: chat.id))
+                    }
+                    if !model.preparingHandoff {
+                        Button {
+                            Task {
+                                if let prepared = await model.prepareHandoff(chat), model.chatID == chat.id {
+                                    handoff = prepared
+                                }
+                            }
+                        } label: {
+                            Label(chat.isScheduledRecord ? L10n.text("Передать контекст…", "Hand off context…") : L10n.text("Настроить передачу контекста…", "Edit context handoff…"),
+                                  systemImage: chat.isScheduledRecord ? "arrowshape.turn.up.right" : "square.and.pencil")
+                        }.pointingHandCursor().help(chat.isScheduledRecord
+                            ? L10n.text("Передать контекст в новый чат", "Hand off context to a new chat")
+                            : L10n.text("Открыть редактор передачи контекста", "Open the context handoff editor"))
+                            .disabled(model.loadingChat || model.creatingHandoff || model.isBusy(threadID: chat.id))
+                    }
                 } else if model.state.browserEnabled == true, model.isRegistered(model.currentAgent), let project = model.selectedProject,
                           model.newChatWorkspaces[project.id] == nil { // A worktree chat starts with its own browser profile.
                     NewChatBrowserProfilePicker(project: project.path, connection: model.currentAgent, ownerName: model.browserProfileOwnerName, selection: Binding(

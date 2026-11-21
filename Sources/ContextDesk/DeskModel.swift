@@ -266,10 +266,9 @@ private struct ChatRunState: Equatable {
     @Published var localHistoryNotice: String?
     @Published var routines: [PortableRoutine] = []
     @Published var creatingHandoff = false
-    @Published var preparingHandoff = false
-    @Published var handoffProgress = ""
-    var handoffRunner: AgentGenerationRunner?
-    var handoffCancelled = false
+    @Published private(set) var preparingHandoff = false
+    @Published private(set) var handoffProgress = ""
+    private var handoffPreparation: (id: UUID, task: Task<ContextHandoff, any Error>)?
     /// One-time launch pass that reduces the tool bodies of archived chats (`ActivityCleanup.swift`).
     var activityCleanupTask: Task<Void, Never>?
     /// The launch pass starts after this delay and, while any chat runs or sends, pauses before each chat so live turns
@@ -1138,7 +1137,7 @@ private struct ChatRunState: Equatable {
         guard let id, id != chatID else { return composer.text }
         return chatDrafts[id] ?? ""
     }
-    func openChat(_ chat: Chat) async {
+    func openChat(_ chat: Chat, freshSession: Bool = false) async {
         guard !isChangingChat(chat.id), state.chats.contains(where: { $0.id == chat.id }) else { return }
         Perf.begin("chat.open", id: chat.id); let perfLoad = Perf.span("chat.load", id: chat.id); defer { perfLoad.end() }
         transcript.cancelPending()
@@ -1149,6 +1148,7 @@ private struct ChatRunState: Equatable {
         let generation = UUID(); selectionGeneration = generation
         defer { if selectionGeneration == generation { loadingChat = false } }
         loadingChat = true; items = []; localHistoryNotice = nil
+        if freshSession { return }
         do {
             let saved = try await store.loadTranscript(conversationID: chat.id)
             guard selectionGeneration == generation else { return }
@@ -1222,63 +1222,188 @@ private struct ChatRunState: Equatable {
             }
         }
     }
-    func cancelHandoffPreparation() async {
-        handoffCancelled = true
-        await handoffRunner?.stop()
+    func cancelHandoffPreparation() {
+        handoffPreparation?.task.cancel()
+        clearHandoffPreparation()
     }
-    func prepareHandoff(_ chat: Chat) async -> ContextHandoff? {
-        guard !preparingHandoff, !creatingHandoff else { return nil }
-        preparingHandoff = true; handoffCancelled = false; error = nil
-        handoffProgress = L10n.text("Читаю историю чата…", "Reading chat history…")
-        defer { preparingHandoff = false; handoffRunner = nil; handoffProgress = "" }
+
+    private func clearHandoffPreparation() {
+        handoffPreparation = nil
+        handoffProgress = ""
+        preparingHandoff = false
+    }
+    private struct HandoffDestination {
+        let source: Chat
+        let selection: UUID
+        let context: AgentContext
+        let project: Project
+        let permissions: AgentPermissionProfile
+        let model: String
+        let effort: String
+        let historyRevision: Int
+        let mustWait: Bool
+    }
+
+    private func handoffMustWait(_ chat: Chat) -> Bool {
+        pending.contains { $0.threadID == chat.id } || settingsProposalsByChat[chat.id] != nil
+            || queuedMessages.contains { $0.threadID == chat.id } || chat.limitResume != nil || chat.job?.status == .cancelled
+            || backgroundWaits[chat.id] != nil || subagents[chat.id]?.contains { $0.status == .running } == true
+    }
+
+    private func handoffDestination(for source: Chat) throws -> HandoffDestination {
+        guard chatID == source.id, let connection = source.nativeSession?.connection,
+              let context = agentState(connection).descriptor?.context, context.connection == connection,
+              let project = project(source.projectID) else { throw ConversationIdentity.unavailable }
+        let model = dispatchModel(source)
+        let effort = dispatchEffort(source)
+        let modelAvailable: Bool
+        if let catalog = modelCatalog(connection) {
+            modelAvailable = catalog.runnable.contains { $0.id == model } && catalog.isDispatchableEffort(source.effort ?? state.claudeEffort)
+        } else {
+            modelAvailable = agentState(connection).models.contains { $0.id == model }
+                && (!traits(connection).contains(.sessionModels) || source.effort == nil || source.effort == effort)
+        }
+        guard modelAvailable else {
+            throw ClientFailure(L10n.text("Модель или режим рассуждения исходного чата недоступны. Выбери доступные настройки перед переносом.", "The source chat's model or reasoning effort is unavailable. Select available settings before handing off."))
+        }
+        return HandoffDestination(source: source, selection: selectionGeneration, context: context, project: project,
+            permissions: source.resolvedRole(in: project, catalog: roleCatalog).profile(for: project,
+                addOns: source.resolvedAddOns(in: project), sharedRoots: sharedRoots),
+            model: model, effort: effort, historyRevision: historyEventRevisions[source.id, default: 0], mustWait: handoffMustWait(source))
+    }
+
+    private func validateHandoffSource(_ target: HandoffDestination) throws {
+        try Task.checkCancellation()
+        guard !shuttingDown, selectionGeneration == target.selection else { throw CancellationError() }
+        guard let chat = chat(target.source.id), !isChangingChat(chat.id), !isBusy(threadID: chat.id),
+              runs[chat.id]?.sending != true, historyEventRevisions[chat.id, default: 0] == target.historyRevision,
+              chat.nativeSession == target.source.nativeSession, chat.worktree == target.source.worktree,
+              chat.isArchived == target.source.isArchived, chat.route == target.source.route,
+              chat.job == target.source.job, chat.limitResume == target.source.limitResume else {
+            throw ClientFailure(L10n.text("Исходный чат изменился во время передачи. Начни перенос заново.", "The source chat changed during the handoff. Start a new handoff."))
+        }
+        let current = try handoffDestination(for: chat)
+        guard current.context == target.context, current.project == target.project, current.permissions == target.permissions,
+              current.model == target.model, current.effort == target.effort, current.mustWait == target.mustWait else { throw ConversationIdentity.unavailable }
+    }
+
+    func continueInNewChat(_ chat: Chat) async {
+        guard !preparingHandoff, !creatingHandoff else { return }
         do {
-            if chat.isScheduledRecord { return try await scheduledRecordHandoff(chat, goal: "") }
-            guard let source = chat.nativeSession, !isBusy(threadID: chat.id), !isChangingChat(chat.id),
-                  runs[chat.id]?.sending != true else {
-                throw ClientFailure(L10n.text("Дождись завершения текущего запроса перед передачей контекста.", "Wait for the current request to finish before handing off context."))
+            let target = try handoffDestination(for: chat)
+            guard let handoff = await prepareHandoff(chat, destination: target) else { return }
+            try validateHandoffSource(target)
+            creatingHandoff = true
+            defer { creatingHandoff = false }
+            let route = chat.route ?? .direct
+            let title = L10n.text("\(chat.title) - продолжение", "\(chat.title) - continuation")
+            let (created, prompt) = try await saveHandoffChat(handoff, project: target.project, route: route,
+                agent: target.context.connection, model: target.model, effort: target.effort, title: title, destination: target)
+            let notSent = L10n.text("Контекст сохранён в черновике нового чата. Первое сообщение не отправлено.", "The context is saved in the new chat's draft. Its first message was not sent.")
+            do { try validateHandoffSource(target) }
+            catch { self.error = notSent; return }
+            await openChat(created, freshSession: true)
+            guard self.chatID == created.id, !loadingChat, !shuttingDown, !Task.isCancelled,
+                  composer.text == prompt, !isBusy(threadID: created.id), runs[created.id]?.sending != true,
+                  agentState(target.context.connection).descriptor?.context == target.context,
+                  !queuedMessages.contains(where: { $0.threadID == created.id }) else {
+                self.error = notSent; return
             }
-            guard chatConnected(chat.id), chatAuthenticated(chat.id) else {
-                throw ClientFailure(L10n.text("Агент этого чата не подключён. Подключись и войди, затем повтори.", "This chat's agent is not connected. Connect and sign in, then try again."))
-            }
-            let client = try clientForChat(chat.id)
-            let descriptor = try await client.descriptor()
-            guard descriptor.capabilities.contains(.isolatedGeneration) else {
-                throw ClientFailure(L10n.text("Этот агент не поддерживает автоматическую подготовку контекста.", "This agent does not support automatic context preparation."))
-            }
-            let language = L10n.language
-            let turns = try await client.history(source)
-            let snapshot = try LocalHistory.snapshot(conversation: chat.conversationID, source: source, turns: turns)
-            let chunks = try HandoffSummary.chunks(snapshot)
-            let runner = AgentGenerationRunner(integration: client.integration)
-            handoffRunner = runner
-            var summary: HandoffSummary?
-            for (index, chunk) in chunks.enumerated() {
-                try Task.checkCancellation()
-                guard !handoffCancelled else { throw CancellationError() }
-                guard try await client.descriptor().context == descriptor.context else { throw ConversationIdentity.unavailable }
-                handoffProgress = L10n.text("Готовлю контекст: часть \(index + 1) из \(chunks.count)…", "Preparing context: part \(index + 1) of \(chunks.count)…", language: language)
-                summary = try await runner.handoff(source: source,
-                    input: HandoffSummary.input(chunk: chunk, previous: summary, completeness: snapshot.completeness),
-                    model: generationModel(for: chat), route: chat.route ?? .direct,
-                    environment: generationEnvironment(for: chat.id, workspace: ".handoff-workspace"), language: language)
-            }
-            try Task.checkCancellation()
-            guard !handoffCancelled else { throw CancellationError() }
-            guard state.chats.contains(where: { $0.id == chat.id && $0.nativeSession == source }),
-                  !isBusy(threadID: chat.id), runs[chat.id]?.sending != true, !isChangingChat(chat.id) else {
-                throw ClientFailure(L10n.text("Исходный чат изменился во время подготовки контекста. Запрос не повторён.", "The source chat changed during context preparation. The request was not retried."))
-            }
-            let latest = try LocalHistory.snapshot(conversation: chat.conversationID, source: source, turns: await client.history(source))
-            guard latest.revision == snapshot.revision else {
-                throw ClientFailure(L10n.text("Переписка изменилась во время подготовки контекста. Запусти передачу ещё раз, когда чат закончит работу.", "The conversation changed during context preparation. Start a new handoff when the chat finishes working."))
-            }
-            guard !handoffCancelled else { throw CancellationError() }
-            guard try await client.descriptor().context == descriptor.context else { throw ConversationIdentity.unavailable }
-            return try summary?.applying(to: snapshot, language: language)
+            updateDraft(chatID: created.id) { _ in "" }
+            await deliver(text: prompt, project: target.project, threadID: created.id,
+                localID: "local-user:handoff:" + handoff.id.uuidString, selectedModel: target.model,
+                selectedEffort: target.effort, handoffContext: target.context, handoffPermissions: target.permissions)
+        } catch is CancellationError {
+            return
         } catch {
-            if !handoffCancelled && !(error is CancellationError) { self.error = error.localizedDescription }
+            self.error = error.localizedDescription
+        }
+    }
+
+    func prepareHandoff(_ chat: Chat) async -> ContextHandoff? {
+        await prepareHandoff(chat, destination: nil)
+    }
+
+    private func prepareHandoff(_ chat: Chat, destination: HandoffDestination?) async -> ContextHandoff? {
+        guard !preparingHandoff, !creatingHandoff, !shuttingDown, !Task.isCancelled else { return nil }
+        let id = UUID()
+        let selection = selectionGeneration
+        let task = Task { try await buildHandoff(chat, destination: destination) }
+        handoffPreparation = (id, task)
+        preparingHandoff = true
+        handoffProgress = L10n.text("Читаю историю чата…", "Reading chat history…")
+        error = nil
+        let result = await withTaskCancellationHandler {
+            await task.result
+        } onCancel: {
+            task.cancel()
+        }
+        // Cancel clears the UI immediately. A provider still finishing the old request cannot clear or update a new attempt.
+        guard handoffPreparation?.id == id else { return nil }
+        clearHandoffPreparation()
+        guard selectionGeneration == selection, !shuttingDown, !Task.isCancelled else { return nil }
+        switch result {
+        case .success(let handoff): return handoff
+        case .failure(is CancellationError): return nil
+        case .failure(let failure):
+            error = failure.localizedDescription
             return nil
         }
+    }
+
+    private func buildHandoff(_ chat: Chat, destination: HandoffDestination?) async throws -> ContextHandoff {
+        try Task.checkCancellation()
+        if chat.isScheduledRecord { return try await scheduledRecordHandoff(chat, goal: "") }
+        if let destination { try validateHandoffSource(destination) }
+        guard let source = chat.nativeSession, !isBusy(threadID: chat.id), !isChangingChat(chat.id),
+              runs[chat.id]?.sending != true else {
+            throw ClientFailure(L10n.text("Дождись завершения текущего запроса перед передачей контекста.", "Wait for the current request to finish before handing off context."))
+        }
+        guard chatConnected(chat.id), chatAuthenticated(chat.id) else {
+            throw ClientFailure(L10n.text("Агент этого чата не подключён. Подключись и войди, затем повтори.", "This chat's agent is not connected. Connect and sign in, then try again."))
+        }
+        let client = try clientForChat(chat.id)
+        let descriptor = try await client.descriptor()
+        try Task.checkCancellation()
+        guard descriptor.capabilities.contains(.isolatedGeneration) else {
+            throw ClientFailure(L10n.text("Этот агент не поддерживает автоматическую подготовку контекста.", "This agent does not support automatic context preparation."))
+        }
+        let language = L10n.language
+        let turns = try await client.history(source, context: descriptor.context)
+        try Task.checkCancellation()
+        let snapshot = try LocalHistory.snapshot(conversation: chat.conversationID, source: source, turns: turns)
+        let chunks = try HandoffSummary.chunks(snapshot)
+        let runner = AgentGenerationRunner(integration: client.integration)
+        var summary: HandoffSummary?
+        for (index, chunk) in chunks.enumerated() {
+            try Task.checkCancellation()
+            if let destination { try validateHandoffSource(destination) }
+            guard try await client.descriptor().context == descriptor.context else { throw ConversationIdentity.unavailable }
+            try Task.checkCancellation()
+            handoffProgress = L10n.text("Готовлю контекст: часть \(index + 1) из \(chunks.count)…", "Preparing context: part \(index + 1) of \(chunks.count)…", language: language)
+            summary = try await runner.handoff(source: source,
+                input: HandoffSummary.input(chunk: chunk, previous: summary, completeness: snapshot.completeness),
+                model: destination?.model ?? generationModel(for: chat), route: chat.route ?? .direct,
+                environment: generationEnvironment(for: chat.id, workspace: ".handoff-workspace"), language: language, context: descriptor.context)
+        }
+        try Task.checkCancellation()
+        guard state.chats.contains(where: { $0.id == chat.id && $0.nativeSession == source }),
+              !isBusy(threadID: chat.id), runs[chat.id]?.sending != true, !isChangingChat(chat.id) else {
+            throw ClientFailure(L10n.text("Исходный чат изменился во время подготовки контекста. Запрос не повторён.", "The source chat changed during context preparation. The request was not retried."))
+        }
+        let latestTurns = try await client.history(source, context: descriptor.context)
+        try Task.checkCancellation()
+        let latest = try LocalHistory.snapshot(conversation: chat.conversationID, source: source, turns: latestTurns)
+        guard latest.revision == snapshot.revision else {
+            throw ClientFailure(L10n.text("Переписка изменилась во время подготовки контекста. Запусти передачу ещё раз, когда чат закончит работу.", "The conversation changed during context preparation. Start a new handoff when the chat finishes working."))
+        }
+        guard try await client.descriptor().context == descriptor.context else { throw ConversationIdentity.unavailable }
+        try Task.checkCancellation()
+        if let destination { try validateHandoffSource(destination) }
+        guard let summary else {
+            throw ClientFailure(L10n.text("Не удалось получить полную сводку для передачи контекста.", "Could not obtain a complete context handoff summary.", language: language))
+        }
+        return try summary.applying(to: snapshot, language: language, automatic: destination != nil, forceWait: destination?.mustWait == true)
     }
     /// `model`, `effort`, `role` and `title` override the new chat's defaults (a run record's follow-up keeps its settings).
     func createHandoffChat(_ handoff: ContextHandoff, project: Project, route: RequestRoute, agent: AgentConnectionID,
@@ -1286,38 +1411,69 @@ private struct ChatRunState: Equatable {
         guard !creatingHandoff else { return false }
         creatingHandoff = true; defer { creatingHandoff = false }
         do {
-            guard let client = self.client(agent), agentState(agent).connected && agentState(agent).authenticated,
-                  state.projects.contains(where: { $0 == project }), routeIsAvailable(route) else {
-                throw ConversationIdentity.unavailable
-            }
-            let descriptor = try await client.descriptor()
-            guard descriptor.context.connection == agent, descriptor.capabilities.contains(.interactiveSessions),
-                  descriptor.routes.contains(route.agentRoute) else { throw ConversationIdentity.unavailable }
-            let prompt = try handoff.prompt()
-            let selectedModel = model ?? defaultModelSetting(agent)
-            try await store.saveHandoff(handoff)
-            let current = state.projects.first { $0.id == project.id } ?? project
-            let resolvedRole = roleCatalog.role(role) ?? current.chatRole(roleCatalog)
-            let reservedID = UUID().uuidString
-            let permissions = resolvedRole.profile(for: current, addOns: Self.projectAddOns(current), sharedRoots: sharedRoots)
-            let chromeGrant = try await UserChromeControl.shared.grant(chat: reservedID, projectRoot: project.path,
-                allowed: state.userChromeEnabled != false && permissions.effective.browser == .appAndUserChrome)
-            noteChatReferences(chatID: reservedID, text: prompt)
-            let session = try await client.createSession(projectPath: project.path, permissions: permissions,
-                                                             model: selectedModel, route: route, context: descriptor.context, userChromeGrant: chromeGrant,
-                                                             chatDirectory: initialChatDirectoryArguments(id: reservedID, agent: agent, projectPath: project.path, permissions: permissions))
-            var chat = Chat(session: session, projectID: project.id, title: title ?? String(handoff.goal.prefix(100)), model: selectedModel)
-            chat.id = reservedID
-            chat.route = route; chat.handoffOrigin = handoff.origin; chat.effort = effort
-            chat.roleID = roleCatalog.role(role)?.id; chat.accessMode = roleCatalog.role(role)?.legacyAccessMode; chat.inheritsProjectAccess = role == nil
-            guard !state.chats.contains(where: { $0.nativeSession == session }) else { throw ConversationIdentity.invalidStorage }
-            state.chats.append(chat)
-            do { try await store.save(state) }
-            catch { state.chats.removeAll { $0.id == chat.id }; throw error }
-            chatDrafts[chat.id] = prompt
+            let (chat, _) = try await saveHandoffChat(handoff, project: project, route: route, agent: agent,
+                model: model, effort: effort, role: role, title: title)
             await openChat(chat)
             return true
         } catch { self.error = error.localizedDescription; return false }
+    }
+
+    private func saveHandoffChat(_ handoff: ContextHandoff, project: Project, route: RequestRoute, agent: AgentConnectionID,
+                                 model: String?, effort: String?, role: String? = nil, title: String?,
+                                 destination: HandoffDestination? = nil) async throws -> (Chat, String) {
+        guard let client = self.client(agent), agentState(agent).connected && agentState(agent).authenticated,
+              state.projects.contains(where: { $0 == project }), routeIsAvailable(route) else {
+            throw ConversationIdentity.unavailable
+        }
+        let descriptor = try await client.descriptor()
+        guard descriptor.context.connection == agent, descriptor.capabilities.contains(.interactiveSessions),
+              descriptor.routes.contains(route.agentRoute),
+              destination.map({ $0.context == descriptor.context }) ?? true else { throw ConversationIdentity.unavailable }
+        let prompt = try handoff.prompt()
+        let selectedModel = model ?? defaultModelSetting(agent)
+        try await store.saveHandoff(handoff)
+        let current = state.projects.first { $0.id == project.id } ?? project
+        let explicitRole = destination?.source.resolvedRole(in: current, catalog: roleCatalog) ?? roleCatalog.role(role)
+        let resolvedRole = explicitRole ?? current.chatRole(roleCatalog)
+        let addOns = destination?.source.resolvedAddOns(in: current) ?? Self.projectAddOns(current)
+        let permissions = resolvedRole.profile(for: current, addOns: addOns, sharedRoots: sharedRoots)
+        let workingDirectory = destination?.source.workingDirectory(in: project) ?? project.path
+        if let destination {
+            try validateHandoffSource(destination)
+            guard !worktreeRemovalOffers.contains(where: { $0.worktree.path == workingDirectory }),
+                  FileManager.default.fileExists(atPath: workingDirectory) else {
+                throw ClientFailure(L10n.text("Рабочая папка исходного чата недоступна.", "The source chat's working directory is unavailable."))
+            }
+        }
+        let reservedID = UUID().uuidString
+        let chromeGrant = try await UserChromeControl.shared.grant(chat: reservedID, projectRoot: workingDirectory,
+            allowed: state.userChromeEnabled != false && permissions.effective.browser == .appAndUserChrome)
+        if let destination { try validateHandoffSource(destination) }
+        // Summary text is historical evidence. A referenced chat in that text does not confer inspection access.
+        if destination == nil { noteChatReferences(chatID: reservedID, text: prompt) }
+        let session = try await client.createSession(projectPath: workingDirectory, permissions: permissions,
+            model: selectedModel, route: route, context: descriptor.context, userChromeGrant: chromeGrant,
+            chatDirectory: initialChatDirectoryArguments(id: reservedID, agent: agent, projectPath: workingDirectory, permissions: permissions))
+        var chat = Chat(session: session, projectID: project.id, title: title ?? String(handoff.goal.prefix(100)), model: selectedModel)
+        chat.id = reservedID
+        chat.route = route; chat.handoffOrigin = handoff.origin; chat.effort = effort
+        chat.roleID = explicitRole?.id; chat.accessMode = explicitRole?.legacyAccessMode; chat.inheritsProjectAccess = role == nil && destination == nil
+        if let destination {
+            chat.roleAddOns = RoleAddOn.allCases.filter(addOns.contains).map(\.rawValue)
+            chat.worktree = destination.source.worktree
+            chat.worktree?.branchSettled = true
+        }
+        guard !state.chats.contains(where: { $0.nativeSession == session }) else { throw ConversationIdentity.invalidStorage }
+        chatDrafts[chat.id] = prompt
+        state.chats.append(chat)
+        do { try await store.save(state) }
+        catch {
+            state.chats.removeAll { $0.id == chat.id }
+            chatDrafts[chat.id] = nil
+            throw error
+        }
+        if let destination, agentState(agent).descriptor?.context == destination.context { loadedThreads.insert(chat.id) }
+        return (chat, prompt)
     }
     func loadRoutines() async {
         do { routines = try await store.loadRoutines() } catch { self.error = error.localizedDescription }
@@ -2211,7 +2367,8 @@ private struct ChatRunState: Equatable {
     func deliver(text: String, project: Project, threadID: String?, localID: String,
                          selectedModel: String, selectedEffort: String, scheduledRun: UUID? = nil, scheduledRoute: RequestRoute? = nil, scheduledBrowserImport: ChromeSessionImportPolicy? = nil,
                          scheduledAgent: AgentConnectionID? = nil, scheduledRole: AgentRole? = nil, afterInterrupt: Bool = false,
-                         worktree: ChatWorktree? = nil) async {
+                         worktree: ChatWorktree? = nil, handoffContext: AgentContext? = nil,
+                         handoffPermissions: AgentPermissionProfile? = nil) async {
         var cleanupFence: String?
         defer {
             if let thread = cleanupFence {
@@ -2273,7 +2430,7 @@ private struct ChatRunState: Equatable {
             let reservedChatID = threadID ?? UUID().uuidString
             let userChromeGrant = try await UserChromeControl.shared.grant(chat: reservedChatID, projectRoot: workingDirectory,
                 allowed: state.userChromeEnabled != false && scheduledRun == nil && access.effective.browser == .appAndUserChrome)
-            if scheduledRun == nil { noteChatReferences(chatID: reservedChatID, text: text) }
+            if scheduledRun == nil && handoffContext == nil { noteChatReferences(chatID: reservedChatID, text: text) }
             var id = threadID
             if id == nil {
                 // Browser profiles belong to the folder they were made in, so a worktree chat starts with its own.
@@ -2324,7 +2481,7 @@ private struct ChatRunState: Equatable {
                 try await store.save(state)
             }
             guard let id else { throw ClientFailure(L10n.text("Не выбран разговор", "No conversation selected")) }
-            if !loadedThreads.contains(id) {
+            if !loadedThreads.contains(id), handoffContext == nil {
                 try await client.resume(sessionForChat(id), projectPath: workingDirectory, permissions: access, route: route,
                                         kind: scheduledRun == nil ? .interactive : .scheduled, userChromeGrant: userChromeGrant)
                 loadedThreads.insert(id)
@@ -2336,7 +2493,7 @@ private struct ChatRunState: Equatable {
             }
             var outgoing = afterInterrupt ? InterruptedTurnNote.applying(L10n.text(InterruptedTurnNote.russian, InterruptedTurnNote.english), to: text) : text
             // Before the launch arguments are built: a newly named chat attaches `inspect_chat` to this turn.
-            if scheduledRun == nil { noteChatReferences(chatID: id, text: text) }
+            if scheduledRun == nil && handoffContext == nil { noteChatReferences(chatID: id, text: text) }
             if let scheduledBrowserImport, scheduledRun != nil, state.browserEnabled == true {
                 let session = try sessionForChat(id)
                 try ScheduledBrowserImport.install(scheduledBrowserImport, session: session, browserEnabled: state.browserEnabled == true)
@@ -2369,6 +2526,16 @@ private struct ChatRunState: Equatable {
                       admission.context == agentState(scheduledConnection).descriptor?.context else {
                     throw ClientFailure(L10n.text("Условия фонового запуска изменились. Отправка отменена.", "Scheduled execution conditions changed. Delivery was cancelled."))
                 }
+            }
+            if let handoffContext {
+                guard !shuttingDown, !Task.isCancelled,
+                      let chat = chat(id), !chat.isArchived, !isChangingChat(id), chat.route == route,
+                      agentState(chat.nativeSession?.connection).descriptor?.context == handoffContext,
+                      loadedThreads.contains(id), project == self.project(project.id),
+                      dispatchModel(chat) == selectedModel, dispatchEffort(chat) == selectedEffort,
+                      chat.resolvedRole(in: project, catalog: roleCatalog).profile(for: project,
+                        addOns: chat.resolvedAddOns(in: project), sharedRoots: sharedRoots) == handoffPermissions,
+                      access == handoffPermissions else { throw ConversationIdentity.unavailable }
             }
             let submittedTurn = try await client.send(outgoing, to: sessionForChat(id), projectPath: workingDirectory,
                                                           permissions: access, model: selectedModel, effort: selectedEffort,
@@ -2406,7 +2573,7 @@ private struct ChatRunState: Equatable {
             let engineTurn = runs[runKey]?.turnID.flatMap { $0 == priorTurn ? nil : $0 }
             // The app is quitting and closed its connections under this send: the message waits in the persisted
             // queue and goes out on the next launch (the quit itself was judged idle before the send arrived).
-            if shuttingDown, let threadID, scheduledRun == nil, !localID.hasPrefix("local-user:remote:") {
+            if shuttingDown, let threadID, scheduledRun == nil, handoffContext == nil, !localID.hasPrefix("local-user:remote:") {
                 holdForRestart(QueuedMessage(id: localID, threadID: threadID, projectID: project.id, text: text,
                                              model: selectedModel, effort: selectedEffort), first: true)
                 if engineTurn == nil {
@@ -2418,7 +2585,7 @@ private struct ChatRunState: Equatable {
             // The engine started a turn of its own while this send was in flight (Claude resuming after its background
             // tasks): that turn keeps the chat running. A definite rejection delivered nothing, so the message waits
             // in the queue for that turn to finish, exactly as if it had been sent while the chat was busy.
-            if let engineTurn, let threadID, scheduledRun == nil, !localID.hasPrefix("local-user:remote:"),
+            if let engineTurn, let threadID, scheduledRun == nil, handoffContext == nil, !localID.hasPrefix("local-user:remote:"),
                (error as? AgentOperationFailure)?.rejection != nil {
                 AppLog.delivery.notice("Engine turn \(engineTurn, privacy: .public) started in chat \(threadID, privacy: .public) during a send; message queued, nothing was delivered")
                 items.removeAll { $0.id == localID }
@@ -2439,7 +2606,9 @@ private struct ChatRunState: Equatable {
                 runs[runKey, default: ChatRunState()].running = false
                 runs[runKey, default: ChatRunState()].turnID = nil
             }
-            if visible && selectionGeneration == selection && !composer.hasText { composer.text = text }
+            if let threadID, handoffContext != nil {
+                updateDraft(chatID: threadID) { $0.isEmpty ? text : $0 }
+            } else if visible && selectionGeneration == selection && !composer.hasText { composer.text = text }
         }
     }
     func scheduledAgentReady(_ agent: AgentConnectionID) -> Bool {
@@ -3161,7 +3330,7 @@ private struct ChatRunState: Equatable {
         for id in Array(titleTasks.keys) { await cancelChatTitle(id) }
         step("scheduler"); await stopScheduler()
         summaryTask?.cancel()
-        step("handoff"); await cancelHandoffPreparation()
+        step("handoff"); cancelHandoffPreparation()
         step("summary runners")
         for id in agentIDs { await slots[id]?.generationRunner.stop() }
         step("summary queue"); await summaryTask?.value

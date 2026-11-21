@@ -130,8 +130,10 @@ public actor AgentClient {
         try await integration.answer(id, session: session, context: descriptor().context, response: response).value()
     }
     public func rejectInteraction(_ id: UUID) async { await integration.rejectInteraction(id) }
-    public func history(_ session: AgentSessionReference) async throws -> [AgentHistoryTurn] {
-        try await integration.history(session, context: descriptor().context).value()
+    public func history(_ session: AgentSessionReference, context: AgentContext? = nil) async throws -> [AgentHistoryTurn] {
+        let boundContext: AgentContext
+        if let context { boundContext = context } else { boundContext = try await descriptor().context }
+        return try await integration.history(session, context: boundContext).value()
     }
     public func summarySource(_ session: AgentSessionReference) async throws -> SummarySource {
         let source = try await integration.summarySource(session, context: descriptor().context).value()
@@ -170,15 +172,21 @@ public actor AgentGenerationRunner {
         return title
     }
     public func handoff(source: AgentSessionReference, input: String, model: String, route: RequestRoute,
-                        environment: AgentGenerationEnvironment, language: AppLanguage) async throws -> HandoffSummary {
-        let context = try await integration.descriptor().value().context
+                        environment: AgentGenerationEnvironment, language: AppLanguage, context: AgentContext) async throws -> HandoffSummary {
         let request = AgentGenerationRequest(source: source, recipe: .contextHandoffV1, historicalInput: input,
             model: .init(context: context, model: model), route: route.agentRoute, language: language.rawValue)
+        try Task.checkCancellation()
         active = request.id; defer { active = nil }
-        guard case .handoff(let output) = try await integration.generate(request, environment: environment, willStart: {}).value() else {
-            throw AgentOperationFailure(rejection: .invalidResponse, failure: nil)
+        return try await withTaskCancellationHandler {
+            let result = await integration.generate(request, environment: environment, willStart: { try Task.checkCancellation() })
+            try Task.checkCancellation()
+            guard case .handoff(let output) = try result.value() else {
+                throw AgentOperationFailure(rejection: .invalidResponse, failure: nil)
+            }
+            return try HandoffSummary.validate(output)
+        } onCancel: { [integration] in
+            Task { await integration.cancelGeneration(request.id) }
         }
-        return try HandoffSummary.validate(output)
     }
     /// A commit message draft from `GitGeneration.commitInput`.
     public func commitMessage(source: AgentSessionReference, input: String, model: String, route: RequestRoute,

@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- The context handoff arrow opens a new chat with the source settings and sends the summary in one action. Paused work stays paused, and the handoff editor remains available. Cancel stops preparation immediately in either flow and discards late responses.
+
 - Under the external boundary, `git hash-object --stdin` is refused at once with the reason and the file route, instead of hanging when another mediated command feeds it (nono 0.81.0 keeps that pipe open).
 
 - Claude applies role restrictions to quoted and path-qualified command names and can open the three project env templates under the external boundary.
