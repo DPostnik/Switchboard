@@ -568,7 +568,11 @@ Known gaps. Check this list before you treat a failure as a new defect.
     and an upstream report to nono. Verified: unit tests (`mediatedGitRefusesHashObjectStdinAndKeepsFileOperands`,
     `nono why` with the pinned helper), the probe `scripts/probe-nono-runtime.py --nono .build/nono/nono
     --git-stdin-only` outside any sandbox (refusal exit 126 with the text, file route, plain pipe returns, and
-    `git/nono-mediated-pipe-leak-still-present`, which fails once a fixed helper stops the hang). Not checked live in a chat.
+    `git/nono-mediated-pipe-leak-still-present`, which fails once a fixed helper stops the hang). Checked live 2026-11-21
+    (isostudio, Claude chat 32CBECA8, build 565): `printf x | git hash-object --stdin` refused at once with exit 126 and the
+    text; in the same chat `/usr/bin/security list-keychains` was refused by the hook (`denyList`), the listed item read
+    `security find-generic-password -s isostudio-sentry -a auth-token -w | wc -c` ran, Read opened `.env.example` and
+    refused `.env`.
 
 - `scripts/build-app.sh` and the queue's `confirm-live` read the process list and a process's path and
   start time through libproc instead of `ps` (2026-11-12): `ps` stopped the app build after a
