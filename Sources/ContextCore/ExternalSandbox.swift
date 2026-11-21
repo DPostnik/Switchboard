@@ -775,10 +775,13 @@ public enum ExternalSandboxPlanner {
                                             "-c", "gpg.format=openpgp", "-c", "gpg.program=gpg"]
     public static let gitPullRefusal = "git pull does not run with the Keychain under the external boundary: it would run the repository's merge drivers and filters with it. Run `git fetch`, then `git merge --ff-only` or `git rebase`. / git pull под внешней границей не получает Связку ключей: он запустил бы с ней драйверы слияния и фильтры репозитория. Выполни `git fetch`, затем `git merge --ff-only` или `git rebase`."
     public static let gitCredentialRefusal = "git credential is not available under the external boundary: credentials stay in the Keychain. `git push`, `git fetch` and `git ls-remote` use them themselves. / git credential под внешней границей недоступен: учётные данные остаются в Связке ключей, их сами берут `git push`, `git fetch` и `git ls-remote`."
+    /// nono 0.81.0 does not mark the stdio descriptors it receives from a shim close-on-exec, so every mediated child started
+    /// meanwhile inherits them: a mediated reader fed by a mediated writer keeps its own pipe's write end and never sees EOF
+    /// (PERMISSIONS.md, known gaps). Only these argv prefixes can be matched; the file route covers them.
     public static var gitHashStdinRefusal: String {
         L10n.text(
-            "Передача данных в git hash-object через stdin может зависнуть в посреднике nono. Команда не запущена. Для хеширования передайте путь к файлу.",
-            "Piped input to git hash-object can hang in the nono broker. The command did not start. Pass a file path to hash."
+            "git hash-object --stdin под внешней границей отклонён: если вход идёт от другой посредничаемой команды (`git show … | git hash-object --stdin`), nono 0.81.0 оставляет канал открытым и команда зависает. Команда не запущена. Запиши содержимое в файл и выполни `git hash-object -w --path <путь> <файл>`.",
+            "git hash-object --stdin is refused under the external boundary: when its input comes from another mediated command (`git show … | git hash-object --stdin`), nono 0.81.0 keeps the pipe open and the command hangs. The command did not start. Write the content to a file and run `git hash-object -w --path <path> <file>`."
         )
     }
 

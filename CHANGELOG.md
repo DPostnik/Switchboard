@@ -4,7 +4,7 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
-- The Git broker refuses common `git hash-object --stdin` forms promptly when piped input could hang. Hashing a file by path remains available.
+- Under the external boundary, `git hash-object --stdin` is refused at once with the reason and the file route, instead of hanging when another mediated command feeds it (nono 0.81.0 keeps that pipe open).
 
 - Claude applies role restrictions to quoted and path-qualified command names and can open the three project env templates under the external boundary.
 

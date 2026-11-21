@@ -265,8 +265,23 @@ cat pipeline.err
 test ! -s pipeline.out
 echo "CHECK stdin-no-output $?"
 blob=$(git hash-object -w from-file.txt) && git cat-file -e "$blob" && echo "CHECK file-object $blob"
+# Piped input from a command outside the broker reaches mediated git and ends with EOF (a form the refusal does not match).
+echo "CHECK plain-pipe $(printf 'switchboard file fixture\n' | git hash-object --path from-file.txt --stdin 2>&1)"
+# nono 0.81.0 leak (PERMISSIONS.md, known gaps): a mediated reader fed by a mediated writer inherits the writer's pipe end
+# and never sees EOF. Bounded here; the probe kills the orphaned real git after the run.
+# Every stdio stream of the pair goes to a file: the leaked descriptors must not hold the probe's own output pipe.
+( git show :payload.txt | git hash-object --path leak-probe.txt --stdin ) < /dev/null > leak.out 2>&1 &
+pid=$!
+for i in {1..50}; do kill -0 $pid 2>/dev/null || break; sleep 0.1; done
+if kill -0 $pid 2>/dev/null; then echo "CHECK mediated-pipe hangs"; kill $pid 2>/dev/null; else echo "CHECK mediated-pipe returns"; fi
 exit 0
-""", env, timeout=15, profile=profile)
+""", env, timeout=30, profile=profile)
+    # The real git of the leak check is the supervisor's child in its own session: killing nono's group leaves it running.
+    for pid in subprocess.run(['pgrep', '-f', 'hash-object --path leak-probe.txt --stdin'], capture_output=True, text=True).stdout.split():
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except (ProcessLookupError, ValueError):
+            pass
     found = lines(out)
     results['git-stdin'] = {'checks': found, 'exit': code}
     completed = code == 0 and 'TIMEOUT' not in out
@@ -275,6 +290,11 @@ exit 0
           and nono_git_policy.GIT_HASH_STDIN_REFUSAL in out, (out + err).strip())
     check('git/hash-object-file-written', completed and found.get('file-object') == expected,
           found.get('file-object', 'missing'))
+    check('git/plain-pipe-into-mediated-git-returns', completed and found.get('plain-pipe') == expected, found.get('plain-pipe', 'missing'))
+    # Expected to hang while the pinned nono leaks received stdio descriptors. "returns" means a fixed helper: revisit the
+    # hash-object refusal and the known gap.
+    check('git/nono-mediated-pipe-leak-still-present', completed and found.get('mediated-pipe') == 'hangs',
+          found.get('mediated-pipe', 'missing'))
 
 
 if args.git_stdin_only:

@@ -423,7 +423,6 @@ Known gaps. Check this list before you treat a failure as a new defect.
   - Cost: nono walks each root once per deny glob at every process start (no pruning, `walk_and_match`). Measured on this
     repository (about 180,000 entries with `.build`): 1.4-2.2 s for both globs in `nono run --dry-run`. A large shared root adds
     its own walk.
-  - Consequences: a repository that tracks a `.env` file cannot check it out, stash or `git add -A` it under the boundary (EPERM);
     an untracked, unignored `.env` makes `git add -A` fail. Tools that write `.env` (`vercel env pull` and the like) fail. Hard
     links to an env file made inside the boundary are not checked. Claude's Read tool under the boundary uses exact template
     exceptions via ordered relative gitignore negations in the same deny list
@@ -541,15 +540,35 @@ Known gaps. Check this list before you treat a failure as a new defect.
     relative `-C`, `git remote update`, `git submodule update` and local `git fetch ../repo` (file transport) have no
     network or fail.
 
-- Mediated `git hash-object` stdin (2026-11-21): a Claude chat's `git show | awk | git hash-object -w --stdin`
-  stalled under nono 0.81.0. The file-operand form completed. The pinned broker passes stdio itself
-  (`tool-sandbox/protocol.rs`, `tool-sandbox/platform/macos.rs`); Switchboard's provider launcher does
-  not own that pipe. Channel 2 uses the existing Git invocation policy to refuse the prefixes
-  `hash-object --stdin` and `hash-object -w --stdin`, bare or with an existing `-C <root>` lead, before
-  Git starts. The shared planner covers both providers when Git narrowing is enabled. Other stdin
-  forms, other Git subcommands and the rollback policy are outside this mitigation. No grant, route,
-  approval, ledger reason or permission decision changes. The helper and the bounded fixture probe
-  (`scripts/probe-nono-runtime.py --nono .build/nono/nono --git-stdin-only`) still need runtime verification.
+- Pipes between two mediated commands hang (nono 0.81.0 defect, found 2026-11-21). A Claude chat's
+  `git show HEAD:PERMISSIONS.md | awk … | git hash-object -w --stdin` hung for over 30 minutes with no output; the
+  file form `git hash-object -w --path P FILE` returned at once.
+  - Cause, proven: the shim sends its stdio to the supervisor (`tool-sandbox/protocol.rs` `recv_stdio_fds`), which
+    receives them with `recvmsg(…, 0)` and never sets `FD_CLOEXEC` (`crates/nono/src/supervisor/socket.rs`
+    `recv_fd_via_socket`; macOS has no `MSG_CMSG_CLOEXEC`). `platform/macos.rs` `launch_child` then forks every mediated
+    child with `std::process::Command`, which closes nothing else. So every mediated child inherits the stdio of each
+    other mediated call in flight. Reproduced with the pinned helper outside any sandbox: the real `git apply --check`
+    of `git show :f | git apply --check` held fd 16, the write end of its own stdin pipe (`lsof`), and never saw EOF.
+    `wc -c | wc -l` hangs the same way, so it is not git-specific. v0.82.0 has the same code. No policy field controls
+    it. `resources.wall_time_seconds` would also kill long `fetch` and `push` runs.
+  - What works: a mediated writer into a plain reader (`git show … | cat`), a plain writer into a mediated reader
+    (`printf … | git …`, a heredoc into `git commit -F -`, `< file`), command substitution, files. Concurrent
+    mediated calls are not serialized. What hangs: any mediated reader whose input comes, directly or through plain
+    stages (`awk`), from a mediated writer in the same pipeline: `git diff | git apply`, `git show | git hash-object
+    --stdin`, `git format-patch --stdout | git am`, and the same with `gh` or `security`. The real child is started in
+    its own session and survives the chat's kill; `ps` cannot show it under the boundary.
+  - Mitigation, channel 2, both providers (shared planner, only with the git narrowing on): the existing git
+    invocation policy refuses the prefixes `hash-object --stdin` and `hash-object -w --stdin`, bare or after `-C <root>`,
+    before git starts. The RU/EN text names the cause and the file route (`git hash-object -w --path <path> <file>`).
+    This also refuses the working plain-writer form of those two prefixes. nono's argv matchers cannot see where stdin
+    comes from, and `apply`, `am`, `commit -F -`, `update-index --index-info`, `cat-file --batch` stay allowed, because
+    a heredoc or file feeds them correctly. They still hang when a mediated command feeds them. `--path P --stdin` is
+    not matched. No grant, route, approval, ledger reason or decision changes.
+  - Not done: a Claude hook refusal for pipelines that join two mediated commands (Codex has no hook, invariant 14),
+    and an upstream report to nono. Verified: unit tests (`mediatedGitRefusesHashObjectStdinAndKeepsFileOperands`,
+    `nono why` with the pinned helper), the probe `scripts/probe-nono-runtime.py --nono .build/nono/nono
+    --git-stdin-only` outside any sandbox (refusal exit 126 with the text, file route, plain pipe returns, and
+    `git/nono-mediated-pipe-leak-still-present`, which fails once a fixed helper stops the hang). Not checked live in a chat.
 
 - `scripts/build-app.sh` and the queue's `confirm-live` read the process list and a process's path and
   start time through libproc instead of `ps` (2026-11-12): `ps` stopped the app build after a

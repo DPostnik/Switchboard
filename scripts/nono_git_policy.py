@@ -10,7 +10,9 @@ GIT_LOCAL_ENV = PLAIN_ENV + ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_AUTHOR_
                              'GIT_COMMITTER_DATE', 'GIT_INDEX_FILE', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_EDITOR', 'GIT_SEQUENCE_EDITOR',
                              'GIT_MERGE_AUTOEDIT', 'GIT_OPTIONAL_LOCKS']
 KEYCHAIN_SUBCOMMANDS = ['push', 'fetch', 'ls-remote']
-GIT_HASH_STDIN_REFUSAL = 'Piped input to git hash-object can hang in the nono broker. The command did not start. Pass a file path to hash.'
+GIT_HASH_STDIN_REFUSAL = ('git hash-object --stdin is refused under the external boundary: when its input comes from another mediated command '
+                          '(`git show … | git hash-object --stdin`), nono 0.81.0 keeps the pipe open and the command hangs. The command did not '
+                          'start. Write the content to a file and run `git hash-object -w --path <path> <file>`.')
 KEYCHAIN_PREPEND = ['--no-pager', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.askPass=',
                     '-c', 'core.alternateRefsCommand=exit 0', '-c', 'credential.helper=', '-c', 'credential.https://github.com.helper=osxkeychain',
                     '-c', 'gpg.format=openpgp', '-c', 'gpg.program=gpg']
