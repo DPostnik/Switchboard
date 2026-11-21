@@ -10,6 +10,79 @@ import AgentContract
 // policy file lives outside every granted root. App-owned MCP servers stay outside the boundary behind
 // `SandboxRuntime/mcp_host.py`; the sandboxed process reaches them through `mcp_relay.py` over one socket.
 
+/// Project secret env files (invariant 12; user decision 2026-11-21): `.env` and `.env.<suffix>` at any depth of every granted
+/// folder stay closed to the whole provider process tree under the external boundary, both providers. Templates hold no
+/// secrets and agents edit them, so they stay readable (and writable where the folder is).
+///
+/// nono 0.81.0 (`crates/nono-cli/src/policy.rs` `add_glob_deny_rules`): a `filesystem.deny` glob is expanded at start and also
+/// emitted as a Seatbelt regex deny, so files created later and nested folders are covered; it wins over the folder grant.
+/// Two gaps of nono's typed fields are filled with raw Seatbelt rules (`unsafe_macos_seatbelt_rules`, honoured for profiles
+/// loaded by path): `bypass_protection` reopens only files that exist at start, through their canonical path (a template linked
+/// to `.env` would reopen `.env`), so templates are reopened by a regex on the path Seatbelt checks; and a command sandbox
+/// inherits no agent deny but the Keychain one (`tool-sandbox/platform/macos.rs` `build_child_caps`), so every mediated
+/// command gets the same deny and template rules, appended after its grants.
+public enum ProjectSecretFiles {
+    /// Globs under each granted folder; `**/` also matches at the folder's own level.
+    public static let deniedGlobs = ["**/.env", "**/.env.*"]
+    /// File names that stay open although `.env.*` matches them.
+    public static let templates = [".env.example", ".env.sample", ".env.template"]
+
+    /// Whether a file name is a secret env file under this rule (templates are not).
+    public static func isSecret(_ name: String) -> Bool {
+        (name == ".env" || name.hasPrefix(".env.")) && !templates.contains(name)
+    }
+
+    /// nono's `filesystem.deny` entries for the folders (a folder inside another listed one adds nothing).
+    public static func denyEntries(roots: [String]) -> [String] {
+        outermost(roots).flatMap { root in deniedGlobs.map { root + "/" + $0 } }
+    }
+
+    /// Raw Seatbelt rules that reopen templates: read in every folder, write only in `writable` ones. Each follows the deny
+    /// it overrides (Seatbelt: the last matching rule wins).
+    public static func templateRules(roots: [String], writable: [String]) -> [String] {
+        let read = outermost(roots).flatMap { root in templates.compactMap { regex(root, "**/" + $0) }.map { "(allow file-read-data (regex #\"\($0)\"))" } }
+        let write = outermost(writable).flatMap { root in templates.compactMap { regex(root, "**/" + $0) }.map { "(allow file-write* (regex #\"\($0)\"))" } }
+        return read + write
+    }
+
+    /// The deny for a command sandbox, which does not inherit the session's `filesystem.deny`, followed by the template rules.
+    public static func commandRules(roots: [String], writable: [String]) -> [String] {
+        let denied = outermost(roots).flatMap { root in deniedGlobs.compactMap { regex(root, $0) } }
+        return denied.flatMap { ["(deny file-read-data (regex #\"\($0)\"))", "(deny file-write* (regex #\"\($0)\"))"] }
+            + templateRules(roots: roots, writable: writable)
+    }
+
+    /// Folders that no other listed folder contains, in their order.
+    public static func outermost(_ roots: [String]) -> [String] {
+        var result: [String] = []
+        for root in roots where !result.contains(root) && !roots.contains(where: { $0 != root && root.hasPrefix($0 + "/") }) {
+            result.append(root)
+        }
+        return result
+    }
+
+    /// The anchored regex nono builds for `<root>/<glob>` (`glob_to_seatbelt_regex_with_literal_prefix`): the folder escaped
+    /// literally, `**/` as `(.*/)?` (Seatbelt ignores non-capturing groups), `*` as `[^/]*`. nil for a path nono cannot
+    /// express (control characters).
+    public static func regex(_ root: String, _ glob: String) -> String? {
+        guard !root.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
+        func escaped(_ text: Substring) -> String {
+            text.map { character -> String in
+                if character == "\"" { return "\\\"" }
+                return ".+*?()[]{}|^$\\".contains(character) ? "\\" + String(character) : String(character)
+            }.joined()
+        }
+        var result = "^" + escaped(Substring(root + "/"))
+        var rest = Substring(glob)
+        while !rest.isEmpty {
+            if rest.hasPrefix("**/") { result += "(.*/)?"; rest = rest.dropFirst(3) }
+            else if rest.hasPrefix("*") { result += "[^/]*"; rest = rest.dropFirst() }
+            else { result += escaped(rest.prefix(1)); rest = rest.dropFirst() }
+        }
+        return result + "$"
+    }
+}
+
 /// The helper shipped in `Contents/Helpers/Nono`, verified against the lock before every use.
 public struct ExternalSandboxHelper: Hashable, Sendable {
     public let executable: URL
@@ -242,6 +315,10 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
     /// because `~/.docker/config.json` stays denied and Testcontainers fails on a config file it sees but cannot read.
     public var dockerConfig = false
     public var dockerConfigFolder: URL { temporary.appendingPathComponent("docker-config", isDirectory: true) }
+    /// Granted folders (the project, its folders and shared roots, folder grants inside them) whose secret env files stay
+    /// closed (`ProjectSecretFiles`); a folder granted read+write keeps its templates writable.
+    public var secretFileRoots: [String] = []
+    var secretFileWritableRoots: [String] { secretFileRoots.filter { grants.contains(.init(.allow, $0)) } }
     public let commands: [ExternalSandboxCommand]
     public let executableDirectories: [String]
     public let worker: URL
@@ -291,7 +368,9 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
                 + (command.callers.isEmpty ? "" : " callers=" + command.callers.joined(separator: ","))
             return "command \(command.name) \(command.executable) \(command.sandbox.label)" + rules + refused + routes + chain
         }
-        return ["project " + project] + paths + mediated + executableDirectories.map { "exec " + $0 }
+        let secrets = secretFileRoots.isEmpty ? [] : ["secret files " + ProjectSecretFiles.deniedGlobs.joined(separator: ",")
+            + " except " + ProjectSecretFiles.templates.joined(separator: ",") + " in " + secretFileRoots.joined(separator: ",")]
+        return ["project " + project] + paths + mediated + executableDirectories.map { "exec " + $0 } + secrets
     }
 
     /// Environment the wrapped process receives on top of the provider's: a private temp folder inside the grants and
@@ -317,6 +396,8 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
         let readFiles = grants.filter { $0.mode == .readFile || $0.mode == .allowFile }.map(\.path)
         let writes = grants.filter { $0.mode == .allow }.map(\.path)
         let writeFiles = grants.filter { $0.mode == .allowFile }.map(\.path)
+        // Secret env files: a command sandbox reads the session's folders but not its `filesystem.deny` (ProjectSecretFiles).
+        let secretRules = secretFileRoots.isEmpty ? [] : ProjectSecretFiles.commandRules(roots: secretFileRoots, writable: secretFileWritableRoots)
         var commands: [String: Any] = [:]
         func compile(_ variant: ExternalSandboxCommand.Sandbox) -> [String: Any] {
             var environment: [String: Any] = ["allow_vars": variant.environment ?? ExternalSandboxCommand.defaultEnvironment]
@@ -330,7 +411,7 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
                 ["(allow process-exec* (subpath \"\(tree)\"))", "(allow file-read* (subpath \"\(tree)\"))", "(allow file-map-executable (subpath \"\(tree)\"))"]
             } + variant.executableFiles.flatMap { file in
                 ["(allow process-exec* (literal \"\(file)\"))", "(allow file-read* (literal \"\(file)\"))", "(allow file-map-executable (literal \"\(file)\"))"]
-            }
+            } + secretRules
             if !rules.isEmpty { sandbox["unsafe_macos_seatbelt_rules"] = rules }
             return sandbox
         }
@@ -373,6 +454,10 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
             commands[command.name] = policy
         }
         var document: [String: Any] = ["meta": ["name": "switchboard-\(workerID)", "version": "1"], "workdir": ["access": "none"]]
+        if !secretFileRoots.isEmpty {
+            document["filesystem"] = ["deny": ProjectSecretFiles.denyEntries(roots: secretFileRoots)]
+            document["unsafe_macos_seatbelt_rules"] = ProjectSecretFiles.templateRules(roots: secretFileRoots, writable: secretFileWritableRoots)
+        }
         // nono 0.81.0 refuses `command_policies` fields when no command is mediated (`inactive_non_empty`, B1 probe).
         if !commands.isEmpty { document["command_policies"] = ["executable_dirs": executableDirectories, "commands": commands] }
         return document
@@ -635,6 +720,13 @@ public enum ExternalSandboxPlanner {
                                          relay: resources.appendingPathComponent("SandboxRuntime/mcp_relay.py"), temporary: temporary)
         let denied = protectedPaths(home: input.home)
         result.dockerConfig = grants.contains { $0.mode == .bypassProtection }
+        // Secret env files close in the folders the user granted (project, its folders, shared roots) and in every folder grant
+        // inside them (the scratch folder, access-set paths in the project). A path with `*` would read as a glob to nono.
+        let userRoots = [project] + effective.extraRoots.map { canonical(expand($0.path, home: input.home)) }
+        result.secretFileRoots = grants.filter { grant in
+            (grant.mode == .allow || grant.mode == .read) && !grant.path.contains("*")
+                && userRoots.contains { grant.path == $0 || grant.path.hasPrefix($0 + "/") }
+        }.map(\.path)
         result.protectedFolders = effective.extraRoots.map { canonical(expand($0.path, home: input.home)) }
             .filter { root in denied.contains { root == $0 || root.hasPrefix($0 + "/") } }
         return .success(result)

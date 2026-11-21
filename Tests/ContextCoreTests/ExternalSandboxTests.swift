@@ -1040,3 +1040,140 @@ private extension ExternalSandboxCommand.ArgumentRule {
         #expect(text.contains(folder) && text.contains("docker"))
     }
 }
+
+/// Secret env files (user decision 2026-11-21, invariant 12): `.env` and `.env.<suffix>` close at any depth of every granted
+/// folder, for the session (nono's `filesystem.deny`) and for every mediated command (which inherits no agent deny); templates
+/// stay readable, and writable only where the folder is. Both providers plan the same rules (invariant 14).
+@Test func secretEnvFilesCloseInEveryGrantedFolderForBothProviders() throws {
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    let shared = root.appendingPathComponent("shared"), reference = root.appendingPathComponent("reference")
+    for folder in [shared, reference] { try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) }
+    var project = Project(path: root.appendingPathComponent("project").path)
+    project.accessPresets = ["apple-signing"]
+    var profile = AgentRoleCatalog.preset(AgentRoleID.developer).profile(for: project)
+    profile.filesystem = .project(extraRoots: [.init(path: shared.path, writable: true), .init(path: reference.path, writable: false)])
+    var input = claudeInput(root, project: project, workerID: "se1"); input.profile = profile
+    let plan = try ExternalSandboxPlanner.plan(input, helper: .success(helper)).get()
+    let projectPath = plan.project, sharedPath = shared.resolvingSymlinksInPath().path, referencePath = reference.resolvingSymlinksInPath().path
+    #expect(plan.secretFileRoots == [projectPath, sharedPath, referencePath])
+    // Provider home, temp folder, toolchains and the app's caches are not user folders: no rule (and no walk) there.
+    #expect(!plan.secretFileRoots.contains { $0.hasPrefix(plan.worker.path) || $0.hasSuffix("/codex-home") || $0.hasPrefix("/opt/") || $0.hasSuffix("/Caches/Switchboard") })
+    let document = plan.policyDocument()
+    let deny = (document["filesystem"] as! [String: [String]])["deny"]!
+    #expect(deny == [projectPath, sharedPath, referencePath].flatMap { [$0 + "/**/.env", $0 + "/**/.env.*"] })
+    let session = document["unsafe_macos_seatbelt_rules"] as! [String]
+    #expect(session.allSatisfy { $0.hasPrefix("(allow file-read-data (regex #\"^") || $0.hasPrefix("(allow file-write* (regex #\"^") })
+    #expect(session.filter { $0.hasPrefix("(allow file-read-data") }.count == 9)
+    let writes = session.filter { $0.hasPrefix("(allow file-write*") }
+    #expect(writes.count == 6 && !writes.contains { $0.contains(referencePath) })
+    // The regexes match what nono's globs match: any depth, the folder's own level included, never another folder.
+    func pattern(_ rule: String) throws -> NSRegularExpression {
+        let start = try #require(rule.range(of: "#\"")), end = try #require(rule.range(of: "\"))", options: .backwards))
+        return try NSRegularExpression(pattern: String(rule[start.upperBound..<end.lowerBound]))
+    }
+    func matches(_ rules: [String], _ path: String) throws -> Bool {
+        try rules.contains { try pattern($0).firstMatch(in: path, range: NSRange(path.startIndex..., in: path)) != nil }
+    }
+    let commands = (document["command_policies"] as! [String: Any])["commands"] as! [String: Any]
+    let security = ((commands["security"] as! [String: Any])["from"] as! [String: [String: Any]])["session"]!["sandbox"] as! [String: Any]
+    let codesign = (commands["codesign"] as! [String: Any])["sandbox"] as! [String: Any]
+    for sandbox in [security, codesign, (commands["pgrep"] as! [String: Any])["sandbox"] as! [String: Any]] {
+        let rules = sandbox["unsafe_macos_seatbelt_rules"] as! [String]
+        let denies = rules.filter { $0.hasPrefix("(deny ") }
+        #expect(denies.count == 12)
+        // Last in the sandbox, denies before the template allows: Seatbelt's last matching rule decides.
+        #expect(Array(rules.suffix(denies.count + session.count)) == denies + session)
+        let readDenies = denies.filter { $0.hasPrefix("(deny file-read-data") }
+        for path in [projectPath + "/.env", projectPath + "/.env.local", projectPath + "/app/.env", sharedPath + "/a/b/.env.production",
+                     referencePath + "/.env.example.bak", projectPath + "/.env.example"] {
+            #expect(try matches(readDenies, path), "\(path)")
+        }
+        for path in [projectPath + "/env", projectPath + "/.envrc", projectPath + "/x.env", projectPath + "/.env/inner", root.path + "/other/.env",
+                     projectPath + "x/.env"] {
+            #expect(try !matches(readDenies, path), "\(path)")
+        }
+    }
+    let readAllows = session.filter { $0.hasPrefix("(allow file-read-data") }
+    for path in [projectPath + "/.env.example", projectPath + "/app/web/.env.sample", referencePath + "/.env.template"] {
+        #expect(try matches(readAllows, path), "\(path)")
+    }
+    #expect(try !matches(readAllows, projectPath + "/.env.examples") && !matches(readAllows, projectPath + "/.env"))
+    #expect(try matches(writes, projectPath + "/new/.env.example") && !matches(writes, referencePath + "/.env.example"))
+    #expect(plan.authority.contains { $0.hasPrefix("secret files **/.env,**/.env.* except .env.example,.env.sample,.env.template in ") })
+    // Codex compiles the same folders and rules from the same planner input.
+    var codex = CodexIntegration.boundaryInput(project: project.path, profile: profile, root: root, inbox: root.appendingPathComponent("inbox"))
+    codex.home = root.appendingPathComponent("home")
+    let codexPlan = try ExternalSandboxPlanner.plan(codex, helper: .success(helper)).get()
+    #expect(codexPlan.secretFileRoots == plan.secretFileRoots)
+    #expect(codexPlan.policyDocument()["filesystem"] as? [String: [String]] == document["filesystem"] as? [String: [String]])
+    #expect(codexPlan.policyDocument()["unsafe_macos_seatbelt_rules"] as? [String] == session)
+}
+
+@Test func secretEnvFilesKeepTemplatesReadOnlyInAReadOnlyProject() throws {
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    let project = Project(path: root.appendingPathComponent("project").path)
+    var input = claudeInput(root, project: project, workerID: "se2")
+    input.profile = AgentRoleCatalog.preset(AgentRoleID.reader).profile(for: project)
+    let plan = try ExternalSandboxPlanner.plan(input, helper: .success(helper)).get()
+    #expect(plan.readOnlyProject && plan.secretFileRoots.first == plan.project)
+    let rules = plan.policyDocument()["unsafe_macos_seatbelt_rules"] as! [String]
+    // The project only reads templates; only a writable folder inside it (the role's scratch folder) may write them.
+    let writable = plan.secretFileRoots.filter { plan.grants.contains(.init(.allow, $0)) }
+    #expect(!writable.contains(plan.project))
+    let writes = rules.filter { $0.hasPrefix("(allow file-write*") }
+    #expect(writes.count == writable.count * ProjectSecretFiles.templates.count)
+    #expect(writes.allSatisfy { rule in writable.contains { rule.contains(ProjectSecretFiles.regex($0, "**/")!.dropLast(1)) } })
+    #expect(ProjectSecretFiles.denyEntries(roots: plan.secretFileRoots) == [plan.project + "/**/.env", plan.project + "/**/.env.*"])
+}
+
+@Test func secretEnvFileNamesAndRegexEscaping() {
+    for name in [".env", ".env.local", ".env.production", ".env.example.local"] { #expect(ProjectSecretFiles.isSecret(name), "\(name)") }
+    for name in [".env.example", ".env.sample", ".env.template", ".envrc", "env", "x.env", ".environment"] { #expect(!ProjectSecretFiles.isSecret(name), "\(name)") }
+    #expect(ProjectSecretFiles.regex("/a b/[locale]/x.y+z", "**/.env.*") == #"^/a b/\[locale\]/x\.y\+z/(.*/)?\.env\.[^/]*$"#)
+    #expect(ProjectSecretFiles.regex("/q\"x", "**/.env") == #"^/q\"x/(.*/)?\.env$"#)
+    #expect(ProjectSecretFiles.regex("/bad\npath", "**/.env") == nil)
+    #expect(ProjectSecretFiles.outermost(["/p", "/p/sub", "/q", "/p"]) == ["/p", "/q"])
+}
+
+/// The emitted secret-file rules are accepted by the pinned helper and nono reports the deny inside the granted project.
+/// nono's `why` evaluates `filesystem.deny` for files that exist at start only and does not read raw Seatbelt rules, so it
+/// reports templates as denied; their reopening is checked by the regex test above and live.
+@Test func secretEnvFilePolicyIsAcceptedByThePinnedHelper() throws {
+    let package = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    let candidates = [package, package.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()]
+        .map { $0.appendingPathComponent(".build/nono/nono").path }
+    guard let nono = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return }
+    func run(_ arguments: [String], _ document: [String: Any]) throws -> (Int32, String) {
+        let process = Process(), input = Pipe(), output = Pipe()
+        process.executableURL = URL(fileURLWithPath: nono); process.arguments = arguments
+        process.standardInput = input; process.standardOutput = output; process.standardError = output
+        try process.run()
+        input.fileHandleForWriting.write(try JSONSerialization.data(withJSONObject: document)); try input.fileHandleForWriting.close()
+        let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        return (process.terminationStatus, text)
+    }
+    let root = try fixtureProject()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = try helperFromFixture()
+    let folder = root.appendingPathComponent("project")
+    try FileManager.default.createDirectory(at: folder.appendingPathComponent("app"), withIntermediateDirectories: true)
+    for name in [".env", ".env.local", "app/.env", "env.txt", ".env.example"] { try Data("x".utf8).write(to: folder.appendingPathComponent(name)) }
+    let project = Project(path: folder.path)
+    let plan = try ExternalSandboxPlanner.plan(claudeInput(root, project: project, workerID: "se3"), helper: .success(helper)).get()
+    let document = plan.policyDocument()
+    let (code, text) = try run(["profile", "validate", "/dev/stdin"], document)
+    #expect(code == 0 && text.contains("Result: valid"), "\(text)")
+    func why(_ path: String, _ operation: String) throws -> String {
+        let (_, out) = try run(["why", "--json", "--profile", "/dev/stdin", "--allow", plan.project, "--path", plan.project + "/" + path, "--op", operation], document)
+        return ((try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any])?["status"] as? String ?? out
+    }
+    for path in [".env", ".env.local", "app/.env"] {
+        #expect(try why(path, "read") == "denied" && why(path, "write") == "denied", "\(path)")
+    }
+    #expect(try why("env.txt", "read") == "allowed" && why("env.txt", "write") == "allowed")
+}

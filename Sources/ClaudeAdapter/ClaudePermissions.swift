@@ -19,7 +19,10 @@ struct ClaudeLaunchPolicy: Equatable {
     static let hookCallback = "switchboard-bash"
     /// `SendMessage` also reaches the user's other Claude sessions; the hook lets it through only to the chat's own sub-agents.
     static let sendCallback = "switchboard-send"
-    /// Secrets no restricted role may read even inside its roots.
+    /// Secrets no restricted role may read even inside its roots. `.env.*` also matches the templates the external boundary
+    /// keeps open (`ProjectSecretFiles.templates`): Claude's deny rules win over every allow rule and take no exception, so its
+    /// Read tool still refuses them (PERMISSIONS.md section 5). Under the boundary nono closes the other secret files for the
+    /// whole process tree; these rules stay for the Read tool and the CLI-sandbox fallback.
     static let secretDenyRules = ["Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(~/.gnupg/**)", "Read(~/.config/gh/**)",
                                   "Read(**/.env)", "Read(**/.env.*)", "Read(~/.codex/auth.json)", "Read(~/.claude/.credentials.json)"]
     /// Commands that reach the network; denied by the hook when the role has shell but no network.

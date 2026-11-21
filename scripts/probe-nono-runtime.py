@@ -105,8 +105,61 @@ def GIT_FS(case):
             'fs_read_file': [str(HOME / '.gitconfig')], 'fs_write': [str(case / 'project'), str(case / 'tmp')], 'fs_write_file': []}
 
 
+SECRET_GLOBS = ['**/.env', '**/.env.*']
+SECRET_TEMPLATES = ['.env.example', '.env.sample', '.env.template']
+
+
+def secret_regex(root, glob):
+    """Mirror of `ProjectSecretFiles.regex` (nono's `glob_to_seatbelt_regex_with_literal_prefix`)."""
+    def escaped(text):
+        return ''.join('\\"' if c == '"' else ('\\' + c if c in '.+*?()[]{}|^$\\' else c) for c in text)
+    out, rest = '^' + escaped(str(root) + '/'), glob
+    while rest:
+        if rest.startswith('**/'):
+            out, rest = out + '(.*/)?', rest[3:]
+        elif rest.startswith('*'):
+            out, rest = out + '[^/]*', rest[1:]
+        else:
+            out, rest = out + escaped(rest[0]), rest[1:]
+    return out + '$'
+
+
+def secret_template_rules(roots, writable):
+    return (['(allow file-read-data (regex #"%s"))' % secret_regex(r, '**/' + t) for r in roots for t in SECRET_TEMPLATES]
+            + ['(allow file-write* (regex #"%s"))' % secret_regex(r, '**/' + t) for r in writable for t in SECRET_TEMPLATES])
+
+
+def with_secret_files(document, roots, writable):
+    """The app's secret env file rules (`ExternalSandboxPlan.policyDocument`, 2026-11-21): nono's `filesystem.deny` and the
+    template rules for the session; every command sandbox (no inherited deny) gets the deny and template rules last."""
+    document['filesystem'] = {'deny': [str(r) + '/' + g for r in roots for g in SECRET_GLOBS]}
+    document['unsafe_macos_seatbelt_rules'] = secret_template_rules(roots, writable)
+    command = [rule for r in roots for g in SECRET_GLOBS
+               for rule in ('(deny file-read-data (regex #"%s"))' % secret_regex(r, g), '(deny file-write* (regex #"%s"))' % secret_regex(r, g))]
+    command += secret_template_rules(roots, writable)
+    seen = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            sandbox = node.get('sandbox')
+            if isinstance(sandbox, dict) and id(sandbox) not in seen:
+                seen.add(id(sandbox))
+                sandbox['unsafe_macos_seatbelt_rules'] = sandbox.get('unsafe_macos_seatbelt_rules', []) + command
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+    walk(document.get('command_policies', {}))
+    return document
+
+
 def policy(case, browser_port):
     """Command mediation: keychain for `security`, a browser command for the app's MCP server, Xcode tools by absolute path."""
+    return with_secret_files(base_policy(case, browser_port), [case / 'project'], [case / 'project'])
+
+
+def base_policy(case, browser_port):
     profiles = case / 'profiles'
     return {
         'meta': {'name': 'switchboard-runtime-probe', 'version': '1'},
@@ -179,6 +232,10 @@ try:
                                                  'test -r "%s/Library/Keychains/login.keychain-db" && touch "%s/hook-keychain"\nexit 0\n'
                                                  % (case / 'tmp', HOME, case / 'tmp'))
     os.chmod(hooks / 'reference-transaction', 0o755)
+    # Secret env files (2026-11-21): existing ones at start; others are created inside the sandbox after start.
+    (case / 'project/app').mkdir()
+    for name, text in [('.env', 'SECRET=1\n'), ('app/.env.local', 'SECRET=2\n'), ('.env.example', 'SECRET=\n')]:
+        (case / 'project' / name).write_text(text)
     browser_port = 39577
     profile = case / 'policy.json'
     profile.write_text(json.dumps(policy(case, browser_port), indent=1))
@@ -292,6 +349,19 @@ gh auth status -t > /dev/null 2>&1; echo "CHECK gh-show-token-refused $?"
 gh pr list --limit 1 > /dev/null 2>&1; echo "CHECK gh-pr-list $?"
 printf 'protocol=https\\nhost=github.com\\n' | "{GIT_EXEC}/git-credential-osxkeychain" get 2>/dev/null | grep -q '^password=' ; echo "CHECK git-helper-direct-no-secret $?"
 ls "{HOME}/Library/Keychains" > /dev/null 2>&1; echo "CHECK session-keychain-hidden $?"
+cd "{case}/project"
+cat .env > /dev/null 2>&1; echo "CHECK env-read-denied $?"
+cat app/.env.local > /dev/null 2>&1; echo "CHECK env-nested-read-denied $?"
+printf X >> .env 2>/dev/null; echo "CHECK env-write-denied $?"
+printf X > .env.production 2>/dev/null; echo "CHECK env-new-file-denied $?"
+mkdir -p late/deep && printf X > late/deep/.env 2>/dev/null; echo "CHECK env-new-nested-denied $?"
+test -e .env; echo "CHECK env-metadata-visible $?"
+cat .env.example > /dev/null 2>&1; echo "CHECK env-template-read $?"
+printf '#\\n' >> .env.example 2>/dev/null; echo "CHECK env-template-write $?"
+printf X > app/.env.sample 2>/dev/null && cat app/.env.sample > /dev/null 2>&1; echo "CHECK env-template-new $?"
+ln -s .env leak.env.example 2>/dev/null; cat leak.env.example > /dev/null 2>&1; echo "CHECK env-template-link-denied $?"
+git hash-object .env > /dev/null 2>&1; echo "CHECK env-mediated-git-denied $?"
+git hash-object .env.example > /dev/null 2>&1; echo "CHECK env-mediated-git-template $?"
 echo "CHECK proxy-env ${{HTTPS_PROXY:-unset}}"
 {chrome_part}
 {swiftpm_part}
@@ -337,6 +407,12 @@ wait
         token = found.get('gh-token-refused', '0 0').split(' ')
         check('developer/gh-token-refused-by-policy', token[0] not in ('0', '') and token[-1] != '0', ' '.join(token))
         check('developer/gh-pr-list (informational)', True, found.get('gh-pr-list', 'missing'))
+    # Secret env files: closed for the session and mediated git, also when created after start and nested; templates open.
+    exp.update({'env-metadata-visible': '0', 'env-template-read': '0', 'env-template-write': '0', 'env-template-new': '0',
+                'env-mediated-git-template': '0'})
+    for name in ['env-read-denied', 'env-nested-read-denied', 'env-write-denied', 'env-new-file-denied', 'env-new-nested-denied',
+                 'env-template-link-denied', 'env-mediated-git-denied']:
+        check('developer/' + name, found.get(name, '0').split(' ')[0] not in ('0', ''), found.get(name, 'missing'))
     for name, code in exp.items():
         check('developer/' + name, found.get(name, '').split(' ')[0] == code, found.get(name, 'missing'))
     for name in ['other-write', 'other-cwd-write', 'security-direct-denied', 'session-profiles-hidden', 'session-keychain-hidden', 'git-helper-direct-no-secret',

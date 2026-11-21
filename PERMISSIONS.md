@@ -160,8 +160,11 @@ Secrets
     readable by that project's agents through the mediated `security find-generic-password` forms.
     Per item, visible and removable in the project settings, listed by the grant review; never the
     whole Keychain and never a reserved item (`KeychainItemRule.reserved`).
-12. Secret paths (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `.env*`, provider credential
-    files) stay denied inside every restricted role. One deliberate exception (user decision
+12. Secret paths (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, project env files `.env` and
+    `.env.<suffix>` at any depth of every granted folder, provider credential files) stay denied
+    inside every restricted role. The env file templates `.env.example`, `.env.sample`,
+    `.env.template` hold no secrets and stay open (`ProjectSecretFiles`, 2026-11-21; under the
+    boundary for the whole process tree, see section 5). One deliberate exception (user decision
     2026-11-13): mediated gh's own sandbox reads `~/.config/gh` (read-only), only while its
     `hosts.yml` holds no plain-text `oauth_token` (the token stays in the Keychain). The session and
     every other command never get it. Second exception (user decision 2026-11-20): the `docker` access
@@ -221,6 +224,10 @@ Do not reopen these without the user.
   setting, no workaround (user decision 2026-11-12; it refines the earlier "fails, not asked").
 - Docker (2026-11-20): only through the `docker` access set, which opens the daemon socket file and
   nothing else in `~/.docker`. Never a folder grant of `~/.docker` or a bypass of a whole folder.
+- Project env files (2026-11-21): `.env` and `.env.<suffix>` close at the external boundary for both
+  providers, for the session and every mediated command, read and write, files created later and
+  nested folders included; only the three templates stay open. Agents reach a project secret through
+  a named Keychain item (`addKeychainItems`), never through the file. No mediated command regains it.
 - Grants are reviewed about twice a week (section 7). Accumulated grants are not trusted forever.
 - Sub-agents inherit the parent's rights. The role cap limits their tool names only; there is no
   read-only promise for them.
@@ -379,6 +386,57 @@ Developer chat signed its app under the boundary but direct `devicectl` installa
 same Info.plist EPERM as above.
 
 Known gaps. Check this list before you treat a failure as a new defect.
+
+- Project env files at the boundary (2026-11-21, user decision; `ProjectSecretFiles`, `ExternalSandboxPlan.secretFileRoots`).
+  Before, only Claude's settings rules `Read(**/.env)`, `Read(**/.env.*)` existed: they stop Claude's Read tool and Bash
+  commands the CLI parses. Seen live in isostudio: Claude's `grep … .env` inside a `for` loop read the file, Codex ran
+  `node --env-file=.env` and read `SENTRY_AUTH_TOKEN` (now a Keychain item, commit c7766ab). Now, channel 1, both providers
+  through the shared planner:
+  - Folders: the project, its folders and shared roots, and every folder grant inside them (the role's scratch folder,
+    access-set paths in the project). Not the provider home, temp, toolchains or caches. A root whose path contains `*` is
+    skipped (nono would read it as a glob).
+  - Session: nono `filesystem.deny` `<root>/**/.env`, `<root>/**/.env.*`. nono 0.81.0 (`crates/nono-cli/src/policy.rs`
+    `add_glob_deny_rules`, profile guide "Glob patterns", schema `FilesystemConfig.deny`) expands the glob at start and, on
+    macOS, emits a Seatbelt regex deny (`file-read-data`, `file-write*`) that wins over the folder grant and covers files created
+    later and any depth (`**/` also matches the root level). Metadata stays visible (`test -e` works).
+  - Templates: nono has no typed exception that fits. `filesystem.bypass_protection` reopens only files that exist at start
+    and through their canonical path (`apply_deny_overrides`), so a template linked to `.env` would reopen `.env` and a template
+    created later stays closed. The policy therefore adds top-level `unsafe_macos_seatbelt_rules` after the deny:
+    `(allow file-read-data (regex …/.env.example$))` per root and template, `file-write*` only for read+write roots. Seatbelt
+    checks the resolved path (nono relies on it too), so a link named like a template that points at `.env` should stay
+    closed (probe check `env-template-link-denied`, not run). nono honours raw rules only
+    for profiles loaded by path (`strip_untrusted_unsafe_seatbelt_rules`), which ours is.
+  - Mediated commands (channel 2): a command sandbox inherits no agent deny except the Keychain one
+    (`tool-sandbox/platform/macos.rs` `build_child_caps`; profile guide on `keychain_access`), and its schema has no deny field.
+    Every command sandbox (git, gh, codesign, security, pgrep, git's intercept routes) gets the same regex denies, then the
+    template rules, appended after its grants in its `unsafe_macos_seatbelt_rules` (emitted last, the last match wins). None of
+    them needs an env file.
+  - Authority: a line `secret files … in <roots>`, so a changed rule or root set replaces the process (Claude: next turn; Codex:
+    next message, `plan.authority` in the worker scope).
+  - Verified: unit tests (`ExternalSandboxTests`, `secretEnvFiles*`: folders, deny entries, rule order, regexes against nested,
+    new and foreign paths, read-only project, Codex equals Claude), `nono profile validate` of the emitted document and `nono why`
+    (`.env`, `.env.local`, `app/.env` denied for read and write, other files allowed) with the pinned helper. `nono why` does not
+    read raw rules and reports templates as denied; it also evaluates only files that exist. The runtime probe
+    (`scripts/probe-nono-runtime.py`, `developer/env-*`) has the Seatbelt checks (existing, new and nested files, link named like
+    a template, mediated git, template read, write and create) but was not run: it needs a session outside any sandbox. Not
+    checked live in a chat.
+  - Cost: nono walks each root once per deny glob at every process start (no pruning, `walk_and_match`). Measured on this
+    repository (about 180,000 entries with `.build`): 1.4-2.2 s for both globs in `nono run --dry-run`. A large shared root adds
+    its own walk. On a new external Claude worker, the app-owned zsh launcher reports readiness on stdout after nono has
+    installed the policy and the launcher has prepared fd 3. The wire consumes this fixed prelude before sending initialize.
+    Sandbox preparation has a separate 60 s watchdog. Claude then has the ordinary 15 s to answer initialize. EOF, malformed
+    startup output and preparation timeout close the wire. The signal is timing information only and cannot grant access.
+    A warm worker skips this startup sequence. Codex has its own 30 s initialization deadline.
+  - Consequences: a repository that tracks a `.env` file cannot check it out, stash or `git add -A` it under the boundary (EPERM);
+    an untracked, unignored `.env` makes `git add -A` fail. Tools that write `.env` (`vercel env pull` and the like) fail. Hard
+    links to an env file made inside the boundary are not checked. Claude's Read tool still refuses templates: its deny rules win
+    over every allow rule and take no exception (`ClaudeLaunchPolicy.secretDenyRules` unchanged); Bash under the boundary reads
+    them. Fallbacks: the Claude CLI sandbox merges `Read` deny rules into its `denyRead` (code.claude.com/docs/en/sandboxing:
+    a wildcard deny holds inside a wider allow), so Bash there is closed for `.env` and `.env.*`, templates included; not
+    checked live. The Codex native path (`sandboxPolicy` `workspaceWrite`/`readOnly`) reads the whole disk and cannot deny a
+    file inside a root, so Codex chats on the native sandbox can still read env files. Codex 0.171's permission profiles
+    (`default_permissions`, `[permissions.<name>.filesystem]` with `":workspace_roots"` globs set to `"deny"`) could express it;
+    moving the native path to them is a separate change, not made.
 
 - Mediated `security` (2026-11-12): before, apple-signing mediated `/usr/bin/security` with Keychain read and no
   argument filter, so agents of such a project could read the whole login Keychain. It now carries an argument

@@ -4,6 +4,10 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Claude chats start the response timer once the external sandbox is ready, so preparing large projects no longer consumes the time allowed for the first reply from the CLI.
+
+- Under the external boundary, Claude and Codex agents and the commands they run can no longer read or write project `.env` and `.env.*` files in any granted folder, including files created later and nested folders; `.env.example`, `.env.sample` and `.env.template` stay readable.
+
 - Claude chats under the external boundary can read a Keychain item granted to the project with the exact `security find-generic-password` command, as Codex chats already could; every other `security` command stays refused.
 
 - The web client and the iPhone app explain when they cannot reach the Mac (Switchboard on the Mac asleep, closed or offline) or the Switchboard server, and that new commands wait until the Mac is back.
