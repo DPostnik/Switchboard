@@ -9,7 +9,7 @@ import ContextCore
 /// preserved verbatim. A model the pinned Claude Code build does not describe is listed but not
 /// selectable: the CLI rejects it before any turn runs.
 ///
-/// Codex: the models the server lists, plus "Auto"; efforts come from the selected model.
+/// Codex: current and previous models from the server, plus "Auto"; efforts come from the selected model.
 ///
 /// Gemini (session models): the models its sessions report (the last list is remembered for new chats), plus "Auto"
 /// for the agent's own default; a reasoning level only when the model lists one.
@@ -22,6 +22,7 @@ struct ModelChip: View {
     /// The current agent offers the app's model catalog (Claude) instead of the engine's model list.
     private var catalog: AgentModelCatalog? { model.modelCatalog(model.currentAgent) }
     private var claude: Bool { catalog != nil }
+    private var profile: AgentProfile? { model.profile(model.currentAgent) }
     private var newChat: Bool { model.chatID == nil }
     /// Codex lists its models only once connected; until then the chip has no model to show.
     private var showsModels: Bool { claude || !model.models.isEmpty }
@@ -36,7 +37,7 @@ struct ModelChip: View {
         if let catalog { return catalog.title(model.currentModel) }
         guard showsModels else { return model.currentAgentName }
         if model.currentModel.isEmpty { return L10n.text("Авто", "Auto") }
-        return model.models.first { $0.id == model.currentModel }?.displayName ?? model.currentModel
+        return discoveredModelTitle(model.currentModel, displayName: model.models.first { $0.id == model.currentModel }?.displayName)
     }
 
     private var effortTitle: String? {
@@ -134,29 +135,34 @@ struct ModelChip: View {
             Section {
                 Picker(L10n.text("Рассуждение", "Reasoning"),
                        selection: Binding(get: { model.claudeEffort }, set: { model.selectClaudeEffort($0) })) {
-                    ForEach(catalog.efforts, id: \.id) { level in
+                    ForEach(claudeEffortOptions(catalog), id: \.id) { level in
                         Text(level.title).tag(level.id)
                     }
                 }.pickerStyle(.inline).labelsHidden()
             } header: { Text(L10n.text("Рассуждение", "Reasoning")) }
         } else if showsModels {
             Section {
-                Picker(L10n.text("Модель", "Model"), selection: Binding(get: { model.currentModel }, set: { model.selectModel($0) })) {
-                    Text(L10n.text("Авто", "Auto")).tag("")
-                    if !model.currentModel.isEmpty && !model.models.contains(where: { $0.id == model.currentModel }) {
-                        Text(model.currentModel).tag(model.currentModel)
-                    }
-                    ForEach(model.models, id: \.self) { entry in Text(entry.displayName).tag(entry.id) }
-                }.pickerStyle(.inline).labelsHidden()
+                if let featured = profile?.featuredComposerModels, !featured.isEmpty {
+                    groupedModelOptions(featured)
+                } else {
+                    Picker(L10n.text("Модель", "Model"), selection: Binding(get: { model.currentModel }, set: { model.selectModel($0) })) {
+                        Text(L10n.text("Авто", "Auto")).tag("")
+                        if !model.currentModel.isEmpty && !model.models.contains(where: { $0.id == model.currentModel }) {
+                            Text(model.currentModel).tag(model.currentModel)
+                        }
+                        ForEach(model.models, id: \.self) { entry in Text(entry.displayName).tag(entry.id) }
+                    }.pickerStyle(.inline).labelsHidden()
+                }
             } header: { Text(model.currentAgentName) }
             if !model.supportedEfforts.isEmpty {
                 Section {
                     Picker(L10n.text("Рассуждение", "Reasoning"), selection: Binding(get: { model.effort }, set: { model.effort = $0 })) {
                         Text(L10n.text("Авто", "Auto")).tag("")
-                        if !model.effort.isEmpty && !model.supportedEfforts.contains(model.effort) {
+                        if !model.effort.isEmpty && !model.supportedEfforts.contains(model.effort)
+                            && showsEffortOption(model.effort) {
                             Text(model.effort).tag(model.effort)
                         }
-                        ForEach(model.supportedEfforts, id: \.self) { Text($0).tag($0) }
+                        ForEach(model.supportedEfforts.filter(showsEffortOption), id: \.self) { Text($0).tag($0) }
                     }.pickerStyle(.inline).labelsHidden()
                 } header: { Text(L10n.text("Рассуждение", "Reasoning")) }
             }
@@ -171,6 +177,41 @@ struct ModelChip: View {
                 }
             } header: { Text(L10n.text("Для новых чатов", "For new chats")) }
         }
+    }
+
+    @ViewBuilder private func groupedModelOptions(_ featuredIDs: [String]) -> some View {
+        let featured = featuredIDs.compactMap { id in model.models.first { $0.id == id } }
+        let previous = model.models.filter { !featuredIDs.contains($0.id) }
+        modelOption(L10n.text("Авто", "Auto"), id: "")
+        if !model.currentModel.isEmpty && !model.models.contains(where: { $0.id == model.currentModel }) {
+            modelOption(discoveredModelTitle(model.currentModel), id: model.currentModel)
+        }
+        ForEach(featured, id: \.id) { modelOption(discoveredModelTitle($0.id, displayName: $0.displayName), id: $0.id) }
+        if !previous.isEmpty {
+            Menu(L10n.text("Предыдущие поколения", "Previous generations")) {
+                ForEach(previous, id: \.id) { modelOption($0.displayName, id: $0.id) }
+            }
+        }
+    }
+
+    private func discoveredModelTitle(_ id: String, displayName: String? = nil) -> String {
+        profile?.composerModelTitles[id] ?? displayName ?? id
+    }
+
+    private func modelOption(_ title: String, id: String) -> some View {
+        Toggle(title, isOn: Binding(get: { model.currentModel == id }, set: { _ in
+            if model.currentModel != id { model.selectModel(id) }
+        }))
+    }
+
+    private func showsEffortOption(_ effort: String) -> Bool {
+        profile?.hiddenComposerEfforts.contains(effort) != true
+    }
+
+    private func claudeEffortOptions(_ catalog: AgentModelCatalog) -> [AgentModelCatalog.Level] {
+        let id = catalog.resolveModel(model.currentModel).lowercased()
+        guard id.hasPrefix("claude-opus-") || id == "opus" || id.hasPrefix("opus[") else { return catalog.efforts }
+        return catalog.efforts.filter { $0.id != "max" }
     }
 
     private func entry(_ item: AgentModelCatalog.Entry) -> some View {

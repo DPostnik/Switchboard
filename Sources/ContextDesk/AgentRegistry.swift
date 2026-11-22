@@ -103,6 +103,12 @@ struct AgentProfile: Sendable {
     var brandMark: AgentBrandMark? = nil
     /// The agent runs scheduled jobs (as chats of its connection). Off keeps it out of the job editor and the scheduler.
     var scheduledJobs = true
+    /// Discovered models to show first in the composer, with remaining models in a submenu.
+    var featuredComposerModels: [String] = []
+    /// Composer labels keyed by the provider's model ID.
+    var composerModelTitles: [String: String] = [:]
+    /// Reasoning levels omitted from the composer's discovered-model menu.
+    var hiddenComposerEfforts: Set<String> = []
 }
 
 /// Selectable models, effort levels and advisors of an agent whose engine lists no models. The adapter owns the

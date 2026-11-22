@@ -70,7 +70,10 @@ enum AgentIntegrationFactory {
                       "Codex limits are shared across all apps on your account. Each chat’s context usage is shown next to the message field.")
         }, limitsSignIn: {
             L10n.text("Войди в ChatGPT в настройках приложения, чтобы увидеть лимиты.", "Sign in with ChatGPT in the app’s settings to see your limits.")
-        }, handoffSignIn: nil), modelCatalog: nil, brandMark: .openAI)
+        }, handoffSignIn: nil), modelCatalog: nil, brandMark: .openAI,
+        featuredComposerModels: ["gpt-6.2-sol", "gpt-6.2-astra"],
+        composerModelTitles: ["gpt-6.2-astra": "GPT-6.2 Astra"],
+        hiddenComposerEfforts: ["ultra", "max"])
 
     static let claudeProfile = AgentProfile(
         connection: .appClaude, engine: .claude, name: "Claude", productName: "Claude Code",
