@@ -13,6 +13,14 @@ import ClaudeAdapter
         #expect(!sol.contains("fork_turns") && !sol.contains("gpt-6-astra"))
         let unset = AgentModelContext.instructions(model: "", provider: .codex, language: language)
         #expect(!unset.contains("gpt-6-astra") && !unset.contains("gpt-6.2-sol"))
+        let priority = language == .russian
+            ? "Явные указания пользователя о делегировании в этом чате или задаче имеют приоритет"
+            : "Explicit user instructions about delegation for this chat or task take precedence"
+        let directWork = language == .russian ? "выполни её без подагентов" : "implement it without subagents"
+        for context in [astra, fable, sol, unset] {
+            #expect(context.contains(priority))
+            #expect(context.contains(directWork))
+        }
         #expect(astra != sol && sol != unset)
         let astra62 = AgentModelContext.instructions(model: "gpt-6.2-astra", provider: .codex, language: language)
         #expect(astra62.contains("gpt-6.2-astra") && astra62.contains("fork_turns"))
