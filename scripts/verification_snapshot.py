@@ -2,13 +2,14 @@
 """Explicit, immutable patch snapshots for the serialized verification checkout.
 
 Callers must hold the verification queue lock while preparing/using the checkout.
-No operation here changes the source checkout or its index.
+Only synchronization after confirmed publication changes the source checkout.
 """
 import argparse
 import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import shutil
 import subprocess
 import stat
 import tempfile
@@ -220,9 +221,7 @@ def publication_plan(repo, manifest_path, messages, expected_remote_base, branch
     """Create ordered commit objects and an explicit CAS publication plan.
 
     This deliberately does not push or move any local branch. The caller must
-    record transport outcomes and must not retry an uncertain push. A successful
-    remote update leaves the source branch at its original commit: moving it
-    underneath uncommitted/staged edits would change their meaning.
+    record transport outcomes and must not retry an uncertain push.
     """
     manifest = verify_checkout(repo, manifest_path, checkout)
     if expected_remote_base != manifest['base']:
@@ -244,7 +243,7 @@ def publication_plan(repo, manifest_path, messages, expected_remote_base, branch
         raise SnapshotError('Publication tree differs from verified tree')
     return {'snapshot_digest': manifest['digest'], 'expected_remote_base': expected_remote_base,
             'target_ref': 'refs/heads/' + branch, 'commits': commits, 'head': parent,
-            'tree': manifest['tree'], 'local_branch_unchanged': True,
+            'tree': manifest['tree'],
             'push_arguments': ['push', '--force-with-lease=refs/heads/' + branch + ':' + expected_remote_base,
                                'origin', parent + ':refs/heads/' + branch]}
 
@@ -267,12 +266,90 @@ def _write_attempt(path, record):
         os.close(directory)
 
 
+def _sync_local_branch(repo, plan):
+    """Fast-forward the checked-out branch while preserving unpublished edits."""
+    repo = Path(os.fsdecode(git(Path(repo).resolve(), 'rev-parse', '--show-toplevel').rstrip(b'\n')))
+    base, head, target = plan['expected_remote_base'], plan['head'], plan['target_ref']
+    if git(repo, 'rev-parse', '--symbolic-full-name', 'HEAD').decode().strip() != target:
+        raise SnapshotError('The published branch is not checked out')
+    current = git(repo, 'rev-parse', 'HEAD').decode().strip()
+    if current not in (base, head):
+        raise SnapshotError('The local branch moved from the publication base')
+    for marker in ('MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply',
+                   'sequencer', 'BISECT_START'):
+        path = git(repo, 'rev-parse', '--git-path', marker).decode().rstrip('\n')
+        if (repo / path).exists():
+            raise SnapshotError('A Git operation is in progress: ' + marker)
+
+    index = Path(os.fsdecode(git(repo, 'rev-parse', '--path-format=absolute', '--git-path', 'index').rstrip(b'\n')))
+    lock = index.with_name(index.name + '.lock')
+    if current == head and not lock.exists():
+        return {'state': 'synced', 'head': head}
+
+    paths = set(git(repo, 'diff-tree', '-r', '--no-renames', '--name-only', '-z', base, head).split(b'\0')[:-1])
+    deleted = git(repo, 'diff-tree', '-r', '--no-renames', '--diff-filter=D', '--name-only', '-z',
+                  base, head).split(b'\0')[:-1]
+    # Git's ordinary fast-forward rejects unstaged edits even when they already
+    # equal the incoming files. Prepare the replacement index under Git's index
+    # lock. Two-tree read-tree preserves unrelated staged entries and rejects
+    # conflicting ones. No worktree files are written on this path.
+    with lock.open('xb') as locked_index:
+        remove_lock = True
+        try:
+            if git(repo, 'symbolic-ref', 'HEAD').decode().strip() != target or \
+                    git(repo, 'rev-parse', 'HEAD').decode().strip() != base:
+                raise SnapshotError('The checked-out branch changed before local synchronization')
+            with tempfile.TemporaryDirectory(prefix='verification-index-', dir=index.parent) as directory:
+                candidate = Path(directory) / 'index'
+                shutil.copyfile(index, candidate)
+                env = dict(os.environ, GIT_INDEX_FILE=str(candidate))
+                git(repo, 'read-tree', '-i', '-m', base, head, env=env)
+                dirty = set(git(repo, 'diff', '--no-ext-diff', '--name-only', '-z', env=env).split(b'\0')[:-1])
+                if not paths.intersection(dirty) and not any(os.path.lexists(repo / os.fsdecode(p)) for p in deleted):
+                    with candidate.open('rb') as source:
+                        shutil.copyfileobj(source, locked_index)
+                    locked_index.flush()
+                    os.fsync(locked_index.fileno())
+                    remove_lock = False
+                    try:
+                        git(repo, 'update-ref', '-m', 'verification: fast-forward after publication', target, head, base)
+                    except SnapshotError:
+                        remove_lock = True
+                        raise
+                    # If installing the index fails after the ref changed, keep
+                    # the prepared index and lock so Git cannot silently proceed.
+                    lock.replace(index)
+                    return {'state': 'synced', 'head': head}
+        finally:
+            if remove_lock:
+                lock.unlink()
+
+    # The published edits may instead come from a separate checkout. Let Git
+    # apply them with its standard checks for overlapping local changes.
+    if git(repo, 'symbolic-ref', 'HEAD').decode().strip() != target or \
+            git(repo, 'rev-parse', 'HEAD').decode().strip() != base:
+        raise SnapshotError('The checked-out branch changed before local synchronization')
+    git(repo, 'merge', '--ff-only', '--no-autostash', '--no-overwrite-ignore', head)
+    return {'state': 'synced', 'head': head}
+
+
+def _record_local_sync(repo, attempt_path, record):
+    if record.get('local_sync', {}).get('state') != 'synced':
+        try:
+            record['local_sync'] = _sync_local_branch(repo, record['plan'])
+        except (SnapshotError, OSError) as error:
+            record['local_sync'] = {'state': 'blocked', 'reason': str(error)}
+        _write_attempt(attempt_path, record)
+    return record
+
+
 def publish_plan(repo, plan, attempt_path, remote='origin', runner=None):
     """Publish once after the queue has validated all verification evidence.
 
     An existing attempt is never replayed, including a failed/unknown attempt.
     Reconciliation can inspect remote state, but only a fresh authorized plan
-    can start another publication. No source worktree, branch or index changes.
+    can start another publication. Local synchronization starts only after the
+    success receipt is durable.
     """
     if not remote or remote.startswith('-') or any(c.isspace() for c in remote):
         raise SnapshotError('Invalid publication remote')
@@ -313,6 +390,8 @@ def publish_plan(repo, plan, attempt_path, remote='origin', runner=None):
     except (OSError, subprocess.SubprocessError) as error:
         record['error'] = str(error)
     _write_attempt(attempt_path, record)
+    if record['state'] == 'published':
+        return _record_local_sync(repo, attempt_path, record)
     return record
 
 
@@ -330,7 +409,13 @@ def reconcile_publication(repo, attempt_path, runner=None):
     record['observed_remote_tip'] = tip
     if tip == plan['head']:
         record['state'] = 'published'
-    elif tip == plan['expected_remote_base']:
+        _write_attempt(attempt_path, record)
+        return _record_local_sync(repo, attempt_path, record)
+    if record['state'] == 'published':
+        # A subsequent remote update does not erase a confirmed publication.
+        _write_attempt(attempt_path, record)
+        return record
+    if tip == plan['expected_remote_base']:
         record['state'] = 'not_published'
     else:
         record['state'] = 'remote_changed'

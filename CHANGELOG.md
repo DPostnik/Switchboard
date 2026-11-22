@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- The verification queue fast-forwards the local branch after publishing a verified commit and preserves unrelated local edits.
+
 - Explicit chat or task instructions about delegation and executor models override Switchboard’s standing defaults.
 
 - The chat composer features GPT-6.2 Sol and Astra and groups other GPT models under Previous generations. Its reasoning menu hides Ultra and Max for GPT and Maximum for Claude Opus.

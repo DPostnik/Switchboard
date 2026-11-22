@@ -18,11 +18,13 @@ class SnapshotTests(unittest.TestCase):
         self.repo = Path(self.temp.name) / 'repo'
         self.repo.mkdir()
         self.git('init', '-q')
+        self.git('symbolic-ref', 'HEAD', 'refs/heads/main')
         self.git('config', 'user.name', 'Fixture')
         self.git('config', 'user.email', 'fixture@localhost')
         self.git('remote', 'add', 'origin', '/nonexistent/snapshot-fixture.git')
+        (self.repo / '.gitignore').write_text('.build/\n')
         (self.repo / 'file').write_text('base\n')
-        self.git('add', '.')
+        self.git('add', '.gitignore', 'file')
         self.git('commit', '-qm', 'base')
         self.base = self.git('rev-parse', 'HEAD').strip()
 
@@ -116,6 +118,7 @@ class SnapshotTests(unittest.TestCase):
 
         result = snapshot.publish_plan(self.repo, plan, attempt, runner=lost_transport)
         self.assertEqual(result['state'], 'unknown')
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.base)
         with self.assertRaises(snapshot.SnapshotError):
             snapshot.publish_plan(self.repo, plan, attempt, runner=lost_transport)
         self.assertEqual(len(calls), 1)
@@ -124,7 +127,75 @@ class SnapshotTests(unittest.TestCase):
             self.assertIn('ls-remote', args)
             return subprocess.CompletedProcess(args, 0, (plan['head'] + '\trefs/heads/main\n').encode(), b'')
 
-        self.assertEqual(snapshot.reconcile_publication(self.repo, attempt, runner=remote_accepted)['state'], 'published')
+        result = snapshot.reconcile_publication(self.repo, attempt, runner=remote_accepted)
+        self.assertEqual(result['state'], 'published')
+        self.assertEqual(result['local_sync']['state'], 'synced')
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), plan['head'])
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_success_clears_published_edits_and_preserves_other_staged_and_unstaged_work(self):
+        other = self.repo / 'other'
+        other.write_text('original\n')
+        self.git('add', 'other')
+        self.git('commit', '-qm', 'add unrelated file')
+        self.base = self.git('rev-parse', 'HEAD').strip()
+        manifest = self.create()
+        snapshot.prepare_checkout(self.repo, manifest)
+        plan = snapshot.publication_plan(self.repo, manifest, {'one': 'Fix'}, self.base)
+        (self.repo / 'file').write_text('changed\n')
+        other.write_text('staged\n')
+        self.git('add', 'other')
+        other.write_text('unstaged\n')
+        (self.repo / 'untracked').write_text('untracked\n')
+
+        result = snapshot.publish_plan(self.repo, plan, Path(self.temp.name) / 'attempt.json',
+                                       runner=lambda args, **kwargs: subprocess.CompletedProcess(args, 0))
+        self.assertEqual(result['local_sync'], {'state': 'synced', 'head': plan['head']})
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), plan['head'])
+        self.assertEqual(self.git('status', '--porcelain'), 'MM other\n?? untracked\n')
+        self.assertEqual(self.git('show', ':other'), 'staged\n')
+        self.assertEqual(other.read_text(), 'unstaged\n')
+
+    def test_overlapping_edit_blocks_local_sync_without_repeating_push(self):
+        manifest = self.create()
+        snapshot.prepare_checkout(self.repo, manifest)
+        plan = snapshot.publication_plan(self.repo, manifest, {'one': 'Fix'}, self.base)
+        attempt = Path(self.temp.name) / 'attempt.json'
+        path = self.repo / 'file'
+        path.write_text('different local edit\n')
+        result = snapshot.publish_plan(self.repo, plan, attempt,
+                                       runner=lambda args, **kwargs: subprocess.CompletedProcess(args, 0))
+        self.assertEqual(result['state'], 'published')
+        self.assertEqual(result['local_sync']['state'], 'blocked')
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.base)
+        self.assertEqual(path.read_text(), 'different local edit\n')
+        self.assertEqual(self.git('status', '--porcelain'), ' M file\n')
+
+        path.write_text('changed\n')
+
+        def remote_accepted(args, **kwargs):
+            self.assertIn('ls-remote', args)
+            return subprocess.CompletedProcess(args, 0, (plan['head'] + '\trefs/heads/main\n').encode(), b'')
+
+        result = snapshot.reconcile_publication(self.repo, attempt, runner=remote_accepted)
+        self.assertEqual(result['local_sync']['state'], 'synced')
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_local_sync_preserves_conflicting_staged_content_even_when_worktree_matches(self):
+        manifest = self.create()
+        snapshot.prepare_checkout(self.repo, manifest)
+        plan = snapshot.publication_plan(self.repo, manifest, {'one': 'Fix'}, self.base)
+        path = self.repo / 'file'
+        path.write_text('staged only\n')
+        self.git('add', 'file')
+        path.write_text('changed\n')
+        result = snapshot.publish_plan(self.repo, plan, Path(self.temp.name) / 'attempt.json',
+                                       runner=lambda args, **kwargs: subprocess.CompletedProcess(args, 0))
+        self.assertEqual(result['state'], 'published')
+        self.assertEqual(result['local_sync']['state'], 'blocked')
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.base)
+        self.assertEqual(self.git('show', ':file'), 'staged only\n')
+        self.assertEqual(path.read_text(), 'changed\n')
 
     def test_publication_cas_rejection_needs_reconciliation(self):
         manifest_path = self.create()

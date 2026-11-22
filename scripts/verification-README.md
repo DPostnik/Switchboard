@@ -119,11 +119,14 @@ for the actual UI/behavior observations. Evidence is saved under the batch direc
 `publish` requires verified tasks, allowed publication policy and recorded live evidence
 when requested. The commit-message JSON maps task IDs to English commit messages. It
 creates per-task commits with the exact final verified tree, then pushes with an exact
-remote-base lease. It never stages unrelated dirty files or changes the source branch.
-The local branch intentionally stays unchanged and may require a later deliberate sync.
+remote-base lease. After confirmation, it fast-forwards the checked-out target branch.
+Edits already present in the published commit stop appearing in `git status`, and
+unrelated staged, unstaged, and untracked work stays in place. The result reports
+`local_sync.state` separately from remote publication. A different checked-out branch,
+divergent history, or conflicting local edits can block synchronization.
 An exclusive durable publication attempt prevents blind push retries. `reconcile` reads
-the remote tip after an uncertain outcome without repeating the push. Existing permissions
-and project restart rules still apply.
+the remote tip and can finish local synchronization for that exact published commit
+without repeating the push. Existing permissions and project restart rules still apply.
 
 Cheap policy checks: `python3 scripts/test-verify-project.py`. Snapshot and queue tests
 are separate Python checks. These checks do not build or launch the app.
