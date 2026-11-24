@@ -76,27 +76,24 @@ struct ZoomedWindowTitle: ViewModifier {
     }
 }
 
-/// NavigationSplitView applies its column width only when the column is created, and a restored
-/// split view keeps the old width, so a zoomed sidebar truncated every row. This keeps the sidebar
-/// item's limits in step with the zoom and widens it when it is narrower than the new minimum.
-struct SidebarWidthLimits: NSViewRepresentable {
-    let min: CGFloat
-    let ideal: CGFloat
-    let max: CGFloat
+/// Apply the fixed width to the native split item as well, including after restoring a window or changing zoom.
+struct FixedSidebarWidth: NSViewRepresentable {
+    let width: CGFloat
     func makeNSView(context: Context) -> NSView { NSView() }
     func updateNSView(_ view: NSView, context: Context) {
-        let (min, ideal, max) = (min, ideal, max)
+        let width = width
         // The view joins the split view only after SwiftUI attaches it to the window.
         DispatchQueue.main.async {
             var ancestor = view.superview
             while let current = ancestor, !(current is NSSplitView) { ancestor = current.superview }
             guard let split = ancestor as? NSSplitView, let controller = split.delegate as? NSSplitViewController,
                   let item = controller.splitViewItems.first, !item.isCollapsed else { return }
-            guard item.minimumThickness != min || item.maximumThickness != max else { return }
-            item.minimumThickness = min
-            item.maximumThickness = max
-            let width = item.viewController.view.frame.width
-            if width < min || width > max { split.setPosition(Swift.min(Swift.max(ideal, min), max), ofDividerAt: 0) }
+            guard item.minimumThickness != width || item.maximumThickness != width else { return }
+            // Widen the allowed range first when the new width is above the current maximum.
+            if width > item.maximumThickness { item.maximumThickness = width }
+            item.minimumThickness = width
+            item.maximumThickness = width
+            split.setPosition(width, ofDividerAt: 0)
         }
     }
 }

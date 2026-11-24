@@ -182,8 +182,8 @@ struct DeskView: View {
                 sidebarDock
             }.background(DeskPalette.sidebar)
                 .animation(sidebarAnimation, value: selection.isEmpty)
-                .navigationSplitViewColumnWidth(min: .ui(240), ideal: .ui(285), max: .ui(380))
-                .background(SidebarWidthLimits(min: .ui(240), ideal: .ui(285), max: .ui(380)))
+                .navigationSplitViewColumnWidth(.ui(285))
+                .background(FixedSidebarWidth(width: .ui(285)))
     }
     private var sidebarListState: SidebarListState {
         SidebarListState(selection: selection, menuRowID: menuRowID, dropTargetProjectID: dropTargetProjectID,
@@ -1135,6 +1135,16 @@ struct ChatView: View {
         guard !reduceMotion, visible(height) != visible(composerHeight) else { composerHeight = height; return }
         withAnimation(.easeOut(duration: 0.16)) { composerHeight = height }
     }
+    private struct FileScope: Equatable {
+        let chatID: String?
+        let projectID: UUID?
+        let directory: String?
+    }
+
+    private var fileScope: FileScope {
+        FileScope(chatID: model.chatID, projectID: model.projectID, directory: model.selectedWorkingDirectory)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if !model.currentAgentAuthenticated {
@@ -1388,20 +1398,27 @@ struct ChatView: View {
                                             // A late write-back of an earlier slide must not override a newer wish.
                                             syncInspector()
                                         })) {
-            if let current = preview.current, !preview.expanded {
-                DocumentPreviewView(session: preview, model: current, onQuote: quoteIntoDraft,
-                                    onShowFiles: showingFiles ? { preview.close() } : nil)
-                    .id(current.id)
-                    .inspectorColumnWidth(min: 320, ideal: 520, max: 1100)
-            } else if showingFiles {
-                ProjectFilesView(files: files, open: { openPreview($0, line: nil) },
-                                 addToMessage: { model.addDroppedFiles([$0]) }, close: { showingFiles = false })
-                    .inspectorColumnWidth(min: 320, ideal: 520, max: 1100)
+            Group {
+                if let current = preview.current, !preview.expanded {
+                    DocumentPreviewView(session: preview, model: current, onQuote: quoteIntoDraft,
+                                        onShowFiles: showingFiles ? { preview.close() } : nil)
+                        .id(current.id)
+                } else if showingFiles {
+                    ProjectFilesView(files: files, open: { openPreview($0, line: nil) },
+                                     addToMessage: { model.addDroppedFiles([$0]) }, close: { showingFiles = false })
+                }
             }
+            .inspectorColumnWidth(520)
         }
         .onChange(of: wantsInspector, initial: true) { _, _ in syncInspector() }
+        .onChange(of: fileScope) { _, _ in
+            showingFiles = false
+            preview.close()
+            files.expanded = []
+            files.selection = nil
+            files.query = ""
+        }
         .task(id: showingFiles ? model.selectedWorkingDirectory : nil) {
-            // Runs when the tree is shown or the chat's folder changes: the listing is always fresh then.
             if showingFiles { await files.load(model.selectedWorkingDirectory, force: true) }
         }
         // The column appears by itself once the chat has files, so its lists follow the transcript; the update is

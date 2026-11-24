@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- The navigation sidebar and file inspector keep fixed widths, and open file panels no longer carry over between chats.
+
 - The verification queue fast-forwards the local branch after publishing a verified commit and preserves unrelated local edits.
 
 - Explicit chat or task instructions about delegation and executor models override Switchboard’s standing defaults.

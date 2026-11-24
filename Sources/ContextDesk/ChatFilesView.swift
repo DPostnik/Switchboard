@@ -160,18 +160,21 @@ struct ChatFilesOverlay: View {
     let model: DeskModel
     let open: (URL, Int?) -> Void
     let addToMessage: (URL) -> Void
-    @AppStorage("chatFilesPanelOpen") private var panelOpen = false
+    @State private var expandedChats: Set<String> = []
     /// Hides the tile and the panel in every chat; View → Show Chat Files brings them back.
     @AppStorage(ChatFilesVisibility.hiddenKey) private var hidden = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    private var panelOpen: Bool { model.chatID.map { expandedChats.contains($0) } ?? false }
+
     var body: some View {
         GeometryReader { proxy in
         ZStack(alignment: .topTrailing) {
-            if model.selectedChat != nil, !files.isEmpty, !hidden {
+            if let chatID = model.chatID, files.chatID == chatID, !files.isEmpty, !hidden {
                 if panelOpen {
                     ChatFilesSidebar(files: files, model: model, open: open, addToMessage: addToMessage,
-                                     maxHeight: max(160, proxy.size.height - 130)) { toggle(false) }
+                                     maxHeight: max(160, proxy.size.height - 130)) { toggle(false, chatID: chatID) }
+                        .id(chatID)
                         .background(shape.fill(DeskPalette.canvas))
                         .overlay(shape.stroke(DeskPalette.border, lineWidth: 1))
                         .clipShape(shape)
@@ -179,7 +182,7 @@ struct ChatFilesOverlay: View {
                         .contextMenu { hideButton }
                         .transition(panelTransition)
                 } else {
-                    ChatFilesTile(files: files) { toggle(true) }
+                    ChatFilesTile(files: files) { toggle(true, chatID: chatID) }
                         .background(shape.fill(DeskPalette.canvas))
                         .overlay(shape.stroke(DeskPalette.border, lineWidth: 1))
                         .clipShape(shape)
@@ -209,8 +212,9 @@ struct ChatFilesOverlay: View {
                            removal: .scale(scale: 0.3, anchor: .topTrailing).combined(with: .opacity.animation(.easeIn(duration: 0.16))))
     }
 
-    private func toggle(_ open: Bool) {
-        withAnimation(reduceMotion ? .easeOut(duration: 0.12) : .spring(response: 0.36, dampingFraction: 0.86)) { panelOpen = open }
+    private func toggle(_ open: Bool, chatID: String) {
+        if open { expandedChats.insert(chatID) }
+        else { expandedChats.remove(chatID) }
     }
 }
 
