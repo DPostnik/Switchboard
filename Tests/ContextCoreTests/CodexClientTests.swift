@@ -533,3 +533,27 @@ private func commandFixture() throws -> (URL, URL) {
     let truncated = JSONValue.object(["type": .string("text"), "text": .string(AgentModelContext.openingMarker)])
     #expect(CodexDecoding.transcriptItem(item([user, truncated]))?.text == "original user text\n" + AgentModelContext.openingMarker)
 }
+
+@Test func managedCodexSiblingKeepsPrimaryReleaseAfterPromotion() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    var releases: [URL] = []
+    for name in ["old", "new"] {
+        let folder = root.appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let binary = folder.appendingPathComponent("codex")
+        try Data("#!/bin/sh\n".utf8).write(to: binary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+        releases.append(binary.resolvingSymlinksInPath())
+    }
+    let bin = root.appendingPathComponent("bin"), managed = bin.appendingPathComponent("codex")
+    try FileManager.default.createSymbolicLink(at: bin, withDestinationURL: releases[1].deletingLastPathComponent())
+    // The primary started on the old release; the nightly check has since repointed the link to the new one.
+    #expect(CodexConnection.launchBinary(executable: managed, managed: managed, pinned: releases[0]) == releases[0])
+    #expect(CodexConnection.launchBinary(executable: managed, managed: managed, pinned: nil) == releases[1])
+    // A removed pinned release falls back to the current target; other launchers are never redirected.
+    try FileManager.default.removeItem(at: releases[0])
+    #expect(CodexConnection.launchBinary(executable: managed, managed: managed, pinned: releases[0]) == releases[1])
+    let other = URL(fileURLWithPath: "/opt/homebrew/bin/codex")
+    #expect(CodexConnection.launchBinary(executable: other, managed: managed, pinned: releases[0]) == other)
+}

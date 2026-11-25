@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- After a nightly Codex update, new and changed chats keep working on the running Codex version until the next reconnect instead of failing with “The Codex version changed”.
+
 - The navigation sidebar and file inspector keep fixed widths, and open file panels no longer carry over between chats.
 
 - The verification queue fast-forwards the local branch after publishing a verified commit and preserves unrelated local edits.

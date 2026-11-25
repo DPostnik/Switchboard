@@ -386,7 +386,9 @@ public actor CodexIntegration: AgentIntegration {
         let inbox = SettingsProposalInbox.chatFolder(inboxFolder)
         // The project's skill link folder is read like the workflows; its links resolve inside the project, which is granted.
         let skills = projectSkills(project).map { [$0.folder] } ?? []
-        let input = Self.boundaryInput(project: project, permissions: permissions, home: launch.home, executable: launch.executable,
+        // Grant the release the worker will start (`CodexConnection.sibling`), not whatever the managed link names now.
+        let executable = await base.transport.launchedBinary ?? launch.executable
+        let input = Self.boundaryInput(project: project, permissions: permissions, home: launch.home, executable: executable,
                                        resources: resources, workflowDirectories: await base.registeredWorkflowDirectories + skills, inbox: inbox)
         switch Self.boundaryDecision(input, inbox: inbox, helper: boundaryHelper) {
         case .success(let launch): return (launch, nil)

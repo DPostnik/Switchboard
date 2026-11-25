@@ -38,7 +38,11 @@ struct CodexReplyTooLarge: LocalizedError, Sendable {
     private let revision: OSAllocatedUnfairLock<UUID>
     private let preservesAccountRevision: Bool
     var accountEpoch: UUID { revision.withLock { $0 } }
-    func sibling(preservingAccountRevision: Bool = false) -> CodexConnection { CodexConnection(revision: revision, preservesAccountRevision: preservingAccountRevision) }
+    /// A sibling starts the binary this process runs: the nightly compatibility check may repoint the managed link to a newer
+    /// verified release while the app runs, and a worker on another version than its primary is refused.
+    func sibling(preservingAccountRevision: Bool = false) -> CodexConnection {
+        CodexConnection(revision: revision, preservesAccountRevision: preservingAccountRevision, pinnedBinary: launchedBinary)
+    }
     var isRunning: Bool { process?.isRunning == true }
     private struct PendingRequest { let epoch: UUID; let token: UUID; let thread: String?; let turn: String? }
     private var approvalRequests: [JSONValue: PendingRequest] = [:]
@@ -51,12 +55,16 @@ struct CodexReplyTooLarge: LocalizedError, Sendable {
     public private(set) var serverUserAgent: String?
     private(set) var verifiedInstallVersion: String?
     private(set) var activeHome: URL?
+    /// The resolved binary the current or last process started; siblings inherit it.
+    private(set) var launchedBinary: URL?
+    private let pinnedBinary: URL?
 
     public init(maximumLineBytes: Int = 32 * 1024 * 1024) {
         self.init(maximumLineBytes: maximumLineBytes, revision: OSAllocatedUnfairLock(initialState: UUID()))
     }
-    private init(maximumLineBytes: Int = 32 * 1024 * 1024, revision: OSAllocatedUnfairLock<UUID>, preservesAccountRevision: Bool = false) {
-        self.revision = revision; self.preservesAccountRevision = preservesAccountRevision
+    private init(maximumLineBytes: Int = 32 * 1024 * 1024, revision: OSAllocatedUnfairLock<UUID>, preservesAccountRevision: Bool = false,
+                 pinnedBinary: URL? = nil) {
+        self.revision = revision; self.preservesAccountRevision = preservesAccountRevision; self.pinnedBinary = pinnedBinary
         self.maximumLineBytes = maximumLineBytes; buffer = JSONLineBuffer(maximumLineBytes: maximumLineBytes)
         let scoped = AsyncStream<CodexWireEvent>.makeStream()
         scopedEvents = scoped.stream; scopedSink = scoped.continuation
@@ -86,6 +94,13 @@ struct CodexReplyTooLarge: LocalizedError, Sendable {
     static func boundaryArguments(_ boundary: ExternalSandboxLaunch?) -> [String] {
         boundary == nil ? [] : ["-c", "allow_login_shell=false"]
     }
+    /// The binary a process runs. The managed pointer resolves to its current target, or to the sibling's pinned one while
+    /// that release is still installed (promotions keep earlier releases). Other launchers may dispatch by their link name.
+    static func launchBinary(executable: URL, managed: URL, pinned: URL?) -> URL {
+        guard executable.standardizedFileURL == managed.standardizedFileURL else { return executable }
+        if let pinned, FileManager.default.isExecutableFile(atPath: pinned.path) { return pinned }
+        return executable.resolvingSymlinksInPath()
+    }
     public func start(executable: URL, home: URL, extraArguments: [String] = [], boundary: ExternalSandboxLaunch? = nil) async throws {
         guard process == nil else { return }
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true,
@@ -94,8 +109,9 @@ struct CodexReplyTooLarge: LocalizedError, Sendable {
         let token = UUID(); generation = token
         if !preservesAccountRevision { revision.withLock { $0 = UUID() } }
         // Pin the managed pointer for this process. Other launchers may dispatch by their symlink name.
-        let managed = Locations.agentsHome.appendingPathComponent("codex/bin/codex").standardizedFileURL
-        let binary = executable.standardizedFileURL == managed ? executable.resolvingSymlinksInPath() : executable
+        let binary = Self.launchBinary(executable: executable, managed: Locations.agentsHome.appendingPathComponent("codex/bin/codex"),
+                                       pinned: pinnedBinary)
+        launchedBinary = binary
         verifiedInstallVersion = CodexVerifiedInstall.version(of: binary, selected: executable)
         // A thread's writer lock belongs to one process. With no unload delay, `CodexClient.release` hands it to another at once.
         let serverArguments = ["app-server", "--listen", "stdio://", "-c", "cli_auth_credentials_store=\"file\"",
