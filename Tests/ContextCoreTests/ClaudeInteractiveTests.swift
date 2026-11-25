@@ -400,10 +400,12 @@ private func waitForJSON(_ file: URL) async throws -> JSONValue {
 }
 private func interactiveRequest(context: AgentContext, root: URL, session: AgentSessionReference? = nil, prompt: String = "hello", id: UUID = UUID(),
                                 fullAccess: Bool = false, kind: AgentExecutionRequest.Kind = .interactive, model: String = "",
-                                effort: String? = nil, role: AgentPermissionProfile? = nil, userChromeGrant: AgentUserChromeGrant? = nil) -> AgentExecutionRequest {
+                                effort: String? = nil, role: AgentPermissionProfile? = nil, userChromeGrant: AgentUserChromeGrant? = nil,
+                                useSubagents: Bool? = nil) -> AgentExecutionRequest {
     .init(id: id, conversation: ConversationID(), session: session, kind: kind, prompt: prompt, projectPath: root.path,
           permissions: role.map { .profile($0, root: root.path) } ?? (fullAccess ? .unrestricted(approval: .never) : .workspaceWrite(root: root.path, network: false, approval: .ask)),
-          model: .init(context: context, model: model, effort: effort), route: .direct, userChromeGrant: userChromeGrant)
+          model: .init(context: context, model: model, effort: effort), route: .direct,
+          userChromeGrant: userChromeGrant, useSubagents: useSubagents)
 }
 
 @Test func claudeEditorWritesInsideTheProjectWithoutAsking() async throws {
@@ -1175,17 +1177,17 @@ func claudeBashUnderTheSandboxFollowsTheCLIFlag(_ command: String, _ flag: Bool,
     let descriptor = try await adapter.connect(.init(executable: binary, home: home)).value()
     let session = try await adapter.prepare(interactiveRequest(context: descriptor.context, root: root)).value()
     _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session, prompt: "background-hang",
-                                                    model: "claude-fable-5-2", effort: "high")).value()
+                                                    model: "claude-fable-5-2", effort: "high", useSubagents: false)).value()
     try await waitFor { await events.completionCount() == 1 }
     if refused { try Data().write(to: home.appendingPathComponent("refuse-flags")) }
     // A different effort and model would need another launch; the running sub-agent keeps its CLI instead.
     _ = try await adapter.submit(interactiveRequest(context: descriptor.context, root: root, session: session,
-                                                    model: "claude-sonnet-5-5", effort: "medium")).value()
+                                                    model: "claude-sonnet-5-5", effort: "medium", useSubagents: true)).value()
     try await waitFor { await events.completionCount() == 2 }
     let submitted = try lines("submitted")
     #expect(submitted.count == 2 && Set(submitted.map { $0["pid"] }).count == 1)
-    #expect(submitted[0]["model_context"].string == AgentModelContext.instructions(model: "claude-fable-5-2", provider: .claude))
-    #expect(submitted[1]["model_context"].string == AgentModelContext.instructions(model: refused ? "claude-fable-5-2" : "claude-sonnet-5-5", provider: .claude))
+    #expect(submitted[0]["model_context"].string == AgentModelContext.instructions(model: "claude-fable-5-2", provider: .claude, useSubagents: false))
+    #expect(submitted[1]["model_context"].string == AgentModelContext.instructions(model: refused ? "claude-fable-5-2" : "claude-sonnet-5-5", provider: .claude, useSubagents: true))
     #expect(submitted[1]["prompt"].string == "hello")
     #expect(try String(contentsOf: home.appendingPathComponent("launches"), encoding: .utf8).split(separator: "\n").count == 1)
     let applied = try lines("controls").filter { $0["request"]["subtype"].string == "apply_flag_settings" }

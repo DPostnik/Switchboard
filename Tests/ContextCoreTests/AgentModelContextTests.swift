@@ -45,3 +45,31 @@ import ClaudeAdapter
         #expect(args[index + 1].hasSuffix(AgentModelContext.instructions(model: model, provider: .claude)))
     }
 }
+
+@Test func explicitSubagentChoiceOverridesModelDefaultInBothLanguages() {
+    for language in [AppLanguage.russian, .english] {
+        let codexOff = AgentModelContext.instructions(model: "gpt-6.2-astra", provider: .codex, useSubagents: false, language: language)
+        let claudeOff = AgentModelContext.instructions(model: "fable", provider: .claude, useSubagents: false, language: language)
+        let codexOn = AgentModelContext.instructions(model: "gpt-6.2-sol", provider: .codex, useSubagents: true, language: language)
+        let claudeOn = AgentModelContext.instructions(model: "opus", provider: .claude, useSubagents: true, language: language)
+        let override = language == .russian
+            ? "Эта настройка имеет приоритет над постоянными правилами делегирования по модели."
+            : "This setting overrides standing model-based delegation rules."
+        for context in [codexOn, claudeOn, codexOff, claudeOff] {
+            #expect(context.contains(override))
+        }
+        #expect(codexOn.contains("gpt-6.2-sol (fork_turns:"))
+        #expect(claudeOn.contains("Opus 5.5 (model: \"opus\")"))
+        #expect(!codexOff.contains("fork_turns"))
+        #expect(!claudeOff.contains("model: \"opus\""))
+    }
+}
+
+@Test(arguments: [nil, false, true] as [Bool?]) func chatStoresExplicitSubagentChoice(choice: Bool?) throws {
+    var chat = Chat(id: "chat", projectID: UUID(), title: "Chat", model: "gpt-6.2-astra")
+    chat.useSubagents = choice
+    let data = try JSONEncoder().encode(chat)
+    let fields = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect((fields["useSubagents"] as? Bool) == choice)
+    #expect(try JSONDecoder().decode(Chat.self, from: data).useSubagents == choice)
+}

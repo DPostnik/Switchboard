@@ -73,7 +73,8 @@ enum AgentIntegrationFactory {
         }, handoffSignIn: nil), modelCatalog: nil, brandMark: .openAI,
         featuredComposerModels: ["gpt-6.2-sol", "gpt-6.2-astra"],
         composerModelTitles: ["gpt-6.2-astra": "GPT-6.2 Astra"],
-        hiddenComposerEfforts: ["ultra", "max"])
+        hiddenComposerEfforts: ["ultra", "max"],
+        subagentsByDefault: { AgentModelContext.delegatesByDefault(model: $0, provider: .codex) })
 
     static let claudeProfile = AgentProfile(
         connection: .appClaude, engine: .claude, name: "Claude", productName: "Claude Code",
@@ -102,7 +103,8 @@ enum AgentIntegrationFactory {
             L10n.text("Войди в Claude в настройках приложения, чтобы увидеть лимиты.", "Sign in to Claude in the app’s settings to see your limits.")
         }, handoffSignIn: {
             L10n.text("Сначала войди по подписке Claude в настройках.", "First sign in with your Claude subscription in settings.")
-        }), modelCatalog: { claudeCatalog }, brandMark: .anthropic)
+        }), modelCatalog: { claudeCatalog }, brandMark: .anthropic,
+        subagentsByDefault: { AgentModelContext.delegatesByDefault(model: $0, provider: .claude) })
 
     /// Gemini CLI over ACP (stage D): one `gemini --acp` process serves every Gemini chat; models come from the session's
     /// model option; sign-in is the agent's own `authenticate` (Google account in the browser). Listed only when the CLI is

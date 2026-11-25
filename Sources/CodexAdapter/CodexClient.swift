@@ -333,7 +333,8 @@ public actor CodexClient {
     }
     /// Acknowledges submission only. Never retries after any transport failure.
     public func send(_ text: String, to session: AgentSessionReference, projectPath: String,
-                     permissions: AgentPermissionProfile, model: String, effort: String, userChromeGrant: AgentUserChromeGrant? = nil) async throws -> String? {
+                     permissions: AgentPermissionProfile, model: String, effort: String,
+                     userChromeGrant: AgentUserChromeGrant? = nil, useSubagents: Bool? = nil) async throws -> String? {
         if diagnosticsResources != nil || userChromeEnabled {
             guard let scope = diagnosticScopes[session] else {
                 throw ClientFailure(L10n.text("Сначала возобнови чат для обновления диагностики.", "Resume this chat before updating diagnostics."))
@@ -346,7 +347,7 @@ public actor CodexClient {
             "threadId": .string(try nativeID(session)),
             "input": .array([
                 .object(["type": .string("text"), "text": .string(text), "text_elements": .array([])]),
-                .object(["type": .string("text"), "text": .string(AgentModelContext.instructions(model: model, provider: .codex)), "text_elements": .array([])])
+                .object(["type": .string("text"), "text": .string(AgentModelContext.instructions(model: model, provider: .codex, useSubagents: useSubagents)), "text_elements": .array([])])
             ])
         ]
         params.merge(permissions.codexTurnParameters(projectPath: projectPath, external: boundary != nil)) { _, new in new }

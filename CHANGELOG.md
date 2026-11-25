@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- The composer’s model menu lets you turn subagent delegation on or off for each Codex or Claude chat.
+
 - After the nightly check switches to a newer verified Codex release, Switchboard restarts once every chat is idle, so all chats use the new version.
 
 - The composer's model list stays open while you choose a model, a reasoning level or a default for new chats, and closes on an outside click or Escape.

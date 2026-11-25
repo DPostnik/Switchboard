@@ -119,6 +119,8 @@ private struct ChatRunState: Equatable {
     /// Project ID -> role picked in the composer for the project's next new chat; absent follows the project default.
     /// It applies to that chat only; the project default changes in the project settings.
     @Published var newChatRoles: [UUID: String] = [:]
+    /// Project ID -> explicit subagent choice for the project's next new chat.
+    @Published var newChatSubagentChoices: [UUID: Bool] = [:]
     /// Project ID -> agent ID -> model and effort picked in the composer for the project's next new chat; absent
     /// follows the project default, then the app default. It never changes either default.
     @Published var newChatModelChoices: [UUID: [String: ModelChoice]] = [:]
@@ -2409,6 +2411,10 @@ private struct ChatRunState: Equatable {
             ?? newChatAddOns[project.id] ?? Set((project.chatRoleAddOns ?? []).compactMap(RoleAddOn.init(rawValue:)))
         let explicitNewChatAddOns = scheduledRun == nil && threadID == nil ? newChatAddOns[project.id] : nil
         let access = role.profile(for: project, addOns: addOns, sharedRoots: sharedRoots)
+        let useSubagents: Bool?
+        if scheduledRun != nil { useSubagents = nil }
+        else if let threadID { useSubagents = chat(threadID)?.useSubagents }
+        else { useSubagents = newChatSubagentChoices[project.id] }
         let newWorktree = threadID == nil && scheduledRun == nil ? worktree : nil
         // The chat's own folder (`Chat.workingDirectory(in:)`): engine cwd, permission root and checkpoints.
         let workingDirectory = newWorktree?.workingDirectory ?? threadID.flatMap { workingDirectory(forChat: $0) } ?? project.path
@@ -2448,6 +2454,7 @@ private struct ChatRunState: Equatable {
                 var chat = Chat(session: session, projectID: project.id, title: ChatTitle.placeholder(), model: selectedModel)
                 chat.id = reservedChatID
                 chat.effort = selectedEffort
+                chat.useSubagents = useSubagents
                 chat.worktree = newWorktree
                 if let newWorktree { consumeNewChatWorktree(newWorktree, project: project.id) }
                 let explicitRole = scheduledRun == nil ? explicitNewChatRole : role
@@ -2458,6 +2465,9 @@ private struct ChatRunState: Equatable {
                     newChatRoles.removeValue(forKey: project.id)
                 }
                 if scheduledRun == nil { newChatModelChoices.removeValue(forKey: project.id) }
+                if let useSubagents, newChatSubagentChoices[project.id] == useSubagents {
+                    newChatSubagentChoices.removeValue(forKey: project.id)
+                }
                 if let explicitNewChatAddOns {
                     chat.roleAddOns = RoleAddOn.allCases.filter(explicitNewChatAddOns.contains).map(\.rawValue)
                     if newChatAddOns[project.id] == explicitNewChatAddOns { newChatAddOns.removeValue(forKey: project.id) }
@@ -2541,7 +2551,8 @@ private struct ChatRunState: Equatable {
                                                           permissions: access, model: selectedModel, effort: selectedEffort,
                                                           advisor: modelCatalog(threadID.flatMap { connectionOfChat($0) } ?? newConnection)?.advisor(state.claudeAdvisor, selectedModel),
                                                           kind: scheduledRun == nil ? .interactive : .scheduled, conversation: ConversationID(id),
-                                                          chatDirectory: chatDirectoryArguments(for: id), userChromeGrant: userChromeGrant)
+                                                          chatDirectory: chatDirectoryArguments(for: id), userChromeGrant: userChromeGrant,
+                                                          useSubagents: useSubagents)
             if threadID == nil && scheduledRun == nil {
                 generateChatTitle(id, firstMessage: text, model: selectedModel, route: route)
             }

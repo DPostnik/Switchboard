@@ -109,6 +109,8 @@ struct AgentProfile: Sendable {
     var composerModelTitles: [String: String] = [:]
     /// Reasoning levels omitted from the composer's discovered-model menu.
     var hiddenComposerEfforts: Set<String> = []
+    /// Default delegation for a selected model. Nil means the adapter does not offer a per-chat choice.
+    var subagentsByDefault: (@Sendable (String) -> Bool)? = nil
 }
 
 /// Selectable models, effort levels and advisors of an agent whose engine lists no models. The adapter owns the

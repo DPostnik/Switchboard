@@ -71,13 +71,14 @@ public actor AgentClient {
     private func request(prompt: String, session: AgentSessionReference?, projectPath: String, permissions profile: AgentPermissionProfile,
                          model: String, effort: String = "", advisor: String? = nil, route: RequestRoute, kind: AgentExecutionRequest.Kind = .interactive,
                          conversation: ConversationID = ConversationID(), context suppliedContext: AgentContext? = nil,
-                         browserProfile: AgentBrowserProfile? = nil, chatDirectory: [String]? = nil, userChromeGrant: AgentUserChromeGrant? = nil) async throws -> AgentExecutionRequest {
+                         browserProfile: AgentBrowserProfile? = nil, chatDirectory: [String]? = nil,
+                         userChromeGrant: AgentUserChromeGrant? = nil, useSubagents: Bool? = nil) async throws -> AgentExecutionRequest {
         let context: AgentContext
         if let suppliedContext { context = suppliedContext } else { context = try await descriptor().context }
         return AgentExecutionRequest(conversation: conversation, session: session, kind: kind, prompt: prompt, projectPath: projectPath,
             permissions: .profile(profile, root: projectPath),
             model: .init(context: context, model: model, effort: effort, advisor: advisor), route: route.agentRoute, browserProfile: browserProfile,
-            chatDirectory: chatDirectory, userChromeGrant: userChromeGrant)
+            chatDirectory: chatDirectory, userChromeGrant: userChromeGrant, useSubagents: useSubagents)
     }
     public func createSession(projectPath: String, permissions: AgentPermissionProfile, model: String, route: RequestRoute,
                               context: AgentContext? = nil, browserProfile: AgentBrowserProfile? = nil,
@@ -92,12 +93,14 @@ public actor AgentClient {
     }
     public func send(_ text: String, to session: AgentSessionReference, projectPath: String, permissions: AgentPermissionProfile,
                      model: String, effort: String, advisor: String? = nil, kind: AgentExecutionRequest.Kind = .interactive,
-                     conversation: ConversationID = ConversationID(), chatDirectory: [String]? = nil, userChromeGrant: AgentUserChromeGrant? = nil) async throws -> String? {
+                     conversation: ConversationID = ConversationID(), chatDirectory: [String]? = nil,
+                     userChromeGrant: AgentUserChromeGrant? = nil, useSubagents: Bool? = nil) async throws -> String? {
         guard let route = sessionRoutes[session], let context = sessionContexts[session] else {
             throw AgentOperationFailure(rejection: .staleContext, failure: nil)
         }
         let request = try await request(prompt: text, session: session, projectPath: projectPath, permissions: permissions, model: model,
-            effort: effort, advisor: advisor, route: route, kind: kind, conversation: conversation, context: context, chatDirectory: chatDirectory, userChromeGrant: userChromeGrant)
+            effort: effort, advisor: advisor, route: route, kind: kind, conversation: conversation, context: context, chatDirectory: chatDirectory,
+            userChromeGrant: userChromeGrant, useSubagents: useSubagents)
         return try await integration.submit(request).value().turnID
     }
     // Legacy entry points: the old access modes stand for the editor and operator roles.

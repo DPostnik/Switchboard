@@ -504,17 +504,20 @@ private func commandFixture() throws -> (URL, URL) {
     let wire = CodexConnection(), client = CodexClient(transport: wire)
     try await client.start(executable: executable, home: root)
     let session = try await client.createSession(projectPath: "/workspace", access: .standard, model: "gpt-6-astra", route: .direct)
-    for model in ["gpt-6-astra", "gpt-6.1-sol", ""] {
+    let choices: [(String, Bool?)] = [("gpt-6-astra", nil), ("gpt-6-astra", false), ("gpt-6.1-sol", true), ("", nil)]
+    for (model, useSubagents) in choices {
         try await client.resume(session, projectPath: "/workspace", access: .standard, route: .direct)
-        _ = try await client.send("literal user text", to: session, projectPath: "/workspace", access: .standard, model: model, effort: "")
+        _ = try await client.send("literal user text", to: session, projectPath: "/workspace",
+            permissions: AgentRoleCatalog.preset(AccessMode.standard.legacyRoleID).profile, model: model, effort: "",
+            useSubagents: useSubagents)
     }
     let starts = try await wire.request("test/calls").array.filter { $0["method"].string == "turn/start" }
-    #expect(starts.count == 3)
-    for (turn, model) in zip(starts, ["gpt-6-astra", "gpt-6.1-sol", ""]) {
+    #expect(starts.count == choices.count)
+    for (turn, (model, useSubagents)) in zip(starts, choices) {
         let input = turn["params"]["input"].array
         #expect(input.count == 2)
         #expect(input.first?["text"].string == "literal user text")
-        #expect(input.last?["text"].string == AgentModelContext.instructions(model: model, provider: .codex))
+        #expect(input.last?["text"].string == AgentModelContext.instructions(model: model, provider: .codex, useSubagents: useSubagents))
         #expect(turn["params"]["model"] == (model.isEmpty ? .null : .string(model)))
     }
     await client.stop()

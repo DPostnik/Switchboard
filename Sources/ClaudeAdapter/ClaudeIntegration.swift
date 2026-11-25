@@ -477,7 +477,7 @@ public actor ClaudeIntegration: AgentIntegration {
             try await wire.send(.object(["type": .string("user"), "session_id": .string(id), "uuid": .string(command),
                 "message": .object(["role": .string("user"), "content": .array([
                     .object(["type": .string("text"), "text": .string(request.prompt)]),
-                    .object(["type": .string("text"), "text": .string(AgentModelContext.instructions(model: selection.model, provider: .claude))])
+                    .object(["type": .string("text"), "text": .string(AgentModelContext.instructions(model: selection.model, provider: .claude, useSubagents: request.useSubagents))])
                 ])])]))
             return .success(.init(context: context, requestID: request.id, session: reference(id), turnID: turn))
         } catch {

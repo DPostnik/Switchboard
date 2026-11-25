@@ -27,6 +27,8 @@ public struct AgentExecutionRequest: Sendable {
     /// Command line of the app's read-only chat directory MCP server; nil unless the user opted this chat in.
     public let chatDirectory: [String]?
     public let userChromeGrant: AgentUserChromeGrant?
+    /// A chat's explicit delegation instruction. This does not control tool permissions.
+    public let useSubagents: Bool?
 
     public enum Kind: Sendable {
         case interactive, scheduled
@@ -34,11 +36,13 @@ public struct AgentExecutionRequest: Sendable {
     }
     public init(id: UUID = UUID(), conversation: ConversationID, session: AgentSessionReference? = nil,
                 kind: Kind, prompt: String, projectPath: String, permissions: AgentPermissionIntent,
-                model: AgentModelSelection, route: AgentRoute, browserProfile: AgentBrowserProfile? = nil, chatDirectory: [String]? = nil, userChromeGrant: AgentUserChromeGrant? = nil) {
+                model: AgentModelSelection, route: AgentRoute, browserProfile: AgentBrowserProfile? = nil, chatDirectory: [String]? = nil,
+                userChromeGrant: AgentUserChromeGrant? = nil, useSubagents: Bool? = nil) {
         self.id = id; self.conversation = conversation; self.session = session; self.kind = kind
         self.prompt = prompt; self.projectPath = projectPath; self.permissions = permissions
         self.model = model; self.route = route
         self.browserProfile = browserProfile; self.chatDirectory = chatDirectory; self.userChromeGrant = userChromeGrant
+        self.useSubagents = useSubagents
     }
 }
 

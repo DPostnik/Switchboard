@@ -77,6 +77,37 @@ import ContextCore
     #expect(model.composer.text.isEmpty)
 }
 
+@Test @MainActor func subagentChoiceBelongsToTheSelectedChatOrDraft() async {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let model = composerModel(root)
+    let project = Project(path: "/tmp/subagent-project")
+    let otherProject = Project(path: "/tmp/other-subagent-project")
+    let astra = Chat(id: "astra", projectID: project.id, title: "Astra", model: "gpt-6.2-astra")
+    let sol = Chat(id: "sol", projectID: project.id, title: "Sol", model: "gpt-6.2-sol")
+    model.state.projects = [project, otherProject]
+    model.state.chats = [astra, sol]
+    model.state.model = "gpt-6.2-sol"
+    model.projectID = project.id
+    #expect(!model.currentChatUsesSubagents)
+    model.setCurrentChatUsesSubagents(true)
+    #expect(model.currentChatUsesSubagents)
+    model.chatID = astra.id
+    #expect(model.currentChatUsesSubagents)
+    model.setCurrentChatUsesSubagents(false)
+    #expect(!model.currentChatUsesSubagents)
+    #expect(model.chat(astra.id)?.useSubagents == false)
+    model.chatID = sol.id
+    #expect(!model.currentChatUsesSubagents)
+    #expect(model.chat(sol.id)?.useSubagents == nil)
+    model.chatID = nil
+    model.projectID = otherProject.id
+    #expect(!model.currentChatUsesSubagents)
+    model.projectID = project.id
+    #expect(model.currentChatUsesSubagents)
+    await model.flushPersist()
+}
+
 @Test @MainActor func canSendAndSendReadTheComposerText() async throws {
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)

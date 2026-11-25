@@ -486,7 +486,8 @@ public actor CodexIntegration: AgentIntegration {
                     try? await worker.refreshProjectSkills(self.projectSkills(request.projectPath), projectPath: request.projectPath)
                 }
                 let turn = try await self.worker(for: session).send(request.prompt, to: session, projectPath: request.projectPath,
-                    permissions: self.access(request.permissions), model: request.model.model, effort: request.model.effort ?? "", userChromeGrant: request.userChromeGrant)
+                    permissions: self.access(request.permissions), model: request.model.model, effort: request.model.effort ?? "",
+                    userChromeGrant: request.userChromeGrant, useSubagents: request.useSubagents)
                 guard let turn, !turn.isEmpty else { throw ClientFailure(L10n.text("Не получен ID запуска", "No turn ID received")) }
                 self.turnContexts[session, default: [:]][turn] = request.model.context
                 // The turn's model and effort as the session's settings; no request is made for them.

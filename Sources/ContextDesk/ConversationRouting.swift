@@ -124,6 +124,22 @@ extension DeskModel {
         // A catalog agent has an app default, so a blank value never reaches the CLI as "its own choice".
         return modelCatalog(currentAgent)?.resolveModel(setting) ?? setting
     }
+    var supportsSubagentChoice: Bool { profile(currentAgent)?.subagentsByDefault != nil }
+    var currentChatUsesSubagents: Bool {
+        guard let delegatesByDefault = profile(currentAgent)?.subagentsByDefault else { return false }
+        let choice = chatID == nil ? projectID.flatMap { newChatSubagentChoices[$0] } : selectedChat?.useSubagents
+        return choice ?? delegatesByDefault(currentModel)
+    }
+    func setCurrentChatUsesSubagents(_ value: Bool) {
+        guard supportsSubagentChoice else { return }
+        if let chatID {
+            guard let index = state.chats.firstIndex(where: { $0.id == chatID }), !state.chats[index].isScheduledRecord else { return }
+            state.chats[index].useSubagents = value
+            persist()
+        } else if let projectID {
+            newChatSubagentChoices[projectID] = value
+        }
+    }
     /// The effort the composer sends with: the catalog level, the selected model's free-form effort, or for a
     /// session-models agent only an effort its model lists.
     var currentEffort: String {

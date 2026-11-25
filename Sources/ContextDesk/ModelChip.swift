@@ -35,6 +35,9 @@ struct ModelChip: View {
     private var newChat: Bool { model.chatID == nil }
     /// Codex lists its models only once connected; until then the chip has no model to show.
     private var showsModels: Bool { claude || !model.models.isEmpty }
+    private var showsSubagentChoice: Bool {
+        model.supportsSubagentChoice && model.selectedProject != nil && model.selectedChat?.isScheduledRecord != true
+    }
 
     /// Chip label: "<model> · <effort>", or the model alone when the model has no effort levels.
     static func title(model: String, effort: String?) -> String {
@@ -113,7 +116,7 @@ struct ModelChip: View {
                     .focused($fieldFocused)
                     .onAppear { fieldFocused = true }
                     .accessibilityLabel(L10n.text("Модель Claude", "Claude model"))
-            } else if showsModels {
+            } else if showsModels || showsSubagentChoice {
                 Button {
                     if !showing {
                         previousExpanded = currentIsPrevious
@@ -139,7 +142,7 @@ struct ModelChip: View {
                 .id(model.currentAgent)
                 .accessibilityLabel(L10n.text("Модель и рассуждение", "Model and reasoning"))
             } else {
-                // Codex before the model list arrives: nothing to choose.
+                // The agent has no composer options yet.
                 ChipLabel(title: modelTitle, mark: mark)
                     .font(.ui(.callout)).foregroundStyle(.secondary).padding(.horizontal, .ui(9))
             }
@@ -149,7 +152,7 @@ struct ModelChip: View {
         .help(help)
     }
 
-    /// The chip's list, kept open while choosing: models, reasoning levels and the defaults for new chats.
+    /// The chip's options stay open while the user makes selections.
     private func panel(previousExpanded: Bool) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             if let catalog {
@@ -196,6 +199,17 @@ struct ModelChip: View {
                         ForEach(model.supportedEfforts.filter(showsEffortOption), id: \.self) { effortOption($0, id: $0) }
                     }
                 }
+            }
+            if showsSubagentChoice {
+                if showsModels { divider }
+                Toggle(L10n.text("Использовать подагентов", "Use subagents"), isOn: Binding(
+                    get: { model.currentChatUsesSubagents },
+                    set: { model.setCurrentChatUsesSubagents($0) }
+                ))
+                .toggleStyle(.checkbox)
+                .font(.ui(.callout))
+                .padding(.horizontal, .ui(6)).padding(.vertical, .ui(4))
+                .help(L10n.text("Делегирование реализации для этого чата.", "Delegate implementation in this chat."))
             }
             if showsModels, let project = model.selectedProject {
                 divider

@@ -114,6 +114,8 @@ public struct Chat: Identifiable, Codable, Hashable, Sendable {
     public var title: String
     public var model: String
     public var effort: String?
+    /// Explicit choice in the composer; older chats and untouched drafts use the model default.
+    public var useSubagents: Bool?
     /// Missing legacy values do not inherit a folder-wide permission escalation.
     public var accessMode: AccessMode?
     /// Only an explicit true inherits; legacy records retain their stored permissions.
