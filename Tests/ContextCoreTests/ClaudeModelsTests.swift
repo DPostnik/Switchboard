@@ -17,7 +17,9 @@ import Testing
 
 @Test func claudeCatalogOffersTheCurrentLineup() {
     let current = Set(ClaudeModel.current.map(\.id))
-    #expect(current == ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-2"])
+    #expect(ClaudeModel.current.map(\.id) == ["claude-opus-5-5", "claude-fable-5-2"])
+    #expect(!current.contains("claude-sonnet-5-5"))
+    #expect(ClaudeModel.previous.first?.id == "claude-sonnet-5-5")
     #expect(ClaudeModel.previous.allSatisfy { !$0.isCurrent })
     #expect(ClaudeModel.current.count + ClaudeModel.previous.count == ClaudeModel.catalog.count)
     #expect(ClaudeModel.entry(for: "claude-opus-5-5")?.reasoning == .always)

@@ -208,10 +208,9 @@ struct ModelChip: View {
         profile?.hiddenComposerEfforts.contains(effort) != true
     }
 
+    /// Maximum is hidden for every Claude model (user decision 2026-11-24); the CLI still accepts it.
     private func claudeEffortOptions(_ catalog: AgentModelCatalog) -> [AgentModelCatalog.Level] {
-        let id = catalog.resolveModel(model.currentModel).lowercased()
-        guard id.hasPrefix("claude-opus-") || id == "opus" || id.hasPrefix("opus[") else { return catalog.efforts }
-        return catalog.efforts.filter { $0.id != "max" }
+        catalog.efforts.filter { $0.id != "max" }
     }
 
     private func entry(_ item: AgentModelCatalog.Entry) -> some View {

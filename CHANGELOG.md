@@ -8,6 +8,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 - After a nightly Codex update, new and changed chats keep working on the running Codex version until the next reconnect instead of failing with “The Codex version changed”.
 
+- The Claude model menu offers Opus 5.5 and Fable 5.2; Sonnet 5.5 moved to previous generations. The Maximum reasoning level is hidden for every Claude model.
+
 - The navigation sidebar and file inspector keep fixed widths, and open file panels no longer carry over between chats.
 
 - The verification queue fast-forwards the local branch after publishing a verified commit and preserves unrelated local edits.

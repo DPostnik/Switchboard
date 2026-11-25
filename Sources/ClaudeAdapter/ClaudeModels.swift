@@ -133,10 +133,12 @@ public struct ClaudeModel: Hashable, Sendable, Identifiable {
     /// `claude-opus-5-5` with "version 2.1.280 or newer is required"; 2.1.292 describes both and
     /// runs `claude-opus-5-5` end to end. Sonnet 5.5 is recorded at the version where its catalog
     /// entry was actually observed, because an undescribed model falls back to a 200K window.
+    /// The selector's main list offers Opus 5.5 and Fable 5.2 only (user decision 2026-11-24);
+    /// Sonnet 5.5 stays selectable under previous generations.
     public static let catalog: [ClaudeModel] = [
         .init(id: "claude-opus-5-5", name: "Opus 5.5", reasoning: .always, isCurrent: true, minimumCLI: "2.1.280"),
-        .init(id: "claude-sonnet-5-5", name: "Sonnet 5.5", reasoning: .always, isCurrent: true, minimumCLI: "2.1.292"),
         .init(id: "claude-fable-5-2", name: "Fable 5.2", reasoning: .always, isCurrent: true, minimumCLI: "2.1.321"),
+        .init(id: "claude-sonnet-5-5", name: "Sonnet 5.5", reasoning: .always, isCurrent: false, minimumCLI: "2.1.292"),
         .init(id: "claude-fable-5-1", name: "Fable 5.1", reasoning: .always, isCurrent: false, minimumCLI: "2.1.260"),
         .init(id: "claude-fable-5", name: "Fable 5", reasoning: .always, isCurrent: false, minimumCLI: "2.1.260"),
         .init(id: "claude-opus-5", name: "Opus 5", reasoning: .adaptive, isCurrent: false, minimumCLI: "2.1.260"),
