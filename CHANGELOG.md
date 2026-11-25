@@ -6,6 +6,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 - After the nightly check switches to a newer verified Codex release, Switchboard restarts once every chat is idle, so all chats use the new version.
 
+- The composer's model list stays open while you choose a model, a reasoning level or a default for new chats, and closes on an outside click or Escape.
+
 - After a nightly Codex update, new and changed chats keep working on the running Codex version until the next reconnect instead of failing with “The Codex version changed”.
 
 - The Claude model menu offers Opus 5.5 and Fable 5.2; Sonnet 5.5 moved to previous generations. The Maximum reasoning level is hidden for every Claude model.

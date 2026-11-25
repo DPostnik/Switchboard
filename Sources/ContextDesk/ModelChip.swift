@@ -1,5 +1,6 @@
 import SwiftUI
 import ContextCore
+import ContextTranscript
 
 /// One composer chip for the model and the reasoning effort; in a new chat with several agents a provider toggle
 /// (`AgentToggle`) precedes it, else the chip carries the provider's mark.
@@ -18,6 +19,14 @@ struct ModelChip: View {
     @State private var entering = false
     @FocusState private var fieldFocused: Bool
     @State private var draft = ""
+    @State private var showing = false
+    @State private var previousExpanded = false
+    /// The "Make default" row just used (true: this project, false: all projects), confirmed with a check.
+    @State private var savedDefault: Bool?
+    @State private var edge = CompactPopoverPlacement.fallback.edge
+    @State private var height: CGFloat?
+    @State private var maxHeight = CompactPopoverPlacement.fallback.maxHeight
+    @State private var anchor = ScreenFrameProbe()
 
     /// The current agent offers the app's model catalog (Claude) instead of the engine's model list.
     private var catalog: AgentModelCatalog? { model.modelCatalog(model.currentAgent) }
@@ -100,15 +109,35 @@ struct ModelChip: View {
                           prompt: Text(catalog.map { $0.title($0.defaultModel) } ?? ""))
                     .onSubmit { commit() }
                     .onExitCommand { entering = false }
-                    // The field replaces the menu the user just chose from, so typing can start at once.
+                    // The field replaces the list the user just chose from, so typing can start at once.
                     .focused($fieldFocused)
                     .onAppear { fieldFocused = true }
                     .accessibilityLabel(L10n.text("Модель Claude", "Claude model"))
             } else if showsModels {
-                ChipMenu(title: Self.title(model: modelTitle, effort: effortTitle), mark: mark) { menu }
-                    // A menu's label may keep its old text when only the text changes; a new agent rebuilds it.
-                    .id(model.currentAgent)
-                    .accessibilityLabel(L10n.text("Модель и рассуждение", "Model and reasoning"))
+                Button {
+                    if !showing {
+                        previousExpanded = currentIsPrevious
+                        savedDefault = nil
+                        // Measured as it opens, without blank room: a popover that changes height after presentation
+                        // leaves the screen, so expanding the previous generations later scrolls inside this height.
+                        let placement = anchor.compactPlacement
+                        edge = placement.edge
+                        maxHeight = placement.maxHeight
+                        height = FixedHeightPopover<EmptyView>.height(of: panel(previousExpanded: previousExpanded), placement: placement)
+                    }
+                    showing.toggle()
+                } label: {
+                    ChipLabel(title: Self.title(model: modelTitle, effort: effortTitle), mark: mark, chevron: true)
+                }
+                .buttonStyle(ChipButtonStyle()).fixedSize().pointingHandCursor()
+                .background(ScreenFrameReader(probe: anchor))
+                // A popover rather than a menu: choosing a model or a level keeps it open; an outside click or Escape closes it.
+                .popover(isPresented: $showing, arrowEdge: edge) {
+                    FixedHeightPopover(height: height, maxHeight: maxHeight) { panel(previousExpanded: previousExpanded) }
+                }
+                // A new agent rebuilds the chip.
+                .id(model.currentAgent)
+                .accessibilityLabel(L10n.text("Модель и рассуждение", "Model and reasoning"))
             } else {
                 // Codex before the model list arrives: nothing to choose.
                 ChipLabel(title: modelTitle, mark: mark)
@@ -120,66 +149,107 @@ struct ModelChip: View {
         .help(help)
     }
 
-    @ViewBuilder private var menu: some View {
-        if let catalog {
-            Section {
-                ForEach(catalog.current) { entry($0) }
-                Menu(L10n.text("Предыдущие поколения", "Previous generations")) {
-                    ForEach(catalog.previous) { entry($0) }
-                }
-                Button(L10n.text("Другая модель…", "Other model…")) {
-                    draft = model.currentModel
-                    entering = true
-                }
-            } header: { Text(model.currentAgentName) }
-            Section {
-                Picker(L10n.text("Рассуждение", "Reasoning"),
-                       selection: Binding(get: { model.claudeEffort }, set: { model.selectClaudeEffort($0) })) {
-                    ForEach(claudeEffortOptions(catalog), id: \.id) { level in
-                        Text(level.title).tag(level.id)
+    /// The chip's list, kept open while choosing: models, reasoning levels and the defaults for new chats.
+    private func panel(previousExpanded: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let catalog {
+                section(model.currentAgentName) {
+                    ForEach(catalog.current) { entry($0) }
+                    if !catalog.previous.isEmpty {
+                        previousGenerations(expanded: previousExpanded)
+                        if previousExpanded { ForEach(catalog.previous) { entry($0, indent: true) } }
                     }
-                }.pickerStyle(.inline).labelsHidden()
-            } header: { Text(L10n.text("Рассуждение", "Reasoning")) }
-        } else if showsModels {
-            Section {
-                if let featured = profile?.featuredComposerModels, !featured.isEmpty {
-                    groupedModelOptions(featured)
-                } else {
-                    Picker(L10n.text("Модель", "Model"), selection: Binding(get: { model.currentModel }, set: { model.selectModel($0) })) {
-                        Text(L10n.text("Авто", "Auto")).tag("")
-                        if !model.currentModel.isEmpty && !model.models.contains(where: { $0.id == model.currentModel }) {
-                            Text(model.currentModel).tag(model.currentModel)
-                        }
-                        ForEach(model.models, id: \.self) { entry in Text(entry.displayName).tag(entry.id) }
-                    }.pickerStyle(.inline).labelsHidden()
+                    ModelMenuRow(title: L10n.text("Другая модель…", "Other model…")) {
+                        showing = false
+                        draft = model.currentModel
+                        entering = true
+                    }
                 }
-            } header: { Text(model.currentAgentName) }
-            if !model.supportedEfforts.isEmpty {
-                Section {
-                    Picker(L10n.text("Рассуждение", "Reasoning"), selection: Binding(get: { model.effort }, set: { model.effort = $0 })) {
-                        Text(L10n.text("Авто", "Auto")).tag("")
+                divider
+                section(L10n.text("Рассуждение", "Reasoning")) {
+                    ForEach(claudeEffortOptions(catalog), id: \.id) { level in
+                        ModelMenuRow(title: level.title, selected: model.claudeEffort == level.id) {
+                            select { model.selectClaudeEffort(level.id) }
+                        }
+                    }
+                }
+            } else if showsModels {
+                section(model.currentAgentName) {
+                    if let featured = profile?.featuredComposerModels, !featured.isEmpty {
+                        groupedModelOptions(featured, previousExpanded: previousExpanded)
+                    } else {
+                        modelOption(L10n.text("Авто", "Auto"), id: "")
+                        if !model.currentModel.isEmpty && !model.models.contains(where: { $0.id == model.currentModel }) {
+                            modelOption(model.currentModel, id: model.currentModel)
+                        }
+                        ForEach(model.models, id: \.id) { modelOption($0.displayName, id: $0.id) }
+                    }
+                }
+                if !model.supportedEfforts.isEmpty {
+                    divider
+                    section(L10n.text("Рассуждение", "Reasoning")) {
+                        effortOption(L10n.text("Авто", "Auto"), id: "")
                         if !model.effort.isEmpty && !model.supportedEfforts.contains(model.effort)
                             && showsEffortOption(model.effort) {
-                            Text(model.effort).tag(model.effort)
+                            effortOption(model.effort, id: model.effort)
                         }
-                        ForEach(model.supportedEfforts.filter(showsEffortOption), id: \.self) { Text($0).tag($0) }
-                    }.pickerStyle(.inline).labelsHidden()
-                } header: { Text(L10n.text("Рассуждение", "Reasoning")) }
+                        ForEach(model.supportedEfforts.filter(showsEffortOption), id: \.self) { effortOption($0, id: $0) }
+                    }
+                }
+            }
+            if showsModels, let project = model.selectedProject {
+                divider
+                section(L10n.text("Для новых чатов", "For new chats")) {
+                    ModelMenuRow(title: L10n.text("Сделать по умолчанию в проекте «\(project.name)»", "Make default in project “\(project.name)”"),
+                                 confirmed: savedDefault == true) {
+                        model.saveCurrentModelAsDefault(projectOnly: true)
+                        savedDefault = true
+                    }
+                    ModelMenuRow(title: L10n.text("Сделать по умолчанию во всех проектах", "Make default in all projects"),
+                                 confirmed: savedDefault == false) {
+                        model.saveCurrentModelAsDefault(projectOnly: false)
+                        savedDefault = false
+                    }
+                }
             }
         }
-        if showsModels, let project = model.selectedProject {
-            Section {
-                Button(L10n.text("Сделать по умолчанию в проекте «\(project.name)»", "Make default in project “\(project.name)”")) {
-                    model.saveCurrentModelAsDefault(projectOnly: true)
-                }
-                Button(L10n.text("Сделать по умолчанию во всех проектах", "Make default in all projects")) {
-                    model.saveCurrentModelAsDefault(projectOnly: false)
-                }
-            } header: { Text(L10n.text("Для новых чатов", "For new chats")) }
+        .padding(.ui(6))
+        .frame(width: .ui(290))
+    }
+
+    private func section(_ title: String, @ViewBuilder rows: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(title).font(.ui(.caption)).foregroundStyle(.secondary).lineLimit(1)
+                .padding(.horizontal, .ui(6)).padding(.top, .ui(3)).padding(.bottom, .ui(2))
+            rows()
         }
     }
 
-    @ViewBuilder private func groupedModelOptions(_ featuredIDs: [String]) -> some View {
+    private var divider: some View { Divider().padding(.vertical, .ui(4)) }
+
+    /// The inline group of superseded models, in place of a submenu.
+    private func previousGenerations(expanded: Bool) -> some View {
+        ModelMenuRow(title: L10n.text("Предыдущие поколения", "Previous generations"), expanded: expanded) {
+            previousExpanded.toggle()
+        }
+        .accessibilityValue(expanded ? L10n.text("Развёрнуто", "Expanded") : L10n.text("Свёрнуто", "Collapsed"))
+    }
+
+    /// The current model belongs to the previous generations, so the list opens with them expanded.
+    private var currentIsPrevious: Bool {
+        let id = model.currentModel
+        if let catalog { return catalog.previous.contains { $0.id == id } }
+        guard let featured = profile?.featuredComposerModels, !featured.isEmpty else { return false }
+        return !featured.contains(id) && model.models.contains { $0.id == id }
+    }
+
+    /// A new model or level invalidates the "Make default" confirmation.
+    private func select(_ change: () -> Void) {
+        change()
+        savedDefault = nil
+    }
+
+    @ViewBuilder private func groupedModelOptions(_ featuredIDs: [String], previousExpanded: Bool) -> some View {
         let featured = featuredIDs.compactMap { id in model.models.first { $0.id == id } }
         let previous = model.models.filter { !featuredIDs.contains($0.id) }
         modelOption(L10n.text("Авто", "Auto"), id: "")
@@ -188,8 +258,9 @@ struct ModelChip: View {
         }
         ForEach(featured, id: \.id) { modelOption(discoveredModelTitle($0.id, displayName: $0.displayName), id: $0.id) }
         if !previous.isEmpty {
-            Menu(L10n.text("Предыдущие поколения", "Previous generations")) {
-                ForEach(previous, id: \.id) { modelOption($0.displayName, id: $0.id) }
+            previousGenerations(expanded: previousExpanded)
+            if previousExpanded {
+                ForEach(previous, id: \.id) { modelOption($0.displayName, id: $0.id, indent: true) }
             }
         }
     }
@@ -198,10 +269,16 @@ struct ModelChip: View {
         profile?.composerModelTitles[id] ?? displayName ?? id
     }
 
-    private func modelOption(_ title: String, id: String) -> some View {
-        Toggle(title, isOn: Binding(get: { model.currentModel == id }, set: { _ in
-            if model.currentModel != id { model.selectModel(id) }
-        }))
+    private func modelOption(_ title: String, id: String, indent: Bool = false) -> some View {
+        ModelMenuRow(title: title, selected: model.currentModel == id, indent: indent) {
+            select { if model.currentModel != id { model.selectModel(id) } }
+        }
+    }
+
+    private func effortOption(_ title: String, id: String) -> some View {
+        ModelMenuRow(title: title, selected: model.effort == id) {
+            select { model.effort = id }
+        }
     }
 
     private func showsEffortOption(_ effort: String) -> Bool {
@@ -213,15 +290,58 @@ struct ModelChip: View {
         catalog.efforts.filter { $0.id != "max" }
     }
 
-    private func entry(_ item: AgentModelCatalog.Entry) -> some View {
+    private func entry(_ item: AgentModelCatalog.Entry, indent: Bool = false) -> some View {
         let note = item.requirementNote
-        return Toggle(note.map { item.menuTitle + " · " + $0 } ?? item.menuTitle,
-                      isOn: Binding(get: { model.currentModel == item.id }, set: { _ in model.selectCurrentModel(item.id) }))
-            .disabled(note != nil)
+        return ModelMenuRow(title: note.map { item.menuTitle + " · " + $0 } ?? item.menuTitle,
+                            selected: model.currentModel == item.id, indent: indent) {
+            select { model.selectCurrentModel(item.id) }
+        }
+        .disabled(note != nil)
     }
 
     private func commit() {
         model.selectCurrentModel(draft.trimmingCharacters(in: .whitespacesAndNewlines))
         entering = false
+    }
+}
+
+/// One menu-like row of the model list: a check column for the chosen item, the title, and a trailing
+/// confirmation check or a group's disclosure chevron.
+private struct ModelMenuRow: View {
+    let title: String
+    var selected = false
+    var indent = false
+    var confirmed = false
+    /// Expansion of a group row; nil for an ordinary item.
+    var expanded: Bool? = nil
+    let action: () -> Void
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: .ui(6)) {
+                Image(systemName: "checkmark").font(.ui(size: 10, weight: .semibold))
+                    .frame(width: .ui(12)).opacity(selected ? 1 : 0)
+                Text(title).lineLimit(2).multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, indent ? CGFloat.ui(12) : 0)
+                Spacer(minLength: .ui(4))
+                if confirmed {
+                    Image(systemName: "checkmark").font(.ui(size: 10, weight: .semibold)).foregroundStyle(DeskPalette.accent)
+                }
+                if let expanded {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.ui(size: 9, weight: .bold)).foregroundStyle(.tertiary)
+                }
+            }
+            .font(.ui(.callout)).foregroundStyle(isEnabled ? .primary : .secondary)
+            .padding(.horizontal, .ui(6)).padding(.vertical, .ui(4))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(hovering && isEnabled ? DeskPalette.subtle : .clear, in: RoundedRectangle(cornerRadius: .ui(5)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
