@@ -40,6 +40,16 @@ class CompatCheckTests(unittest.TestCase):
             exe.write_bytes(b'replaced')
             self.assertFalse(trial['verified_active'](root, '1.2.3'))
 
+    def test_restart_request_is_one_attempt_and_reports_outcome(self):
+        with tempfile.TemporaryDirectory() as root:
+            calls = Path(root) / 'calls'
+            app = Path(root) / 'Switchboard'
+            app.write_text(f'#!/bin/sh\necho "$@" >> \'{calls}\'\nexit ${{CODE:-0}}\n')
+            app.chmod(0o755)
+            self.assertEqual(compat.request_restart(str(app)), 'restart requested')
+            self.assertEqual(calls.read_text(), '--request-restart\n')
+            self.assertEqual(compat.request_restart(str(Path(root) / 'missing')), 'restart not requested: app not found')
+
     def test_policy_matches_the_app(self):
         self.assertEqual(compat.classify('0.160.0', VERIFIED['codex']), 'verified')
         self.assertEqual(compat.classify('0.160.4', VERIFIED['codex']), 'same-minor')

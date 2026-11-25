@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- After the nightly check switches to a newer verified Codex release, Switchboard restarts once every chat is idle, so all chats use the new version.
+
 - After a nightly Codex update, new and changed chats keep working on the running Codex version until the next reconnect instead of failing with “The Codex version changed”.
 
 - The navigation sidebar and file inspector keep fixed widths, and open file panels no longer carry over between chats.

@@ -6,7 +6,7 @@ the latest published version is one `npm view <package> version` per agent, at m
 no-inference tests run only for an installed version that is neither verified nor checked before. No model
 inference. New stable Codex packages are staged separately and promoted only after all candidate scenarios pass.
 
-  python3 -I scripts/compat-check.py [--worktree DIR] [--app PATH] [--no-live] [--force-npm]
+  python3 -I scripts/compat-check.py [--worktree DIR] [--app PATH] [--no-live] [--force-npm] [--no-restart]
                                      [--state FILE] [--status FILE] [--no-notify]
 
 State: ~/Library/Caches/Switchboard/compat/state.json. Result: one line in
@@ -185,6 +185,18 @@ def notify(app, summary):
                    capture_output=True, timeout=30)
 
 
+def request_restart(app):
+    """Asks the running app to restart once every chat is idle, so its Codex connection loads the promoted release.
+    One attempt: delivery is not acknowledged and a failure is only reported, never retried."""
+    if not (app and os.access(app, os.X_OK)):
+        return 'restart not requested: app not found'
+    try:
+        code = subprocess.run([app, '--request-restart'], capture_output=True, timeout=30).returncode
+    except (OSError, subprocess.SubprocessError):
+        return 'restart request failed'
+    return 'restart requested' if code == 0 else 'restart not requested: app not running'
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--worktree', type=Path, default=ROOT, help='tree whose tests and verified versions are used')
@@ -194,6 +206,7 @@ def main():
     parser.add_argument('--state', type=Path, default=STATE)
     parser.add_argument('--status', type=Path, default=STATUS)
     parser.add_argument('--no-notify', action='store_true', help='print findings instead of notifying (manual runs)')
+    parser.add_argument('--no-restart', action='store_true', help='do not ask the running app to restart after a Codex promotion')
     args = parser.parse_args()
     now = dt.datetime.now().astimezone()
     args.status.parent.mkdir(parents=True, exist_ok=True)
@@ -225,6 +238,9 @@ def main():
             print(f'Codex candidate: {exc}', file=sys.stderr)
             outcome = 'failed: candidate setup or check'
         line += f'; Codex candidate {newest}: {outcome}'
+        if outcome == 'promoted' and not (args.no_restart or args.no_notify):
+            # The running engine keeps the previous release until it reconnects; restart when every chat is idle.
+            line += '; ' + request_restart(args.app)
         if outcome.startswith('failed'):
             line = re.sub('^ok ', 'attention ', line)
         if outcome.startswith(('failed', 'promoted')):
