@@ -12,6 +12,8 @@ struct ArchiveView: View {
     @State private var textMatches: (query: String, matches: [String: String]) = ("", [:])
     @State private var matchesRevision = 0
     @State private var cache = ListingCache()
+    /// How many chats the list holds; grows a page at a time while scrolling (`page`).
+    @State private var shownLimit = ArchiveView.pageSize
 
     /// Everything the list needs, computed once per render: the archive can hold hundreds of chats,
     /// and the body reruns on every model change.
@@ -157,25 +159,29 @@ struct ArchiveView: View {
                     EmptyState(icon: "archivebox", title: search.isEmpty ? L10n.text("Архив пуст", "Archive is empty") : L10n.text("Ничего не найдено", "No results"),
                                text: search.isEmpty ? L10n.text("Архивные чаты всех проектов появятся здесь.", "Archived chats from all projects will appear here.") : L10n.text("Попробуй другие слова или «Найти с агентом»: он учитывает синонимы и даты.", "Try other words or \"Find with agent\": it understands synonyms and dates."))
                 } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 10) {
-                            if !search.isEmpty {
-                                sectionTitle(L10n.text("В архиве", "Archived"), count: listing.chats.count)
-                            }
-                            ForEach(listing.chats) { chat in archivedRow(chat, listing) }
-                            if !listing.active.isEmpty {
-                                sectionTitle(L10n.text("Не в архиве", "Not archived"), count: listing.active.count).padding(.top, 6)
-                                ForEach(listing.active) { chat in
-                                    Button { Task { await model.openChat(chat) } } label: { chatSummary(chat, listing) }
-                                        .buttonStyle(PointerButtonStyle(base: .plain))
-                                        .padding(16).background(DeskPalette.subtle, in: RoundedRectangle(cornerRadius: 12))
-                                }
-                            }
-                        }.padding(.horizontal).padding(.bottom)
-                    }
+                    let page = Self.page(listing, limit: shownLimit, searching: !search.isEmpty)
+                    // A `List` reuses the rows that scroll out of view, and only `shownLimit` rows exist at all:
+                    // the next page is added when the list reaches its end.
+                    List {
+                        ForEach(page.entries) { entry in
+                            entryView(entry, listing)
+                                .listRowInsets(EdgeInsets(top: 5, leading: 16, bottom: 5, trailing: 16))
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(Color.clear)
+                        }
+                        if page.hasMore {
+                            ProgressView().controlSize(.small).frame(maxWidth: .infinity)
+                                .listRowSeparator(.hidden).listRowBackground(Color.clear)
+                                .onAppear { shownLimit += Self.pageSize }
+                        }
+                    }.listStyle(.plain).scrollContentBackground(.hidden)
+                        .environment(\.defaultMinListRowHeight, 0)
                 }
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            // A new search or project starts from the first page again.
+            .onChange(of: search) { shownLimit = Self.pageSize }
+            .onChange(of: projectFilter) { shownLimit = Self.pageSize }
             .sheet(item: $summary) { record in
                 ArchiveSummaryDetail(record: record) {
                     summary = nil
@@ -199,61 +205,67 @@ struct ArchiveView: View {
         }
     }
 
-    private func sectionTitle(_ title: String, count: Int) -> some View {
-        Text("\(title) · \(count)").font(.ui(.caption).weight(.semibold)).foregroundStyle(.secondary)
+    /// Rows shown per page; the list grows by this many when it is scrolled to its end.
+    static let pageSize = 60
+
+    /// One row of the archive list: a section title or a chat.
+    enum Entry: Identifiable, Equatable {
+        case section(String, count: Int)
+        case archived(Chat)
+        case active(Chat)
+
+        var id: String {
+            switch self {
+            case let .section(title, _): "section:" + title
+            case let .archived(chat): "archived:" + chat.id
+            case let .active(chat): "active:" + chat.id
+            }
+        }
     }
 
-    private func chatSummary(_ chat: Chat, _ listing: Listing) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(chat.title).font(.ui(.headline)).lineLimit(2)
-            if let snippet = listing.snippets[chat.id] {
-                Text(snippet).font(.ui(.caption)).foregroundStyle(.secondary).lineLimit(2)
-            }
-            if let project = listing.projects[chat.projectID] {
-                Text(project.name + " · " + L10n.date(chat.updated)).font(.ui(.caption)).foregroundStyle(.secondary)
-                Text(project.path).font(.ui(.caption2)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-            }
-        }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+    /// The first `limit` chats of the listing, archived ones first, with section titles while searching.
+    /// Titles keep the full counts; `hasMore` tells the list to add another page at its end.
+    nonisolated static func page(_ listing: Listing, limit: Int, searching: Bool) -> (entries: [Entry], hasMore: Bool) {
+        var entries: [Entry] = []
+        let archived = listing.chats.prefix(limit)
+        let active = listing.active.prefix(max(0, limit - archived.count))
+        if searching, !listing.chats.isEmpty || !listing.active.isEmpty {
+            entries.append(.section(L10n.text("В архиве", "Archived"), count: listing.chats.count))
+        }
+        entries += archived.map(Entry.archived)
+        if !active.isEmpty {
+            entries.append(.section(L10n.text("Не в архиве", "Not archived"), count: listing.active.count))
+            entries += active.map(Entry.active)
+        }
+        return (entries, archived.count + active.count < listing.chats.count + listing.active.count)
     }
 
-    private func archivedRow(_ chat: Chat, _ listing: Listing) -> some View {
-        HStack(spacing: 16) {
-            Button { Task { await model.openChat(chat) } } label: { chatSummary(chat, listing) }
-                .buttonStyle(PointerButtonStyle(base: .plain))
-                .disabled(model.isChangingChat(chat.id))
-            if let record = model.archiveSummaries[chat.id] {
-                VStack(alignment: .trailing, spacing: 6) {
-                    if record.status == .ready {
-                        Button(record.status.label()) { summary = record }.buttonStyle(DeskButtonStyle())
-                    } else {
-                        Text(record.status.label()).font(.ui(.caption)).foregroundStyle(.secondary)
-                    }
-                    if [.failed, .uncertain, .stale].contains(record.status) {
-                        Button(L10n.text("Создать итог заново", "Generate summary again")) {
-                            Task { await model.retryArchiveSummary(chat.id) }
-                        }.buttonStyle(DeskButtonStyle()).disabled(!model.canGenerateSummary(chat) || model.isChangingChat(chat.id))
-                        if record.status == .uncertain {
-                            Text(L10n.text("Прошлый запрос мог выполниться. Новый использует лимиты повторно.", "The previous request may have completed. A new one uses allowance again."))
-                                .font(.ui(.caption2)).foregroundStyle(.secondary).frame(maxWidth: 220)
-                        }
-                    }
-                }.help(record.issue ?? record.status.label())
-            }
-            Button(L10n.text("Восстановить", "Restore")) {
-                Task { await model.setChatArchived(chat.id, archived: false) }
-            }.buttonStyle(DeskButtonStyle(kind: .text)).disabled(!model.canDeleteChat(chat.id))
-        }.padding(16).background(DeskPalette.subtle, in: RoundedRectangle(cornerRadius: 12))
-            .contentShape(Rectangle())
-            .contextMenu {
-                Button(L10n.text("Скопировать ID чата", "Copy chat ID")) {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(ChatReference.link(chat), forType: .string)
-                }
-                Button(L10n.text("Скопировать ссылку на чат для агента", "Copy chat reference for an agent")) {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(ChatReference.text(chat, projectPath: listing.projects[chat.projectID]?.path), forType: .string)
-                }
-            }
+    @ViewBuilder private func entryView(_ entry: Entry, _ listing: Listing) -> some View {
+        switch entry {
+        case let .section(title, count):
+            Text("\(title) · \(count)").font(.ui(.caption).weight(.semibold)).foregroundStyle(.secondary)
+        case let .archived(chat):
+            ArchiveChatRow(content: rowContent(chat, listing, archived: true), actions: rowActions(chat)).equatable()
+        case let .active(chat):
+            ArchiveChatRow(content: rowContent(chat, listing, archived: false), actions: rowActions(chat)).equatable()
+        }
+    }
+
+    private func rowContent(_ chat: Chat, _ listing: Listing, archived: Bool) -> ArchiveChatRow.Content {
+        let project = listing.projects[chat.projectID]
+        return ArchiveChatRow.Content(
+            chat: chat, archived: archived, projectName: project?.name, projectPath: project?.path, snippet: listing.snippets[chat.id],
+            summary: archived ? model.archiveSummaries[chat.id] : nil, changing: archived && model.isChangingChat(chat.id),
+            canRestore: archived && model.canDeleteChat(chat.id), canGenerate: archived && model.canGenerateSummary(chat))
+    }
+
+    private func rowActions(_ chat: Chat) -> ArchiveChatRow.Actions {
+        let model = model
+        return ArchiveChatRow.Actions(
+            open: { Task { await model.openChat(chat) } },
+            showSummary: { summary = $0 },
+            retrySummary: { Task { await model.retryArchiveSummary(chat.id) } },
+            restore: { Task { await model.setChatArchived(chat.id, archived: false) } })
     }
 
     nonisolated static func chatCount(_ count: Int, language: AppLanguage = L10n.language) -> String {
@@ -286,6 +298,89 @@ extension SavedState {
             hasher.combine(chat.sidebarOrder); hasher.combine(chat.updated); hasher.combine(chat.isScheduledRecord); hasher.combine(chat.chatSearch)
         }
         return hasher.finalize()
+    }
+}
+
+/// One chat in the archive list, rendered from values only: a model publication that changes none of them
+/// (streaming in another chat) skips the row.
+private struct ArchiveChatRow: View, Equatable {
+    struct Content: Equatable {
+        let chat: Chat
+        /// false: an active chat found by the search; it only opens.
+        let archived: Bool
+        let projectName: String?
+        let projectPath: String?
+        let snippet: String?
+        let summary: ArchiveSummaryRecord?
+        let changing: Bool
+        let canRestore: Bool
+        let canGenerate: Bool
+    }
+
+    struct Actions {
+        let open: () -> Void
+        let showSummary: (ArchiveSummaryRecord) -> Void
+        let retrySummary: () -> Void
+        let restore: () -> Void
+    }
+
+    let content: Content
+    let actions: Actions
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool { lhs.content == rhs.content }
+
+    var body: some View {
+        let chat = content.chat
+        HStack(spacing: 16) {
+            Button(action: actions.open) { details }
+                .buttonStyle(PointerButtonStyle(base: .plain))
+                .disabled(content.changing)
+            if let record = content.summary {
+                VStack(alignment: .trailing, spacing: 6) {
+                    if record.status == .ready {
+                        Button(record.status.label()) { actions.showSummary(record) }.buttonStyle(DeskButtonStyle())
+                    } else {
+                        Text(record.status.label()).font(.ui(.caption)).foregroundStyle(.secondary)
+                    }
+                    if [.failed, .uncertain, .stale].contains(record.status) {
+                        Button(L10n.text("Создать итог заново", "Generate summary again"), action: actions.retrySummary)
+                            .buttonStyle(DeskButtonStyle()).disabled(!content.canGenerate || content.changing)
+                        if record.status == .uncertain {
+                            Text(L10n.text("Прошлый запрос мог выполниться. Новый использует лимиты повторно.", "The previous request may have completed. A new one uses allowance again."))
+                                .font(.ui(.caption2)).foregroundStyle(.secondary).frame(maxWidth: 220)
+                        }
+                    }
+                }.help(record.issue ?? record.status.label())
+            }
+            if content.archived {
+                Button(L10n.text("Восстановить", "Restore"), action: actions.restore)
+                    .buttonStyle(DeskButtonStyle(kind: .text)).disabled(!content.canRestore)
+            }
+        }.padding(16).background(DeskPalette.subtle, in: RoundedRectangle(cornerRadius: 12))
+            .contentShape(Rectangle())
+            .contextMenu {
+                Button(L10n.text("Скопировать ID чата", "Copy chat ID")) {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(ChatReference.link(chat), forType: .string)
+                }
+                Button(L10n.text("Скопировать ссылку на чат для агента", "Copy chat reference for an agent")) {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(ChatReference.text(chat, projectPath: content.projectPath), forType: .string)
+                }
+            }
+    }
+
+    private var details: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(content.chat.title).font(.ui(.headline)).lineLimit(2)
+            if let snippet = content.snippet {
+                Text(snippet).font(.ui(.caption)).foregroundStyle(.secondary).lineLimit(2)
+            }
+            if let name = content.projectName, let path = content.projectPath {
+                Text(name + " · " + L10n.date(content.chat.updated)).font(.ui(.caption)).foregroundStyle(.secondary)
+                Text(path).font(.ui(.caption2)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
     }
 }
 

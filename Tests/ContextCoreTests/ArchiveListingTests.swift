@@ -98,3 +98,21 @@ private func archive() -> (SavedState, Project, Project) {
         #expect(changed.listingFingerprint != state.listingFingerprint)
     }
 }
+
+@Test func archivePageShowsTheFirstChatsAndKeepsFullSectionCounts() {
+    var listing = ArchiveView.Listing()
+    listing.chats = (0..<5).map { Chat(id: "a\($0)", projectID: UUID(), title: "A\($0)", model: "fixture-model") }
+    listing.active = (0..<3).map { Chat(id: "b\($0)", projectID: UUID(), title: "B\($0)", model: "fixture-model") }
+    let first = ArchiveView.page(listing, limit: 4, searching: true)
+    #expect(first.hasMore)
+    #expect(first.entries.map(\.id) == ["section:" + L10n.text("В архиве", "Archived"), "archived:a0", "archived:a1", "archived:a2", "archived:a3"])
+    guard case let .section(_, count) = first.entries[0] else { Issue.record("no section title"); return }
+    #expect(count == 5)
+    let second = ArchiveView.page(listing, limit: 7, searching: true)
+    #expect(second.hasMore && second.entries.filter { if case .active = $0 { true } else { false } }.map(\.id) == ["active:b0", "active:b1"])
+    let all = ArchiveView.page(listing, limit: 8, searching: true)
+    #expect(!all.hasMore && all.entries.count == 10)
+    // Without a search the archive has no section titles.
+    listing.active = []
+    #expect(ArchiveView.page(listing, limit: 60, searching: false).entries.map(\.id) == listing.chats.map { "archived:" + $0.id })
+}
