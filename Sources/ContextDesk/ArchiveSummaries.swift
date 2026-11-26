@@ -1,4 +1,5 @@
 import Foundation
+import AgentContract
 import ContextCore
 
 extension DeskModel {
@@ -18,17 +19,31 @@ extension DeskModel {
 
     func canGenerateSummary(_ chat: Chat) -> Bool {
         guard supportsSummaries(chat) else { return false }
-        let state = agentState(chat.nativeSession?.connection)
-        return state.connected && state.authenticated
+        let source = agentState(chat.nativeSession?.connection)
+        let target = agentState(summaryConnection(for: chat))
+        return source.connected && source.authenticated && target.connected && target.authenticated
     }
 
-    /// The generation runner of the chat's own connection; nil for a chat no registered connection owns.
+    func summaryConnection(for chat: Chat) -> AgentConnectionID? {
+        state.archiveSummariesUseCodex == true ? AgentIntegrationFactory.codexProfile.connection : chat.nativeSession?.connection
+    }
+
     func generationRunner(for id: String) -> AgentGenerationRunner? {
-        connectionOfChat(id).flatMap { generationRunner(connection: $0) }
+        chat(id).flatMap { summaryConnection(for: $0) }.flatMap { generationRunner(connection: $0) }
+    }
+
+    func setArchiveSummaryCodex(_ enabled: Bool) {
+        state.archiveSummariesUseCodex = enabled
+        persist()
+        startSummaryQueue()
     }
 
     func generationEnvironment(for id: String, workspace: String, recipe: String? = nil) -> AgentGenerationEnvironment {
-        let registration = connectionOfChat(id).flatMap { self.registration($0) }
+        generationEnvironment(connection: connectionOfChat(id), workspace: workspace, recipe: recipe)
+    }
+
+    private func generationEnvironment(connection: AgentConnectionID?, workspace: String, recipe: String? = nil) -> AgentGenerationEnvironment {
+        let registration = connection.flatMap { self.registration($0) }
         return .init(executable: registration?.generationExecutable, home: registration?.generationHome ?? summaryHome,
                      workspace: summarySkillsDirectory.appendingPathComponent(workspace),
                      recipeDirectory: recipe.map { summarySkillsDirectory.appendingPathComponent($0) })
@@ -43,8 +58,10 @@ extension DeskModel {
     /// Stops in-flight summary work owned by one agent after its account or connection changed.
     func interruptSummaries(_ agent: AgentConnectionID, issue: String) async {
         let owned = { (id: String) in self.state.chats.first { $0.id == id }?.nativeSession?.connection == agent }
-        if let active = summaryActiveThread, owned(active) { summaryTask?.cancel() }
-        for id in archiveSummaries.keys where owned(id) {
+        let active = summaryActiveThread
+        let targetChanged = summaryActiveConnection == agent
+        if let active, owned(active) || targetChanged { summaryTask?.cancel() }
+        for id in archiveSummaries.keys where owned(id) || (targetChanged && id == active) {
             guard var record = archiveSummaries[id], [.queued, .reading, .generating].contains(record.status) else { continue }
             record.status = record.status == .generating ? .uncertain : .stale
             record.issue = issue
@@ -106,13 +123,18 @@ extension DeskModel {
               archiveSummaries.values.contains(where: { $0.status == .queued && isArchived($0.threadID) && canGenerateSummary($0.threadID) }) else { return }
         summaryTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.summaryActiveThread = nil; self.summaryTask = nil }
+            defer {
+                self.summaryActiveThread = nil
+                self.summaryActiveConnection = nil
+                self.summaryTask = nil
+            }
             while !Task.isCancelled && !self.restartRequested && !self.shuttingDown {
                 guard let next = self.archiveSummaries.values.filter({ $0.status == .queued && self.isArchived($0.threadID) && self.canGenerateSummary($0.threadID) })
                     .sorted(by: { $0.updatedAt < $1.updatedAt }).first else { return }
                 self.summaryActiveThread = next.threadID
                 await self.buildArchiveSummary(next)
                 self.summaryActiveThread = nil
+                self.summaryActiveConnection = nil
             }
         }
     }
@@ -134,14 +156,23 @@ extension DeskModel {
     private func buildArchiveSummary(_ queued: ArchiveSummaryRecord) async {
         var record = queued
         do {
-            guard let chat = state.chats.first(where: { $0.id == record.threadID }) else { return }
+            guard let chat = state.chats.first(where: { $0.id == record.threadID }),
+                  let connection = summaryConnection(for: chat), let runner = generationRunner(for: chat.id) else { return }
+            summaryActiveConnection = connection
+            let useCodex = state.archiveSummariesUseCodex == true
+            let model = useCodex ? CodexModelDefaults.model : generationModel(for: chat)
+            let route = useCodex ? RequestRoute.direct : chat.route ?? .direct
+            // The original adapter reads history. Codex receives a bounded excerpt in an isolated turn.
+            let sourceSession = try sessionForChat(chat.id)
+            let generationSource = sourceSession.connection == connection ? sourceSession : nil
+            let environment = generationEnvironment(connection: connection, workspace: ".summary-workspace", recipe: "archive-summary")
             try prepareSummarySkills()
             let recipe = try ArchiveSummaryRecipe(directory: summarySkillsDirectory.appendingPathComponent("archive-summary"))
             let recipeDigest = SummarySource.hash(Data((recipe.digest + L10n.language.rawValue).utf8))
             record.status = .reading; record.issue = nil
             try await saveSummaryProgress(record)
             let source = try await readSummarySource(record.threadID)
-            let reuse = record.recipeDigest == recipeDigest
+            let reuse = record.recipeDigest == recipeDigest && record.model == model && record.route == route
             var matching = 0
             if reuse {
                 for (part, chunk) in zip(record.parts, source.chunks) {
@@ -154,8 +185,8 @@ extension DeskModel {
             record.sourceReferences = source.references; record.omittedDetails = source.omittedDetails
             record.sourceTurnDates = source.turnDates
             record.partCount = source.chunks.count
-            record.model = generationModel(for: chat)
-            record.route = chat.route ?? .direct
+            record.model = model
+            record.route = route
             guard routeIsAvailable(record.route), !record.model.isEmpty else {
                 throw ClientFailure(L10n.text("Модель или маршрут чата недоступны для подготовки итога", "The chat model or route is unavailable for summarization"))
             }
@@ -163,9 +194,8 @@ extension DeskModel {
             for chunk in source.chunks.dropFirst(matching) {
                 try Task.checkCancellation()
                 let id = record.threadID, attempt = record.attempt
-                guard let runner = generationRunner(for: id) else { throw ConversationIdentity.unavailable }
-                let part = try await runner.summarize(source: sessionForChat(record.threadID), chunk: chunk, model: record.model,
-                    route: record.route, environment: generationEnvironment(for: id, workspace: ".summary-workspace", recipe: "archive-summary"),
+                let part = try await runner.summarize(source: generationSource, chunk: chunk, model: record.model,
+                    route: record.route, environment: environment,
                     language: L10n.language) { [weak self] in
                         guard let self else { throw CancellationError() }
                         try await self.markSummaryGenerating(id: id, attempt: attempt)
@@ -182,6 +212,7 @@ extension DeskModel {
             }
             record.status = .ready; record.updatedAt = Date()
             try await saveSummaryProgress(record)
+            if useCodex { AppLog.lifecycle.info("Archive summary completed using Codex") }
             // The summary no longer needs the tool bodies of the Claude session file.
             await reduceArchivedActivity(record.threadID)
         } catch {

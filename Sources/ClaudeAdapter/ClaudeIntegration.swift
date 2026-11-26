@@ -1743,7 +1743,8 @@ public actor ClaudeIntegration: AgentIntegration {
             }
             // Re-read the account so a changed login never receives another account's history.
             guard try await account().value().authenticated, request.model.context == context else { return .rejected(.staleContext) }
-            _ = try peek(request.source.nativeID) // The source must exist and be valid; its record is not needed afterwards.
+            guard let source = request.source else { return .rejected(.wrongConnection) }
+            _ = try peek(source.nativeID) // The source must exist and be valid.
         } catch { return failed(error) }
         let runner = ClaudeGenerationRunner()
         generations[request.id] = runner

@@ -174,6 +174,26 @@ func summaryRunnerRoutesAndFailsClosed(mode: String, version: String) async thro
     #expect(!calls.contains("thread/compact"))
 }
 
+@Test func codexSummarizesAnExcerptWithoutOpeningASourceSession() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let executable = try fixture(root)
+    let client = CodexClient(transport: CodexConnection())
+    try await client.start(executable: executable, home: root)
+    let integration = CodexIntegration(client: client)
+    let runner = AgentGenerationRunner(integration: integration)
+    let source = try CodexDecoding.summarySource(thread: history("Synthetic archive excerpt"))
+    let part = try await runner.summarize(source: nil, chunk: source.chunks[0], model: CodexModelDefaults.model,
+        route: .direct, environment: .init(executable: executable, home: root, workspace: root.appendingPathComponent("work"),
+        recipeDirectory: skills.appendingPathComponent("archive-summary")), language: .english, willStart: {})
+    #expect(part.content.activities.first?.goal == "Weekly report")
+    let calls = try String(contentsOf: root.appendingPathComponent("calls.jsonl"), encoding: .utf8)
+    #expect(calls.contains(CodexModelDefaults.model))
+    #expect(!calls.contains("thread/read"))
+    #expect(!calls.contains("thread/resume"))
+    await integration.disconnect()
+}
+
 @Test @MainActor func archiveHookBuildsReusesAndRefreshesWithoutChangingSource() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -217,6 +237,15 @@ func summaryRunnerRoutesAndFailsClosed(mode: String, version: String) async thro
     #expect(model.archiveSummaries["source"]?.status == .ready)
     calls = try String(contentsOf: home.appendingPathComponent("calls.jsonl"), encoding: .utf8)
     #expect(calls.components(separatedBy: #""method": "turn/start""#).count - 1 == 2)
+    await model.setChatArchived("source", archived: false)
+    await model.setChatArchived("source", archived: true)
+    model.setArchiveSummaryCodex(true)
+    #expect(model.archiveSummaries["source"]?.status == .stale)
+    #expect(model.summaryTask == nil)
+    await model.retryArchiveSummary("source")
+    await model.summaryTask?.value
+    #expect(model.archiveSummaries["source"]?.status == .ready)
+    #expect(model.archiveSummaries["source"]?.model == CodexModelDefaults.model)
     #expect(model.state.chats.count == 1)
     #expect(model.items.isEmpty)
     await model.shutdown()

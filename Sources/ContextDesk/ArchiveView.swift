@@ -150,6 +150,17 @@ struct ArchiveView: View {
                         textMatches = (query, matches); matchesRevision &+= 1
                     }
                 projectChips(listing)
+                Picker(L10n.text("Модель для сводок", "Archive summary model"), selection: Binding(
+                    get: { model.state.archiveSummariesUseCodex == true },
+                    set: { model.setArchiveSummaryCodex($0) }
+                )) {
+                    Text(L10n.text("Модель архивного чата", "Archived chat’s model")).tag(false)
+                    Text("GPT-6.2 Sol (Codex)").tag(true)
+                }
+                .pickerStyle(.menu)
+                .fixedSize()
+                .help(L10n.text("Выбор действует на следующие сводки. При выборе Codex фрагменты переписки будут отправлены в аккаунт Codex.",
+                                "Applies to upcoming summaries. Choosing Codex sends conversation excerpts to your Codex account."))
                 if listing.missing > 0, listing.shownMissing {
                     Button(Self.summarizeTitle(listing.missing)) {
                         Task { await model.queueMissingArchiveSummaries() }

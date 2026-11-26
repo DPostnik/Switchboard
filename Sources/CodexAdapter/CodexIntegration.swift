@@ -612,7 +612,7 @@ public actor CodexIntegration: AgentIntegration {
             return failure(error, delivery: .notSent)
         }
     }
-    private func checkGeneration(_ id: UUID, context: AgentContext, source: AgentSessionReference) async throws {
+    private func checkGeneration(_ id: UUID, context: AgentContext, source: AgentSessionReference?) async throws {
         try Task.checkCancellation()
         guard !cancelledGenerations.contains(id) else { throw CancellationError() }
         try await check(context, session: source)

@@ -51,13 +51,14 @@ public struct AgentGenerationRequest: Sendable {
     public static let maximumInputBytes = 128 * 1024
     public enum Recipe: String, Sendable { case chatTitleV1, archiveSummaryV1, contextHandoffV1, commitMessageV1, pullRequestV1 }
     public let id: UUID
-    public let source: AgentSessionReference
+    /// A Codex archive summary can receive bounded excerpts from another adapter without a Codex session.
+    public let source: AgentSessionReference?
     public let recipe: Recipe
     public let historicalInput: String
     public let model: AgentModelSelection
     public let route: AgentRoute
     public let language: String
-    public init(id: UUID = UUID(), source: AgentSessionReference, recipe: Recipe, historicalInput: String,
+    public init(id: UUID = UUID(), source: AgentSessionReference?, recipe: Recipe, historicalInput: String,
                 model: AgentModelSelection, route: AgentRoute, language: String) {
         self.id = id; self.source = source; self.recipe = recipe; self.historicalInput = historicalInput
         self.model = model; self.route = route; self.language = language

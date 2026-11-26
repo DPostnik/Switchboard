@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- The archive can use GPT-6.2 Sol on Codex for upcoming summaries, including conversations archived from Claude.
+
 - The chat archive list holds at most 100 chats at once and moves that window while you scroll, so long archives stay light.
 
 - A pending restart lets the active archive summary finish and resumes queued summaries after relaunch. The restart menu names the archive chat.

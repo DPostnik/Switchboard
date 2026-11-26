@@ -112,7 +112,11 @@ public struct AgentDescriptor: Sendable {
     public func validate(_ request: AgentGenerationRequest) -> AgentRejection? {
         guard version == Self.contractVersion else { return .incompatibleContract }
         guard request.model.context == context else { return .staleContext }
-        guard request.source.connection == context.connection else { return .wrongConnection }
+        if let source = request.source {
+            guard source.connection == context.connection else { return .wrongConnection }
+        } else {
+            guard request.recipe == .archiveSummaryV1, context.connection.agent == .codex else { return .wrongConnection }
+        }
         guard capabilities.contains(.isolatedGeneration) else { return .unsupported(.isolatedGeneration) }
         guard routes.contains(request.route) else { return .routeUnavailable }
         guard !request.model.model.isEmpty,

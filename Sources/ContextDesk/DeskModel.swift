@@ -246,6 +246,7 @@ private struct ChatRunState: Equatable {
     var schedulerStopping = false
     @Published var archiveSummaries: [String: ArchiveSummaryRecord] = [:]
     @Published var summaryActiveThread: String?
+    var summaryActiveConnection: AgentConnectionID?
     var summaryTask: Task<Void, Never>?
     var restartRequested = false
     /// Full-text index of chat dialogue for the archive search and the chat-search tools (`ChatSearch.swift`).

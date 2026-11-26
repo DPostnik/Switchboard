@@ -180,6 +180,8 @@ public struct SavedState: Codable, Sendable {
     /// `model` and `defaultRoute` belong to this connection, never another engine.
     public var defaultConnection: AgentConnectionID? = .originalCodex
     public var claudeModel: String?
+    /// Explicit archive-only opt-in. Absent keeps the archived chat's own agent and model.
+    public var archiveSummariesUseCodex: Bool?
     /// Default model of new chats for agents whose models come from their sessions (Gemini CLI), by agent ID; absent or
     /// empty keeps the agent's own default. `model` stays the setting of the first agent with listed models.
     public var agentModels: [String: String]?

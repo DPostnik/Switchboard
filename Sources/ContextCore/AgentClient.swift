@@ -215,7 +215,7 @@ public actor AgentGenerationRunner {
         }
         return GitPullRequestText(title: title, body: body)
     }
-    public func summarize(source: AgentSessionReference, chunk: SummarySource.Chunk, model: String, route: RequestRoute,
+    public func summarize(source: AgentSessionReference?, chunk: SummarySource.Chunk, model: String, route: RequestRoute,
                           environment: AgentGenerationEnvironment, language: AppLanguage,
                           willStart: @escaping @Sendable () async throws -> Void) async throws -> SummaryPart {
         let context = try await integration.descriptor().value().context

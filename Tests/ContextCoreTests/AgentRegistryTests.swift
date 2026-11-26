@@ -300,7 +300,11 @@ private let thirdProfile = AgentProfile(
     #expect(try model.clientForChat(chat.id) === model.client(thirdConnection))
     #expect(model.chatIsAvailable(chat.id) && model.chatConnected(chat.id) && model.chatAuthenticated(chat.id))
     #expect(model.supportsSummaries(chat) && model.canGenerateSummary(chat))
-    #expect(model.generationRunner(for: chat.id) === model.generationRunner(connection: thirdConnection))
+    #expect(model.summaryConnection(for: chat) == thirdConnection)
+    model.state.archiveSummariesUseCodex = true
+    #expect(model.summaryConnection(for: chat) == .originalCodex)
+    #expect(!model.canGenerateSummary(chat))
+    model.state.archiveSummariesUseCodex = nil
     #expect(model.generationEnvironment(for: chat.id, workspace: "w").home == root.appendingPathComponent("third"))
 
     // Events arrive through the connection's own loop: an interaction for an unknown session is rejected on it.
