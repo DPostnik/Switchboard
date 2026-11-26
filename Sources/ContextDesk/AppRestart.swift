@@ -140,6 +140,7 @@ struct RestartContinuation: Codable, Equatable {
     func enqueueRestart() {
         guard !requested, !terminating else { return }
         requested = true
+        delegate?.model?.restartRequested = true
         // Leave the requesting tool time to return before examining the host's busy state.
         // terminate() must run from the run loop, not from a main-actor job: with .terminateLater it
         // spins a nested run loop until the delegate's Task replies, and that Task cannot start
@@ -153,6 +154,8 @@ struct RestartContinuation: Codable, Equatable {
         guard !terminating else { return }
         requested = false; timer?.invalidate(); timer = nil
         continuationChatIDs = []; continuationTitles = [:]; blockers = []
+        delegate?.model?.restartRequested = false
+        delegate?.model?.startSummaryQueue()
     }
 
     /// Written only once the restart is certain, so a cancelled request never continues a chat later.

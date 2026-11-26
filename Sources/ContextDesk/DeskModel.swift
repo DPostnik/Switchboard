@@ -247,6 +247,7 @@ private struct ChatRunState: Equatable {
     @Published var archiveSummaries: [String: ArchiveSummaryRecord] = [:]
     @Published var summaryActiveThread: String?
     var summaryTask: Task<Void, Never>?
+    var restartRequested = false
     /// Full-text index of chat dialogue for the archive search and the chat-search tools (`ChatSearch.swift`).
     let chatSearchIndex: ChatSearchIndex
     var chatIndexTask: Task<Void, Never>?
@@ -2286,7 +2287,9 @@ private struct ChatRunState: Equatable {
             reasons.insert(L10n.text("Сообщение в очереди: ", "Queued message: ") + title(message.threadID))
         }
         for run in jobLedger.runs where run.status.active { reasons.insert(L10n.text("Задание: ", "Scheduled task: ") + run.name) }
-        if summaryTask != nil { reasons.insert(L10n.text("Сводка архива", "Archive summary")) }
+        if let id = summaryActiveThread {
+            reasons.insert(L10n.text("Сводка архива для чата «\(title(id))»", "Archive summary for “\(title(id))”"))
+        }
         if preparingHandoff || creatingHandoff { reasons.insert(L10n.text("Передача контекста", "Context handoff")) }
         if !deletingChatIDs.isEmpty || !archivingChatIDs.isEmpty { reasons.insert(L10n.text("Архивирование или удаление чатов", "Archiving or deleting chats")) }
         return reasons.sorted()

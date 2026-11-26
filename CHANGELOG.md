@@ -6,6 +6,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 - The chat archive list holds at most 100 chats at once and moves that window while you scroll, so long archives stay light.
 
+- A pending restart lets the active archive summary finish and resumes queued summaries after relaunch. The restart menu names the archive chat.
+
 - The composer’s model menu lets you turn subagent delegation on or off for each Codex or Claude chat.
 
 - After the nightly check switches to a newer verified Codex release, Switchboard restarts once every chat is idle, so all chats use the new version.

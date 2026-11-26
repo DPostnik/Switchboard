@@ -293,7 +293,12 @@ func summaryRunnerRoutesAndFailsClosed(mode: String, version: String) async thro
     #expect(model.summaryTask == nil)
     var calls = try String(contentsOf: home.appendingPathComponent("calls.jsonl"), encoding: .utf8)
     #expect(!calls.contains("turn/start"))
+    model.restartRequested = true
     await model.retryArchiveSummary(chat.id)
+    #expect(model.archiveSummaries[chat.id]?.status == .queued)
+    #expect(model.summaryTask == nil)
+    model.restartRequested = false
+    model.startSummaryQueue()
     await model.summaryTask?.value
     #expect(model.archiveSummaries[chat.id]?.status == .ready)
     calls = try String(contentsOf: home.appendingPathComponent("calls.jsonl"), encoding: .utf8)

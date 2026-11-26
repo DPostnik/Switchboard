@@ -201,6 +201,7 @@ private struct MainWindowContent: View {
             .modifier(MainWindowOpener(delegate: delegate))
             .task {
                 delegate.model = model
+                model.restartRequested = delegate.restart.requested
                 TranscriptFlushTriggers.install(model)
                 MemoryPressureRelief.install(model)
                 TranscriptLinks.openChat = { [weak model] id in model?.openChatLink(id) }

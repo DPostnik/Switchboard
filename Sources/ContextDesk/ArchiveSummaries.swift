@@ -102,12 +102,12 @@ extension DeskModel {
     }
 
     func startSummaryQueue() {
-        guard summaryTask == nil,
+        guard !restartRequested, !shuttingDown, summaryTask == nil,
               archiveSummaries.values.contains(where: { $0.status == .queued && isArchived($0.threadID) && canGenerateSummary($0.threadID) }) else { return }
         summaryTask = Task { [weak self] in
             guard let self else { return }
             defer { self.summaryActiveThread = nil; self.summaryTask = nil }
-            while !Task.isCancelled {
+            while !Task.isCancelled && !self.restartRequested && !self.shuttingDown {
                 guard let next = self.archiveSummaries.values.filter({ $0.status == .queued && self.isArchived($0.threadID) && self.canGenerateSummary($0.threadID) })
                     .sorted(by: { $0.updatedAt < $1.updatedAt }).first else { return }
                 self.summaryActiveThread = next.threadID
