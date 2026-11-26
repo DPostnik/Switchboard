@@ -4,8 +4,6 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
-- A pending restart lets the active archive summary finish and resumes queued summaries after relaunch. The restart menu names the archive chat.
-
 - The chat archive loads its list a page at a time and reuses rows while scrolling, so long archives scroll smoothly.
 
 - The composer’s model menu lets you turn subagent delegation on or off for each Codex or Claude chat.
