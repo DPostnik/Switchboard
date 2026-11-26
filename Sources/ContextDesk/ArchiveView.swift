@@ -12,8 +12,10 @@ struct ArchiveView: View {
     @State private var textMatches: (query: String, matches: [String: String]) = ("", [:])
     @State private var matchesRevision = 0
     @State private var cache = ListingCache()
-    /// How many chats the list holds; grows a page at a time while scrolling (`page`).
-    @State private var shownLimit = ArchiveView.pageSize
+    /// Position of the first chat the list holds; the window of `windowSize` chats moves while scrolling (`page`).
+    @State private var windowStart = 0
+    /// Set while the window moves and the list scrolls back to the row it showed, so the edge rows do not move it again.
+    @State private var shifting = false
 
     /// Everything the list needs, computed once per render: the archive can hold hundreds of chats,
     /// and the body reruns on every model change.
@@ -159,29 +161,32 @@ struct ArchiveView: View {
                     EmptyState(icon: "archivebox", title: search.isEmpty ? L10n.text("Архив пуст", "Archive is empty") : L10n.text("Ничего не найдено", "No results"),
                                text: search.isEmpty ? L10n.text("Архивные чаты всех проектов появятся здесь.", "Archived chats from all projects will appear here.") : L10n.text("Попробуй другие слова или «Найти с агентом»: он учитывает синонимы и даты.", "Try other words or \"Find with agent\": it understands synonyms and dates."))
                 } else {
-                    let page = Self.page(listing, limit: shownLimit, searching: !search.isEmpty)
-                    // A `List` reuses the rows that scroll out of view, and only `shownLimit` rows exist at all:
-                    // the next page is added when the list reaches its end.
-                    List {
-                        ForEach(page.entries) { entry in
-                            entryView(entry, listing)
-                                .listRowInsets(EdgeInsets(top: 5, leading: 16, bottom: 5, trailing: 16))
-                                .listRowSeparator(.hidden)
-                                .listRowBackground(Color.clear)
-                        }
-                        if page.hasMore {
-                            ProgressView().controlSize(.small).frame(maxWidth: .infinity)
-                                .listRowSeparator(.hidden).listRowBackground(Color.clear)
-                                .onAppear { shownLimit += Self.pageSize }
-                        }
-                    }.listStyle(.plain).scrollContentBackground(.hidden)
-                        .environment(\.defaultMinListRowHeight, 0)
+                    let page = Self.page(listing, start: windowStart, size: Self.windowSize, searching: !search.isEmpty)
+                    // A `List` reuses the rows that scroll out of view, and it never holds more than `windowSize` chats:
+                    // reaching an edge moves the window by `windowStep` and scrolls back to the row that was at that edge.
+                    ScrollViewReader { proxy in
+                        List {
+                            if page.hasBefore {
+                                edgeRow { moveWindow(to: page.start - Self.windowStep, anchor: page.entries.first?.id, edge: .top, proxy) }
+                            }
+                            ForEach(page.entries) { entry in
+                                entryView(entry, listing)
+                                    .listRowInsets(EdgeInsets(top: 5, leading: 16, bottom: 5, trailing: 16))
+                                    .listRowSeparator(.hidden)
+                                    .listRowBackground(Color.clear)
+                            }
+                            if page.hasAfter {
+                                edgeRow { moveWindow(to: page.start + Self.windowStep, anchor: page.entries.last?.id, edge: .bottom, proxy) }
+                            }
+                        }.listStyle(.plain).scrollContentBackground(.hidden)
+                            .environment(\.defaultMinListRowHeight, 0)
+                    }
                 }
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
             // A new search or project starts from the first page again.
-            .onChange(of: search) { shownLimit = Self.pageSize }
-            .onChange(of: projectFilter) { shownLimit = Self.pageSize }
+            .onChange(of: search) { windowStart = 0 }
+            .onChange(of: projectFilter) { windowStart = 0 }
             .sheet(item: $summary) { record in
                 ArchiveSummaryDetail(record: record) {
                     summary = nil
@@ -205,8 +210,26 @@ struct ArchiveView: View {
         }
     }
 
-    /// Rows shown per page; the list grows by this many when it is scrolled to its end.
-    static let pageSize = 60
+    /// The most chats the list holds at once.
+    static let windowSize = 100
+    /// How far the window moves when the list reaches one of its edges.
+    static let windowStep = 50
+
+    private func edgeRow(_ reached: @escaping () -> Void) -> some View {
+        ProgressView().controlSize(.small).frame(maxWidth: .infinity)
+            .listRowSeparator(.hidden).listRowBackground(Color.clear)
+            .onAppear { if !shifting { reached() } }
+    }
+
+    private func moveWindow(to start: Int, anchor: Entry.ID?, edge: UnitPoint, _ proxy: ScrollViewProxy) {
+        shifting = true
+        windowStart = max(0, start)
+        // After the rows change, keep the row that was at the edge where it was on screen.
+        DispatchQueue.main.async {
+            if let anchor { proxy.scrollTo(anchor, anchor: edge) }
+            DispatchQueue.main.async { shifting = false }
+        }
+    }
 
     /// One row of the archive list: a section title or a chat.
     enum Entry: Identifiable, Equatable {
@@ -223,21 +246,37 @@ struct ArchiveView: View {
         }
     }
 
-    /// The first `limit` chats of the listing, archived ones first, with section titles while searching.
-    /// Titles keep the full counts; `hasMore` tells the list to add another page at its end.
-    nonisolated static func page(_ listing: Listing, limit: Int, searching: Bool) -> (entries: [Entry], hasMore: Bool) {
+    struct Page: Equatable {
         var entries: [Entry] = []
-        let archived = listing.chats.prefix(limit)
-        let active = listing.active.prefix(max(0, limit - archived.count))
-        if searching, !listing.chats.isEmpty || !listing.active.isEmpty {
-            entries.append(.section(L10n.text("В архиве", "Archived"), count: listing.chats.count))
+        /// Position of the first chat, after clamping to the listing.
+        var start = 0
+        var hasBefore = false
+        var hasAfter = false
+    }
+
+    /// Up to `size` chats from position `start` of the listing (archived ones first, then active ones), with each
+    /// section title while searching when its first chat is in the window. Titles keep the full counts.
+    nonisolated static func page(_ listing: Listing, start: Int, size: Int, searching: Bool) -> Page {
+        let archivedCount = listing.chats.count, total = archivedCount + listing.active.count
+        var page = Page()
+        page.start = max(0, min(start, total - size))
+        let end = min(total, page.start + size)
+        page.hasBefore = page.start > 0
+        page.hasAfter = end < total
+        if searching, page.start == 0, total > 0 {
+            page.entries.append(.section(L10n.text("В архиве", "Archived"), count: archivedCount))
         }
-        entries += archived.map(Entry.archived)
-        if !active.isEmpty {
-            entries.append(.section(L10n.text("Не в архиве", "Not archived"), count: listing.active.count))
-            entries += active.map(Entry.active)
+        for position in page.start..<end {
+            if position < archivedCount {
+                page.entries.append(.archived(listing.chats[position]))
+            } else {
+                if position == archivedCount {
+                    page.entries.append(.section(L10n.text("Не в архиве", "Not archived"), count: listing.active.count))
+                }
+                page.entries.append(.active(listing.active[position - archivedCount]))
+            }
         }
-        return (entries, archived.count + active.count < listing.chats.count + listing.active.count)
+        return page
     }
 
     @ViewBuilder private func entryView(_ entry: Entry, _ listing: Listing) -> some View {

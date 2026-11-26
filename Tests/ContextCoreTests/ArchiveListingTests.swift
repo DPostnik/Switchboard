@@ -99,20 +99,26 @@ private func archive() -> (SavedState, Project, Project) {
     }
 }
 
-@Test func archivePageShowsTheFirstChatsAndKeepsFullSectionCounts() {
+@Test func archivePageHoldsAMovingWindowAndKeepsFullSectionCounts() {
     var listing = ArchiveView.Listing()
     listing.chats = (0..<5).map { Chat(id: "a\($0)", projectID: UUID(), title: "A\($0)", model: "fixture-model") }
     listing.active = (0..<3).map { Chat(id: "b\($0)", projectID: UUID(), title: "B\($0)", model: "fixture-model") }
-    let first = ArchiveView.page(listing, limit: 4, searching: true)
-    #expect(first.hasMore)
-    #expect(first.entries.map(\.id) == ["section:" + L10n.text("В архиве", "Archived"), "archived:a0", "archived:a1", "archived:a2", "archived:a3"])
+    let archivedTitle = "section:" + L10n.text("В архиве", "Archived"), activeTitle = "section:" + L10n.text("Не в архиве", "Not archived")
+    let first = ArchiveView.page(listing, start: 0, size: 4, searching: true)
+    #expect(!first.hasBefore && first.hasAfter)
+    #expect(first.entries.map(\.id) == [archivedTitle, "archived:a0", "archived:a1", "archived:a2", "archived:a3"])
     guard case let .section(_, count) = first.entries[0] else { Issue.record("no section title"); return }
     #expect(count == 5)
-    let second = ArchiveView.page(listing, limit: 7, searching: true)
-    #expect(second.hasMore && second.entries.filter { if case .active = $0 { true } else { false } }.map(\.id) == ["active:b0", "active:b1"])
-    let all = ArchiveView.page(listing, limit: 8, searching: true)
-    #expect(!all.hasMore && all.entries.count == 10)
+    // The window moves without growing; a title shows only with the first chat of its section.
+    let middle = ArchiveView.page(listing, start: 3, size: 4, searching: true)
+    #expect(middle.hasBefore && middle.hasAfter)
+    #expect(middle.entries.map(\.id) == ["archived:a3", "archived:a4", activeTitle, "active:b0", "active:b1"])
+    // A start past the end is clamped so the window stays full.
+    let last = ArchiveView.page(listing, start: 50, size: 4, searching: true)
+    #expect(last.start == 4 && last.hasBefore && !last.hasAfter)
+    #expect(last.entries.map(\.id) == ["archived:a4", activeTitle, "active:b0", "active:b1", "active:b2"])
     // Without a search the archive has no section titles.
     listing.active = []
-    #expect(ArchiveView.page(listing, limit: 60, searching: false).entries.map(\.id) == listing.chats.map { "archived:" + $0.id })
+    let plain = ArchiveView.page(listing, start: 0, size: 100, searching: false)
+    #expect(!plain.hasBefore && !plain.hasAfter && plain.entries.map(\.id) == listing.chats.map { "archived:" + $0.id })
 }
