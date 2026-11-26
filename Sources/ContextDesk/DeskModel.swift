@@ -245,9 +245,15 @@ private struct ChatRunState: Equatable {
     var jobExecutors: [UUID: any AgentScheduledExecutor] = [:]
     var schedulerStopping = false
     @Published var archiveSummaries: [String: ArchiveSummaryRecord] = [:]
-    @Published var summaryActiveThread: String?
-    var summaryActiveConnection: AgentConnectionID?
-    var summaryTask: Task<Void, Never>?
+    enum SummaryWorker: Hashable { case primary, additional }
+    struct ActiveArchiveSummary {
+        let threadID: String
+        let connection: AgentConnectionID
+    }
+    @Published var activeArchiveSummaries: [SummaryWorker: ActiveArchiveSummary] = [:]
+    var summaryWorkers: [SummaryWorker: Task<Void, Never>] = [:]
+    var summaryTask: Task<Void, Never>? { summaryWorkers[.primary] ?? summaryWorkers[.additional] }
+    var summaryParallelCapacity: (() -> Bool)?
     var restartRequested = false
     /// Full-text index of chat dialogue for the archive search and the chat-search tools (`ChatSearch.swift`).
     let chatSearchIndex: ChatSearchIndex
@@ -424,7 +430,8 @@ private struct ChatRunState: Equatable {
     var workingSince: Date? { busy ? runs[currentRunKey]?.turnID.flatMap { turnStarts[currentRunKey + ":" + $0] } : nil }
     var queuePaused: Bool { runs[currentRunKey]?.queuePaused ?? true }
     var priorityMessageID: String? { runs[currentRunKey]?.priorityMessageID }
-    var anyBusy: Bool { preparingHandoff || creatingHandoff || jobLedger.runs.contains { $0.status.active } || summaryTask != nil || !deletingChatIDs.isEmpty || !archivingChatIDs.isEmpty || runs.values.contains { $0.running || $0.sending } }
+    var anyBusy: Bool { hasWorkOutsideArchiveSummaries || summaryTask != nil }
+    var hasWorkOutsideArchiveSummaries: Bool { preparingHandoff || creatingHandoff || jobLedger.runs.contains { $0.status.active } || !deletingChatIDs.isEmpty || !archivingChatIDs.isEmpty || runs.values.contains { $0.running || $0.sending } }
     func isBusy(threadID: String) -> Bool { runs[threadID]?.running == true }
     func isSending(threadID: String) -> Bool { runs[threadID]?.sending == true }
     /// Chats with a running or sending turn, without scanning every chat.
@@ -1528,7 +1535,7 @@ private struct ChatRunState: Equatable {
     }
     func canDeleteChat(_ id: String) -> Bool {
         (chatConnected(id) || isScheduledRecord(id)) && hasChat(id) &&
-        !isChangingChat(id) && summaryActiveThread != id && !isBusy(threadID: id) &&
+        !isChangingChat(id) && !isSummarizingArchiveChat(id) && !isBusy(threadID: id) &&
         runs[id]?.sending != true && !pending.contains(where: { $0.threadID == id })
     }
     /// Confirms all chats with their agents concurrently, then commits the confirmed ones in one save.
@@ -2288,8 +2295,8 @@ private struct ChatRunState: Equatable {
             reasons.insert(L10n.text("Сообщение в очереди: ", "Queued message: ") + title(message.threadID))
         }
         for run in jobLedger.runs where run.status.active { reasons.insert(L10n.text("Задание: ", "Scheduled task: ") + run.name) }
-        if let id = summaryActiveThread {
-            reasons.insert(L10n.text("Сводка архива для чата «\(title(id))»", "Archive summary for “\(title(id))”"))
+        for summary in activeArchiveSummaries.values {
+            reasons.insert(L10n.text("Сводка архива для чата «\(title(summary.threadID))»", "Archive summary for “\(title(summary.threadID))”"))
         }
         if preparingHandoff || creatingHandoff { reasons.insert(L10n.text("Передача контекста", "Context handoff")) }
         if !deletingChatIDs.isEmpty || !archivingChatIDs.isEmpty { reasons.insert(L10n.text("Архивирование или удаление чатов", "Archiving or deleting chats")) }
@@ -3344,11 +3351,13 @@ private struct ChatRunState: Equatable {
         step("chat titles (\(titleTasks.count))")
         for id in Array(titleTasks.keys) { await cancelChatTitle(id) }
         step("scheduler"); await stopScheduler()
-        summaryTask?.cancel()
+        let archiveWorkers = Array(summaryWorkers.values)
+        for worker in archiveWorkers { worker.cancel() }
         step("handoff"); cancelHandoffPreparation()
         step("summary runners")
         for id in agentIDs { await slots[id]?.generationRunner.stop() }
-        step("summary queue"); await summaryTask?.value
+        step("summary queue")
+        for worker in archiveWorkers { await worker.value }
         for id in agentIDs {
             guard let slot = slots[id] else { continue }
             step("\(slot.profile.name) connection"); await slot.client.stop()
@@ -3670,7 +3679,7 @@ private struct ChatRunState: Equatable {
             watch($chatID, "chatID"), watch($showingArchive, "showingArchive"), watch($archiveViewingChat, "archiveViewingChat"),
             watch($showingJobs, "showingJobs"), watch($jobs, "jobs"), watch($jobLedger, "jobLedger"), watch($schedulerReady, "schedulerReady"),
             watch($attention, "attention"), watch($showingAttention, "showingAttention"), watch($archiveSummaries, "archiveSummaries"),
-            watch($summaryActiveThread, "summaryActiveThread"), watch($localHistoryNotice, "localHistoryNotice"), watch($routines, "routines"),
+            watch($activeArchiveSummaries, "activeArchiveSummaries"), watch($localHistoryNotice, "localHistoryNotice"), watch($routines, "routines"),
             watch($creatingHandoff, "creatingHandoff"), watch($preparingHandoff, "preparingHandoff"), watch($handoffProgress, "handoffProgress"),
             watch($pending, "pending"), watch($restartWaitingChatIDs, "restartWaitingChatIDs"),
             watch($draftEffort, "draftEffort"), watch($newChatModelChoices, "newChatModelChoices"), watch($agentStates, "agentStates"), watch($isBootstrapping, "isBootstrapping"),

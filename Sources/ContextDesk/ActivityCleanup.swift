@@ -25,7 +25,7 @@ extension DeskModel {
     /// which the app never rewrites.
     func activityReductionTargets(_ id: String) -> (transcript: Bool, session: AgentSessionReference?) {
         guard let chat = state.chats.first(where: { $0.id == id }), chat.isArchived, !isBusy(threadID: id), !isSending(threadID: id),
-              !isChangingChat(id), summaryActiveThread != id else { return (false, nil) }
+              !isChangingChat(id), !isSummarizingArchiveChat(id) else { return (false, nil) }
         let summaryInProgress = supportsSummaries(chat)
             && [.queued, .reading, .generating].contains(archiveSummaries[id]?.status ?? .stale)
         let connection = chat.nativeSession?.connection

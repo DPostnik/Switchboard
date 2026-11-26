@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- The archive runs up to two GPT-6.2 Sol summaries at once when Switchboard and the Mac have spare capacity.
+
 - The archive can use GPT-6.2 Sol on Codex for upcoming summaries, including conversations archived from Claude.
 
 - The chat archive list holds at most 100 chats at once and moves that window while you scroll, so long archives stay light.

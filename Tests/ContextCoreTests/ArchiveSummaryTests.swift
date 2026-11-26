@@ -97,7 +97,7 @@ private func fixture(_ root: URL, mode: String = "success", version: String = "0
     let executable = root.appendingPathComponent("engine.py")
     try Data(#"""
     #!\#(fixturePython)
-    import json, os, sys
+    import json, os, sys, time
     from pathlib import Path
     root=Path(os.environ['CODEX_HOME'])
     mode=(root/'mode').read_text()
@@ -110,7 +110,9 @@ private func fixture(_ root: URL, mode: String = "success", version: String = "0
         result={}
         if method=='initialize': result={'userAgent':'context_desk/VERSION (test)'}
         if method=='config/read': result={'config':{'mcp_servers':{'configured':{}}}}
-        if method=='thread/read': result={'thread':json.loads((root/'source.json').read_text())}
+        if method=='thread/read':
+            result={'thread':json.loads((root/'source.json').read_text())}
+            if mode=='parallel': result['thread']['id']=p['threadId']
         if method=='thread/start':
             assert p['ephemeral'] and p['environments']==[] and p['sandbox']=='read-only'
             assert p['approvalPolicy']=='untrusted' and p['approvalsReviewer']=='user'
@@ -119,6 +121,7 @@ private func fixture(_ root: URL, mode: String = "success", version: String = "0
                     'model':p['model'],'modelProvider':('wrong' if mode=='route' else p['modelProvider'])}
         if method=='mcpServerStatus/list':result={'data':([] if mode!='tools' else [{'name':'unexpected','tools':{}}])}
         if method=='turn/start':
+            if mode=='parallel': time.sleep(0.5)
             if mode=='disconnect':sys.exit(0)
             result={'turn':{'id':'generated'}}
             emit({'id':m['id'],'result':result})
@@ -192,6 +195,53 @@ func summaryRunnerRoutesAndFailsClosed(mode: String, version: String) async thro
     #expect(!calls.contains("thread/read"))
     #expect(!calls.contains("thread/resume"))
     await integration.disconnect()
+}
+
+@Test @MainActor func archiveQueueRunsTwoDistinctChatsWhenIdleAndOneUnderLoad() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let home = root.appendingPathComponent("codex")
+    let executable = try fixture(home, mode: "parallel")
+    let client = CodexClient(transport: CodexConnection())
+    try await client.start(executable: executable, home: home)
+    let store = AppStore(file: root.appendingPathComponent("metadata.sqlite"))
+    let model = DeskModel(connection: CodexIntegration(client: client), store: store,
+        pluginDirectory: root.appendingPathComponent("plugins"), summaryResources: skills,
+        summaryExecutable: executable, summaryHome: home)
+    let project = Project(path: root.path)
+    model.state.projects = [project]
+    model.state.chats = ["one", "two", "three", "four"].map { id in
+        var chat = Chat(id: id, projectID: project.id, title: id, model: "fixture-model")
+        chat.archived = true
+        return chat
+    }
+    model.connected = true; model.authenticated = true
+    model.state.archiveSummariesUseCodex = true
+    model.summaryParallelCapacity = { true }
+    await model.queueMissingArchiveSummaries()
+    for _ in 0..<200 {
+        if model.activeArchiveSummaries.count == 2 { break }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    #expect(Set(model.activeArchiveSummaries.values.map(\.threadID)).count == 2)
+    model.restartRequested = true
+    let workers = Array(model.summaryWorkers.values)
+    for worker in workers { await worker.value }
+    #expect(model.archiveSummaries.values.filter { $0.status == .ready }.count == 2)
+    #expect(model.archiveSummaries.values.filter { $0.status == .queued }.count == 2)
+
+    model.restartRequested = false
+    model.summaryParallelCapacity = { false }
+    model.startSummaryQueue()
+    for _ in 0..<200 {
+        if !model.activeArchiveSummaries.isEmpty { break }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    #expect(model.activeArchiveSummaries.count == 1)
+    #expect(model.summaryWorkers[.additional] == nil)
+    await model.summaryTask?.value
+    #expect(model.archiveSummaries.values.allSatisfy { $0.status == .ready })
+    await model.shutdown()
 }
 
 @Test @MainActor func archiveHookBuildsReusesAndRefreshesWithoutChangingSource() async throws {

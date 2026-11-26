@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import AgentContract
 import ContextCore
 
@@ -57,11 +58,11 @@ extension DeskModel {
 
     /// Stops in-flight summary work owned by one agent after its account or connection changed.
     func interruptSummaries(_ agent: AgentConnectionID, issue: String) async {
-        let owned = { (id: String) in self.state.chats.first { $0.id == id }?.nativeSession?.connection == agent }
-        let active = summaryActiveThread
-        let targetChanged = summaryActiveConnection == agent
-        if let active, owned(active) || targetChanged { summaryTask?.cancel() }
-        for id in archiveSummaries.keys where owned(id) || (targetChanged && id == active) {
+        let owned = { (id: String) in self.connectionOfChat(id) == agent }
+        let interrupted = activeArchiveSummaries.filter { owned($0.value.threadID) || $0.value.connection == agent }
+        for worker in interrupted.keys { summaryWorkers[worker]?.cancel() }
+        let interruptedIDs = Set(interrupted.values.map(\.threadID))
+        for id in archiveSummaries.keys where owned(id) || interruptedIDs.contains(id) {
             guard var record = archiveSummaries[id], [.queued, .reading, .generating].contains(record.status) else { continue }
             record.status = record.status == .generating ? .uncertain : .stale
             record.issue = issue
@@ -119,22 +120,58 @@ extension DeskModel {
     }
 
     func startSummaryQueue() {
-        guard !restartRequested, !shuttingDown, summaryTask == nil,
-              archiveSummaries.values.contains(where: { $0.status == .queued && isArchived($0.threadID) && canGenerateSummary($0.threadID) }) else { return }
-        summaryTask = Task { [weak self] in
+        guard summaryTask == nil, !restartRequested, !shuttingDown, nextArchiveSummary() != nil else { return }
+        startSummaryWorker(.primary)
+    }
+
+    func isSummarizingArchiveChat(_ id: String) -> Bool {
+        activeArchiveSummaries.values.contains { $0.threadID == id }
+    }
+
+    nonisolated static func archiveSummaryHostHasCapacity() -> Bool {
+        let process = ProcessInfo.processInfo
+        var load = 0.0
+        return !process.isLowPowerModeEnabled && process.thermalState == .nominal
+            && getloadavg(&load, 1) == 1 && load < Double(process.activeProcessorCount) / 2
+    }
+
+    private var canRunAdditionalSummary: Bool {
+        let codex = AgentIntegrationFactory.codexProfile.connection
+        return state.archiveSummariesUseCodex == true && activeArchiveSummaries[.primary]?.connection == codex
+            && !hasWorkOutsideArchiveSummaries && pending.isEmpty
+            && backgroundWorkChatIDs.isEmpty && !anyAgentConnecting && !hasDeliverableQueue
+            && (summaryParallelCapacity?() ?? (!isBootstrapping && Self.archiveSummaryHostHasCapacity()))
+    }
+
+    private func nextArchiveSummary() -> ArchiveSummaryRecord? {
+        archiveSummaries.values.filter {
+            guard $0.status == .queued, !isSummarizingArchiveChat($0.threadID),
+                  let chat = chat($0.threadID), chat.isArchived else { return false }
+            return canGenerateSummary(chat)
+        }.min { ($0.updatedAt, $0.threadID) < ($1.updatedAt, $1.threadID) }
+    }
+
+    private func startSummaryWorker(_ worker: SummaryWorker) {
+        summaryWorkers[worker] = Task(priority: .utility) { [weak self] in
             guard let self else { return }
             defer {
-                self.summaryActiveThread = nil
-                self.summaryActiveConnection = nil
-                self.summaryTask = nil
+                self.activeArchiveSummaries[worker] = nil
+                self.summaryWorkers[worker] = nil
+                if worker == .additional && !Task.isCancelled { self.startSummaryQueue() }
             }
             while !Task.isCancelled && !self.restartRequested && !self.shuttingDown {
-                guard let next = self.archiveSummaries.values.filter({ $0.status == .queued && self.isArchived($0.threadID) && self.canGenerateSummary($0.threadID) })
-                    .sorted(by: { $0.updatedAt < $1.updatedAt }).first else { return }
-                self.summaryActiveThread = next.threadID
-                await self.buildArchiveSummary(next)
-                self.summaryActiveThread = nil
-                self.summaryActiveConnection = nil
+                guard worker == .primary || self.canRunAdditionalSummary,
+                      let next = self.nextArchiveSummary(), let chat = self.chat(next.threadID),
+                      let connection = self.summaryConnection(for: chat), let client = self.client(connection) else { return }
+                self.activeArchiveSummaries[worker] = .init(threadID: next.threadID, connection: connection)
+                if worker == .primary, self.summaryWorkers[.additional] == nil, self.canRunAdditionalSummary,
+                   self.nextArchiveSummary() != nil {
+                    self.startSummaryWorker(.additional)
+                }
+                if worker == .additional { AppLog.lifecycle.info("Additional archive summary started under low load") }
+                let runner = AgentGenerationRunner(integration: client.integration)
+                await self.buildArchiveSummary(next, chat: chat, connection: connection, runner: runner)
+                self.activeArchiveSummaries[worker] = nil
             }
         }
     }
@@ -153,12 +190,10 @@ extension DeskModel {
         try await saveSummaryProgress(record)
     }
 
-    private func buildArchiveSummary(_ queued: ArchiveSummaryRecord) async {
+    private func buildArchiveSummary(_ queued: ArchiveSummaryRecord, chat: Chat, connection: AgentConnectionID,
+                                     runner: AgentGenerationRunner) async {
         var record = queued
         do {
-            guard let chat = state.chats.first(where: { $0.id == record.threadID }),
-                  let connection = summaryConnection(for: chat), let runner = generationRunner(for: chat.id) else { return }
-            summaryActiveConnection = connection
             let useCodex = state.archiveSummariesUseCodex == true
             let model = useCodex ? CodexModelDefaults.model : generationModel(for: chat)
             let route = useCodex ? RequestRoute.direct : chat.route ?? .direct
@@ -203,6 +238,7 @@ extension DeskModel {
                 record.parts.append(part); record.status = .reading
                 try await saveSummaryProgress(record)
             }
+            try Task.checkCancellation()
             let latest = try await readSummarySource(record.threadID)
             guard latest.digest == source.digest else {
                 record.status = .stale
