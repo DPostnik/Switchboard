@@ -1,14 +1,20 @@
 import Foundation
 
-/// One skill the user installed: a folder with a `SKILL.md` whose front matter gives its name and description.
+/// One skill: a folder with a `SKILL.md` whose front matter gives its name and description.
 public struct SkillInfo: Sendable, Equatable, Identifiable {
+    /// Where the skill comes from (2026-11-27): the user's skill folders or the chat's project (`ProjectSkills`).
+    public enum Origin: String, Sendable, Hashable { case user, project }
+
+    /// The name the agent knows the skill by: the front matter name for a user skill, the folder name for a project one.
     public var name: String
     public var description: String
     /// The skill's folder.
     public var path: String
-    public var id: String { name }
-    public init(name: String, description: String, path: String) {
-        self.name = name; self.description = description; self.path = path
+    public var origin: Origin
+    /// Unique across origins, so a user skill and a project skill with one name are both listed.
+    public var id: String { origin.rawValue + ":" + name }
+    public init(name: String, description: String, path: String, origin: Origin = .user) {
+        self.name = name; self.description = description; self.path = path; self.origin = origin
     }
 }
 

@@ -3,9 +3,11 @@ import ContextCore
 import ContextTranscript
 import SwiftUI
 
-/// The composer's `/` skill list (2026-11-04): the skills of the chat's engine matching the typed `/token`.
+/// The composer's `/` skill list (2026-11-04): the skills of the chat's engine matching the typed `/token`; since
+/// 2026-11-27 also the skills of the chat's project (its working folder), listed first.
 /// The editor reports its text and caret here; only `SkillSuggestionMenu` observes the list, so a keystroke renders
-/// nothing else. Skill folders are scanned off the main thread on first use and kept for `cacheLifetime`.
+/// nothing else. Skill folders are scanned off the main thread on first use and kept for `cacheLifetime` per engine
+/// and project, so one project's skills are never offered in another.
 @MainActor final class SkillSuggestionController: ObservableObject, ComposerCompletion {
     @Published private(set) var items: [SkillInfo] = []
     @Published private(set) var selection = 0
@@ -15,8 +17,11 @@ import SwiftUI
     private var token: SkillSuggestions.Token?
     /// The token Esc closed the list on; it stays closed until the typed token differs.
     private var dismissed: SkillSuggestions.Token?
-    private var cache: [SkillMentionSyntax: (skills: [SkillInfo], scanned: Date)] = [:]
-    private var scanning: Set<SkillMentionSyntax> = []
+    /// The chat's working folder (or the selected project's for a new chat); nil lists only the user's skills.
+    private(set) var project: String?
+    private struct Scope: Hashable { var syntax: SkillMentionSyntax; var project: String? }
+    private var cache: [Scope: (skills: [SkillInfo], scanned: Date)] = [:]
+    private var scanning: Set<Scope> = []
     static let cacheLifetime: TimeInterval = 30
 
     var isActive: Bool { !items.isEmpty }
@@ -24,6 +29,12 @@ import SwiftUI
     func setEngine(_ syntax: SkillMentionSyntax?) {
         guard syntax != self.syntax else { return }
         self.syntax = syntax
+        refresh()
+    }
+
+    func setProject(_ path: String?) {
+        guard path != project else { return }
+        project = path
         refresh()
     }
 
@@ -58,7 +69,7 @@ import SwiftUI
         guard NSMaxRange(token.range) <= string.length, string.substring(with: token.range) == "/" + token.query else { return }
         editor.window?.makeFirstResponder(editor)
         // The editor's change report then finds no token after the inserted space and keeps the list closed.
-        editor.insertText(syntax.invocation(skill.name), replacementRange: token.range)
+        editor.insertText(syntax.invocation(skill), replacementRange: token.range)
     }
 
     private func refresh() {
@@ -70,7 +81,7 @@ import SwiftUI
         self.token = token
         if dismissed == token { return close() }
         dismissed = nil
-        guard let skills = skills(for: syntax) else { return close() }
+        guard let skills = skills(for: Scope(syntax: syntax, project: project)) else { return close() }
         let found = SkillSuggestions.matches(skills, query: token.query)
         if found != items { items = found; if selection != 0 { selection = 0 } }
     }
@@ -82,16 +93,17 @@ import SwiftUI
 
     /// Cached skills, possibly stale while a rescan runs; nil until the first scan for the engine finishes, which then
     /// refreshes the list for whatever is typed by then.
-    private func skills(for syntax: SkillMentionSyntax) -> [SkillInfo]? {
-        let cached = cache[syntax]
+    private func skills(for scope: Scope) -> [SkillInfo]? {
+        let cached = cache[scope]
         let fresh = cached.map { Date().timeIntervalSince($0.scanned) < Self.cacheLifetime } ?? false
-        if !fresh, scanning.insert(syntax).inserted {
-            let roots = SkillSuggestions.roots(syntax)
+        if !fresh, scanning.insert(scope).inserted {
             Task { [weak self] in
-                let skills = await Task.detached(priority: .userInitiated) { SkillCatalog.scan(roots) }.value
+                let skills = await Task.detached(priority: .userInitiated) {
+                    SkillSuggestions.skills(scope.syntax, projectPath: scope.project)
+                }.value
                 guard let self else { return }
-                self.scanning.remove(syntax)
-                self.cache[syntax] = (skills, Date())
+                self.scanning.remove(scope)
+                self.cache[scope] = (skills, Date())
                 self.refresh()
             }
         }
@@ -139,9 +151,22 @@ struct SkillSuggestionMenu: View {
     private static var rowHeight: CGFloat { .ui(40) }
 
     private func row(_ skill: SkillInfo, selected: Bool) -> some View {
-        Button { controller.accept(skill) } label: {
+        // The title is what gets inserted (`project:<name>` in Claude chats); a project skill also carries a small label.
+        let title = controller.syntax?.invokedName(skill) ?? skill.name
+        let origin = skill.origin == .project ? L10n.text("проект", "project") : nil
+        let spoken = [title, skill.origin == .project ? L10n.text("скилл проекта", "project skill") : nil,
+                      skill.description.isEmpty ? nil : skill.description].compactMap { $0 }.joined(separator: ", ")
+        return Button { controller.accept(skill) } label: {
             VStack(alignment: .leading, spacing: .ui(1)) {
-                Text(skill.name).font(.ui(.callout).weight(.semibold)).foregroundStyle(DeskPalette.ink).lineLimit(1)
+                HStack(spacing: .ui(6)) {
+                    Text(title).font(.ui(.callout).weight(.semibold)).foregroundStyle(DeskPalette.ink).lineLimit(1)
+                    if let origin {
+                        Text(origin).font(.ui(.caption2)).foregroundStyle(DeskPalette.muted)
+                            .padding(.horizontal, .ui(5)).padding(.vertical, .ui(1))
+                            .overlay(Capsule().stroke(DeskPalette.border, lineWidth: 1))
+                            .fixedSize()
+                    }
+                }
                 if !skill.description.isEmpty {
                     Text(skill.description).font(.ui(.caption)).foregroundStyle(DeskPalette.muted).lineLimit(1).truncationMode(.tail)
                 }
@@ -154,7 +179,7 @@ struct SkillSuggestionMenu: View {
         .buttonStyle(.plain)
         .pointingHandCursor()
         .help(skill.description)
-        .accessibilityLabel(skill.description.isEmpty ? skill.name : skill.name + ", " + skill.description)
+        .accessibilityLabel(spoken)
         .accessibilityHint(L10n.text("Вставить скилл в сообщение", "Insert the skill into the message"))
         .accessibilityAddTraits(selected ? .isSelected : [])
     }

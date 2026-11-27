@@ -1428,6 +1428,8 @@ struct ChatView: View {
         .onChange(of: model.currentAgent, initial: true) { _, agent in
             skillSuggestions.setEngine(SkillSuggestions.syntax(for: agent.agent))
         }
+        // Project skills follow the chat's working folder; a new chat's draft uses the selected project's folder.
+        .onChange(of: model.selectedWorkingDirectory, initial: true) { _, path in skillSuggestions.setProject(path) }
         .onReceive(model.transcript.$items) { _ in refreshChatFiles() }
         .overlay {
             ZStack {
