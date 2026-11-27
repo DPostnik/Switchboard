@@ -4,6 +4,10 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- The composer's `/` skill list also offers the chat project's skills (`.agents/skills`, `.claude/skills`), inserted as `/project:<name>` in Claude chats and `$<name>` in Codex chats.
+
+- Cancel all waiting archive summaries in one action while keeping active and completed summaries.
+
 - The archive runs up to two GPT-6.2 Sol summaries at once when Switchboard and the Mac have spare capacity.
 
 - The archive can use GPT-6.2 Sol on Codex for upcoming summaries, including conversations archived from Claude.
