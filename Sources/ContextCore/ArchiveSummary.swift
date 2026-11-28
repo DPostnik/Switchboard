@@ -59,12 +59,25 @@ public struct ArchiveSummaryRecord: Codable, Equatable, Identifiable, Sendable {
     public var parts: [SummaryPart] = []
     public var updatedAt = Date()
     public var issue: String?
+    public var cancelledByUser: Bool?
     public var model = ""
     public var route = RequestRoute.direct
     public init(threadID: String, projectID: UUID) { self.threadID = threadID; self.projectID = projectID }
 
     public mutating func enqueue() {
-        attempt = UUID(); status = .queued; issue = nil; updatedAt = Date()
+        attempt = UUID(); status = .queued; issue = nil; cancelledByUser = nil; updatedAt = Date()
+    }
+
+    public mutating func cancelQueued(at date: Date) {
+        guard status == .queued else { return }
+        status = .stale
+        issue = nil
+        cancelledByUser = true
+        updatedAt = date
+    }
+
+    public func statusLabel() -> String {
+        cancelledByUser == true ? L10n.text("Подготовка отменена", "Summary cancelled") : status.label()
     }
 
     public mutating func recover() {

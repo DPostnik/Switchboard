@@ -101,22 +101,63 @@ extension DeskModel {
 
     /// Explicit backfill also covers an archive confirmed by Codex but not persisted locally.
     func queueMissingArchiveSummaries() async {
+        guard !archiveSummaryQueueUpdating else { return }
+        archiveSummaryQueueUpdating = true
+        defer { finishArchiveSummaryQueueUpdate() }
         do {
             for chat in state.chats where chat.isArchived && supportsSummaries(chat.id) && archiveSummaries[chat.id] == nil {
                 let record = ArchiveSummaryRecord(threadID: chat.id, projectID: chat.projectID)
                 try await store.saveArchivingChat(state, summary: record)
                 archiveSummaries[chat.id] = record
             }
-            startSummaryQueue()
         } catch { self.error = error.localizedDescription }
     }
 
     func retryArchiveSummary(_ id: String) async {
-        guard supportsSummaries(id), isArchived(id), !isChangingChat(id), var record = archiveSummaries[id],
+        guard !archiveSummaryQueueUpdating, supportsSummaries(id), isArchived(id), !isChangingChat(id), var record = archiveSummaries[id],
               [.failed, .uncertain, .stale].contains(record.status) else { return }
+        archiveSummaryQueueUpdating = true
+        defer { finishArchiveSummaryQueueUpdate() }
         record.enqueue()
-        do { try await store.saveArchiveSummary(record); archiveSummaries[id] = record; startSummaryQueue() }
+        do { try await store.saveArchiveSummary(record); archiveSummaries[id] = record }
         catch { self.error = error.localizedDescription }
+    }
+
+    var hasWaitingArchiveSummaries: Bool {
+        archiveSummaries.values.contains { $0.status == .queued && !isSummarizingArchiveChat($0.threadID) }
+    }
+
+    func cancelWaitingArchiveSummaries() async {
+        guard !archiveSummaryQueueUpdating else { return }
+        let now = Date()
+        let cancelled = archiveSummaries.values.compactMap { record -> ArchiveSummaryRecord? in
+            let id = record.threadID
+            guard record.status == .queued, !isSummarizingArchiveChat(id), !isChangingChat(id) else { return nil }
+            var updated = record
+            updated.cancelQueued(at: now)
+            return updated
+        }
+        guard !cancelled.isEmpty else { return }
+        archiveSummaryCancellationIDs = Set(cancelled.map(\.threadID))
+        archiveSummaryQueueUpdating = true
+        defer {
+            archiveSummaryCancellationIDs = []
+            finishArchiveSummaryQueueUpdate()
+        }
+        do {
+            try await store.saveArchiveSummaries(cancelled)
+            var updated = archiveSummaries
+            for record in cancelled where updated[record.threadID]?.status == .queued {
+                updated[record.threadID] = record
+            }
+            archiveSummaries = updated
+            AppLog.lifecycle.notice("Cancelled \(cancelled.count, privacy: .public) waiting archive summaries")
+        } catch { self.error = error.localizedDescription }
+    }
+
+    private func finishArchiveSummaryQueueUpdate() {
+        archiveSummaryQueueUpdating = false
+        startSummaryQueue()
     }
 
     func startSummaryQueue() {
@@ -144,7 +185,8 @@ extension DeskModel {
     }
 
     private func nextArchiveSummary() -> ArchiveSummaryRecord? {
-        archiveSummaries.values.filter {
+        guard !archiveSummaryQueueUpdating else { return nil }
+        return archiveSummaries.values.filter {
             guard $0.status == .queued, !isSummarizingArchiveChat($0.threadID),
                   let chat = chat($0.threadID), chat.isArchived else { return false }
             return canGenerateSummary(chat)

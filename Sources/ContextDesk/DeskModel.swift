@@ -245,6 +245,8 @@ private struct ChatRunState: Equatable {
     var jobExecutors: [UUID: any AgentScheduledExecutor] = [:]
     var schedulerStopping = false
     @Published var archiveSummaries: [String: ArchiveSummaryRecord] = [:]
+    @Published var archiveSummaryQueueUpdating = false
+    var archiveSummaryCancellationIDs: Set<String> = []
     enum SummaryWorker: Hashable { case primary, additional }
     struct ActiveArchiveSummary {
         let threadID: String
@@ -417,7 +419,7 @@ private struct ChatRunState: Equatable {
     @Published private(set) var stoppingTasks: Set<String> = []
     @Published private(set) var deletingChatIDs: Set<String> = []
     @Published private(set) var archivingChatIDs: Set<String> = []
-    func isChangingChat(_ id: String) -> Bool { deletingChatIDs.contains(id) || archivingChatIDs.contains(id) || configuringRemoteChats.contains(id) || configuringBrowserChats.contains(id) }
+    func isChangingChat(_ id: String) -> Bool { deletingChatIDs.contains(id) || archivingChatIDs.contains(id) || configuringRemoteChats.contains(id) || configuringBrowserChats.contains(id) || archiveSummaryCancellationIDs.contains(id) }
     func isArchived(_ id: String) -> Bool { chat(id)?.isArchived == true }
     var selectedChatIsArchived: Bool { selectedChat?.isArchived == true }
     private var completedTurns: [String: (status: AgentExecutionOutcome, hasError: Bool)] = [:]
@@ -430,7 +432,7 @@ private struct ChatRunState: Equatable {
     var workingSince: Date? { busy ? runs[currentRunKey]?.turnID.flatMap { turnStarts[currentRunKey + ":" + $0] } : nil }
     var queuePaused: Bool { runs[currentRunKey]?.queuePaused ?? true }
     var priorityMessageID: String? { runs[currentRunKey]?.priorityMessageID }
-    var anyBusy: Bool { hasWorkOutsideArchiveSummaries || summaryTask != nil }
+    var anyBusy: Bool { hasWorkOutsideArchiveSummaries || summaryTask != nil || archiveSummaryQueueUpdating }
     var hasWorkOutsideArchiveSummaries: Bool { preparingHandoff || creatingHandoff || jobLedger.runs.contains { $0.status.active } || !deletingChatIDs.isEmpty || !archivingChatIDs.isEmpty || runs.values.contains { $0.running || $0.sending } }
     func isBusy(threadID: String) -> Bool { runs[threadID]?.running == true }
     func isSending(threadID: String) -> Bool { runs[threadID]?.sending == true }
@@ -2297,6 +2299,9 @@ private struct ChatRunState: Equatable {
         for run in jobLedger.runs where run.status.active { reasons.insert(L10n.text("Задание: ", "Scheduled task: ") + run.name) }
         for summary in activeArchiveSummaries.values {
             reasons.insert(L10n.text("Сводка архива для чата «\(title(summary.threadID))»", "Archive summary for “\(title(summary.threadID))”"))
+        }
+        if archiveSummaryQueueUpdating {
+            reasons.insert(L10n.text("Сохранение очереди сводок", "Saving archive summary queue"))
         }
         if preparingHandoff || creatingHandoff { reasons.insert(L10n.text("Передача контекста", "Context handoff")) }
         if !deletingChatIDs.isEmpty || !archivingChatIDs.isEmpty { reasons.insert(L10n.text("Архивирование или удаление чатов", "Archiving or deleting chats")) }

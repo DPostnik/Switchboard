@@ -378,6 +378,18 @@ public actor AppStore {
         try put(key: "archiveSummary:" + record.threadID, bytes: JSONEncoder().encode(record))
     }
 
+    public func saveArchiveSummaries(_ records: [ArchiveSummaryRecord]) throws {
+        try withDatabase { db in
+            let failure = ClientFailure(L10n.text("Не удалось сохранить сводки архива", "Could not save archive summaries"))
+            try transaction(db, failure: failure) {
+                let encoder = JSONEncoder()
+                for record in records {
+                    try putRaw(db, key: "archiveSummary:" + record.threadID, bytes: encoder.encode(record))
+                }
+            }
+        }
+    }
+
     /// The archive flag and durable pending work must commit together.
     public func saveArchivingChat(_ state: SavedState, summary: ArchiveSummaryRecord?) throws {
         try saveArchivingChats(state, summaries: summary.map { [$0] } ?? [])

@@ -197,6 +197,36 @@ func summaryRunnerRoutesAndFailsClosed(mode: String, version: String) async thro
     await integration.disconnect()
 }
 
+@Test @MainActor func cancellingTheArchiveQueuePreservesClaimedAndCompletedSummaries() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = AppStore(file: root.appendingPathComponent("metadata.sqlite"))
+    let model = DeskModel(store: store, pluginDirectory: root.appendingPathComponent("plugins"))
+    let project = Project(path: root.path)
+    var records = ["waiting", "claimed", "active", "ready"].map { ArchiveSummaryRecord(threadID: $0, projectID: project.id) }
+    records[2].status = .generating
+    records[3].status = .ready
+    try await store.saveArchiveSummaries(records)
+    model.archiveSummaries = Dictionary(uniqueKeysWithValues: records.map { ($0.threadID, $0) })
+    model.activeArchiveSummaries[.primary] = .init(threadID: "claimed", connection: .originalCodex)
+    model.activeArchiveSummaries[.additional] = .init(threadID: "active", connection: .originalCodex)
+    await model.cancelWaitingArchiveSummaries()
+    let saved = try await store.loadArchiveSummaries()
+    #expect(saved["waiting"]?.status == .stale)
+    #expect(saved["waiting"]?.cancelledByUser == true)
+    #expect(saved["claimed"] == records[1])
+    #expect(saved["active"] == records[2])
+    #expect(saved["ready"] == records[3])
+    #expect(model.archiveSummaries == saved)
+    #expect(!model.hasWaitingArchiveSummaries)
+    var cancelled = try #require(saved["waiting"])
+    cancelled.recover()
+    #expect(cancelled.status == .stale)
+    cancelled.enqueue()
+    #expect(cancelled.status == .queued)
+    #expect(cancelled.cancelledByUser == nil)
+}
+
 @Test @MainActor func archiveQueueRunsTwoDistinctChatsWhenIdleAndOneUnderLoad() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }

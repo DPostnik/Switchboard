@@ -6,6 +6,7 @@ struct ArchiveView: View {
     @ObservedObject var model: DeskModel
     @State private var search = ""
     @State private var summary: ArchiveSummaryRecord?
+    @State private var confirmingSummaryCancellation = false
     /// Narrows the list and the search to one project; nil shows every project.
     @State private var projectFilter: UUID?
     /// Chats whose messages match the search, with a snippet, from the local chat index, and the search they answer.
@@ -161,10 +162,26 @@ struct ArchiveView: View {
                 .fixedSize()
                 .help(L10n.text("Выбор действует на следующие сводки. При выборе Codex фрагменты переписки будут отправлены в аккаунт Codex.",
                                 "Applies to upcoming summaries. Choosing Codex sends conversation excerpts to your Codex account."))
+                if model.hasWaitingArchiveSummaries {
+                    Button(L10n.text("Отменить очередь сводок…", "Cancel summary queue…")) {
+                        confirmingSummaryCancellation = true
+                    }
+                    .buttonStyle(DeskButtonStyle())
+                    .disabled(model.archiveSummaryQueueUpdating)
+                    .alert(L10n.text("Отменить очередь сводок?", "Cancel the summary queue?"), isPresented: $confirmingSummaryCancellation) {
+                        Button(L10n.text("Отменить очередь", "Cancel queue"), role: .destructive) {
+                            Task { await model.cancelWaitingArchiveSummaries() }
+                        }
+                        Button(L10n.text("Оставить очередь", "Keep queue"), role: .cancel) {}
+                    } message: {
+                        Text(L10n.text("Ожидающие задания будут сняты. Начатые завершатся, а готовые сводки сохранятся.",
+                                       "Waiting jobs will be cancelled. Active jobs will finish and completed summaries will be kept."))
+                    }
+                }
                 if listing.missing > 0, listing.shownMissing {
                     Button(Self.summarizeTitle(listing.missing)) {
                         Task { await model.queueMissingArchiveSummaries() }
-                    }.buttonStyle(DeskButtonStyle()).disabled(!listing.canSummarizeShown)
+                    }.buttonStyle(DeskButtonStyle()).disabled(!listing.canSummarizeShown || model.archiveSummaryQueueUpdating)
                         .help(L10n.text("Создать краткие итоги для архива. Использует модель и лимиты твоего аккаунта.", "Create compact archive summaries. Uses your model and account allowance."))
                         .padding(.bottom, 10)
                 }
@@ -306,7 +323,8 @@ struct ArchiveView: View {
         return ArchiveChatRow.Content(
             chat: chat, archived: archived, projectName: project?.name, projectPath: project?.path, snippet: listing.snippets[chat.id],
             summary: archived ? model.archiveSummaries[chat.id] : nil, changing: archived && model.isChangingChat(chat.id),
-            canRestore: archived && model.canDeleteChat(chat.id), canGenerate: archived && model.canGenerateSummary(chat))
+            canRestore: archived && model.canDeleteChat(chat.id),
+            canGenerate: archived && !model.archiveSummaryQueueUpdating && model.canGenerateSummary(chat))
     }
 
     private func rowActions(_ chat: Chat) -> ArchiveChatRow.Actions {
@@ -390,7 +408,7 @@ private struct ArchiveChatRow: View, Equatable {
                     if record.status == .ready {
                         Button(record.status.label()) { actions.showSummary(record) }.buttonStyle(DeskButtonStyle())
                     } else {
-                        Text(record.status.label()).font(.ui(.caption)).foregroundStyle(.secondary)
+                        Text(record.statusLabel()).font(.ui(.caption)).foregroundStyle(.secondary)
                     }
                     if [.failed, .uncertain, .stale].contains(record.status) {
                         Button(L10n.text("Создать итог заново", "Generate summary again"), action: actions.retrySummary)
@@ -400,7 +418,7 @@ private struct ArchiveChatRow: View, Equatable {
                                 .font(.ui(.caption2)).foregroundStyle(.secondary).frame(maxWidth: 220)
                         }
                     }
-                }.help(record.issue ?? record.status.label())
+                }.help(record.issue ?? record.statusLabel())
             }
             if content.archived {
                 Button(L10n.text("Восстановить", "Restore"), action: actions.restore)
