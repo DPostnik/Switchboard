@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Folder lists in project settings and Folders for every project show the full path instead of cutting its middle, and mark folders that no longer exist.
+
 - Saved folder grants the external boundary skips (missing or credential folders) appear as an amber warning instead of an error; the notice names the project and says how to remove a stale path.
 
 - The composer's `/` skill list also offers the chat project's skills (`.agents/skills`, `.claude/skills`), inserted as `/project:<name>` in Claude chats and `$<name>` in Codex chats.

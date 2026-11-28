@@ -16,10 +16,23 @@ struct FolderRootsEditor: View {
                 Text(emptyHint).font(.ui(.caption)).foregroundStyle(DeskPalette.muted).fixedSize(horizontal: false, vertical: true)
             }
             ForEach(roots.indices, id: \.self) { index in
+                let path = roots[index].path
+                let missing = !FileManager.default.fileExists(atPath: (path as NSString).expandingTildeInPath)
                 HStack(spacing: .ui(10)) {
-                    Image(systemName: "folder").foregroundStyle(DeskPalette.muted).accessibilityHidden(true)
-                    Text(roots[index].path).font(.ui(.callout)).lineLimit(1).truncationMode(.middle).help(roots[index].path)
-                    Spacer()
+                    Image(systemName: missing ? "folder.badge.questionmark" : "folder")
+                        .foregroundStyle(missing ? DeskPalette.attention : DeskPalette.muted).accessibilityHidden(true)
+                    // The whole path wraps instead of truncating: the distinguishing part is often in the middle.
+                    VStack(alignment: .leading, spacing: .ui(2)) {
+                        Text((path as NSString).abbreviatingWithTildeInPath).font(.ui(.callout))
+                            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled).help(path)
+                        if missing {
+                            Text(L10n.text("Папки нет: доступ к ней не выдаётся. Если она больше не нужна, убери её.",
+                                           "Folder missing: no access is granted to it. Remove it if it is no longer needed."))
+                                .font(.ui(.caption)).foregroundStyle(DeskPalette.attentionInk)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    Spacer(minLength: .ui(8))
                     Toggle(L10n.text("Запись", "Write"), isOn: $roots[index].writable).toggleStyle(.checkbox)
                     Button { roots.remove(at: index) } label: { Image(systemName: "minus.circle") }
                         .buttonStyle(PointerButtonStyle(base: .plain))
