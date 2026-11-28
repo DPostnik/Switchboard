@@ -469,6 +469,8 @@ private struct ChatRunState: Equatable {
     }
     @Published var loadingChat = false
     @Published var error: String?
+    /// A notice that is not a failure (`AgentEvent.Payload.warning`), shown without the error style.
+    @Published var warning: String?
     /// Project settings changes agents proposed (`SettingsProposalInbox`), waiting for the user's decision.
     @Published private(set) var settingsProposals: [SettingsProposalReview] = []
     private var remoteSettingsProposals = RemoteSettingsProposals()
@@ -3529,6 +3531,9 @@ private struct ChatRunState: Equatable {
         case .diagnostic(let message):
             error = message
             if let thread { ChatEventLog.append(chat: thread, kind: "diagnostic", text: message) }
+        case .warning(let message):
+            warning = message
+            if let thread { ChatEventLog.append(chat: thread, kind: "warning", text: message) }
         case .resolved(let requestID):
             let resolved = pending.filter { $0.interaction.id == requestID && $0.threadID == thread }
             pending.removeAll { action in resolved.contains { $0.id == action.id } }

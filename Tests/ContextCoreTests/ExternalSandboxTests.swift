@@ -1019,6 +1019,9 @@ private extension ExternalSandboxCommand.ArgumentRule {
         for language in [AppLanguage.russian, .english] {
             #expect(plan.missingFoldersNotice(language: language)?.contains(path) == true)
         }
+        // A moved or deleted folder: the notice also says how to drop the stale grant.
+        #expect(plan.missingFoldersNotice(language: .russian)?.contains("Папки для всех проектов") == true)
+        #expect(plan.missingFoldersNotice(language: .english)?.contains("Folders for every project") == true)
     }
     #expect(!FileManager.default.fileExists(atPath: missing.path))
     try FileManager.default.createDirectory(at: missing, withIntermediateDirectories: true)
@@ -1076,6 +1079,8 @@ private extension ExternalSandboxCommand.ArgumentRule {
     for language in [AppLanguage.russian, .english] {
         let text = try #require(folderOnly.foldersNotice(language: language))
         #expect(text.contains(folder) && text.contains("docker"))
+        // The banner is app-wide: it names the project whose settings hold the grant.
+        #expect(text.hasPrefix(language == .russian ? "Проект «project»." : "Project “project”."))
     }
 }
 

@@ -329,13 +329,16 @@ public struct ExternalSandboxPlan: Hashable, Sendable {
         guard !missingFolders.isEmpty else { return nil }
         let paths = missingFolders.joined(separator: ", ")
         return L10n.text(
-            "Доступ к папкам сохранён, но эти пути отсутствуют и не вошли во внешнюю границу: \(paths). Приложение не создаёт их и не даёт доступ к родительским папкам. После создания папки приложение заново скомпилирует сохранённые права со следующего сообщения. Повторный запрос доступа не нужен.",
-            "Folder access is saved, but these paths do not exist and were omitted from the external boundary: \(paths). The app does not create them or grant their parent folders. After a folder is created, the app recompiles saved grants on the next message. No repeated access request is needed.", language: language)
+            "Доступ к папкам сохранён, но эти пути отсутствуют и не вошли во внешнюю границу: \(paths). Приложение не создаёт их и не даёт доступ к родительским папкам. После создания папки приложение заново скомпилирует сохранённые права со следующего сообщения. Повторный запрос доступа не нужен. Если папка больше не нужна, удали этот путь из папок проекта или из «Настройки → Дополнительно → Папки для всех проектов».",
+            "Folder access is saved, but these paths do not exist and were omitted from the external boundary: \(paths). The app does not create them or grant their parent folders. After a folder is created, the app recompiles saved grants on the next message. No repeated access request is needed. If the folder is no longer needed, remove this path from the project's folders or from Settings → Advanced → Folders for every project.", language: language)
     }
     /// The chat diagnostic for saved folder grants the boundary does not open (missing or protected), shared by both providers.
+    /// The banner is app-wide, so the text names the project whose settings hold the grants.
     public func foldersNotice(language: AppLanguage = L10n.language) -> String? {
         let parts = [missingFoldersNotice(language: language), protectedFoldersNotice(language: language)].compactMap { $0 }
-        return parts.isEmpty ? nil : parts.joined(separator: "\n\n")
+        guard !parts.isEmpty else { return nil }
+        let name = URL(fileURLWithPath: project).lastPathComponent
+        return L10n.text("Проект «\(name)». ", "Project “\(name)”. ", language: language) + parts.joined(separator: "\n\n")
     }
     public func protectedFoldersNotice(language: AppLanguage = L10n.language) -> String? {
         guard !protectedFolders.isEmpty else { return nil }

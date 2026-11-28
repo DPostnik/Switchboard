@@ -4,6 +4,8 @@ User-visible changes to Switchboard, newest first. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+- Saved folder grants the external boundary skips (missing or credential folders) appear as an amber warning instead of an error; the notice names the project and says how to remove a stale path.
+
 - The composer's `/` skill list also offers the chat project's skills (`.agents/skills`, `.claude/skills`), inserted as `/project:<name>` in Claude chats and `$<name>` in Codex chats.
 
 - Cancel all waiting archive summaries in one action while keeping active and completed summaries.

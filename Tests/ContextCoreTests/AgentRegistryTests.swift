@@ -323,6 +323,10 @@ private let thirdProfile = AgentProfile(
         kind: .approval(canAllow: true), reason: nil, details: "ls"))), from: thirdConnection)
     #expect(model.pending.map(\.interaction.id) == [requestID])
     await model.receive(AgentEvent(session: session, payload: .delta(turn: "t1", item: "a1", text: "hi")), from: thirdConnection)
+    // A warning (a skipped folder grant) is not an error: it fills its own neutral notice.
+    model.error = nil
+    await model.receive(AgentEvent(session: nil, payload: .warning("skipped folder")), from: thirdConnection)
+    #expect(model.warning == "skipped folder" && model.error == nil)
 
     // Losing a per-chat engine signs only that connection out and clears only its requests.
     await model.receive(AgentEvent(session: nil, payload: .disconnected), from: thirdConnection)

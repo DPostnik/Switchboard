@@ -434,7 +434,7 @@ public actor CodexIntegration: AgentIntegration {
             await fresh.stop(); throw error
         }
         noteFallback(decision.fallback, session: session)
-        if let text = decision.launch?.plan.foldersNotice() { sink.yield(.init(session: session, payload: .diagnostic(text))) }
+        if let text = decision.launch?.plan.foldersNotice() { sink.yield(.init(session: session, payload: .warning(text))) }
     }
     public func prepare(_ request: AgentExecutionRequest) async -> AgentResult<AgentSessionReference> {
         do {
@@ -462,7 +462,7 @@ public actor CodexIntegration: AgentIntegration {
                 if decision.launch?.settingsInbox != nil { SettingsProposalInbox.recordAuthor(folder: folder, session: session.nativeID) }
                 await self.bindChromeWorker(worker, session: session, scope: try self.chromeScope(request, boundary: decision.launch, inboxFolder: folder))
                 self.noteFallback(decision.fallback, session: session)
-                if let text = decision.launch?.plan.foldersNotice() { self.sink.yield(.init(session: session, payload: .diagnostic(text))) }
+                if let text = decision.launch?.plan.foldersNotice() { self.sink.yield(.init(session: session, payload: .warning(text))) }
                 self.sessionRoutes[session] = (request.route, request.model.context)
                 return session
             }

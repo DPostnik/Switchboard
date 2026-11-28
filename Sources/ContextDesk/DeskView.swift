@@ -358,6 +358,16 @@ struct DeskView: View {
                         .padding(.horizontal, .ui(12)).padding(.top, .ui(8))
                         .transition(DeskMotion.slide(from: .top, reduceMotion))
                 }
+                if let warning = model.warning {
+                    HStack(alignment: .top) {
+                        Image(systemName: "info.circle.fill").foregroundStyle(DeskPalette.attention)
+                        Text(warning).font(.ui(.callout)).textSelection(.enabled)
+                        Spacer()
+                        Button { model.warning = nil } label: { Image(systemName: "xmark") }.buttonStyle(PointerButtonStyle(base: .plain)).help(L10n.text("Закрыть", "Close"))
+                    }.foregroundStyle(DeskPalette.attentionInk).padding(.ui(12)).background(DeskPalette.attentionWash, in: RoundedRectangle(cornerRadius: 10))
+                        .padding(.horizontal, .ui(12)).padding(.top, .ui(8))
+                        .transition(DeskMotion.slide(from: .top, reduceMotion))
+                }
                 if model.showingArchive {
                     ArchiveView(model: model)
                 } else if model.showingAttention {
@@ -369,6 +379,7 @@ struct DeskView: View {
                     Button(L10n.text("Добавить проект…", "Add project…")) { model.openProject() }.buttonStyle(DeskButtonStyle()).padding(.bottom, .ui(60))
                 } else { ChatView(model: model) }
             }.animation(DeskMotion.standard(reduceMotion), value: model.error)
+                .animation(DeskMotion.standard(reduceMotion), value: model.warning)
                 .navigationTitle(detailTitle)
                 .navigationSubtitle(detailSubtitle)
                 .toolbarBackground(DeskPalette.canvas, for: .windowToolbar)

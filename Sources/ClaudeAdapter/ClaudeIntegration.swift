@@ -439,7 +439,7 @@ public actor ClaudeIntegration: AgentIntegration {
                 }
                 noteFallback(fallback, session: id, project: record.cwd)
                 if case nil = fallback, let text = boundary?.plan.foldersNotice() {
-                    sink.yield(.init(session: reference(id), payload: .diagnostic(text)))
+                    sink.yield(.init(session: reference(id), payload: .warning(text)))
                 }
                 sessionEpochs[id] = UUID()
                 wires[id] = wire; backgroundTasks[id] = []; stopWaiting(id); wirePlugins[id] = plugins

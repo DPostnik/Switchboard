@@ -10,6 +10,8 @@ public struct AgentEvent: Sendable {
         case accountChanged(error: String?)
         case limitsChanged, disconnected, interactionsReset
         case diagnostic(String)
+        /// A notice that is not a failure (for example saved folder grants the boundary skipped); the app shows it without the error style.
+        case warning(String)
         case interaction(AgentInteraction)
         case resolved(UUID)
         case usage(turn: String?, total: TokenCounters?, snapshot: UsageSnapshot)
